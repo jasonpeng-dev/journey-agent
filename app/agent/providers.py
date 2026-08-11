@@ -7,7 +7,6 @@ from uuid import UUID
 
 import httpx
 
-from app.agent.starfire_plans import initial_starfire_plan, recovery_starfire_plan
 from app.agent.strategic_starfire_plans import (
     initial_strategic_starfire_plan,
     recovery_strategic_starfire_plan,
@@ -52,28 +51,15 @@ class MockModelProvider:
             raw = message.content.split("PLANNER_REQUEST_JSON:", 1)[1].strip()
             request = json.loads(raw)
             task_id = UUID(str(request["task_id"]))
-            strategic = request.get("scenario_key") == "starfire_command"
             if request["kind"] == "REPLAN":
-                arguments = (
-                    recovery_strategic_starfire_plan(
-                        task_id,
-                        int(request["next_plan_version"]),
-                        str(request["failure_code"]),
-                    )
-                    if strategic
-                    else recovery_starfire_plan(
-                        task_id,
-                        int(request["next_plan_version"]),
-                        str(request["failure_code"]),
-                    )
+                arguments = recovery_strategic_starfire_plan(
+                    task_id,
+                    int(request["next_plan_version"]),
+                    str(request["failure_code"]),
                 )
                 tool_name = "replan_task"
             else:
-                arguments = (
-                    initial_strategic_starfire_plan(task_id)
-                    if strategic
-                    else initial_starfire_plan(task_id)
-                )
+                arguments = initial_strategic_starfire_plan(task_id)
                 tool_name = "create_task_plan"
             if tool_name not in tool_names:
                 continue
@@ -108,15 +94,8 @@ class MockModelProvider:
                 token_usage=18,
                 model=self.name,
             )
-        has_tool_result = any(message.role == "tool" for message in messages)
-        if not has_tool_result:
-            return ModelResponse(
-                tool_calls=[ToolCall(id="mock-state-1", name="get_player_state", arguments={})],
-                token_usage=12,
-                model=self.name,
-            )
         return ModelResponse(
-            content="I checked the verified game state. How can I guide your journey?",
+            content="No strategic action is pending.",
             token_usage=10,
             model=self.name,
         )

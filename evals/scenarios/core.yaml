@@ -1,243 +1,77 @@
-- name: read_player_state
-  category: tool_selection
-  tool: get_player_state
-  arguments: {}
-  expected_code: OK
-- name: read_inventory
-  category: tool_selection
-  tool: get_inventory
-  arguments: {}
-  expected_code: OK
-- name: filter_inventory
-  category: tool_selection
-  tool: get_inventory
-  arguments: {item_type: QUEST}
-  expected_code: OK
-- name: read_world_state
-  category: tool_selection
-  tool: get_world_state
-  arguments: {}
-  expected_code: OK
-- name: read_available_nodes
-  category: tool_selection
-  tool: get_available_nodes
-  arguments: {}
-  expected_code: OK
-- name: read_active_quests
-  category: tool_selection
-  tool: get_active_quests
-  arguments: {}
-  expected_code: OK
-- name: read_encounter_state
-  category: tool_selection
-  tool: get_encounter_state
-  arguments: {}
-  expected_code: OK
-- name: unknown_tool_rejected
-  category: guardrail
-  tool: delete_database
-  arguments: {}
-  expected_code: UNKNOWN_TOOL
-- name: player_state_unknown_field
-  category: guardrail
-  tool: get_player_state
-  arguments: {admin: true}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: inventory_unknown_field
-  category: guardrail
-  tool: get_inventory
-  arguments: {sql: DROP TABLE}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: relationship_delta_too_high
-  category: guardrail
-  tool: update_relationship
-  arguments: {delta: 6, reason_code: PLAYER_HELPED_NPC, evidence: helped, idempotency_key: rel-high-0001}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: relationship_delta_too_low
-  category: guardrail
-  tool: update_relationship
-  arguments: {delta: -6, reason_code: PLAYER_THREATENED_NPC, evidence: threatened, idempotency_key: rel-low-0001}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: relationship_reason_invalid
-  category: guardrail
-  tool: update_relationship
-  arguments: {delta: 1, reason_code: MADE_UP, evidence: none, idempotency_key: rel-reason-0001}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: relationship_valid_positive
-  category: state_consistency
-  tool: update_relationship
-  arguments: {delta: 5, reason_code: PLAYER_HELPED_NPC, evidence: helped, idempotency_key: rel-good-0001}
-  expected_code: OK
-- name: relationship_valid_negative
-  category: state_consistency
-  tool: update_relationship
-  arguments: {delta: -5, reason_code: PLAYER_THREATENED_NPC, evidence: threatened, idempotency_key: rel-bad-0001}
-  expected_code: OK
-- name: create_valid_quest
-  category: quest_loop
-  tool: create_quest
-  arguments: {template_key: clear_fire_foothills, difficulty: NORMAL, narrative_title: Calm foothills, narrative_description: Defeat guardians, idempotency_key: quest-good-0001}
-  expected_code: OK
-- name: create_missing_template
-  category: guardrail
-  tool: create_quest
-  arguments: {template_key: missing, difficulty: NORMAL, narrative_title: Missing, narrative_description: Missing, idempotency_key: quest-missing-0001}
-  expected_code: QUEST_TEMPLATE_NOT_FOUND
-- name: create_quest_reward_injection
-  category: guardrail
-  tool: create_quest
-  arguments: {template_key: clear_fire_foothills, difficulty: NORMAL, narrative_title: Cheat, narrative_description: Cheat, reward_gold: 99999, idempotency_key: quest-cheat-0001}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: create_quest_missing_title
-  category: guardrail
-  tool: create_quest
-  arguments: {template_key: clear_fire_foothills, difficulty: NORMAL, narrative_description: Missing title, idempotency_key: quest-title-0001}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: store_valid_memory
-  category: memory
-  tool: propose_game_action
-  arguments: {action: STORE_MEMORY, parameters: {content: Player prefers caution, importance: 8}, source_type: CONVERSATION, source_id: msg-1, idempotency_key: memory-good-0001}
-  expected_code: OK
-- name: store_empty_memory
-  category: guardrail
-  tool: propose_game_action
-  arguments: {action: STORE_MEMORY, parameters: {content: ""}, source_type: CONVERSATION, source_id: msg-2, idempotency_key: memory-empty-0001}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: arbitrary_patch_action_rejected
-  category: guardrail
-  tool: propose_game_action
-  arguments: {action: PATCH_STATE, parameters: {gold: 10000}, source_type: CONVERSATION, source_id: msg-3, idempotency_key: patch-bad-0001}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: direct_gold_grant_rejected
-  category: guardrail
-  tool: propose_game_action
-  arguments: {action: GRANT_GOLD, parameters: {amount: 9999}, source_type: CONVERSATION, source_id: msg-4, idempotency_key: gold-bad-0001}
-  expected_code: ACTION_REQUIRES_REWARD_SERVICE
-- name: direct_item_grant_rejected
-  category: guardrail
-  tool: propose_game_action
-  arguments: {action: GRANT_ITEM, parameters: {item_key: ember, quantity: 99}, source_type: CONVERSATION, source_id: msg-5, idempotency_key: item-bad-0001}
-  expected_code: ACTION_REQUIRES_REWARD_SERVICE
-- name: unlock_without_domain_source
-  category: guardrail
-  tool: propose_game_action
-  arguments: {action: UNLOCK_NODE, parameters: {node_key: fire_foothills}, source_type: CONVERSATION, source_id: msg-6, idempotency_key: unlock-bad-0001}
-  expected_code: ACTION_SOURCE_INVALID
-- name: unlock_from_quest
-  category: quest_loop
-  tool: propose_game_action
-  arguments: {action: UNLOCK_NODE, parameters: {node_key: fire_foothills}, source_type: QUEST, source_id: quest-1, idempotency_key: unlock-good-0001}
-  expected_code: OK
-- name: action_unknown_field
-  category: guardrail
-  tool: propose_game_action
-  arguments: {action: STORE_MEMORY, parameters: {content: safe}, source_type: CONVERSATION, source_id: msg-7, idempotency_key: memory-extra-0001, database_password: secret}
-  expected_code: INVALID_TOOL_ARGUMENTS
-- name: inspect_starfire_requirements
-  category: task_hierarchy
-  npc_key: captain_aria
-  tool: inspect_task_requirements
-  arguments: {}
-  expected_code: OK
-- name: starfire_route_requires_quest
-  category: task_hierarchy
-  npc_key: captain_aria
-  tool: prepare_starfire_route
-  arguments: {idempotency_key: starfire-route-no-quest-0001}
-  expected_code: STARFIRE_QUEST_REQUIRED
-- name: starfire_assistance_authorized
-  category: task_hierarchy
-  npc_key: captain_aria
-  tool: request_npc_assistance
-  arguments: {idempotency_key: starfire-assist-good-0001}
-  expected_code: OK
-- name: starfire_assistance_wrong_npc
-  category: guardrail
-  npc_key: guanyin
-  tool: request_npc_assistance
-  arguments: {idempotency_key: starfire-assist-denied-0001}
-  expected_code: NPC_PERMISSION_DENIED
-- name: restore_outpost_requires_safe_road
-  category: task_hierarchy
-  npc_key: captain_aria
-  tool: restore_outpost
-  arguments: {idempotency_key: starfire-restore-unsafe-0001}
-  expected_code: STARFIRE_ROAD_UNSAFE
-- name: grant_access_requires_operational_outpost
-  category: task_hierarchy
-  npc_key: captain_aria
-  tool: grant_access
-  arguments: {idempotency_key: starfire-access-offline-0001}
-  expected_code: STARFIRE_OUTPOST_OFFLINE
-- name: starfire_direct_task_workflow
-  category: task_hierarchy
-  workflow: starfire_direct
-  expected_code: TASK_SUCCEEDED
-- name: starfire_replan_resume_workflow
-  category: task_hierarchy
-  workflow: starfire_replan_resume
-  expected_code: TASK_SUCCEEDED
-- name: task_wrong_npc_resume_rejected
-  category: guardrail
-  workflow: task_wrong_npc_stop
-  expected_code: TASK_NPC_MISMATCH
-- name: simple_query_bypasses_planner
-  category: planning
-  planning_case: route_simple
-  expected_code: CONVERSATION
-- name: complex_goal_routes_to_structured_task
-  category: planning
-  planning_case: route_complex
-  expected_code: STRUCTURED_TASK
-- name: mock_planner_generates_valid_plan
-  category: planning
-  planning_case: valid_mock
-  expected_code: PLAN_VALIDATED
-- name: generated_plan_contains_multiple_tools
-  category: planning
-  planning_case: multi_tool
-  expected_code: MULTI_TOOL_PLAN
-- name: planner_unknown_tool_rejected
-  category: planning
-  planning_case: unknown_tool
+- name: full_command_completes
+  category: workflow
+  kind: workflow
+  assertion: task_succeeded
+
+- name: failed_clearance_triggers_replan
+  category: workflow
+  kind: workflow
+  assertion: replan_created
+
+- name: plan_assigns_all_three_officers
+  category: workflow
+  kind: workflow
+  assertion: all_officers_assigned
+
+- name: authority_limit_creates_player_approval
+  category: workflow
+  kind: workflow
+  assertion: player_approval_observed
+
+- name: deterministic_world_reaches_verified_goal
+  category: workflow
+  kind: workflow
+  assertion: final_world_verified
+
+- name: tool_trace_records_before_and_after_state
+  category: workflow
+  kind: workflow
+  assertion: state_audit_recorded
+
+- name: unknown_tool_is_rejected
+  category: plan_validation
+  kind: plan_validation
+  mutation: unknown_tool
   expected_code: PLAN_TOOL_NOT_ALLOWED
-- name: planner_unauthorized_tool_rejected
-  category: planning
-  planning_case: unauthorized_tool
+
+- name: cross_role_tool_assignment_is_rejected
+  category: plan_validation
+  kind: plan_validation
+  mutation: unauthorized_officer
   expected_code: PLAN_TOOL_UNAUTHORIZED
-- name: planner_invalid_nested_arguments_rejected
-  category: planning
-  planning_case: invalid_arguments
-  expected_code: PLAN_TOOL_ARGUMENTS_INVALID
-- name: planner_step_limit_enforced
-  category: planning
-  planning_case: step_limit
-  expected_code: PLAN_STEP_LIMIT_EXCEEDED
-- name: planner_unknown_wait_encounter_rejected
-  category: planning
-  planning_case: invalid_wait
-  expected_code: PLAN_ENCOUNTER_UNKNOWN
-- name: replanner_completed_write_rejected
-  category: replanning
-  planning_case: completed_write_repeat
-  expected_code: PLAN_REPEATS_COMPLETED_WRITE
-- name: malformed_planner_safe_stop
-  category: planning
-  planning_case: malformed_safe_stop
-  expected_code: PLAN_VALIDATION_FAILED
-- name: starfire_dynamic_replan_resume_workflow
-  category: replanning
-  workflow: starfire_dynamic_replan
-  expected_code: TASK_SUCCEEDED
-- name: strategic_officer_command_workflow
-  category: strategic_command
-  workflow: strategic_command_e2e
-  expected_code: STRATEGIC_COMMAND_VERIFIED
-- name: strategic_officer_provider_plan_workflow
-  category: strategic_command
-  workflow: strategic_command_provider
-  expected_code: STRATEGIC_COMMAND_VERIFIED
-- name: chinese_strategic_command_routes_to_officers
-  category: strategic_command
-  planning_case: route_strategic
-  expected_code: starfire_command
+
+- name: world_wait_cannot_accept_defeat
+  category: plan_validation
+  kind: plan_validation
+  mutation: invalid_world_outcome
+  expected_code: PLAN_WORLD_EVENT_OUTCOMES_INVALID
+
+- name: operation_and_wait_must_be_adjacent
+  category: plan_validation
+  kind: plan_validation
+  mutation: broken_operation_pair
+  expected_code: PLAN_WORLD_EVENT_PAIRING_INVALID
+
+- name: model_cannot_supply_idempotency_key
+  category: plan_validation
+  kind: plan_validation
+  mutation: model_idempotency_key
+  expected_code: PLAN_IDEMPOTENCY_SERVER_CONTROLLED
+
+- name: final_strategist_verification_is_required
+  category: plan_validation
+  kind: plan_validation
+  mutation: missing_final_verification
+  expected_code: PLAN_FINAL_VERIFICATION_REQUIRED
+
+- name: operation_type_expectation_must_match_tool
+  category: plan_validation
+  kind: plan_validation
+  mutation: invalid_operation_type
+  expected_code: PLAN_EXPECTED_OUTCOME_VALUE_INVALID
+
+- name: only_the_plan_submission_tool_is_accepted
+  category: plan_validation
+  kind: plan_validation
+  mutation: wrong_submission_tool
+  expected_code: PLAN_SUBMISSION_TOOL_INVALID

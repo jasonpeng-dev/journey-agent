@@ -17,24 +17,19 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
     AgentTaskStatus,
     DecisionStatus,
-    EncounterStatus,
     MemoryType,
     MessageRole,
     NodeStatus,
     NodeType,
     NPCRole,
-    ObjectiveType,
     PlayerStatus,
-    QuestStatus,
-    RelationshipAttitude,
-    RewardStatus,
     RunStatus,
     SessionStatus,
     StepExecutionType,
@@ -65,16 +60,6 @@ class WorldNode(UUIDPrimaryKey, TimestampMixin, Base):
     type: Mapped[NodeType] = mapped_column(Enum(NodeType, native_enum=False))
     default_status: Mapped[NodeStatus] = mapped_column(Enum(NodeStatus, native_enum=False))
     version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class WorldNodeEdge(UUIDPrimaryKey, Base):
-    __tablename__ = "world_node_edges"
-    __table_args__ = (UniqueConstraint("source_node_id", "target_node_id"),)
-
-    source_node_id: Mapped[UUID] = mapped_column(ForeignKey("world_nodes.id", ondelete="CASCADE"))
-    target_node_id: Mapped[UUID] = mapped_column(ForeignKey("world_nodes.id", ondelete="CASCADE"))
-    prerequisite_type: Mapped[str | None] = mapped_column(String(40))
-    prerequisite_value: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class Player(UUIDPrimaryKey, TimestampMixin, Base):
@@ -120,26 +105,6 @@ class NPC(UUIDPrimaryKey, Base):
     role: Mapped[NPCRole] = mapped_column(Enum(NPCRole, native_enum=False))
     permission_profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
-class PlayerNPCRelationship(TimestampMixin, Base):
-    __tablename__ = "player_npc_relationships"
-    __table_args__ = (
-        CheckConstraint("score >= -100 AND score <= 100", name="ck_relationship_score"),
-    )
-
-    player_id: Mapped[UUID] = mapped_column(
-        ForeignKey("players.id", ondelete="CASCADE"), primary_key=True
-    )
-    npc_id: Mapped[UUID] = mapped_column(
-        ForeignKey("npcs.id", ondelete="CASCADE"), primary_key=True
-    )
-    score: Mapped[int] = mapped_column(Integer, default=0)
-    attitude: Mapped[RelationshipAttitude] = mapped_column(
-        Enum(RelationshipAttitude, native_enum=False),
-        default=RelationshipAttitude.NEUTRAL,
-    )
-    version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class OfficerAppointment(TimestampMixin, Base):
@@ -191,100 +156,6 @@ class PlayerWorldFact(TimestampMixin, Base):
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class ItemDefinition(UUIDPrimaryKey, Base):
-    __tablename__ = "item_definitions"
-    __table_args__ = (CheckConstraint("max_stack >= 1", name="ck_item_max_stack"),)
-
-    key: Mapped[str] = mapped_column(String(80), unique=True)
-    name: Mapped[str] = mapped_column(String(120))
-    type: Mapped[str] = mapped_column(String(40))
-    stackable: Mapped[bool] = mapped_column(Boolean, default=True)
-    max_stack: Mapped[int] = mapped_column(Integer, default=99)
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
-
-
-class InventoryItem(TimestampMixin, Base):
-    __tablename__ = "inventory_items"
-    __table_args__ = (CheckConstraint("quantity >= 0", name="ck_inventory_quantity"),)
-
-    player_id: Mapped[UUID] = mapped_column(
-        ForeignKey("players.id", ondelete="CASCADE"), primary_key=True
-    )
-    item_definition_id: Mapped[UUID] = mapped_column(
-        ForeignKey("item_definitions.id"), primary_key=True
-    )
-    quantity: Mapped[int] = mapped_column(Integer, default=0)
-    version: Mapped[int] = mapped_column(Integer, default=1)
-    definition: Mapped[ItemDefinition] = relationship()
-
-
-class QuestTemplate(UUIDPrimaryKey, Base):
-    __tablename__ = "quest_templates"
-
-    key: Mapped[str] = mapped_column(String(80), unique=True)
-    name: Mapped[str] = mapped_column(String(160))
-    allowed_roles: Mapped[list[str]] = mapped_column(JSON)
-    chapter: Mapped[int] = mapped_column(Integer, default=1)
-    prerequisites: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    objective_type: Mapped[ObjectiveType] = mapped_column(Enum(ObjectiveType, native_enum=False))
-    objective_target: Mapped[str] = mapped_column(String(100))
-    objective_quantity: Mapped[int] = mapped_column(Integer, default=1)
-    reward: Mapped[dict[str, Any]] = mapped_column(JSON)
-
-
-class Quest(UUIDPrimaryKey, TimestampMixin, Base):
-    __tablename__ = "quests"
-    __table_args__ = (
-        UniqueConstraint("player_id", "idempotency_key"),
-        CheckConstraint("progress >= 0", name="ck_quest_progress"),
-    )
-
-    template_id: Mapped[UUID] = mapped_column(ForeignKey("quest_templates.id"))
-    player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
-    issuer_npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
-    status: Mapped[QuestStatus] = mapped_column(
-        Enum(QuestStatus, native_enum=False), default=QuestStatus.AVAILABLE
-    )
-    progress: Mapped[int] = mapped_column(Integer, default=0)
-    reward_status: Mapped[RewardStatus] = mapped_column(
-        Enum(RewardStatus, native_enum=False), default=RewardStatus.PENDING
-    )
-    idempotency_key: Mapped[str] = mapped_column(String(160))
-    narrative_title: Mapped[str] = mapped_column(String(160))
-    narrative_description: Mapped[str] = mapped_column(Text)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    template: Mapped[QuestTemplate] = relationship()
-
-
-class EncounterDefinition(UUIDPrimaryKey, Base):
-    __tablename__ = "encounter_definitions"
-
-    key: Mapped[str] = mapped_column(String(80), unique=True)
-    node_id: Mapped[UUID] = mapped_column(ForeignKey("world_nodes.id"), unique=True)
-    difficulty: Mapped[int] = mapped_column(Integer)
-    allowed_strategies: Mapped[list[str]] = mapped_column(JSON)
-    success_rules: Mapped[dict[str, Any]] = mapped_column(JSON)
-    reward_template: Mapped[dict[str, Any]] = mapped_column(JSON)
-
-
-class EncounterRun(UUIDPrimaryKey, Base):
-    __tablename__ = "encounter_runs"
-    __table_args__ = (UniqueConstraint("player_id", "idempotency_key"),)
-
-    player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
-    encounter_id: Mapped[UUID] = mapped_column(ForeignKey("encounter_definitions.id"))
-    status: Mapped[EncounterStatus] = mapped_column(
-        Enum(EncounterStatus, native_enum=False), default=EncounterStatus.PENDING
-    )
-    selected_strategy: Mapped[str | None] = mapped_column(String(30))
-    result: Mapped[str | None] = mapped_column(String(30))
-    idempotency_key: Mapped[str] = mapped_column(String(160))
-    settlement_idempotency_key: Mapped[str | None] = mapped_column(String(160))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    encounter: Mapped[EncounterDefinition] = relationship()
 
 
 class ConversationSession(UUIDPrimaryKey, TimestampMixin, Base):
@@ -404,9 +275,9 @@ class AgentPlan(UUIDPrimaryKey, Base):
     supersedes_plan_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("agent_plans.id", ondelete="SET NULL")
     )
-    created_by_run_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("agent_runs.id", ondelete="SET NULL")
-    )
+    # Kept as an audit identifier without a foreign key to avoid a schema cycle:
+    # plans are produced by runs, while step runs refer back to plans and steps.
+    created_by_run_id: Mapped[UUID | None]
     created_by_npc_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("npcs.id", ondelete="SET NULL")
     )
@@ -531,24 +402,3 @@ class PlayerDecisionRequest(UUIDPrimaryKey, TimestampMixin, Base):
     selected_option: Mapped[str | None] = mapped_column(String(80))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class EvaluationRun(UUIDPrimaryKey, Base):
-    __tablename__ = "evaluation_runs"
-
-    status: Mapped[str] = mapped_column(String(30), default="COMPLETED")
-    summary: Mapped[dict[str, Any]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class EvaluationResult(UUIDPrimaryKey, Base):
-    __tablename__ = "evaluation_results"
-    __table_args__ = (Index("ix_eval_results_run", "run_id"),)
-
-    run_id: Mapped[UUID] = mapped_column(ForeignKey("evaluation_runs.id", ondelete="CASCADE"))
-    scenario_name: Mapped[str] = mapped_column(String(160))
-    category: Mapped[str] = mapped_column(String(80))
-    passed: Mapped[bool] = mapped_column(Boolean)
-    expected_code: Mapped[str] = mapped_column(String(100))
-    actual_code: Mapped[str] = mapped_column(String(100))
-    latency_ms: Mapped[int] = mapped_column(Integer)

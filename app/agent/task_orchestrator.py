@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from app.agent.authority import effective_authority_limits
 from app.agent.planning import PlanValidationIssue, PlanValidator, build_planning_request
 from app.agent.providers import ProviderFailure, ProviderOutputFailure
-from app.agent.starfire_plans import initial_starfire_plan, recovery_starfire_plan
 from app.agent.strategic_starfire_plans import (
     initial_strategic_starfire_plan,
     recovery_strategic_starfire_plan,
@@ -75,17 +74,7 @@ class TaskOrchestrator:
         self.db.commit()
         if self.tasks.current_plan(task) is not None:
             return task, None, "EXISTING_TASK"
-        if task.planning_mode == "DETERMINISTIC_BASELINE":
-            run, result = self._submit_baseline_plan(
-                session,
-                task,
-                self._initial_plan(task),
-                tool_name="create_task_plan",
-                purpose="PLAN",
-                replan_reason=None,
-            )
-        else:
-            run, result = await self._generate_plan(session, task)
+        run, result = await self._generate_plan(session, task)
         return task, run, "PLANNED" if result.ok else "PLANNING_FAILED"
 
     async def advance(
@@ -165,17 +154,7 @@ class TaskOrchestrator:
     async def _plan_missing_task(
         self, task: AgentTask, session: ConversationSession
     ) -> tuple[AgentTask, AgentRun | None, str]:
-        if task.planning_mode == "DETERMINISTIC_BASELINE":
-            run, result = self._submit_baseline_plan(
-                session,
-                task,
-                self._initial_plan(task),
-                tool_name="create_task_plan",
-                purpose="PLAN",
-                replan_reason=None,
-            )
-        else:
-            run, result = await self._generate_plan(session, task)
+        run, result = await self._generate_plan(session, task)
         return task, run, "PLANNED" if result.ok else "PLANNING_FAILED"
 
     async def _replan(
@@ -199,45 +178,31 @@ class TaskOrchestrator:
             task.last_error_code = "REPLAN_LIMIT_REACHED"
             self.db.commit()
             return task, None, "BLOCKED"
-        if task.planning_mode == "DETERMINISTIC_BASELINE":
+        run, result = await self._generate_plan(
+            session,
+            task,
+            replan_reason=reason,
+        )
+        if not result.ok and reason in {"ENCOUNTER_DEFEAT", "TRADE_SUPPORT_REQUIRED"}:
+            world = GameService(self.db).inspect_command_state(task.player_id)["world"]
+            assert isinstance(world, dict)
+            task.status = AgentTaskStatus.ACTIVE
+            task.last_error_code = reason
+            self.db.commit()
             run, result = self._submit_baseline_plan(
                 session,
                 task,
-                self._recovery_plan(task, reason),
+                state_aware_strategic_recovery_plan(
+                    task.id,
+                    task.current_plan_version + 1,
+                    reason,
+                    world,
+                ),
                 tool_name="replan_task",
                 purpose="REPLAN",
                 replan_reason=reason,
+                plan_source="DETERMINISTIC_RECOVERY_FALLBACK",
             )
-        else:
-            run, result = await self._generate_plan(
-                session,
-                task,
-                replan_reason=reason,
-            )
-            if (
-                not result.ok
-                and task.scenario_key == "starfire_command"
-                and reason in {"ENCOUNTER_DEFEAT", "TRADE_SUPPORT_REQUIRED"}
-            ):
-                world = GameService(self.db).inspect_command_state(task.player_id)["world"]
-                assert isinstance(world, dict)
-                task.status = AgentTaskStatus.ACTIVE
-                task.last_error_code = reason
-                self.db.commit()
-                run, result = self._submit_baseline_plan(
-                    session,
-                    task,
-                    state_aware_strategic_recovery_plan(
-                        task.id,
-                        task.current_plan_version + 1,
-                        reason,
-                        world,
-                    ),
-                    tool_name="replan_task",
-                    purpose="REPLAN",
-                    replan_reason=reason,
-                    plan_source="DETERMINISTIC_RECOVERY_FALLBACK",
-                )
         return task, run, "REPLANNED" if result.ok else "REPLAN_FAILED"
 
     async def _generate_plan(
@@ -528,7 +493,7 @@ class TaskOrchestrator:
         tool_name: str,
         purpose: str,
         replan_reason: str | None,
-        plan_source: str = "DETERMINISTIC_BASELINE",
+        plan_source: str = "DETERMINISTIC_RECOVERY_FALLBACK",
     ) -> tuple[AgentRun, ToolResult]:
         owner = self.db.get(NPC, task.owner_npc_id)
         assert owner is not None
@@ -938,13 +903,9 @@ class TaskOrchestrator:
 
     @staticmethod
     def _initial_plan(task: AgentTask) -> dict[str, Any]:
-        if task.scenario_key == "starfire_command":
-            return initial_strategic_starfire_plan(task.id)
-        return initial_starfire_plan(task.id)
+        return initial_strategic_starfire_plan(task.id)
 
     @staticmethod
     def _recovery_plan(task: AgentTask, reason: str) -> dict[str, Any]:
         next_version = task.current_plan_version + 1
-        if task.scenario_key == "starfire_command":
-            return recovery_strategic_starfire_plan(task.id, next_version, reason)
-        return recovery_starfire_plan(task.id, next_version, reason)
+        return recovery_strategic_starfire_plan(task.id, next_version, reason)

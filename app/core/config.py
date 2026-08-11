@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Journey Agent Backend"
     app_env: Literal["development", "test", "production"] = "development"
-    database_url: str = "postgresql+psycopg://journey@localhost:5432/journey"
+    database_url: str = "sqlite+pysqlite:///./journey_dev.db"
     model_provider: Literal["mock", "openai_compatible"] = "mock"
     model_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4.1-mini"

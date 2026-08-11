@@ -25,11 +25,8 @@ from app.infrastructure.db.models import (
     AgentStep,
     AgentTask,
     ConversationSession,
-    EncounterDefinition,
     Memory,
     OfficerAppointment,
-    Quest,
-    QuestTemplate,
 )
 from app.services.game import GameService
 from app.services.tasks import TaskService
@@ -158,10 +155,6 @@ class PlanValidator:
             )
             if step_npc is None:
                 continue
-            if execution_type == StepExecutionType.WAIT_FOR_USER:
-                wait_count += 1
-                self._validate_wait_step(step.model_dump(mode="json"), path, issues)
-                continue
             if execution_type == StepExecutionType.WAIT_FOR_WORLD_EVENT:
                 wait_count += 1
                 self._validate_world_wait_step(
@@ -226,8 +219,14 @@ class PlanValidator:
                     message="A plan must contain at least one executable tool step",
                 )
             )
-        self._validate_goal_coverage(task, selected_tools, wait_count, issues)
-        self._validate_order(task, selected_tools, parsed.steps, issues)
+        self._validate_goal_coverage(
+            task,
+            selected_tools,
+            wait_count,
+            issues,
+            is_replan=replan_reason is not None,
+        )
+        self._validate_order(parsed.steps, issues)
         self._validate_operation_wait_pairing(parsed.steps, issues)
         self._validate_strategic_final_verification(task, parsed.steps, issues)
         if replan_reason is not None:
@@ -272,32 +271,29 @@ class PlanValidator:
                 )
             )
             return None
-        if task.scenario_key == "starfire_command":
-            appointment = self.db.get(OfficerAppointment, (task.player_id, officer.id))
-            if appointment is None or appointment.status != "ACTIVE":
-                issues.append(
-                    PlanValidationIssue(
-                        code="PLAN_OFFICER_NOT_APPOINTED",
-                        path=f"{path}.assigned_officer_key",
-                        message=f"Officer {officer_key} is not appointed to this player's domain",
-                    )
+        appointment = self.db.get(OfficerAppointment, (task.player_id, officer.id))
+        if appointment is None or appointment.status != "ACTIVE":
+            issues.append(
+                PlanValidationIssue(
+                    code="PLAN_OFFICER_NOT_APPOINTED",
+                    path=f"{path}.assigned_officer_key",
+                    message=f"Officer {officer_key} is not appointed to this player's domain",
                 )
-                return None
-            policy_errors = authority_policy_errors(
-                officer.authority_limits,
-                appointment.authority_overrides,
             )
-            if policy_errors:
-                issues.append(
-                    PlanValidationIssue(
-                        code="PLAN_AUTHORITY_POLICY_INVALID",
-                        path=f"{path}.assigned_officer_key",
-                        message=(
-                            f"Officer {officer.key} has an invalid appointment authority policy"
-                        ),
-                    )
+            return None
+        policy_errors = authority_policy_errors(
+            officer.authority_limits,
+            appointment.authority_overrides,
+        )
+        if policy_errors:
+            issues.append(
+                PlanValidationIssue(
+                    code="PLAN_AUTHORITY_POLICY_INVALID",
+                    path=f"{path}.assigned_officer_key",
+                    message=f"Officer {officer.key} has an invalid appointment authority policy",
                 )
-                return None
+            )
+            return None
         return officer
 
     def _validate_tool_step(
@@ -369,8 +365,6 @@ class PlanValidator:
                 )
                 for error in exc.errors()[:6]
             )
-        if tool_name == "create_quest":
-            self._validate_quest_template(npc, tool_arguments, path, issues)
         allowed_outcomes = EXPECTED_OUTCOME_FIELDS.get(tool_name, frozenset())
         if not expected_outcome:
             issues.append(
@@ -449,100 +443,6 @@ class PlanValidator:
                         ),
                     )
                 )
-
-    def _validate_quest_template(
-        self,
-        npc: NPC,
-        arguments: dict[str, Any],
-        path: str,
-        issues: list[PlanValidationIssue],
-    ) -> None:
-        key = arguments.get("template_key")
-        if not isinstance(key, str):
-            return
-        template = self.db.scalar(select(QuestTemplate).where(QuestTemplate.key == key))
-        if template is None:
-            issues.append(
-                PlanValidationIssue(
-                    code="PLAN_QUEST_TEMPLATE_UNKNOWN",
-                    path=f"{path}.tool_arguments.template_key",
-                    message=f"Quest template {key} does not exist",
-                )
-            )
-        elif npc.role.value not in template.allowed_roles:
-            issues.append(
-                PlanValidationIssue(
-                    code="PLAN_QUEST_TEMPLATE_UNAUTHORIZED",
-                    path=f"{path}.tool_arguments.template_key",
-                    message=f"{npc.role.value} cannot issue quest template {key}",
-                )
-            )
-
-    def _validate_wait_step(
-        self,
-        step: dict[str, Any],
-        path: str,
-        issues: list[PlanValidationIssue],
-    ) -> None:
-        if step.get("selected_tool_name") is not None:
-            issues.append(
-                PlanValidationIssue(
-                    code="PLAN_WAIT_TOOL_INVALID",
-                    path=f"{path}.selected_tool_name",
-                    message="A waiting step cannot select a tool",
-                )
-            )
-        if step.get("tool_arguments"):
-            issues.append(
-                PlanValidationIssue(
-                    code="PLAN_WAIT_ARGUMENTS_INVALID",
-                    path=f"{path}.tool_arguments",
-                    message="A waiting step cannot contain tool arguments",
-                )
-            )
-        condition = step.get("resume_condition")
-        if not isinstance(condition, dict) or condition.get("type") != "ENCOUNTER_RESULT":
-            issues.append(
-                PlanValidationIssue(
-                    code="PLAN_RESUME_CONDITION_INVALID",
-                    path=f"{path}.resume_condition",
-                    message="Only an ENCOUNTER_RESULT resume condition is supported",
-                )
-            )
-            return
-        if condition.get("required_result") != "VICTORY":
-            issues.append(
-                PlanValidationIssue(
-                    code="PLAN_RESUME_RESULT_INVALID",
-                    path=f"{path}.resume_condition.required_result",
-                    message="The supported required encounter result is VICTORY",
-                )
-            )
-        encounter_key = condition.get("encounter_key")
-        encounter = (
-            None
-            if not isinstance(encounter_key, str)
-            else self.db.scalar(
-                select(EncounterDefinition).where(EncounterDefinition.key == encounter_key)
-            )
-        )
-        if encounter is None:
-            issues.append(
-                PlanValidationIssue(
-                    code="PLAN_ENCOUNTER_UNKNOWN",
-                    path=f"{path}.resume_condition.encounter_key",
-                    message="The waiting step references an unknown encounter",
-                )
-            )
-        expected = step.get("expected_outcome")
-        if expected != {"encounter_result": "VICTORY"}:
-            issues.append(
-                PlanValidationIssue(
-                    code="PLAN_WAIT_OUTCOME_INVALID",
-                    path=f"{path}.expected_outcome",
-                    message="Encounter waits must expect encounter_result=VICTORY",
-                )
-            )
 
     def _validate_generic_wait_step(
         self,
@@ -675,7 +575,6 @@ class PlanValidator:
             )
             return
         allowed_facts = {
-            "starfire_road_safe",
             "village_support",
             "valley_intelligence",
             "valley_security",
@@ -714,80 +613,56 @@ class PlanValidator:
         selected_tools: list[str],
         wait_count: int,
         issues: list[PlanValidationIssue],
+        *,
+        is_replan: bool,
     ) -> None:
-        if task.scenario_key == "starfire_command":
-            strategic_required = {
-                "start_military_operation",
-                "start_outpost_repair",
-                "start_trade_route_test",
-            }
-            missing = sorted(strategic_required.difference(selected_tools))
-            for tool_name in missing:
-                issues.append(
-                    PlanValidationIssue(
-                        code="PLAN_GOAL_COVERAGE_INCOMPLETE",
-                        path="steps",
-                        message=f"The command plan cannot satisfy its goal without {tool_name}",
-                    )
-                )
-            if wait_count < 3:
-                issues.append(
-                    PlanValidationIssue(
-                        code="PLAN_GOAL_COVERAGE_INCOMPLETE",
-                        path="steps",
-                        message="Military, construction, and trade outcomes must be world-verified",
-                    )
-                )
-            return
-        if task.scenario_key != "starfire_outpost":
-            return
-        state = GameService(self.db).inspect_starfire_requirements(task.player_id)
-        required: list[str] = []
-        if not state["outpost_operational"]:
-            required.append("restore_outpost")
-        if not state["access_granted"]:
-            required.append("grant_access")
-        for tool_name in required:
-            if tool_name not in selected_tools:
-                issues.append(
-                    PlanValidationIssue(
-                        code="PLAN_GOAL_COVERAGE_INCOMPLETE",
-                        path="steps",
-                        message=f"The plan cannot satisfy the goal without {tool_name}",
-                    )
-                )
-        if not state["road_safe"] and wait_count == 0:
+        strategic_required = {
+            "start_military_operation",
+            "start_outpost_repair",
+            "start_trade_route_test",
+        }
+        if is_replan:
+            world = GameService(self.db).inspect_command_state(task.player_id)["world"]
+            assert isinstance(world, dict)
+            if world.get("valley_security") == "SAFE":
+                strategic_required.remove("start_military_operation")
+            if world.get("starfire_outpost_status") in {"OPERATIONAL", "RESTORED"}:
+                strategic_required.remove("start_outpost_repair")
+            if world.get("northern_trade_route_status") == "OPEN":
+                strategic_required.remove("start_trade_route_test")
+        missing = sorted(strategic_required.difference(selected_tools))
+        for tool_name in missing:
             issues.append(
                 PlanValidationIssue(
                     code="PLAN_GOAL_COVERAGE_INCOMPLETE",
                     path="steps",
-                    message="The plan must wait for a verified road encounter result",
+                    message=f"The command plan cannot satisfy its goal without {tool_name}",
+                )
+            )
+        if not is_replan and wait_count < 3:
+            issues.append(
+                PlanValidationIssue(
+                    code="PLAN_GOAL_COVERAGE_INCOMPLETE",
+                    path="steps",
+                    message="Military, construction, and trade outcomes must be world-verified",
                 )
             )
 
     def _validate_order(
         self,
-        task: AgentTask,
-        selected_tools: list[str],
         steps: list[Any],
         issues: list[PlanValidationIssue],
     ) -> None:
         ordered = [
             step.selected_tool_name
             if step.execution_type == StepExecutionType.TOOL.value
-            else "WAIT_FOR_USER"
+            else step.execution_type
             for step in steps
         ]
         constraints = [
-            ("create_quest", "prepare_starfire_route"),
-            ("WAIT_FOR_USER", "restore_outpost"),
-            ("restore_outpost", "grant_access"),
+            ("start_military_operation", "start_outpost_repair"),
+            ("start_outpost_repair", "start_trade_route_test"),
         ]
-        if task.scenario_key == "starfire_command":
-            constraints = [
-                ("start_military_operation", "start_outpost_repair"),
-                ("start_outpost_repair", "start_trade_route_test"),
-            ]
         for before, after in constraints:
             if (
                 before in ordered
@@ -801,8 +676,6 @@ class PlanValidator:
                         message=f"{before} must occur before {after}",
                     )
                 )
-        if "restore_outpost" in selected_tools and "grant_access" in selected_tools:
-            return
 
     def _validate_replan(
         self,
@@ -831,17 +704,16 @@ class PlanValidator:
             )
         ]
         verified_world: dict[str, Any] = {}
-        if task.scenario_key == "starfire_command":
-            state = GameService(self.db).inspect_command_state(task.player_id)
-            world = state.get("world")
-            if isinstance(world, dict):
-                verified_world = world
+        state = GameService(self.db).inspect_command_state(task.player_id)
+        world = state.get("world")
+        if isinstance(world, dict):
+            verified_world = world
         for index, proposed in enumerate(proposed_steps):
             proposed_tool = proposed.get("selected_tool_name")
             if proposed_tool not in IDEMPOTENT_TASK_TOOLS:
                 continue
             proposed_arguments = proposed.get("tool_arguments", {})
-            if task.scenario_key == "starfire_command" and _strategic_effect_satisfied_for_step(
+            if _strategic_effect_satisfied_for_step(
                 str(proposed_tool),
                 proposed_arguments if isinstance(proposed_arguments, dict) else {},
                 verified_world,
@@ -859,10 +731,7 @@ class PlanValidator:
                 continue
             for completed in completed_writes:
                 if completed.selected_tool_name == proposed_tool:
-                    if (
-                        task.scenario_key == "starfire_command"
-                        and completed.tool_arguments != proposed.get("tool_arguments", {})
-                    ):
+                    if completed.tool_arguments != proposed.get("tool_arguments", {}):
                         continue
                     issues.append(
                         PlanValidationIssue(
@@ -913,7 +782,7 @@ class PlanValidator:
         steps: list[Any],
         issues: list[PlanValidationIssue],
     ) -> None:
-        if task.scenario_key != "starfire_command" or not steps:
+        if not steps:
             return
         final = steps[-1]
         if (
@@ -967,21 +836,19 @@ def build_planning_request(
 ) -> dict[str, Any]:
     npc = db.get(NPC, session.npc_id)
     assert npc is not None
-    execution_officers = [npc]
     appointments: dict[UUID, OfficerAppointment] = {}
-    if task.scenario_key == "starfire_command":
-        officer_rows = db.execute(
-            select(NPC, OfficerAppointment)
-            .join(OfficerAppointment, OfficerAppointment.npc_id == NPC.id)
-            .where(
-                OfficerAppointment.player_id == task.player_id,
-                OfficerAppointment.status == "ACTIVE",
-                NPC.enabled.is_(True),
-            )
-            .order_by(NPC.key)
-        ).all()
-        execution_officers = [officer for officer, _appointment in officer_rows]
-        appointments = {officer.id: appointment for officer, appointment in officer_rows}
+    officer_rows = db.execute(
+        select(NPC, OfficerAppointment)
+        .join(OfficerAppointment, OfficerAppointment.npc_id == NPC.id)
+        .where(
+            OfficerAppointment.player_id == task.player_id,
+            OfficerAppointment.status == "ACTIVE",
+            NPC.enabled.is_(True),
+        )
+        .order_by(NPC.key)
+    ).all()
+    execution_officers = [officer for officer, _appointment in officer_rows]
+    appointments = {officer.id: appointment for officer, appointment in officer_rows}
     valid_policy_officer_ids = {
         officer.id
         for officer in execution_officers
@@ -990,27 +857,17 @@ def build_planning_request(
             (appointments[officer.id].authority_overrides if officer.id in appointments else None),
         )
     }
-    verified_state = (
-        GameService(db).inspect_command_state(task.player_id)
-        if task.scenario_key == "starfire_command"
-        else GameService(db).inspect_starfire_requirements(task.player_id)
-    )
+    verified_state = GameService(db).inspect_command_state(task.player_id)
     verified_world = verified_state.get("world", {})
     if not isinstance(verified_world, dict):
         verified_world = {}
     allowed_tools: list[dict[str, Any]] = []
-    scenario_tools = (
-        STRATEGIC_TASK_EXECUTION_TOOLS
-        if task.scenario_key == "starfire_command"
-        else TASK_EXECUTION_TOOLS
-    )
+    scenario_tools = STRATEGIC_TASK_EXECUTION_TOOLS
     for definition in registry.definitions():
         if definition.name not in scenario_tools:
             continue
-        if (
-            kind == "REPLAN"
-            and task.scenario_key == "starfire_command"
-            and _strategic_effect_already_satisfied(definition.name, verified_world)
+        if kind == "REPLAN" and _strategic_effect_already_satisfied(
+            definition.name, verified_world
         ):
             continue
         tool = registry.get(definition.name)
@@ -1052,17 +909,6 @@ def build_planning_request(
                 "allowed_officer_keys": [officer.key for officer in authorized_officers],
             }
         )
-    template = db.scalar(select(QuestTemplate).where(QuestTemplate.key == "secure_starfire_road"))
-    quest = (
-        None
-        if template is None
-        else db.scalar(
-            select(Quest).where(
-                Quest.player_id == task.player_id,
-                Quest.template_id == template.id,
-            )
-        )
-    )
     prior_plans: list[dict[str, Any]] = []
     service = TaskService(db)
     old_plan = service.current_plan(task)
@@ -1160,21 +1006,6 @@ def build_planning_request(
             for officer in execution_officers
         ],
         "verified_state": verified_state,
-        "approved_resources": {
-            "quest_template": (
-                {
-                    "key": template.key,
-                    "name": template.name,
-                    "allowed_roles": template.allowed_roles,
-                    "objective_type": template.objective_type.value,
-                    "objective_target": template.objective_target,
-                }
-                if template is not None
-                else None
-            ),
-            "quest_status": quest.status.value if quest is not None else None,
-            "encounter_key": "starfire_road_raiders",
-        },
         "allowed_tools": allowed_tools,
         "prior_plans": prior_plans,
         "failure_code": replan_reason,
@@ -1217,14 +1048,14 @@ def build_planning_request(
                         "20 or more yields the requested INTELLIGENCE, GUIDE, or SUPPLIES"
                     ),
                 }
-                if kind == "PLAN" and task.scenario_key == "starfire_command"
+                if kind == "PLAN"
                 else None
             ),
             "strategic_replan_blueprint": _strategic_replan_blueprint(
                 replan_reason,
                 verified_world,
             )
-            if kind == "REPLAN" and task.scenario_key == "starfire_command"
+            if kind == "REPLAN"
             else None,
             "step_shapes": {
                 "tool_step": {

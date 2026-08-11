@@ -9,12 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.debug import router as debug_router
-from app.api.evals import router as evals_router
-from app.api.game import router as game_router
 from app.api.health import router as health_router
-from app.api.sessions import router as sessions_router
-from app.api.tasks import router as tasks_router
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.debug.routes import router as strategic_debug_router
@@ -28,12 +23,7 @@ web_dir = Path(__file__).resolve().parent / "web"
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.mount("/debug-assets", StaticFiles(directory=web_dir), name="debug-assets")
 app.include_router(health_router)
-app.include_router(game_router)
-app.include_router(sessions_router)
-app.include_router(evals_router)
-app.include_router(debug_router)
 app.include_router(strategic_debug_router)
-app.include_router(tasks_router)
 
 
 @app.get("/debug", include_in_schema=False)

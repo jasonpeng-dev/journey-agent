@@ -416,28 +416,28 @@ def test_player_action_wait_has_a_distinct_resume_state(session: Session) -> Non
     player = service.create_player("Player Action Lord")
     conversation = ConversationSession(
         player_id=player.id,
-        npc_id=seed_id("npc:captain_aria"),
+        npc_id=seed_id("npc:shen_ce"),
     )
     session.add(conversation)
     planning_run = _run(session, conversation, "plan")
     task = TaskService(session).create_task(
         conversation,
-        "Wait for the player to make the verified road safe.",
-        "starfire_outpost",
+        "等待主公亲自取得北境村落的向导支持。",
+        "starfire_command",
     )
     plan = TaskService(session).create_plan(
         task.id,
-        "The captain waits for an action only the player can perform.",
+        "The strategist waits for an action only the player can perform.",
         [
             {
-                "description": "Wait for the player to secure the road",
+                "description": "Wait for the player to obtain village support",
                 "execution_type": "WAIT_FOR_PLAYER_ACTION",
                 "expected_outcome": {"player_action": "COMPLETED"},
                 "resume_condition": {
                     "type": "PLAYER_ACTION",
-                    "fact_key": "starfire_road_safe",
-                    "field": "value",
-                    "equals": True,
+                    "fact_key": "village_support",
+                    "field": "status",
+                    "equals": "GUIDE",
                 },
             }
         ],
@@ -450,7 +450,7 @@ def test_player_action_wait_has_a_distinct_resume_state(session: Session) -> Non
     assert task.status == AgentTaskStatus.WAITING_FOR_PLAYER_ACTION
     assert step.status == AgentStepStatus.WAITING_FOR_PLAYER_ACTION
 
-    service.set_world_fact(player.id, "starfire_road_safe", {"value": True})
+    service.set_world_fact(player.id, "village_support", {"status": "GUIDE"})
     resumed = TaskService(session).evaluate_wait(task, step)
     assert resumed == "RESUMED"
     assert task.status == AgentTaskStatus.ACTIVE

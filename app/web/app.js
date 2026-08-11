@@ -37,6 +37,8 @@ async function bootstrap() {
     if (error.status === 404 && state.sessionId) {
       localStorage.removeItem(STORAGE_KEY);
       state.sessionId = "";
+      await resetScenario({ automatic: true });
+      return;
     }
     showError(error, "无法打开战略控制台");
   }

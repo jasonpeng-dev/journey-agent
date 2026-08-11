@@ -86,7 +86,6 @@ const labels = {
   TOOL: "工具执行",
   WAIT_FOR_WORLD_EVENT: "等待世界事件",
   WAIT_FOR_PLAYER_ACTION: "等待玩家行动",
-  WAIT_FOR_USER: "等待用户",
   PLAN: "制定方案",
   REPLAN: "重新制定方案",
   STEP: "执行步骤",

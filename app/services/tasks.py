@@ -14,7 +14,6 @@ from app.domain.enums import (
     AgentStepStatus,
     AgentTaskStatus,
     DecisionStatus,
-    EncounterStatus,
     MemoryType,
     StepExecutionType,
     WorldOperationStatus,
@@ -26,8 +25,6 @@ from app.infrastructure.db.models import (
     AgentStep,
     AgentTask,
     ConversationSession,
-    EncounterDefinition,
-    EncounterRun,
     Memory,
     OfficerAppointment,
     PlayerDecisionRequest,
@@ -57,28 +54,27 @@ class TaskService:
         scenario_key: str,
         planning_mode: str = "PROVIDER",
     ) -> AgentTask:
-        if scenario_key not in {"starfire_outpost", "starfire_command"}:
+        if scenario_key != "starfire_command":
             raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
         if planning_mode not in PLANNING_MODES:
             raise AppError("PLANNING_MODE_INVALID", "The planning mode is not supported")
-        if scenario_key == "starfire_command":
-            owner = self.db.get(NPC, session.npc_id)
-            appointment = (
-                self.db.get(OfficerAppointment, (session.player_id, session.npc_id))
-                if owner is not None
-                else None
+        owner = self.db.get(NPC, session.npc_id)
+        appointment = (
+            self.db.get(OfficerAppointment, (session.player_id, session.npc_id))
+            if owner is not None
+            else None
+        )
+        if (
+            owner is None
+            or owner.role.value != "STRATEGIST"
+            or appointment is None
+            or appointment.status != "ACTIVE"
+        ):
+            raise AppError(
+                "COMMAND_OWNER_INVALID",
+                "The strategic Starfire command must be owned by an appointed strategist",
+                status_code=403,
             )
-            if (
-                owner is None
-                or owner.role.value != "STRATEGIST"
-                or appointment is None
-                or appointment.status != "ACTIVE"
-            ):
-                raise AppError(
-                    "COMMAND_OWNER_INVALID",
-                    "The strategic Starfire command must be owned by an appointed strategist",
-                    status_code=403,
-                )
         active = self.db.scalar(
             select(AgentTask).where(
                 AgentTask.player_id == session.player_id,
@@ -86,7 +82,6 @@ class TaskService:
                 AgentTask.status.in_(
                     [
                         AgentTaskStatus.ACTIVE,
-                        AgentTaskStatus.WAITING_FOR_USER,
                         AgentTaskStatus.REQUIRES_PLAYER_DECISION,
                         AgentTaskStatus.WAITING_FOR_PLAYER_ACTION,
                         AgentTaskStatus.WAITING_FOR_WORLD_EVENT,
@@ -145,7 +140,6 @@ class TaskService:
                     [
                         AgentStepStatus.PENDING,
                         AgentStepStatus.IN_PROGRESS,
-                        AgentStepStatus.WAITING_FOR_USER,
                         AgentStepStatus.REQUIRES_PLAYER_DECISION,
                         AgentStepStatus.WAITING_FOR_PLAYER_ACTION,
                         AgentStepStatus.WAITING_FOR_WORLD_EVENT,
@@ -187,7 +181,6 @@ class TaskService:
                 if old_step.status in {
                     AgentStepStatus.PENDING,
                     AgentStepStatus.IN_PROGRESS,
-                    AgentStepStatus.WAITING_FOR_USER,
                     AgentStepStatus.REQUIRES_PLAYER_DECISION,
                     AgentStepStatus.WAITING_FOR_PLAYER_ACTION,
                     AgentStepStatus.WAITING_FOR_WORLD_EVENT,
@@ -264,19 +257,6 @@ class TaskService:
         self.db.flush()
         return plan
 
-    def mark_waiting(self, task: AgentTask, step: AgentStep) -> None:
-        transitioned = (
-            step.status != AgentStepStatus.WAITING_FOR_USER
-            or task.status != AgentTaskStatus.WAITING_FOR_USER
-        )
-        step.status = AgentStepStatus.WAITING_FOR_USER
-        if step.started_at is None:
-            step.started_at = datetime.now(UTC)
-        task.status = AgentTaskStatus.WAITING_FOR_USER
-        if transitioned:
-            task.version += 1
-        self.db.flush()
-
     def mark_waiting_for_world_event(self, task: AgentTask, step: AgentStep) -> None:
         transitioned = (
             step.status != AgentStepStatus.WAITING_FOR_WORLD_EVENT
@@ -309,52 +289,7 @@ class TaskService:
             return self._evaluate_world_operation_wait(task, step, condition)
         if condition.get("type") == "PLAYER_ACTION":
             return self._evaluate_player_action_wait(task, step, condition)
-        if condition.get("type") != "ENCOUNTER_RESULT":
-            raise AppError("RESUME_CONDITION_INVALID", "The resume condition is unsupported")
-        if step.status == AgentStepStatus.PENDING:
-            self.mark_waiting(task, step)
-            return "WAITING"
-        encounter_key = condition.get("encounter_key")
-        required = condition.get("required_result", "VICTORY")
-        query = (
-            select(EncounterRun)
-            .join(EncounterDefinition)
-            .where(
-                EncounterRun.player_id == task.player_id,
-                EncounterDefinition.key == encounter_key,
-            )
-            .order_by(EncounterRun.started_at.desc())
-        )
-        if step.started_at is not None:
-            query = query.where(EncounterRun.started_at >= step.started_at)
-        run = self.db.scalar(query)
-        if run is None or run.status in {EncounterStatus.PENDING, EncounterStatus.ACTIVE}:
-            self.mark_waiting(task, step)
-            return "WAITING"
-        if run.status.value == required:
-            step.status = AgentStepStatus.SUCCEEDED
-            step.actual_result = {
-                "encounter_run_id": str(run.id),
-                "status": run.status.value,
-            }
-            step.completed_at = datetime.now(UTC)
-            task.status = AgentTaskStatus.ACTIVE
-            task.last_error_code = None
-            task.version += 1
-            self.db.flush()
-            return "RESUMED"
-        step.status = AgentStepStatus.FAILED
-        step.failure_code = "ENCOUNTER_DEFEAT"
-        step.actual_result = {
-            "encounter_run_id": str(run.id),
-            "status": run.status.value,
-        }
-        step.completed_at = datetime.now(UTC)
-        task.status = AgentTaskStatus.ACTIVE
-        task.last_error_code = "ENCOUNTER_DEFEAT"
-        task.version += 1
-        self.db.flush()
-        return "REPLAN_REQUIRED"
+        raise AppError("RESUME_CONDITION_INVALID", "The resume condition is unsupported")
 
     def _evaluate_player_action_wait(
         self,
@@ -467,70 +402,55 @@ class TaskService:
         steps = self.plan_steps(plan.id)
         if not steps or any(step.status != AgentStepStatus.SUCCEEDED for step in steps):
             return False
-        if task.scenario_key == "starfire_outpost":
-            state = GameService(self.db).inspect_starfire_requirements(task.player_id)
-            if not state["outpost_operational"] or not state["access_granted"]:
-                plan.status = AgentPlanStatus.FAILED
-                task.status = AgentTaskStatus.BLOCKED
-                task.last_error_code = "TASK_GOAL_NOT_VERIFIED"
-                task.version += 1
-                self.db.flush()
-                return False
-        if task.scenario_key == "starfire_command":
-            state = GameService(self.db).inspect_command_state(task.player_id)
-            world = state["world"]
-            assert isinstance(world, dict)
-            if (
-                world.get("valley_security") != "SAFE"
-                or world.get("starfire_outpost_status") not in {"OPERATIONAL", "RESTORED"}
-                or world.get("northern_trade_route_status") != "OPEN"
-            ):
-                plan.status = AgentPlanStatus.FAILED
-                task.status = AgentTaskStatus.BLOCKED
-                task.last_error_code = "TASK_GOAL_NOT_VERIFIED"
-                task.version += 1
-                self.db.flush()
-                return False
+        state = GameService(self.db).inspect_command_state(task.player_id)
+        world = state["world"]
+        assert isinstance(world, dict)
+        if (
+            world.get("valley_security") != "SAFE"
+            or world.get("starfire_outpost_status") not in {"OPERATIONAL", "RESTORED"}
+            or world.get("northern_trade_route_status") != "OPEN"
+        ):
+            plan.status = AgentPlanStatus.FAILED
+            task.status = AgentTaskStatus.BLOCKED
+            task.last_error_code = "TASK_GOAL_NOT_VERIFIED"
+            task.version += 1
+            self.db.flush()
+            return False
         now = datetime.now(UTC)
         plan.status = AgentPlanStatus.SUCCEEDED
         task.status = AgentTaskStatus.SUCCEEDED
         task.completed_at = now
         task.last_error_code = None
         task.version += 1
-        if task.scenario_key == "starfire_command":
-            world = GameService(self.db).inspect_command_state(task.player_id)["world"]
-            assert isinstance(world, dict)
-            source_event_id = f"strategic-task:{task.id}:completed"
-            officer_ids = {
-                step.assigned_npc_id for step in steps if step.assigned_npc_id is not None
-            }
-            officer_ids.add(task.owner_npc_id)
-            report = (
-                f"Command completed under Plan v{plan.version}: "
-                f"valley={world.get('valley_security')}, "
-                f"outpost={world.get('starfire_outpost_status')}, "
-                f"trade_route={world.get('northern_trade_route_status')}."
+        source_event_id = f"strategic-task:{task.id}:completed"
+        officer_ids = {step.assigned_npc_id for step in steps if step.assigned_npc_id is not None}
+        officer_ids.add(task.owner_npc_id)
+        report = (
+            f"Command completed under Plan v{plan.version}: "
+            f"valley={world.get('valley_security')}, "
+            f"outpost={world.get('starfire_outpost_status')}, "
+            f"trade_route={world.get('northern_trade_route_status')}."
+        )
+        for officer_id in officer_ids:
+            existing = self.db.scalar(
+                select(Memory).where(
+                    Memory.player_id == task.player_id,
+                    Memory.npc_id == officer_id,
+                    Memory.source_event_id == source_event_id,
+                )
             )
-            for officer_id in officer_ids:
-                existing = self.db.scalar(
-                    select(Memory).where(
-                        Memory.player_id == task.player_id,
-                        Memory.npc_id == officer_id,
-                        Memory.source_event_id == source_event_id,
+            if existing is None:
+                self.db.add(
+                    Memory(
+                        player_id=task.player_id,
+                        npc_id=officer_id,
+                        type=MemoryType.WORLD_EVENT,
+                        content=report,
+                        importance=8,
+                        source_session_id=task.last_session_id,
+                        source_event_id=source_event_id,
                     )
                 )
-                if existing is None:
-                    self.db.add(
-                        Memory(
-                            player_id=task.player_id,
-                            npc_id=officer_id,
-                            type=MemoryType.WORLD_EVENT,
-                            content=report,
-                            importance=8,
-                            source_session_id=task.last_session_id,
-                            source_event_id=source_event_id,
-                        )
-                    )
         self.db.flush()
         return True
 

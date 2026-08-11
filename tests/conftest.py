@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import Settings, get_settings
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.session import get_db
 from app.main import app
@@ -33,6 +34,14 @@ def client(session: Session) -> Generator[TestClient, None, None]:
         yield session
 
     app.dependency_overrides[get_db] = override
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        app_env="test",
+        database_url="sqlite+pysqlite:///:memory:",
+        model_provider="mock",
+        model_name="mock-model",
+        model_api_key=None,
+    )
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

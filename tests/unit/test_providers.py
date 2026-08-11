@@ -37,7 +37,6 @@ def test_plan_step_schema_exposes_exact_execution_type_enum() -> None:
 
     assert schema["properties"]["execution_type"]["enum"] == [
         "TOOL",
-        "WAIT_FOR_USER",
         "WAIT_FOR_PLAYER_ACTION",
         "WAIT_FOR_WORLD_EVENT",
     ]

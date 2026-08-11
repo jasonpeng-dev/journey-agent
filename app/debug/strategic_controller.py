@@ -189,12 +189,6 @@ class StrategicDebugController:
             task = self.tasks.get_task(task_id)
             if task.status in TERMINAL_TASK_STATUSES | PAUSED_TASK_STATUSES:
                 return events
-            if task.status == AgentTaskStatus.WAITING_FOR_USER:
-                raise AppError(
-                    "STRATEGIC_WAIT_STATE_INVALID",
-                    "starfire_command cannot use the legacy WAITING_FOR_USER state",
-                    status_code=409,
-                )
             if task.status == AgentTaskStatus.WAITING_FOR_WORLD_EVENT:
                 operation = self.tasks.serialize(task).get("pending_world_event")
                 if isinstance(operation, dict) and operation.get("status") == (

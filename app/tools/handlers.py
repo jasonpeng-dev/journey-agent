@@ -4,21 +4,10 @@ from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.types import ToolContext
 from app.core.errors import AppError
-from app.infrastructure.db.models import (
-    EncounterRun,
-    InventoryItem,
-    ItemDefinition,
-    Memory,
-    PlayerNPCRelationship,
-    Quest,
-    WorldNode,
-)
-from app.schemas.game import GameAction, QuestCreate, RelationshipUpdate
 from app.services.game import GameService
 from app.services.tasks import TaskService
 
@@ -29,28 +18,6 @@ class StrictArgs(BaseModel):
 
 class EmptyArgs(StrictArgs):
     pass
-
-
-class InventoryArgs(StrictArgs):
-    item_type: str | None = None
-
-
-class EncounterStateArgs(StrictArgs):
-    run_id: UUID | None = None
-
-
-class CreateQuestArgs(QuestCreate):
-    model_config = ConfigDict(extra="forbid")
-    idempotency_key: str = Field(min_length=8, max_length=160)
-
-
-class UpdateRelationshipArgs(RelationshipUpdate):
-    model_config = ConfigDict(extra="forbid")
-    idempotency_key: str = Field(min_length=8, max_length=160)
-
-
-class GameActionArgs(GameAction):
-    model_config = ConfigDict(extra="forbid")
 
 
 class IdempotentArgs(StrictArgs):
@@ -87,12 +54,7 @@ class TradeRouteTestArgs(IdempotentArgs):
 
 class PlanStepArgs(StrictArgs):
     description: str = Field(min_length=3, max_length=500)
-    execution_type: Literal[
-        "TOOL",
-        "WAIT_FOR_USER",
-        "WAIT_FOR_PLAYER_ACTION",
-        "WAIT_FOR_WORLD_EVENT",
-    ]
+    execution_type: Literal["TOOL", "WAIT_FOR_PLAYER_ACTION", "WAIT_FOR_WORLD_EVENT"]
     assigned_officer_key: str | None = Field(default=None, min_length=2, max_length=80)
     action_intent: str | None = Field(default=None, min_length=2, max_length=100)
     constraints: dict[str, Any] = Field(default_factory=dict)
@@ -112,161 +74,6 @@ class CreateTaskPlanArgs(StrictArgs):
 
 class ReplanTaskArgs(CreateTaskPlanArgs):
     replan_reason: str = Field(min_length=3, max_length=160)
-
-
-def player_state(db: Session, context: ToolContext, _args: BaseModel) -> dict[str, Any]:
-    player = GameService(db).get_player(context.player_id)
-    active_quests = db.scalars(
-        select(Quest).where(
-            Quest.player_id == player.id,
-            Quest.status.in_(["AVAILABLE", "ACTIVE", "COMPLETED"]),
-        )
-    ).all()
-    encounter = db.scalar(
-        select(EncounterRun).where(
-            EncounterRun.player_id == player.id,
-            EncounterRun.status == "ACTIVE",
-        )
-    )
-    return {
-        "level": player.level,
-        "gold": player.gold,
-        "current_node_id": str(player.current_node_id),
-        "active_quests": [quest.narrative_title for quest in active_quests],
-        "has_active_encounter": encounter is not None,
-        "version": player.version,
-    }
-
-
-def inventory(db: Session, context: ToolContext, args: BaseModel) -> list[Any]:
-    parsed = InventoryArgs.model_validate(args)
-    query = (
-        select(InventoryItem, ItemDefinition)
-        .join(ItemDefinition)
-        .where(InventoryItem.player_id == context.player_id, InventoryItem.quantity > 0)
-    )
-    if parsed.item_type:
-        query = query.where(ItemDefinition.type == parsed.item_type)
-    return [
-        {"key": definition.key, "name": definition.name, "quantity": item.quantity}
-        for item, definition in db.execute(query).all()
-    ]
-
-
-def world_state(db: Session, context: ToolContext, _args: BaseModel) -> dict[str, Any]:
-    player = GameService(db).get_player(context.player_id)
-    current = db.get(WorldNode, player.current_node_id)
-    nodes = GameService(db).list_nodes(context.player_id)
-    return {
-        "chapter": 1,
-        "current_node": current.key if current else None,
-        "available_nodes": [
-            {"key": node.key, "name": node.name}
-            for node, state in nodes
-            if state.status.value in {"AVAILABLE", "ENTERED"}
-        ],
-    }
-
-
-def available_nodes(db: Session, context: ToolContext, _args: BaseModel) -> list[Any]:
-    nodes = world_state(db, context, _args)["available_nodes"]
-    assert isinstance(nodes, list)
-    return nodes
-
-
-def active_quests(db: Session, context: ToolContext, _args: BaseModel) -> list[Any]:
-    quests = db.scalars(
-        select(Quest).where(
-            Quest.player_id == context.player_id,
-            Quest.status.in_(["AVAILABLE", "ACTIVE", "COMPLETED"]),
-        )
-    ).all()
-    return [
-        {
-            "id": str(quest.id),
-            "template_key": quest.template.key,
-            "status": quest.status.value,
-            "progress": quest.progress,
-            "target": quest.template.objective_quantity,
-            "reward_status": quest.reward_status.value,
-        }
-        for quest in quests
-    ]
-
-
-def encounter_state(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
-    parsed = EncounterStateArgs.model_validate(args)
-    query = select(EncounterRun).where(EncounterRun.player_id == context.player_id)
-    if parsed.run_id:
-        query = query.where(EncounterRun.id == parsed.run_id)
-    else:
-        query = query.order_by(EncounterRun.started_at.desc())
-    run = db.scalar(query)
-    return (
-        {"active": False}
-        if not run
-        else {"active": run.status.value == "ACTIVE", "id": str(run.id), "status": run.status.value}
-    )
-
-
-def relationship_update(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
-    parsed = UpdateRelationshipArgs.model_validate(args)
-    rel = GameService(db).update_relationship(
-        context.player_id, context.npc_id, parsed.delta, parsed.reason_code
-    )
-    return {"score": rel.score, "attitude": rel.attitude.value, "version": rel.version}
-
-
-def quest_create(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
-    parsed = CreateQuestArgs.model_validate(args)
-    quest = GameService(db).create_quest(
-        context.player_id,
-        context.npc_id,
-        parsed.template_key,
-        parsed.narrative_title,
-        parsed.narrative_description,
-        parsed.idempotency_key,
-    )
-    return {"quest_id": str(quest.id), "status": quest.status.value}
-
-
-def game_action(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
-    parsed = GameActionArgs.model_validate(args)
-    if parsed.action == "STORE_MEMORY":
-        content = parsed.parameters.get("content")
-        importance = parsed.parameters.get("importance", 5)
-        if not isinstance(content, str) or not content or not isinstance(importance, int):
-            raise AppError("INVALID_TOOL_ARGUMENTS", "Invalid memory parameters")
-        memory = Memory(
-            player_id=context.player_id,
-            npc_id=context.npc_id,
-            type="PLAYER_PREFERENCE",
-            content=content[:1000],
-            importance=max(1, min(10, importance)),
-            source_session_id=context.session_id,
-            source_event_id=parsed.source_id,
-        )
-        db.add(memory)
-        db.flush()
-        return {"memory_id": str(memory.id)}
-    if parsed.action == "UNLOCK_NODE":
-        if parsed.source_type not in {"QUEST", "ENCOUNTER"}:
-            raise AppError("ACTION_SOURCE_INVALID", "Unlock requires a quest or encounter")
-        node_key = parsed.parameters.get("node_key")
-        if not isinstance(node_key, str):
-            raise AppError("INVALID_TOOL_ARGUMENTS", "node_key is required")
-        state = GameService(db).unlock_node(context.player_id, node_key)
-        return {"node_id": str(state.node_id), "status": state.status.value}
-    raise AppError(
-        "ACTION_REQUIRES_REWARD_SERVICE",
-        "Grant and completion actions must use the validated reward workflow",
-    )
-
-
-def inspect_task_requirements(
-    db: Session, context: ToolContext, _args: BaseModel
-) -> dict[str, Any]:
-    return GameService(db).inspect_starfire_requirements(context.player_id)
 
 
 def inspect_command_state(db: Session, context: ToolContext, _args: BaseModel) -> dict[str, Any]:
@@ -389,30 +196,6 @@ def _operation_result(operation: Any) -> dict[str, Any]:
     }
 
 
-def prepare_starfire_route(db: Session, context: ToolContext, _args: BaseModel) -> dict[str, Any]:
-    state = GameService(db).prepare_starfire_route(context.player_id)
-    return {"node_id": str(state.node_id), "status": state.status.value}
-
-
-def request_npc_assistance(db: Session, context: ToolContext, _args: BaseModel) -> dict[str, Any]:
-    fact = GameService(db).request_starfire_assistance(context.player_id)
-    return {"assistance_active": bool(fact.value.get("value")), "version": fact.version}
-
-
-def restore_outpost(db: Session, context: ToolContext, _args: BaseModel) -> dict[str, Any]:
-    fact = GameService(db).restore_starfire_outpost(context.player_id)
-    return {"outpost_operational": bool(fact.value.get("value")), "version": fact.version}
-
-
-def grant_access(db: Session, context: ToolContext, _args: BaseModel) -> dict[str, Any]:
-    state = GameService(db).grant_starfire_access(context.player_id)
-    return {
-        "node_id": str(state.node_id),
-        "status": state.status.value,
-        "access_granted": True,
-    }
-
-
 def create_task_plan(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = CreateTaskPlanArgs.model_validate(args)
     if context.task_id != parsed.task_id:
@@ -447,6 +230,7 @@ def replan_task(db: Session, context: ToolContext, args: BaseModel) -> dict[str,
         "STEP_TOOL_MISMATCH",
         "TASK_PLAYER_MISMATCH",
         "TASK_NPC_MISMATCH",
+        "STEP_ACTOR_MISMATCH",
     }:
         raise AppError(
             "SECURITY_FAILURE_NOT_REPLANNABLE",
@@ -469,17 +253,7 @@ def replan_task(db: Session, context: ToolContext, args: BaseModel) -> dict[str,
 
 def snapshot(db: Session, context: ToolContext) -> dict[str, Any]:
     player = GameService(db).get_player(context.player_id)
-    relationship = db.get(PlayerNPCRelationship, (context.player_id, context.npc_id))
     return {
-        "player": {
-            "gold": player.gold,
-            "level": player.level,
-            "current_node_id": str(player.current_node_id),
-            "version": player.version,
-        },
-        "relationship": None
-        if not relationship
-        else {"score": relationship.score, "version": relationship.version},
-        "starfire": GameService(db).inspect_starfire_requirements(context.player_id),
+        "player": {"id": str(player.id), "version": player.version},
         "strategic_command": GameService(db).inspect_command_state(context.player_id),
     }

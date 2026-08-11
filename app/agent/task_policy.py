@@ -2,13 +2,6 @@ from __future__ import annotations
 
 TASK_EXECUTION_TOOLS = frozenset(
     {
-        "inspect_task_requirements",
-        "create_quest",
-        "prepare_starfire_route",
-        "request_npc_assistance",
-        "restore_outpost",
-        "grant_access",
-        "update_relationship",
         "inspect_command_state",
         "start_recon_operation",
         "start_military_operation",
@@ -18,25 +11,10 @@ TASK_EXECUTION_TOOLS = frozenset(
     }
 )
 
-STRATEGIC_TASK_EXECUTION_TOOLS = frozenset(
-    {
-        "inspect_command_state",
-        "start_recon_operation",
-        "start_military_operation",
-        "negotiate_village_support",
-        "start_outpost_repair",
-        "start_trade_route_test",
-    }
-)
+STRATEGIC_TASK_EXECUTION_TOOLS = TASK_EXECUTION_TOOLS
 
 IDEMPOTENT_TASK_TOOLS = frozenset(
     {
-        "create_quest",
-        "prepare_starfire_route",
-        "request_npc_assistance",
-        "restore_outpost",
-        "grant_access",
-        "update_relationship",
         "start_recon_operation",
         "start_military_operation",
         "negotiate_village_support",
@@ -67,7 +45,6 @@ PLAN_SECURITY_FAILURES = frozenset(
         "PLAN_TASK_MISMATCH",
         "PLAN_NPC_UNAVAILABLE",
         "PLAN_TOOL_UNAUTHORIZED",
-        "PLAN_QUEST_TEMPLATE_UNAUTHORIZED",
         "PLAN_OFFICER_NOT_APPOINTED",
         "PLAN_AUTHORITY_POLICY_INVALID",
     }
@@ -75,18 +52,16 @@ PLAN_SECURITY_FAILURES = frozenset(
 
 RECOVERABLE_FAILURES = frozenset(
     {
-        "ENCOUNTER_DEFEAT",
         "EXPECTED_OUTCOME_NOT_MET",
         "STATE_VERSION_CONFLICT",
         # A new plan can acquire the missing prerequisite or choose a
         # lower-cost action. These are business-state failures, not
         # authorization or schema violations.
         "ENEMY_SUPPLY_ROUTE_UNKNOWN",
+        "ENCOUNTER_DEFEAT",
         "RESOURCE_INSUFFICIENT",
         "SUPPLY_INSUFFICIENT",
         "SOLDIERS_UNAVAILABLE",
-        "STARFIRE_ROAD_UNSAFE",
-        "STARFIRE_QUEST_REQUIRED",
         "STARFIRE_OUTPOST_OFFLINE",
         "WORLD_OPERATION_DEFEAT",
         "PLAYER_DECISION_REJECTED",
@@ -98,8 +73,8 @@ RECOVERABLE_FAILURES = frozenset(
 
 REPLAN_GUIDANCE: dict[str, str] = {
     "ENCOUNTER_DEFEAT": (
-        "The encounter was lost. Reassess force size, support, and mission order "
-        "before attempting another operation."
+        "The valley clearance failed and exposed the enemy supply route. Disrupt that "
+        "route, secure useful village support, then retry only the unfinished phases."
     ),
     "TRADE_SUPPORT_REQUIRED": (
         "The trade test cannot start without village support. Acquire GUIDE or "
@@ -134,7 +109,6 @@ REPLAN_GUIDANCE: dict[str, str] = {
 
 PLAN_SOURCES = frozenset(
     {
-        "DETERMINISTIC_BASELINE",
         "DETERMINISTIC_RECOVERY_FALLBACK",
         "MOCK_PLANNER",
         "MODEL_PLANNER",
@@ -142,27 +116,9 @@ PLAN_SOURCES = frozenset(
     }
 )
 
-PLANNING_MODES = frozenset({"DETERMINISTIC_BASELINE", "PROVIDER"})
+PLANNING_MODES = frozenset({"PROVIDER"})
 
 EXPECTED_OUTCOME_FIELDS: dict[str, frozenset[str]] = {
-    "inspect_task_requirements": frozenset(
-        {
-            "player_level",
-            "player_level_min",
-            "road_safe",
-            "assistance_active",
-            "outpost_operational",
-            "access_granted",
-            "captain_relationship",
-            "captain_relationship_min",
-        }
-    ),
-    "create_quest": frozenset({"status", "template_key", "quest_id"}),
-    "prepare_starfire_route": frozenset({"status", "node_id"}),
-    "request_npc_assistance": frozenset({"assistance_active", "version"}),
-    "restore_outpost": frozenset({"outpost_operational", "version"}),
-    "grant_access": frozenset({"access_granted", "status", "node_id"}),
-    "update_relationship": frozenset({"score", "score_min", "attitude", "version"}),
     "inspect_command_state": frozenset(
         {
             "soldiers_total_min",

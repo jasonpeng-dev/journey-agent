@@ -7,22 +7,9 @@ class PlayerStatus(StrEnum):
 
 
 class NPCRole(StrEnum):
-    GUIDE = "GUIDE"
-    QUEST_GIVER = "QUEST_GIVER"
-    MERCHANT = "MERCHANT"
-    ENEMY = "ENEMY"
-    BOSS = "BOSS"
     STRATEGIST = "STRATEGIST"
     GENERAL = "GENERAL"
     STEWARD = "STEWARD"
-
-
-class RelationshipAttitude(StrEnum):
-    HOSTILE = "HOSTILE"
-    UNFRIENDLY = "UNFRIENDLY"
-    NEUTRAL = "NEUTRAL"
-    FRIENDLY = "FRIENDLY"
-    TRUSTED = "TRUSTED"
 
 
 class NodeType(StrEnum):
@@ -30,8 +17,6 @@ class NodeType(StrEnum):
     NPC = "NPC"
     EVENT = "EVENT"
     ENCOUNTER = "ENCOUNTER"
-    REST = "REST"
-    BOSS = "BOSS"
 
 
 class NodeStatus(StrEnum):
@@ -39,34 +24,6 @@ class NodeStatus(StrEnum):
     AVAILABLE = "AVAILABLE"
     ENTERED = "ENTERED"
     COMPLETED = "COMPLETED"
-
-
-class QuestStatus(StrEnum):
-    AVAILABLE = "AVAILABLE"
-    ACTIVE = "ACTIVE"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    REWARDED = "REWARDED"
-
-
-class RewardStatus(StrEnum):
-    PENDING = "PENDING"
-    ELIGIBLE = "ELIGIBLE"
-    CLAIMED = "CLAIMED"
-
-
-class ObjectiveType(StrEnum):
-    COMPLETE_NODE = "COMPLETE_NODE"
-    COMPLETE_ENCOUNTER = "COMPLETE_ENCOUNTER"
-    COLLECT_ITEM = "COLLECT_ITEM"
-    REACH_RELATIONSHIP = "REACH_RELATIONSHIP"
-
-
-class EncounterStatus(StrEnum):
-    PENDING = "PENDING"
-    ACTIVE = "ACTIVE"
-    VICTORY = "VICTORY"
-    DEFEAT = "DEFEAT"
 
 
 class SessionStatus(StrEnum):
@@ -82,11 +39,7 @@ class MessageRole(StrEnum):
 
 
 class MemoryType(StrEnum):
-    PLAYER_PREFERENCE = "PLAYER_PREFERENCE"
-    RELATIONSHIP_EVENT = "RELATIONSHIP_EVENT"
-    QUEST_EVENT = "QUEST_EVENT"
     WORLD_EVENT = "WORLD_EVENT"
-    CONVERSATION_SUMMARY = "CONVERSATION_SUMMARY"
 
 
 class RunStatus(StrEnum):
@@ -108,7 +61,6 @@ class TerminationReason(StrEnum):
 
 class AgentTaskStatus(StrEnum):
     ACTIVE = "ACTIVE"
-    WAITING_FOR_USER = "WAITING_FOR_USER"
     REQUIRES_PLAYER_DECISION = "REQUIRES_PLAYER_DECISION"
     WAITING_FOR_PLAYER_ACTION = "WAITING_FOR_PLAYER_ACTION"
     WAITING_FOR_WORLD_EVENT = "WAITING_FOR_WORLD_EVENT"
@@ -130,7 +82,6 @@ class AgentStepStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
-    WAITING_FOR_USER = "WAITING_FOR_USER"
     REQUIRES_PLAYER_DECISION = "REQUIRES_PLAYER_DECISION"
     WAITING_FOR_PLAYER_ACTION = "WAITING_FOR_PLAYER_ACTION"
     WAITING_FOR_WORLD_EVENT = "WAITING_FOR_WORLD_EVENT"
@@ -139,7 +90,6 @@ class AgentStepStatus(StrEnum):
 
 class StepExecutionType(StrEnum):
     TOOL = "TOOL"
-    WAIT_FOR_USER = "WAIT_FOR_USER"
     WAIT_FOR_PLAYER_ACTION = "WAIT_FOR_PLAYER_ACTION"
     WAIT_FOR_WORLD_EVENT = "WAIT_FOR_WORLD_EVENT"
 

@@ -7,48 +7,24 @@ from uuid import UUID, uuid5
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.errors import AppError, AuthorizationError, ConflictError, NotFoundError
+from app.core.errors import AppError, ConflictError, NotFoundError
 from app.domain.enums import (
-    EncounterStatus,
     NodeStatus,
     NPCRole,
-    QuestStatus,
-    RelationshipAttitude,
-    RewardStatus,
     WorldOperationStatus,
 )
 from app.infrastructure.db.models import (
     NPC,
-    EncounterDefinition,
-    EncounterRun,
-    InventoryItem,
-    ItemDefinition,
     OfficerAppointment,
     Player,
     PlayerDomainState,
     PlayerNodeState,
-    PlayerNPCRelationship,
     PlayerWorldFact,
-    Quest,
-    QuestTemplate,
     WorldNode,
-    WorldNodeEdge,
     WorldOperation,
 )
 
 SEED_NAMESPACE = UUID("3e16a11d-9cf5-4981-af7a-152c28331300")
-
-
-def attitude_for(score: int) -> RelationshipAttitude:
-    if score <= -50:
-        return RelationshipAttitude.HOSTILE
-    if score <= -15:
-        return RelationshipAttitude.UNFRIENDLY
-    if score < 25:
-        return RelationshipAttitude.NEUTRAL
-    if score < 70:
-        return RelationshipAttitude.FRIENDLY
-    return RelationshipAttitude.TRUSTED
 
 
 class GameService:
@@ -65,7 +41,7 @@ class GameService:
         return player
 
     def create_player(self, name: str) -> Player:
-        start = self.db.scalar(select(WorldNode).where(WorldNode.key == "journey_start"))
+        start = self.db.scalar(select(WorldNode).where(WorldNode.key == "capital_council"))
         if not start:
             raise AppError("WORLD_NOT_SEEDED", "Demo world has not been seeded", status_code=503)
         player = Player(name=name, current_node_id=start.id)
@@ -75,17 +51,9 @@ class GameService:
         for node in nodes:
             status = NodeStatus.ENTERED if node.id == start.id else node.default_status
             self.db.add(PlayerNodeState(player_id=player.id, node_id=node.id, status=status))
-        strategic_roles = {NPCRole.STRATEGIST, NPCRole.GENERAL, NPCRole.STEWARD}
         for npc in self.db.scalars(select(NPC)).all():
-            self.db.add(PlayerNPCRelationship(player_id=player.id, npc_id=npc.id))
-            if npc.role in strategic_roles:
-                self.db.add(
-                    OfficerAppointment(
-                        player_id=player.id,
-                        npc_id=npc.id,
-                        status="ACTIVE",
-                    )
-                )
+            if npc.role in {NPCRole.STRATEGIST, NPCRole.GENERAL, NPCRole.STEWARD}:
+                self.db.add(OfficerAppointment(player_id=player.id, npc_id=npc.id, status="ACTIVE"))
         self.db.add(
             PlayerDomainState(
                 player_id=player.id,
@@ -109,6 +77,7 @@ class GameService:
         return player
 
     def list_nodes(self, player_id: UUID) -> list[tuple[WorldNode, PlayerNodeState]]:
+        """Return the player's strategic map nodes and their verified state."""
         self.get_player(player_id)
         return list(
             self.db.execute(
@@ -117,29 +86,6 @@ class GameService:
                 .where(PlayerNodeState.player_id == player_id)
             ).tuples()
         )
-
-    def enter_node(self, player_id: UUID, node_id: UUID) -> Player:
-        player = self.get_player(player_id, lock=True)
-        state = self.db.get(PlayerNodeState, (player_id, node_id))
-        if not state:
-            raise NotFoundError("node", node_id)
-        if state.status == NodeStatus.LOCKED:
-            raise AppError("NODE_LOCKED", "Target node is locked")
-        if player.current_node_id != node_id:
-            edge = self.db.scalar(
-                select(WorldNodeEdge).where(
-                    WorldNodeEdge.source_node_id == player.current_node_id,
-                    WorldNodeEdge.target_node_id == node_id,
-                )
-            )
-            if not edge:
-                raise AppError("NODE_NOT_REACHABLE", "Target node is not adjacent")
-        state.status = NodeStatus.ENTERED
-        state.version += 1
-        player.current_node_id = node_id
-        player.version += 1
-        self.db.flush()
-        return player
 
     def unlock_node(self, player_id: UUID, node_key: str) -> PlayerNodeState:
         node = self.db.scalar(select(WorldNode).where(WorldNode.key == node_key))
@@ -153,38 +99,6 @@ class GameService:
             state.version += 1
             self.db.flush()
         return state
-
-    def complete_current_node(self, player_id: UUID, node_id: UUID) -> PlayerNodeState:
-        player = self.get_player(player_id, lock=True)
-        if player.current_node_id != node_id:
-            raise AppError("NODE_NOT_CURRENT", "Only the current node can be completed")
-        state = self.db.get(PlayerNodeState, (player_id, node_id))
-        if not state or state.status != NodeStatus.ENTERED:
-            raise AppError("NODE_NOT_ENTERED", "Node must be entered before completion")
-        state.status = NodeStatus.COMPLETED
-        state.version += 1
-        player.version += 1
-        self.db.flush()
-        return state
-
-    def update_relationship(
-        self, player_id: UUID, npc_id: UUID, delta: int, reason_code: str
-    ) -> PlayerNPCRelationship:
-        if reason_code not in {
-            "PLAYER_HELPED_NPC",
-            "PLAYER_THREATENED_NPC",
-            "PLAYER_KEPT_PROMISE",
-            "PLAYER_BROKE_PROMISE",
-        }:
-            raise AppError("INVALID_REASON_CODE", "Relationship reason is not allowed")
-        rel = self.db.get(PlayerNPCRelationship, (player_id, npc_id))
-        if not rel:
-            raise NotFoundError("relationship", npc_id)
-        rel.score = max(-100, min(100, rel.score + delta))
-        rel.attitude = attitude_for(rel.score)
-        rel.version += 1
-        self.db.flush()
-        return rel
 
     def get_world_fact(self, player_id: UUID, key: str) -> dict[str, object]:
         self.get_player(player_id)
@@ -204,81 +118,6 @@ class GameService:
             fact.version += 1
         self.db.flush()
         return fact
-
-    def inspect_starfire_requirements(self, player_id: UUID) -> dict[str, object]:
-        player = self.get_player(player_id)
-        relationship = self.db.get(PlayerNPCRelationship, (player_id, seed_id("npc:captain_aria")))
-        return {
-            "player_level": player.level,
-            "road_safe": bool(self.get_world_fact(player_id, "starfire_road_safe").get("value")),
-            "assistance_active": bool(
-                self.get_world_fact(player_id, "starfire_assistance").get("value")
-            ),
-            "outpost_operational": bool(
-                self.get_world_fact(player_id, "starfire_outpost_operational").get("value")
-            ),
-            "access_granted": bool(
-                self.get_world_fact(player_id, "starfire_access_granted").get("value")
-            ),
-            "captain_relationship": relationship.score if relationship else 0,
-        }
-
-    def prepare_starfire_route(self, player_id: UUID) -> PlayerNodeState:
-        template = self.db.scalar(
-            select(QuestTemplate).where(QuestTemplate.key == "secure_starfire_road")
-        )
-        quest = (
-            None
-            if template is None
-            else self.db.scalar(
-                select(Quest).where(
-                    Quest.player_id == player_id,
-                    Quest.template_id == template.id,
-                    Quest.status.in_([QuestStatus.AVAILABLE, QuestStatus.ACTIVE]),
-                )
-            )
-        )
-        if quest is None:
-            raise AppError(
-                "STARFIRE_QUEST_REQUIRED",
-                "The road can only be opened after the approved quest is issued",
-            )
-        return self.unlock_node(player_id, "starfire_road")
-
-    def request_starfire_assistance(self, player_id: UUID) -> PlayerWorldFact:
-        return self.set_world_fact(
-            player_id,
-            "starfire_assistance",
-            {"value": True, "source": "captain_aria"},
-        )
-
-    def restore_starfire_outpost(self, player_id: UUID) -> PlayerWorldFact:
-        if not self.get_world_fact(player_id, "starfire_road_safe").get("value"):
-            raise AppError(
-                "STARFIRE_ROAD_UNSAFE",
-                "The outpost cannot be restored until the road is verified safe",
-                retryable=True,
-            )
-        return self.set_world_fact(
-            player_id,
-            "starfire_outpost_operational",
-            {"value": True, "source": "verified_road_clearance"},
-        )
-
-    def grant_starfire_access(self, player_id: UUID) -> PlayerNodeState:
-        if not self.get_world_fact(player_id, "starfire_outpost_operational").get("value"):
-            raise AppError(
-                "STARFIRE_OUTPOST_OFFLINE",
-                "Access cannot be granted until the outpost is operational",
-                retryable=True,
-            )
-        state = self.unlock_node(player_id, "starfire_outpost")
-        self.set_world_fact(
-            player_id,
-            "starfire_access_granted",
-            {"value": True, "source": "captain_aria"},
-        )
-        return state
 
     def inspect_command_state(self, player_id: UUID) -> dict[str, object]:
         player = self.get_player(player_id)
@@ -839,11 +678,6 @@ class GameService:
             "valley_security",
             {"status": "SAFE", "operation_id": str(operation.id)},
         )
-        self.set_world_fact(
-            operation.player_id,
-            "starfire_road_safe",
-            {"value": True, "operation_id": str(operation.id)},
-        )
         self.unlock_node(operation.player_id, "starfire_outpost")
         return {
             "result": "VICTORY",
@@ -865,11 +699,6 @@ class GameService:
             operation.player_id,
             "starfire_outpost_status",
             {"status": status, "operation_id": str(operation.id)},
-        )
-        self.set_world_fact(
-            operation.player_id,
-            "starfire_outpost_operational",
-            {"value": True, "operation_id": str(operation.id)},
         )
         self.unlock_node(operation.player_id, "starfire_outpost")
         return {
@@ -925,190 +754,6 @@ class GameService:
         domain.morale = max(0, min(100, domain.morale + morale_delta))
         domain.version += 1
         self.db.flush()
-
-    def create_quest(
-        self,
-        player_id: UUID,
-        npc_id: UUID,
-        template_key: str,
-        title: str,
-        description: str,
-        idempotency_key: str,
-    ) -> Quest:
-        npc = self.db.get(NPC, npc_id)
-        template = self.db.scalar(select(QuestTemplate).where(QuestTemplate.key == template_key))
-        if not npc or not npc.enabled:
-            raise NotFoundError("npc", npc_id)
-        if not template:
-            raise NotFoundError("quest_template", template_key)
-        if npc.role.value not in template.allowed_roles:
-            raise AuthorizationError(
-                "NPC_PERMISSION_DENIED", "NPC cannot issue this quest", npc_id=npc_id
-            )
-        existing = self.db.scalar(
-            select(Quest).where(
-                Quest.player_id == player_id,
-                Quest.template_id == template.id,
-                Quest.status.in_(
-                    [QuestStatus.AVAILABLE, QuestStatus.ACTIVE, QuestStatus.COMPLETED]
-                ),
-            )
-        )
-        if existing:
-            raise ConflictError("QUEST_ALREADY_ACTIVE", "Player already has this quest")
-        quest = Quest(
-            template_id=template.id,
-            player_id=player_id,
-            issuer_npc_id=npc_id,
-            idempotency_key=idempotency_key,
-            narrative_title=title,
-            narrative_description=description,
-        )
-        self.db.add(quest)
-        self.db.flush()
-        return quest
-
-    def accept_quest(self, player_id: UUID, quest_id: UUID) -> Quest:
-        quest = self.db.get(Quest, quest_id)
-        if not quest or quest.player_id != player_id:
-            raise NotFoundError("quest", quest_id)
-        if quest.status == QuestStatus.AVAILABLE:
-            quest.status = QuestStatus.ACTIVE
-            self.db.flush()
-        return quest
-
-    def start_encounter(
-        self, player_id: UUID, encounter_id: UUID, idempotency_key: str
-    ) -> EncounterRun:
-        player = self.get_player(player_id)
-        definition = self.db.get(EncounterDefinition, encounter_id)
-        if not definition:
-            raise NotFoundError("encounter", encounter_id)
-        if player.current_node_id != definition.node_id:
-            raise AppError("ENCOUNTER_WRONG_NODE", "Player is not at encounter node")
-        existing = self.db.scalar(
-            select(EncounterRun).where(
-                EncounterRun.player_id == player_id,
-                EncounterRun.idempotency_key == idempotency_key,
-            )
-        )
-        if existing:
-            return existing
-        run = EncounterRun(
-            player_id=player_id,
-            encounter_id=encounter_id,
-            idempotency_key=idempotency_key,
-            status=EncounterStatus.ACTIVE,
-        )
-        self.db.add(run)
-        self.db.flush()
-        return run
-
-    def attempt_encounter(self, run_id: UUID, strategy: str, idempotency_key: str) -> EncounterRun:
-        run = self.db.scalar(
-            select(EncounterRun).where(EncounterRun.id == run_id).with_for_update()
-        )
-        if not run:
-            raise NotFoundError("encounter_run", run_id)
-        if run.status in {EncounterStatus.VICTORY, EncounterStatus.DEFEAT}:
-            if run.settlement_idempotency_key == idempotency_key:
-                return run
-            raise ConflictError("ENCOUNTER_ALREADY_COMPLETED", "Encounter has already been settled")
-        definition = run.encounter
-        if strategy not in definition.allowed_strategies:
-            raise AppError("INVALID_STRATEGY", "Strategy is not allowed")
-        player = self.get_player(run.player_id, lock=True)
-        has_talisman = bool(
-            self.db.scalar(
-                select(InventoryItem)
-                .join(ItemDefinition)
-                .where(
-                    InventoryItem.player_id == player.id,
-                    ItemDefinition.key == "water_talisman",
-                    InventoryItem.quantity > 0,
-                )
-            )
-        )
-        strategy_bonus = {"CAUTIOUS": 2, "AGGRESSIVE": 1, "NEGOTIATE": 0}[strategy]
-        assistance_bonus = 0
-        if definition.key == "starfire_road_raiders":
-            assistance_bonus = (
-                2 if self.get_world_fact(player.id, "starfire_assistance").get("value") else 0
-            )
-        score = player.level + strategy_bonus + (2 if has_talisman else 0) + assistance_bonus
-        victory = score >= definition.difficulty
-        run.selected_strategy = strategy
-        run.status = EncounterStatus.VICTORY if victory else EncounterStatus.DEFEAT
-        run.result = run.status.value
-        run.settlement_idempotency_key = idempotency_key
-        run.completed_at = datetime.now(UTC)
-        if victory:
-            if definition.key == "starfire_road_raiders":
-                self.set_world_fact(
-                    player.id,
-                    "starfire_road_safe",
-                    {"value": True, "encounter_run_id": str(run.id)},
-                )
-            quests = self.db.scalars(
-                select(Quest).where(
-                    Quest.player_id == player.id,
-                    Quest.status == QuestStatus.ACTIVE,
-                )
-            ).all()
-            for quest in quests:
-                if (
-                    quest.template.objective_type.value == "COMPLETE_ENCOUNTER"
-                    and quest.template.objective_target == definition.key
-                ):
-                    quest.progress = quest.template.objective_quantity
-                    quest.status = QuestStatus.COMPLETED
-                    quest.reward_status = RewardStatus.ELIGIBLE
-                    quest.completed_at = datetime.now(UTC)
-        self.db.flush()
-        return run
-
-    def claim_reward(self, player_id: UUID, quest_id: UUID) -> Quest:
-        quest = self.db.scalar(
-            select(Quest)
-            .where(Quest.id == quest_id, Quest.player_id == player_id)
-            .with_for_update()
-        )
-        if not quest:
-            raise NotFoundError("quest", quest_id)
-        if quest.reward_status == RewardStatus.CLAIMED:
-            raise ConflictError("REWARD_ALREADY_CLAIMED", "Reward was already claimed")
-        if quest.status != QuestStatus.COMPLETED:
-            raise AppError("QUEST_NOT_COMPLETED", "Quest is not completed")
-        player = self.get_player(player_id, lock=True)
-        reward = quest.template.reward
-        player.gold += int(reward.get("gold", 0))
-        player.version += 1
-        for item_key, quantity in reward.get("items", {}).items():
-            definition = self.db.scalar(
-                select(ItemDefinition).where(ItemDefinition.key == item_key)
-            )
-            if not definition:
-                raise AppError("ITEM_NOT_FOUND", "Reward item is not defined")
-            inventory = self.db.get(InventoryItem, (player_id, definition.id))
-            if not inventory:
-                inventory = InventoryItem(
-                    player_id=player_id,
-                    item_definition_id=definition.id,
-                    quantity=0,
-                    version=1,
-                )
-                self.db.add(inventory)
-            if inventory.quantity + int(quantity) > definition.max_stack:
-                raise AppError("ITEM_STACK_EXCEEDED", "Reward exceeds item stack limit")
-            inventory.quantity += int(quantity)
-            inventory.version = (inventory.version or 0) + 1
-        unlock = reward.get("unlock_node")
-        if unlock:
-            self.unlock_node(player_id, str(unlock))
-        quest.reward_status = RewardStatus.CLAIMED
-        quest.status = QuestStatus.REWARDED
-        self.db.flush()
-        return quest
 
 
 def seed_id(key: str) -> UUID:
