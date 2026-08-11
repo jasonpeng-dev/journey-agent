@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: journey
+      POSTGRES_USER: journey
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the environment}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U journey -d journey"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - journey-postgres:/var/lib/postgresql/data
+
+  api:
+    build: .
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://journey:${POSTGRES_PASSWORD}@db:5432/journey
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-mock}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.openai.com/v1}
+      MODEL_NAME: ${MODEL_NAME:-gpt-4.1-mini}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  journey-postgres:

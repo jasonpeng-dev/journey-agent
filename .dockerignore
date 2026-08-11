@@ -1,0 +1,16 @@
+.git
+.venv
+.env
+.env.*
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+eval-results
+eval-results-*
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs
+tests
