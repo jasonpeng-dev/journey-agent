@@ -150,3 +150,61 @@ class ResourceDefinition:
             raise ValueError("initial_value must be greater than or equal to minimum")
         if self.maximum is not None and self.initial_value > self.maximum:
             raise ValueError("initial_value must be less than or equal to maximum")
+
+
+@dataclass(frozen=True, slots=True)
+class WorldDefinition:
+    """A complete, immutable description of one scenario world."""
+
+    key: str
+    name: str
+    interactions: tuple[InteractionDefinition, ...]
+    nodes: tuple[NodeDefinition, ...]
+    relations: tuple[RelationDefinition, ...]
+    resources: tuple[ResourceDefinition, ...]
+
+    def __post_init__(self) -> None:
+        _validate_key(self.key)
+        _validate_name(self.name)
+        object.__setattr__(self, "interactions", tuple(self.interactions))
+        object.__setattr__(self, "nodes", tuple(self.nodes))
+        object.__setattr__(self, "relations", tuple(self.relations))
+        object.__setattr__(self, "resources", tuple(self.resources))
+        self._validate_unique_keys()
+        self._validate_references()
+
+    def _validate_unique_keys(self) -> None:
+        collections = {
+            "interactions": [item.key for item in self.interactions],
+            "nodes": [item.key for item in self.nodes],
+            "resources": [item.key for item in self.resources],
+        }
+        for label, keys in collections.items():
+            if len(set(keys)) != len(keys):
+                raise ValueError(f"world {label} must use unique keys")
+
+    def _validate_references(self) -> None:
+        interactions = {item.key: item for item in self.interactions}
+        node_keys = {item.key for item in self.nodes}
+        for node in self.nodes:
+            for interaction in node.interactions:
+                if interactions.get(interaction.key) != interaction:
+                    raise ValueError(
+                        f"node {node.key} references an interaction outside the world catalog"
+                    )
+        for relation in self.relations:
+            if relation.source_node_key not in node_keys:
+                raise ValueError(f"relation source {relation.source_node_key} is not a world node")
+            if relation.target_node_key not in node_keys:
+                raise ValueError(f"relation target {relation.target_node_key} is not a world node")
+
+    def node(self, key: str) -> NodeDefinition | None:
+        return next((node for node in self.nodes if node.key == key), None)
+
+    def interaction(self, key: str) -> InteractionDefinition | None:
+        return next(
+            (interaction for interaction in self.interactions if interaction.key == key), None
+        )
+
+    def resource(self, key: str) -> ResourceDefinition | None:
+        return next((resource for resource in self.resources if resource.key == key), None)

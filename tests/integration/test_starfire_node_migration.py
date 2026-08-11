@@ -1,0 +1,221 @@
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.core.config import get_settings
+from app.domain.enums import NodeStatus, NodeType, NPCRole, WorldOperationStatus
+from app.infrastructure.db.models import (
+    NPC,
+    Player,
+    PlayerNodeState,
+    PlayerWorldFact,
+    World,
+    WorldNode,
+    WorldOperation,
+)
+from app.services.game import seed_id
+from app.services.seed import seed_demo_world
+
+INITIAL_REVISION = "d0b3e5ceb9a2"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _config(database_url: str) -> Config:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    return config
+
+
+def _upgrade(monkeypatch: pytest.MonkeyPatch, database_url: str, revision: str) -> None:
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    get_settings.cache_clear()
+    command.upgrade(_config(database_url), revision)
+    get_settings.cache_clear()
+
+
+def _downgrade(monkeypatch: pytest.MonkeyPatch, database_url: str, revision: str) -> None:
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    get_settings.cache_clear()
+    command.downgrade(_config(database_url), revision)
+    get_settings.cache_clear()
+
+
+def test_fresh_database_migrates_and_seeds_canonical_nodes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'fresh.db').as_posix()}"
+    _upgrade(monkeypatch, database_url, "head")
+    engine = create_engine(database_url)
+    with Session(engine) as db, db.begin():
+        seed_demo_world(db)
+    with Session(engine) as db:
+        keys = set(db.scalars(select(WorldNode.key)).all())
+
+    assert keys == {
+        "capital_council",
+        "north_village",
+        "northern_valley",
+        "enemy_north_supply_route",
+        "starfire_outpost",
+        "northern_trade_route",
+    }
+
+
+def test_upgrade_merges_legacy_nodes_without_rewriting_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'upgrade.db').as_posix()}"
+    _upgrade(monkeypatch, database_url, INITIAL_REVISION)
+    engine = create_engine(database_url)
+    world_id = seed_id("world:starfire_command")
+    entrance_id = seed_id("node:valley_entrance")
+    ambush_id = seed_id("node:ambush_valley")
+    with Session(engine) as db:
+        world = World(id=world_id, key="starfire_command", name="Legacy Starfire", chapter=1)
+        node_specs = [
+            ("capital_council", NodeType.START, NodeStatus.AVAILABLE),
+            ("north_village", NodeType.NPC, NodeStatus.AVAILABLE),
+            ("valley_entrance", NodeType.EVENT, NodeStatus.AVAILABLE),
+            ("ambush_valley", NodeType.ENCOUNTER, NodeStatus.LOCKED),
+            ("starfire_outpost", NodeType.EVENT, NodeStatus.LOCKED),
+            ("northern_trade_route", NodeType.EVENT, NodeStatus.LOCKED),
+        ]
+        nodes = {
+            key: WorldNode(
+                id=seed_id(f"node:{key}"),
+                world_id=world_id,
+                key=key,
+                name=key,
+                description=key,
+                type=node_type,
+                default_status=status,
+            )
+            for key, node_type, status in node_specs
+        }
+        db.add(world)
+        db.add_all(nodes.values())
+        db.flush()
+        unknown_player = Player(name="Unknown Supply", current_node_id=ambush_id)
+        known_player = Player(name="Known Supply", current_node_id=entrance_id)
+        officer = NPC(
+            key="legacy_general",
+            name="Legacy General",
+            persona="Migration fixture",
+            doctrine={},
+            authority_limits={},
+            current_node_id=entrance_id,
+            role=NPCRole.GENERAL,
+            permission_profile={},
+        )
+        db.add_all([unknown_player, known_player, officer])
+        db.flush()
+        db.add_all(
+            [
+                PlayerNodeState(
+                    player_id=unknown_player.id,
+                    node_id=entrance_id,
+                    status=NodeStatus.ENTERED,
+                    version=2,
+                ),
+                PlayerNodeState(
+                    player_id=unknown_player.id,
+                    node_id=ambush_id,
+                    status=NodeStatus.AVAILABLE,
+                    version=4,
+                ),
+                PlayerNodeState(
+                    player_id=known_player.id,
+                    node_id=entrance_id,
+                    status=NodeStatus.AVAILABLE,
+                ),
+                PlayerNodeState(
+                    player_id=known_player.id,
+                    node_id=ambush_id,
+                    status=NodeStatus.LOCKED,
+                ),
+                PlayerWorldFact(
+                    player_id=unknown_player.id,
+                    key="enemy_supply_route",
+                    value={"status": "UNKNOWN"},
+                ),
+                PlayerWorldFact(
+                    player_id=known_player.id,
+                    key="enemy_supply_route",
+                    value={"status": "ACTIVE"},
+                ),
+            ]
+        )
+        operation = WorldOperation(
+            player_id=known_player.id,
+            officer_npc_id=officer.id,
+            operation_type="MILITARY",
+            target_key="ambush_valley",
+            status=WorldOperationStatus.PENDING,
+            parameters={"mission_type": "CLEAR_VALLEY"},
+            idempotency_key=f"legacy-operation-{uuid4()}",
+        )
+        db.add(operation)
+        db.commit()
+        unknown_player_id = unknown_player.id
+        known_player_id = known_player.id
+        officer_id = officer.id
+        operation_id = operation.id
+    engine.dispose()
+
+    _upgrade(monkeypatch, database_url, "head")
+    engine = create_engine(database_url)
+    with Session(engine) as db:
+        nodes = {node.key: node for node in db.scalars(select(WorldNode)).all()}
+        northern_valley = nodes["northern_valley"]
+        supply_route = nodes["enemy_north_supply_route"]
+        loaded_unknown_player = db.get(Player, unknown_player_id)
+        loaded_known_player = db.get(Player, known_player_id)
+        loaded_officer = db.get(NPC, officer_id)
+        loaded_operation = db.get(WorldOperation, operation_id)
+        assert loaded_unknown_player is not None
+        assert loaded_known_player is not None
+        assert loaded_officer is not None
+        assert loaded_operation is not None
+
+        assert "valley_entrance" not in nodes
+        assert "ambush_valley" not in nodes
+        assert loaded_unknown_player.current_node_id == northern_valley.id
+        assert loaded_known_player.current_node_id == northern_valley.id
+        assert loaded_officer.current_node_id == northern_valley.id
+        assert db.get(PlayerNodeState, (unknown_player_id, northern_valley.id)) is not None
+        assert db.get(PlayerNodeState, (known_player_id, northern_valley.id)) is not None
+        unknown_supply_state = db.get(
+            PlayerNodeState,
+            (unknown_player_id, supply_route.id),
+        )
+        known_supply_state = db.get(
+            PlayerNodeState,
+            (known_player_id, supply_route.id),
+        )
+        legacy_fact = db.get(PlayerWorldFact, (unknown_player_id, "enemy_supply_route"))
+        assert unknown_supply_state is not None
+        assert known_supply_state is not None
+        assert legacy_fact is not None
+        assert unknown_supply_state.status == NodeStatus.LOCKED
+        assert known_supply_state.status == NodeStatus.AVAILABLE
+        assert loaded_operation.target_key == "ambush_valley"
+        assert legacy_fact.value == {"status": "UNKNOWN"}
+    engine.dispose()
+
+    _downgrade(monkeypatch, database_url, INITIAL_REVISION)
+    engine = create_engine(database_url)
+    with Session(engine) as db:
+        downgraded_keys = set(db.scalars(select(WorldNode.key)).all())
+
+    assert "valley_entrance" in downgraded_keys
+    assert "ambush_valley" in downgraded_keys
+    assert "northern_valley" not in downgraded_keys
+    assert "enemy_north_supply_route" not in downgraded_keys

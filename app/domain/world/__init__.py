@@ -6,6 +6,7 @@ from app.domain.world.definitions import (
     NodeDefinition,
     RelationDefinition,
     ResourceDefinition,
+    WorldDefinition,
 )
 from app.domain.world.types import (
     AccessState,
@@ -27,5 +28,6 @@ __all__ = [
     "RelationType",
     "ResourceDefinition",
     "Visibility",
+    "WorldDefinition",
     "WorldNodeType",
 ]

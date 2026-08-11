@@ -23,6 +23,11 @@ from app.infrastructure.db.models import (
     WorldNode,
     WorldOperation,
 )
+from app.scenarios.starfire.compatibility import (
+    canonical_node_key,
+    initial_legacy_world_facts,
+    initial_resource_values,
+)
 
 SEED_NAMESPACE = UUID("3e16a11d-9cf5-4981-af7a-152c28331300")
 
@@ -41,10 +46,15 @@ class GameService:
         return player
 
     def create_player(self, name: str) -> Player:
+        initial_resources = initial_resource_values()
         start = self.db.scalar(select(WorldNode).where(WorldNode.key == "capital_council"))
         if not start:
             raise AppError("WORLD_NOT_SEEDED", "Demo world has not been seeded", status_code=503)
-        player = Player(name=name, current_node_id=start.id)
+        player = Player(
+            name=name,
+            gold=initial_resources["gold"],
+            current_node_id=start.id,
+        )
         self.db.add(player)
         self.db.flush()
         nodes = self.db.scalars(select(WorldNode)).all()
@@ -57,21 +67,13 @@ class GameService:
         self.db.add(
             PlayerDomainState(
                 player_id=player.id,
-                soldiers_total=300,
+                soldiers_total=initial_resources["soldiers"],
                 soldiers_committed=0,
-                food=100,
-                morale=60,
+                food=initial_resources["food"],
+                morale=initial_resources["morale"],
             )
         )
-        initial_facts: dict[str, dict[str, object]] = {
-            "valley_intelligence": {"status": "INCOMPLETE"},
-            "enemy_supply_route": {"status": "UNKNOWN"},
-            "valley_security": {"status": "UNSAFE"},
-            "village_support": {"status": "NONE"},
-            "starfire_outpost_status": {"status": "DAMAGED"},
-            "northern_trade_route_status": {"status": "CLOSED"},
-        }
-        for key, value in initial_facts.items():
+        for key, value in initial_legacy_world_facts().items():
             self.db.add(PlayerWorldFact(player_id=player.id, key=key, value=value))
         self.db.flush()
         return player
@@ -88,7 +90,8 @@ class GameService:
         )
 
     def unlock_node(self, player_id: UUID, node_key: str) -> PlayerNodeState:
-        node = self.db.scalar(select(WorldNode).where(WorldNode.key == node_key))
+        canonical_key = canonical_node_key(node_key)
+        node = self.db.scalar(select(WorldNode).where(WorldNode.key == canonical_key))
         if not node:
             raise NotFoundError("node", node_key)
         state = self.db.get(PlayerNodeState, (player_id, node.id))
@@ -664,6 +667,7 @@ class GameService:
                 "valley_intelligence",
                 {"status": "COMPLETE", "operation_id": str(operation.id)},
             )
+            self.unlock_node(operation.player_id, "enemy_north_supply_route")
             return {
                 "result": "DEFEAT",
                 "mission_type": mission,
