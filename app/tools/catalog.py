@@ -22,6 +22,13 @@ from app.tools.handlers import (
     start_recon_operation,
     start_trade_route_test,
 )
+from app.tools.interaction_validation import (
+    MILITARY_INTERACTION,
+    RECON_INTERACTION,
+    REPAIR_INTERACTION,
+    TRADE_ROUTE_INTERACTION,
+    VILLAGE_SUPPORT_INTERACTION,
+)
 from app.tools.registry import ToolRegistry
 
 
@@ -60,6 +67,7 @@ def build_registry() -> ToolRegistry:
             ReconOperationArgs,
             start_recon_operation,
             preflight=preflight_recon_operation,
+            interaction_requirement=RECON_INTERACTION,
             write=True,
             allowed_roles=frozenset({"GENERAL"}),
             require_permission_profile=True,
@@ -70,6 +78,7 @@ def build_registry() -> ToolRegistry:
             MilitaryOperationArgs,
             start_military_operation,
             preflight=preflight_military_operation,
+            interaction_requirement=MILITARY_INTERACTION,
             write=True,
             allowed_roles=frozenset({"GENERAL"}),
             require_permission_profile=True,
@@ -80,6 +89,7 @@ def build_registry() -> ToolRegistry:
             VillageSupportArgs,
             negotiate_village_support,
             preflight=preflight_village_support,
+            interaction_requirement=VILLAGE_SUPPORT_INTERACTION,
             write=True,
             allowed_roles=frozenset({"STEWARD"}),
             require_permission_profile=True,
@@ -90,6 +100,7 @@ def build_registry() -> ToolRegistry:
             OutpostRepairArgs,
             start_outpost_repair,
             preflight=preflight_outpost_repair,
+            interaction_requirement=REPAIR_INTERACTION,
             write=True,
             allowed_roles=frozenset({"STEWARD"}),
             require_permission_profile=True,
@@ -100,6 +111,7 @@ def build_registry() -> ToolRegistry:
             TradeRouteTestArgs,
             start_trade_route_test,
             preflight=preflight_trade_route_test,
+            interaction_requirement=TRADE_ROUTE_INTERACTION,
             write=True,
             allowed_roles=frozenset({"STEWARD"}),
             require_permission_profile=True,

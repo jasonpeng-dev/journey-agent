@@ -48,6 +48,7 @@ class ToolContext:
     session_id: UUID
     agent_run_id: UUID
     message_id: UUID
+    scenario_key: str
     task_id: UUID | None = None
     plan_id: UUID | None = None
     step_id: UUID | None = None

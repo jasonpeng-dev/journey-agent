@@ -10,6 +10,13 @@ from app.agent.types import ToolContext
 from app.core.errors import AppError
 from app.services.game import GameService
 from app.services.tasks import TaskService
+from app.tools.interaction_validation import (
+    MILITARY_INTERACTION,
+    RECON_INTERACTION,
+    REPAIR_INTERACTION,
+    TRADE_ROUTE_INTERACTION,
+    resolve_tool_interaction,
+)
 
 
 class StrictArgs(BaseModel):
@@ -90,12 +97,13 @@ def preflight_recon_operation(db: Session, context: ToolContext, args: BaseModel
 
 def start_recon_operation(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = ReconOperationArgs.model_validate(args)
+    target = resolve_tool_interaction(context.scenario_key, RECON_INTERACTION, parsed)
     operation = GameService(db).start_recon_operation(
         player_id=context.player_id,
         officer_npc_id=context.npc_id,
         task_id=context.task_id,
         source_step_id=context.step_id,
-        target_key=parsed.target_key,
+        target_key=target.key,
         troop_count=parsed.troop_count,
         approach=parsed.approach,
         idempotency_key=parsed.idempotency_key,
@@ -114,12 +122,13 @@ def preflight_military_operation(db: Session, context: ToolContext, args: BaseMo
 
 def start_military_operation(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = MilitaryOperationArgs.model_validate(args)
+    target = resolve_tool_interaction(context.scenario_key, MILITARY_INTERACTION, parsed)
     operation = GameService(db).start_military_operation(
         player_id=context.player_id,
         officer_npc_id=context.npc_id,
         task_id=context.task_id,
         source_step_id=context.step_id,
-        target_key=parsed.target_key,
+        target_key=target.key,
         troop_count=parsed.troop_count,
         mission_type=parsed.mission_type,
         strategy=parsed.strategy,
@@ -156,11 +165,13 @@ def preflight_outpost_repair(db: Session, context: ToolContext, args: BaseModel)
 
 def start_outpost_repair(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = OutpostRepairArgs.model_validate(args)
+    target = resolve_tool_interaction(context.scenario_key, REPAIR_INTERACTION, parsed)
     operation = GameService(db).start_outpost_repair(
         player_id=context.player_id,
         officer_npc_id=context.npc_id,
         task_id=context.task_id,
         source_step_id=context.step_id,
+        target_key=target.key,
         repair_level=parsed.repair_level,
         food_commitment=parsed.food_commitment,
         gold_commitment=parsed.gold_commitment,
@@ -176,12 +187,13 @@ def preflight_trade_route_test(db: Session, context: ToolContext, args: BaseMode
 
 def start_trade_route_test(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = TradeRouteTestArgs.model_validate(args)
+    target = resolve_tool_interaction(context.scenario_key, TRADE_ROUTE_INTERACTION, parsed)
     operation = GameService(db).start_trade_route_test(
         player_id=context.player_id,
         officer_npc_id=context.npc_id,
         task_id=context.task_id,
         source_step_id=context.step_id,
-        route_key=parsed.route_key,
+        route_key=target.key,
         idempotency_key=parsed.idempotency_key,
     )
     return _operation_result(operation)

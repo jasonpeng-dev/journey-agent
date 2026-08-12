@@ -16,6 +16,13 @@ LEGACY_NODE_ALIASES: Mapping[str, str] = MappingProxyType(
     }
 )
 
+LEGACY_TARGET_INTERACTIONS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "valley_entrance": frozenset({"reconnaissance"}),
+        "ambush_valley": frozenset({"clear_threat"}),
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class CanonicalFactRef:
@@ -51,6 +58,13 @@ def canonical_node_key(key: str) -> str:
     """Resolve a historical Starfire node key without changing the audited input."""
 
     return LEGACY_NODE_ALIASES.get(key, key)
+
+
+def legacy_target_supports_interaction(raw_key: str, interaction_key: str) -> bool:
+    """Keep historical target meanings narrower than their merged canonical node."""
+
+    allowed = LEGACY_TARGET_INTERACTIONS.get(raw_key)
+    return allowed is None or interaction_key in allowed
 
 
 def canonical_fact_ref(legacy_key: str) -> CanonicalFactRef | None:

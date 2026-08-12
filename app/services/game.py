@@ -27,6 +27,7 @@ from app.scenarios.starfire.compatibility import (
     canonical_node_key,
     initial_legacy_world_facts,
     initial_resource_values,
+    legacy_target_supports_interaction,
 )
 
 SEED_NAMESPACE = UUID("3e16a11d-9cf5-4981-af7a-152c28331300")
@@ -260,7 +261,10 @@ class GameService:
         approach: str,
         idempotency_key: str,
     ) -> WorldOperation:
-        if target_key != "valley_entrance":
+        canonical_target = canonical_node_key(target_key)
+        if canonical_target != "northern_valley" or not legacy_target_supports_interaction(
+            target_key, "reconnaissance"
+        ):
             raise AppError("RECON_TARGET_INVALID", "The target cannot be reconnoitered")
         if approach not in {"CAUTIOUS", "STANDARD", "AGGRESSIVE"}:
             raise AppError("RECON_APPROACH_INVALID", "The reconnaissance approach is invalid")
@@ -270,7 +274,7 @@ class GameService:
             task_id=task_id,
             source_step_id=source_step_id,
             operation_type="RECONNAISSANCE",
-            target_key=target_key,
+            target_key=canonical_target,
             parameters={"troop_count": troop_count, "approach": approach},
             idempotency_key=idempotency_key,
         )
@@ -291,7 +295,18 @@ class GameService:
         allowed_missions = {"CLEAR_VALLEY", "DISRUPT_SUPPLY", "ESCORT", "DEFEND"}
         if mission_type not in allowed_missions:
             raise AppError("MILITARY_MISSION_INVALID", "The military mission is invalid")
-        if target_key not in {"ambush_valley", "enemy_north_supply_route"}:
+        required_interaction = (
+            "disrupt_supply" if mission_type == "DISRUPT_SUPPLY" else "clear_threat"
+        )
+        canonical_target = canonical_node_key(target_key)
+        expected_target = (
+            "enemy_north_supply_route"
+            if required_interaction == "disrupt_supply"
+            else "northern_valley"
+        )
+        if canonical_target != expected_target or not legacy_target_supports_interaction(
+            target_key, required_interaction
+        ):
             raise AppError("MILITARY_TARGET_INVALID", "The military target is invalid")
         if strategy not in {"CAUTIOUS", "STANDARD", "AGGRESSIVE"}:
             raise AppError("MILITARY_STRATEGY_INVALID", "The strategy is invalid")
@@ -304,7 +319,7 @@ class GameService:
             player_id,
             idempotency_key,
             operation_type="MILITARY",
-            target_key=target_key,
+            target_key=canonical_target,
             parameters=parameters,
         )
         if existing is not None:
@@ -323,7 +338,7 @@ class GameService:
             task_id=task_id,
             source_step_id=source_step_id,
             operation_type="MILITARY",
-            target_key=target_key,
+            target_key=canonical_target,
             parameters=parameters,
             idempotency_key=idempotency_key,
         )
@@ -366,11 +381,15 @@ class GameService:
         officer_npc_id: UUID,
         task_id: UUID | None,
         source_step_id: UUID | None,
+        target_key: str,
         repair_level: str,
         food_commitment: int,
         gold_commitment: int,
         idempotency_key: str,
     ) -> WorldOperation:
+        canonical_target = canonical_node_key(target_key)
+        if canonical_target != "starfire_outpost":
+            raise AppError("REPAIR_TARGET_INVALID", "The repair target is invalid")
         if repair_level not in {"TEMPORARY", "FULL"}:
             raise AppError("REPAIR_LEVEL_INVALID", "The repair level is invalid")
         parameters = {
@@ -382,7 +401,7 @@ class GameService:
             player_id,
             idempotency_key,
             operation_type="CONSTRUCTION",
-            target_key="starfire_outpost",
+            target_key=canonical_target,
             parameters=parameters,
         )
         if existing is not None:
@@ -411,7 +430,7 @@ class GameService:
             task_id=task_id,
             source_step_id=source_step_id,
             operation_type="CONSTRUCTION",
-            target_key="starfire_outpost",
+            target_key=canonical_target,
             parameters=parameters,
             idempotency_key=idempotency_key,
         )
@@ -426,13 +445,14 @@ class GameService:
         route_key: str,
         idempotency_key: str,
     ) -> WorldOperation:
-        if route_key != "northern_trade_route":
+        canonical_target = canonical_node_key(route_key)
+        if canonical_target != "northern_trade_route":
             raise AppError("TRADE_ROUTE_INVALID", "The trade route is unknown")
         existing = self._matching_operation(
             player_id,
             idempotency_key,
             operation_type="TRADE_TEST",
-            target_key=route_key,
+            target_key=canonical_target,
             parameters={},
         )
         if existing is not None:
@@ -463,7 +483,7 @@ class GameService:
             task_id=task_id,
             source_step_id=source_step_id,
             operation_type="TRADE_TEST",
-            target_key=route_key,
+            target_key=canonical_target,
             parameters={},
             idempotency_key=idempotency_key,
         )
@@ -587,7 +607,7 @@ class GameService:
             return None
         if (
             existing.operation_type != operation_type
-            or existing.target_key != target_key
+            or canonical_node_key(existing.target_key) != canonical_node_key(target_key)
             or existing.parameters != parameters
         ):
             raise ConflictError(

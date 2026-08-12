@@ -154,6 +154,7 @@ def test_business_preflight_rejects_unavailable_troops_before_player_approval(
             session_id=conversation.id,
             agent_run_id=execution_run.id,
             message_id=uuid4(),
+            scenario_key="starfire_command",
             task_id=task.id,
             plan_id=plan.id,
             step_id=step.id,
@@ -276,6 +277,7 @@ def test_appointment_override_controls_the_effective_authority_policy(
             session_id=conversation.id,
             agent_run_id=execution_run.id,
             message_id=uuid4(),
+            scenario_key="starfire_command",
             task_id=task.id,
             plan_id=plan.id,
             step_id=step.id,
@@ -322,6 +324,7 @@ def test_idempotency_key_cannot_be_reused_for_a_different_tool(
             session_id=conversation.id,
             agent_run_id=first_run.id,
             message_id=uuid4(),
+            scenario_key="starfire_command",
         ),
         ToolCall(
             id="first-recon",
@@ -344,6 +347,7 @@ def test_idempotency_key_cannot_be_reused_for_a_different_tool(
             session_id=conversation.id,
             agent_run_id=second_run.id,
             message_id=uuid4(),
+            scenario_key="starfire_command",
         ),
         ToolCall(
             id="second-military",
@@ -500,6 +504,7 @@ def test_session_owner_cannot_impersonate_the_assigned_step_actor(
             session_id=conversation.id,
             agent_run_id=run.id,
             message_id=uuid4(),
+            scenario_key="starfire_command",
             task_id=task.id,
             plan_id=plan.id,
             step_id=step.id,
@@ -577,6 +582,7 @@ def test_executor_refreshes_a_concurrently_revoked_appointment(
             session_id=conversation.id,
             agent_run_id=run.id,
             message_id=uuid4(),
+            scenario_key="starfire_command",
         ),
         ToolCall(
             id="inspect-after-revocation",

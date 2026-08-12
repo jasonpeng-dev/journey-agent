@@ -29,6 +29,7 @@ from app.infrastructure.db.models import (
     ToolExecution,
 )
 from app.tools.handlers import snapshot
+from app.tools.interaction_validation import resolve_tool_interaction
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -194,8 +195,15 @@ class ToolExecutor:
                 actual_policy_version = npc.profile_version
                 if run is not None:
                     run.authority_policy_version = actual_policy_version
+            if tool.interaction_requirement is not None:
+                resolve_tool_interaction(
+                    context.scenario_key,
+                    tool.interaction_requirement,
+                    args,
+                )
             if tool.preflight is not None:
                 tool.preflight(self.db, context, args)
+            if tool.interaction_requirement is not None or tool.preflight is not None:
                 trace.business_rule_status = "PREFLIGHT_PASSED"
             authority = evaluate_authority(
                 npc,
