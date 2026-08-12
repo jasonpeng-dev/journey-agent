@@ -582,6 +582,70 @@ details > summary::-webkit-details-marker {
   font-size: 14px;
 }
 
+.observer-legend,
+.scope-header,
+.wait-lifecycle,
+.plan-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.observer-node-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.observer-node,
+.observer-relations {
+  border: 1px solid #ead9b8;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.observer-node > summary,
+.observer-relations > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  font-size: 9px;
+}
+
+.observer-facts,
+.relation-list {
+  display: grid;
+  gap: 5px;
+  padding: 0 8px 8px;
+}
+
+.observer-fact,
+.relation-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  padding: 6px;
+  border-radius: 7px;
+  background: #fffaf0;
+  font-size: 8px;
+}
+
+.observer-fact small {
+  grid-column: 1 / -1;
+  color: var(--ink-soft);
+}
+
+.relation-row {
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+
+.relation-row .mini-chip {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
+
 .developer-label {
   color: #9c6415;
   font-size: 9px;
@@ -906,6 +970,76 @@ details > summary::-webkit-details-marker {
   display: block;
 }
 
+.scope-card,
+.evaluation-card,
+.early-stop-card {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px solid #e0d8ca;
+  border-radius: 10px;
+  background: #f7f4ed;
+  font-size: 9px;
+}
+
+.scope-header {
+  justify-content: space-between;
+}
+
+.scope-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.scope-key {
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: var(--jade-dark);
+  background: var(--jade-soft);
+  font-size: 8px;
+}
+
+.objective-item > summary {
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.requirement-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.requirement-row {
+  padding: 5px 6px;
+  border-left: 3px solid var(--gold);
+  border-radius: 5px;
+  background: #fff;
+  font-size: 8px;
+}
+
+.requirement-row.success {
+  border-left-color: var(--jade);
+}
+
+.early-stop-card {
+  border-left: 4px solid #aaa08f;
+}
+
+.early-stop-card.triggered {
+  border-left-color: var(--gold);
+  background: var(--gold-soft);
+}
+
+.early-stop-card span,
+.scope-card small,
+.evaluation-card small {
+  color: var(--ink-soft);
+}
+
 .task-stats span {
   color: var(--ink-soft);
   font-size: 8px;
@@ -961,6 +1095,19 @@ details > summary::-webkit-details-marker {
 .plan-history {
   display: grid;
   gap: 9px;
+}
+
+.plan-flow {
+  padding: 8px;
+  border-radius: 9px;
+  color: var(--ink-soft);
+  background: #f3efe7;
+  font-size: 8px;
+}
+
+.plan-arrow {
+  color: #9a8051;
+  font-size: 8px;
 }
 
 .plan-card {
@@ -1038,6 +1185,41 @@ details > summary::-webkit-details-marker {
 
 .validation-line {
   background: #f2efe8;
+}
+
+.step-note {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: 8px;
+}
+
+.step-note.warning {
+  color: #9c6415;
+}
+
+.wait-lifecycle {
+  margin-top: 7px;
+  padding: 6px;
+  border-radius: 7px;
+  background: var(--blue-soft);
+  font-size: 8px;
+}
+
+.kind-failure .timeline-marker {
+  background: var(--danger);
+  box-shadow: 0 0 0 1px #dfaaa0;
+}
+
+.kind-knowledge-revealed .timeline-marker,
+.kind-replan .timeline-marker,
+.kind-early-stop .timeline-marker {
+  background: var(--gold);
+  box-shadow: 0 0 0 1px #e2c68e;
+}
+
+.kind-objective-evaluation .timeline-marker,
+.kind-task-completed .timeline-marker {
+  background: var(--jade-dark);
 }
 
 .pass-text {

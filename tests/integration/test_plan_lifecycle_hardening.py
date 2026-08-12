@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.agent.providers import MockModelProvider
 from app.agent.task_orchestrator import TaskOrchestrator
 from app.core.config import Settings
+from app.debug.snapshot_service import StrategicSnapshotService
 from app.domain.enums import AgentStepStatus, AgentTaskStatus
 from app.infrastructure.db.models import AgentRun, ConversationSession
 from app.scenarios.contracts import GoalResolutionResult, ObjectiveResolutionStatus
@@ -124,6 +125,38 @@ def test_settled_successful_operation_completes_wait_before_early_stop(
     assert steps[1].actual_result["status"] == "RESOLVED"
     assert steps[2].status == AgentStepStatus.SKIPPED
     assert steps[2].actual_result == {"skip_reason": "OBJECTIVE_SCOPE_SATISFIED"}
+    snapshot = StrategicSnapshotService(session, _settings()).build(
+        conversation.id,
+        include_trace=False,
+        include_hidden_truth=False,
+    )
+    assert snapshot["early_stop"] == {
+        "triggered": True,
+        "reason": "OBJECTIVE_SCOPE_SATISFIED",
+        "skipped_future_step_count": 1,
+        "skipped_future_steps": [
+            {
+                "plan_version": 1,
+                "step_sequence": 3,
+                "description": "Optional future report",
+                "execution_type": "TOOL",
+                "selected_tool_name": "inspect_command_state",
+            }
+        ],
+    }
+    pair = snapshot["operation_wait_pairs"][0]
+    assert pair["operation_step_sequence"] == 1
+    assert pair["wait_step_sequence"] == 2
+    assert pair["wait_status"] == "SUCCEEDED"
+    assert pair["wait_result"]["status"] == "RESOLVED"
+    outside_scope = snapshot["objective_evaluation"]["outside_scope_state"]
+    assert {
+        "node_key": "northern_trade_route",
+        "fact_key": "trade_route_status",
+        "actual_value": "CLOSED",
+        "scope_relation": "OUTSIDE_CURRENT_SCOPE",
+    } in outside_scope
+    assert any(item["kind"] == "EARLY_STOP" for item in snapshot["timeline"])
     assert game.inspect_command_state(player.id)["world"]["northern_trade_route_status"] == (
         "CLOSED"
     )

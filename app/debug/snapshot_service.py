@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
@@ -11,6 +11,7 @@ from app.agent.authority import authority_policy_errors, effective_authority_lim
 from app.core.config import Settings
 from app.core.errors import AppError, NotFoundError
 from app.domain.enums import AgentTaskStatus, NodeStatus, SessionStatus
+from app.domain.world import AccessState, Visibility
 from app.infrastructure.db.models import (
     NPC,
     AgentPlan,
@@ -31,6 +32,7 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.contracts import project_known_relation_payloads
 from app.scenarios.starfire.definition import STARFIRE_WORLD
+from app.scenarios.starfire.objective_catalog import STARFIRE_OBJECTIVE_CATALOG
 from app.scenarios.starfire.ruleset import StarfireKnowledgeState
 from app.services.game import GameService, seed_id
 from app.services.tasks import TaskService
@@ -59,13 +61,16 @@ class StrategicSnapshotService:
         world = dict(cast(dict[str, object], command_state["world"]))
         task = self._latest_task(player.id)
         serialized_task = TaskService(self.db).serialize(task) if task is not None else None
+        objective_evaluation = self._objective_evaluation(task)
+        operation_wait_pairs = self._operation_wait_pairs(task)
+        early_stop = self._early_stop(task)
         trace = self._trace(task) if include_trace and task is not None else []
         messages = self._messages(session.id)
         officers = self._officers(player.id)
         known_world = self._known_world_state(player.id, world)
         player_world = self._player_world_projection(game.scenario_known_state(player.id))
         observer_world = (
-            self._observer_world_projection(player.id) if include_hidden_truth else None
+            self._observer_world_projection(player.id, task) if include_hidden_truth else None
         )
         snapshot_version = (
             f"p{player.version}-d{domain.version}-t{task.version if task is not None else 0}"
@@ -141,10 +146,13 @@ class StrategicSnapshotService:
             "task": serialized_task,
             "active_plan": active_plan,
             "plan_history": plan_history,
+            "objective_evaluation": objective_evaluation,
+            "operation_wait_pairs": operation_wait_pairs,
+            "early_stop": early_stop,
             "active_decision": active_decision,
             "pending_player_action": pending_player_action,
             "pending_world_event": pending_world_event,
-            "timeline": self._timeline(task, messages),
+            "timeline": self._timeline(task, messages, objective_evaluation, early_stop),
             "recent_messages": messages,
             "recent_traces": trace,
             "capabilities": {
@@ -293,7 +301,11 @@ class StrategicSnapshotService:
             ],
         }
 
-    def _observer_world_projection(self, player_id: UUID) -> dict[str, object]:
+    def _observer_world_projection(
+        self,
+        player_id: UUID,
+        task: AgentTask | None,
+    ) -> dict[str, object]:
         rows = self.db.execute(
             select(WorldNode, PlayerNodeState)
             .join(PlayerNodeState, PlayerNodeState.node_id == WorldNode.id)
@@ -305,17 +317,33 @@ class StrategicSnapshotService:
             select(PlayerWorldFactState).where(PlayerWorldFactState.player_id == player_id)
         ).all()
         facts: dict[str, list[dict[str, object]]] = {}
+        reveal_sources = self._fact_reveal_sources(task)
         for fact in fact_rows:
             node_key = node_ids.get(fact.node_id)
             if node_key is None:
                 continue
-            facts.setdefault(node_key, []).append(
-                {
-                    "key": fact.fact_key,
-                    "truth": fact.truth_value,
-                    "knowledge": fact.visibility.value,
-                }
+            fact_payload: dict[str, object] = {
+                "key": fact.fact_key,
+                "truth": fact.truth_value,
+                "knowledge": fact.visibility.value,
+            }
+            reveal_source = reveal_sources.get((node_key, fact.fact_key))
+            if reveal_source is not None:
+                fact_payload["revealed_by"] = reveal_source
+            facts.setdefault(node_key, []).append(fact_payload)
+        known_access = {
+            key: AccessState(self._node_access(state.status))
+            for key, state in state_by_key.items()
+            if state.visibility == Visibility.KNOWN
+        }
+        visible_relations = {
+            (
+                str(item["source_node_key"]),
+                str(item["relation_type"]),
+                str(item["target_node_key"]),
             )
+            for item in project_known_relation_payloads(STARFIRE_WORLD.relations, known_access)
+        }
         return {
             "classification": "DEVELOPER_ONLY_READ_ONLY",
             "nodes": [
@@ -334,6 +362,20 @@ class StrategicSnapshotService:
                 }
                 for definition in STARFIRE_WORLD.nodes
                 if definition.key in state_by_key
+            ],
+            "relations": [
+                {
+                    "source_node_key": relation.source_node_key,
+                    "relation_type": relation.relation_type.value,
+                    "target_node_key": relation.target_node_key,
+                    "planner_visible": (
+                        relation.source_node_key,
+                        relation.relation_type.value,
+                        relation.target_node_key,
+                    )
+                    in visible_relations,
+                }
+                for relation in STARFIRE_WORLD.relations
             ],
             "resolution_rules": {
                 "first_clear_attempt": "DEFEAT_UNTIL_SUPPLY_DISRUPTED",
@@ -369,6 +411,8 @@ class StrategicSnapshotService:
         self,
         task: AgentTask | None,
         messages: list[dict[str, object]],
+        objective_evaluation: dict[str, object] | None,
+        early_stop: dict[str, object] | None,
     ) -> list[dict[str, object]]:
         items: list[dict[str, object]] = [
             {
@@ -396,12 +440,16 @@ class StrategicSnapshotService:
             items.append(
                 {
                     "id": f"plan:{plan.id}",
-                    "kind": "PLAN_CREATED" if plan.version == 1 else "REPLAN",
+                    "kind": "PLAN" if plan.version == 1 else "REPLAN",
                     "actor": self._officer(plan.created_by_npc_id or task.owner_npc_id),
                     "content": plan.strategy_summary,
                     "status": plan.status.value,
                     "plan_version": plan.version,
+                    "source_plan_version": plan.version - 1 if plan.version > 1 else None,
+                    "new_plan_version": plan.version,
                     "replan_reason": plan.replan_reason,
+                    "source": plan.source,
+                    "planner_model": plan.planner_model,
                     "created_at": plan.created_at,
                 }
             )
@@ -409,17 +457,18 @@ class StrategicSnapshotService:
                 select(AgentStep).where(AgentStep.plan_id == plan.id).order_by(AgentStep.sequence)
             ).all()
             for step in steps:
-                if step.status.value in {"PENDING", "SKIPPED"}:
+                if step.status.value == "PENDING":
                     continue
+                if step.execution_type.value == "WAIT_FOR_WORLD_EVENT":
+                    kind = "WAIT_RESULT"
+                elif step.status.value == "FAILED":
+                    kind = "FAILURE"
+                else:
+                    kind = "TOOL_CALL"
                 items.append(
                     {
                         "id": f"step:{step.id}",
-                        "kind": (
-                            "FINAL_REPORT"
-                            if step.action_intent == "VERIFY_AND_REPORT"
-                            and step.status.value == "SUCCEEDED"
-                            else "OFFICER_ACTION"
-                        ),
+                        "kind": kind,
                         "actor": self._officer(step.assigned_npc_id or task.owner_npc_id),
                         "content": step.description,
                         "status": step.status.value,
@@ -430,6 +479,24 @@ class StrategicSnapshotService:
                         "created_at": step.completed_at or step.started_at or plan.created_at,
                     }
                 )
+                if (
+                    step.execution_type.value == "WAIT_FOR_WORLD_EVENT"
+                    and step.status.value == "FAILED"
+                ):
+                    items.append(
+                        {
+                            "id": f"failure:{step.id}",
+                            "kind": "FAILURE",
+                            "actor": self._officer(step.assigned_npc_id or task.owner_npc_id),
+                            "content": step.description,
+                            "status": step.status.value,
+                            "plan_version": plan.version,
+                            "step_sequence": step.sequence,
+                            "result": step.actual_result,
+                            "failure_code": step.failure_code,
+                            "created_at": (step.completed_at or step.started_at or plan.created_at),
+                        }
+                    )
         decisions = self.db.scalars(
             select(PlayerDecisionRequest)
             .where(PlayerDecisionRequest.task_id == task.id)
@@ -455,7 +522,7 @@ class StrategicSnapshotService:
             items.append(
                 {
                     "id": f"operation:{operation.id}",
-                    "kind": "WORLD_EVENT",
+                    "kind": "WORLD_OPERATION",
                     "actor": {"key": "game_service", "name": "GameService", "role": "SYSTEM"},
                     "content": f"{operation.operation_type}: {operation.target_key}",
                     "status": operation.status.value,
@@ -463,8 +530,233 @@ class StrategicSnapshotService:
                     "created_at": operation.resolved_at or operation.created_at,
                 }
             )
+            outcome = operation.outcome if isinstance(operation.outcome, dict) else {}
+            discovered = outcome.get("facts_discovered")
+            if isinstance(discovered, list) and discovered:
+                items.append(
+                    {
+                        "id": f"knowledge:{operation.id}",
+                        "kind": "KNOWLEDGE_REVEALED",
+                        "actor": {"key": "game_service", "name": "GameService", "role": "SYSTEM"},
+                        "content": "Knowledge revealed by operation result",
+                        "status": "RECORDED",
+                        "result": {
+                            "operation_id": str(operation.id),
+                            "facts_discovered": discovered,
+                            "failure_code": outcome.get("failure_code"),
+                        },
+                        "created_at": operation.resolved_at or operation.created_at,
+                    }
+                )
+        if objective_evaluation is not None:
+            items.append(
+                {
+                    "id": f"objective-evaluation:{task.id}",
+                    "kind": "OBJECTIVE_EVALUATION",
+                    "actor": {
+                        "key": "game_service",
+                        "name": "ObjectiveEvaluator",
+                        "role": "SYSTEM",
+                    },
+                    "content": "Frozen objective scope evaluated by backend",
+                    "status": (
+                        "SUCCEEDED" if objective_evaluation["scope_satisfied"] else "INCOMPLETE"
+                    ),
+                    "result": objective_evaluation,
+                    "created_at": task.completed_at or task.updated_at,
+                }
+            )
+        if early_stop is not None and early_stop["triggered"]:
+            items.append(
+                {
+                    "id": f"early-stop:{task.id}",
+                    "kind": "EARLY_STOP",
+                    "actor": {"key": "game_service", "name": "TaskService", "role": "SYSTEM"},
+                    "content": "Objective scope satisfied; only future steps were skipped",
+                    "status": "RECORDED",
+                    "result": early_stop,
+                    "created_at": task.completed_at or task.updated_at,
+                }
+            )
+        if task.status.value == "SUCCEEDED":
+            items.append(
+                {
+                    "id": f"task-completed:{task.id}",
+                    "kind": "TASK_COMPLETED",
+                    "actor": {"key": "game_service", "name": "TaskService", "role": "SYSTEM"},
+                    "content": "Task completed after authoritative objective evaluation",
+                    "status": task.status.value,
+                    "created_at": task.completed_at or task.updated_at,
+                }
+            )
         items.sort(key=lambda item: _timestamp(item.get("created_at")))
         return items[-60:]
+
+    def _objective_evaluation(self, task: AgentTask | None) -> dict[str, object] | None:
+        if task is None:
+            return None
+        service = TaskService(self.db)
+        if service.load_frozen_scope(task) is None:
+            return None
+        evaluation = service.evaluate_scope(task)
+        known = GameService(self.db).scenario_known_state(task.player_id)
+        scoped_refs = {
+            (item.requirement.node_key, item.requirement.fact_key)
+            for objective in evaluation.objectives
+            for item in objective.requirements
+        }
+        outside_scope_state: list[dict[str, object]] = []
+        seen_refs: set[tuple[str, str]] = set()
+        for definition in STARFIRE_OBJECTIVE_CATALOG.definitions.values():
+            for requirement in definition.completion_requirements:
+                ref = (requirement.node_key, requirement.fact_key)
+                if ref in scoped_refs or ref in seen_refs or not known.fact_known(*ref):
+                    continue
+                seen_refs.add(ref)
+                outside_scope_state.append(
+                    {
+                        "node_key": requirement.node_key,
+                        "fact_key": requirement.fact_key,
+                        "actual_value": known.fact_value(*ref),
+                        "scope_relation": "OUTSIDE_CURRENT_SCOPE",
+                    }
+                )
+        return {
+            "source": "BACKEND_SCOPED_OBJECTIVE_EVALUATOR",
+            "scope_satisfied": evaluation.completed,
+            "evaluated_at": task.completed_at or task.updated_at,
+            "outside_scope_state": outside_scope_state,
+            "objectives": [
+                {
+                    "objective_key": objective.objective_key,
+                    "satisfied": objective.completed,
+                    "requirements": [
+                        {
+                            "key": item.requirement.key,
+                            "node_key": item.requirement.node_key,
+                            "fact_key": item.requirement.fact_key,
+                            "description": item.requirement.description,
+                            "accepted_values": sorted(item.requirement.accepted_values),
+                            "actual_value": item.actual_value,
+                            "satisfied": item.satisfied,
+                        }
+                        for item in objective.requirements
+                    ],
+                }
+                for objective in evaluation.objectives
+            ],
+        }
+
+    def _early_stop(self, task: AgentTask | None) -> dict[str, object] | None:
+        if task is None:
+            return None
+        plans = self.db.scalars(
+            select(AgentPlan).where(AgentPlan.task_id == task.id).order_by(AgentPlan.version)
+        ).all()
+        skipped: list[dict[str, object]] = []
+        for plan in plans:
+            for step in self.db.scalars(
+                select(AgentStep).where(AgentStep.plan_id == plan.id).order_by(AgentStep.sequence)
+            ).all():
+                if step.actual_result == {"skip_reason": "OBJECTIVE_SCOPE_SATISFIED"}:
+                    skipped.append(
+                        {
+                            "plan_version": plan.version,
+                            "step_sequence": step.sequence,
+                            "description": step.description,
+                            "execution_type": step.execution_type.value,
+                            "selected_tool_name": step.selected_tool_name,
+                        }
+                    )
+        return {
+            "triggered": bool(skipped),
+            "reason": "OBJECTIVE_SCOPE_SATISFIED" if skipped else None,
+            "skipped_future_step_count": len(skipped),
+            "skipped_future_steps": skipped,
+        }
+
+    def _operation_wait_pairs(self, task: AgentTask | None) -> list[dict[str, object]]:
+        if task is None:
+            return []
+        plans = self.db.scalars(
+            select(AgentPlan).where(AgentPlan.task_id == task.id).order_by(AgentPlan.version)
+        ).all()
+        steps = [
+            (plan, step)
+            for plan in plans
+            for step in self.db.scalars(
+                select(AgentStep).where(AgentStep.plan_id == plan.id).order_by(AgentStep.sequence)
+            ).all()
+        ]
+        step_by_id = {step.id: (plan, step) for plan, step in steps}
+        waits_by_source: dict[tuple[UUID, int], AgentStep] = {}
+        for plan, step in steps:
+            condition = step.resume_condition if isinstance(step.resume_condition, dict) else {}
+            source_sequence = condition.get("source_step_sequence")
+            if step.execution_type.value == "WAIT_FOR_WORLD_EVENT" and isinstance(
+                source_sequence, int
+            ):
+                waits_by_source[(plan.id, source_sequence)] = step
+        operations = self.db.scalars(
+            select(WorldOperation)
+            .where(WorldOperation.task_id == task.id)
+            .order_by(WorldOperation.created_at)
+        ).all()
+        result: list[dict[str, object]] = []
+        for operation in operations:
+            source = step_by_id.get(operation.source_step_id) if operation.source_step_id else None
+            source_plan: AgentPlan | None = source[0] if source is not None else None
+            operation_step: AgentStep | None = source[1] if source is not None else None
+            wait_step = (
+                waits_by_source.get((source_plan.id, operation_step.sequence))
+                if source_plan is not None and operation_step is not None
+                else None
+            )
+            result.append(
+                {
+                    "operation_id": str(operation.id),
+                    "operation_type": operation.operation_type,
+                    "target_key": operation.target_key,
+                    "operation_status": operation.status.value,
+                    "operation_outcome": operation.outcome,
+                    "plan_version": source_plan.version if source_plan is not None else None,
+                    "operation_step_sequence": operation_step.sequence if operation_step else None,
+                    "wait_step_sequence": wait_step.sequence if wait_step else None,
+                    "wait_status": wait_step.status.value if wait_step else None,
+                    "wait_result": wait_step.actual_result if wait_step else None,
+                    "paired": wait_step is not None,
+                }
+            )
+        return result
+
+    def _fact_reveal_sources(
+        self,
+        task: AgentTask | None,
+    ) -> dict[tuple[str, str], dict[str, object]]:
+        if task is None:
+            return {}
+        result: dict[tuple[str, str], dict[str, object]] = {}
+        operations = self.db.scalars(
+            select(WorldOperation)
+            .where(WorldOperation.task_id == task.id)
+            .order_by(WorldOperation.created_at)
+        ).all()
+        for operation in operations:
+            outcome = operation.outcome if isinstance(operation.outcome, dict) else {}
+            discovered = outcome.get("facts_discovered")
+            if not isinstance(discovered, list):
+                continue
+            for fact_key in discovered:
+                canonical = {
+                    "enemy_supply_route": ("enemy_north_supply_route", "supply_status")
+                }.get(str(fact_key))
+                if canonical is not None:
+                    result[canonical] = {
+                        "operation_id": str(operation.id),
+                        "operation_type": operation.operation_type,
+                        "failure_code": outcome.get("failure_code"),
+                    }
+        return result
 
     def _trace(self, task: AgentTask) -> list[dict[str, object]]:
         scope = TaskService(self.db).load_frozen_scope(task)
@@ -542,5 +834,5 @@ class StrategicSnapshotService:
 
 def _timestamp(value: object) -> datetime:
     if isinstance(value, datetime):
-        return value
-    return datetime.min
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return datetime.min.replace(tzinfo=UTC)

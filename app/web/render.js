@@ -150,7 +150,7 @@ export function renderSnapshot(snapshot, flags) {
   renderOfficers(snapshot.officers || []);
   renderHiddenTruth(snapshot.observer_world_state, flags.hidden);
   renderTimeline(snapshot.timeline || []);
-  renderTask(snapshot.task, snapshot.plan_history || []);
+  renderTask(snapshot);
   renderWaiting(snapshot);
   renderDecision(snapshot.active_decision);
   renderTrace(snapshot.recent_traces || [], snapshot, flags.trace);
@@ -247,11 +247,61 @@ function renderOfficers(officers) {
 function renderHiddenTruth(truth, visible) {
   ui.hiddenTruthPanel.hidden = !visible;
   if (!visible) return;
-  ui.hiddenTruthContent.replaceChildren(
-    truth
-      ? jsonBlock(localizeObject(truth))
-      : el("p", "empty-copy", "服务端没有返回 Observer 世界状态。")
+  if (!truth) {
+    ui.hiddenTruthContent.replaceChildren(
+      el("p", "empty-copy", "服务端没有返回 Observer 世界状态。")
+    );
+    return;
+  }
+  const legend = el("div", "observer-legend");
+  legend.append(
+    el("span", "mini-chip success", "KNOWN / Planner 可见"),
+    el("span", "mini-chip warning", "HIDDEN / 仅 Observer"),
+    el("span", "mini-chip", "Truth + Knowledge + Access")
   );
+  const nodes = el("div", "observer-node-list");
+  (truth.nodes || []).forEach((node) => {
+    const card = el("details", "observer-node");
+    const summary = el("summary");
+    summary.append(
+      el("strong", "", node.name || node.key),
+      el("span", `mini-chip ${node.knowledge === "KNOWN" ? "success" : "warning"}`, node.knowledge),
+      el("span", `mini-chip ${statusClass(node.access)}`, node.access)
+    );
+    const body = el("div", "observer-facts");
+    (node.facts || []).forEach((fact) => {
+      const row = el("div", "observer-fact");
+      row.append(
+        el("code", "", fact.key),
+        el("strong", "", `${compact(fact.truth)} · ${fact.knowledge}`)
+      );
+      if (fact.revealed_by) {
+        row.appendChild(
+          el("small", "", `revealed by ${shortId(fact.revealed_by.operation_id)} · ${failureName(fact.revealed_by.failure_code)}`)
+        );
+      }
+      body.appendChild(row);
+    });
+    card.append(summary, body);
+    nodes.appendChild(card);
+  });
+  const relations = el("details", "observer-relations");
+  relations.appendChild(el("summary", "", `World Relations (${(truth.relations || []).length})`));
+  const relationList = el("div", "relation-list");
+  (truth.relations || []).forEach((relation) => {
+    const row = el("div", "relation-row");
+    row.append(
+      el("code", "", relation.source_node_key),
+      el("strong", "", relation.relation_type),
+      el("code", "", relation.target_node_key),
+      el("span", `mini-chip ${relation.planner_visible ? "success" : "warning"}`, relation.planner_visible ? "Planner visible" : "Observer only")
+    );
+    relationList.appendChild(row);
+  });
+  relations.appendChild(relationList);
+  const raw = el("details", "nested-raw");
+  raw.append(el("summary", "", "Raw observer payload"), jsonBlock(localizeObject(truth)));
+  ui.hiddenTruthContent.replaceChildren(legend, nodes, relations, raw);
 }
 
 function renderTimeline(items) {
@@ -286,6 +336,8 @@ function renderTimeline(items) {
       body.append(meta, el("p", "timeline-content", translateText(item.content) || "状态已更新。"));
       const chips = el("div", "timeline-chips");
       if (item.plan_version) chips.appendChild(el("span", "mini-chip", `方案 v${item.plan_version}`));
+      if (item.source) chips.appendChild(el("span", "mini-chip", item.source));
+      if (item.replan_reason) chips.appendChild(el("code", "failure-chip", failureName(item.replan_reason)));
       if (item.step_sequence) chips.appendChild(el("span", "mini-chip", `步骤 ${item.step_sequence}`));
       if (item.status) {
         chips.appendChild(el("span", `mini-chip ${statusClass(item.status)}`, label(item.status)));
@@ -309,21 +361,25 @@ function renderTimeline(items) {
   ui.timeline.scrollTop = ui.timeline.scrollHeight;
 }
 
-function renderTask(task, plans) {
+function renderTask(snapshot) {
+  const task = snapshot.task;
+  const plans = snapshot.plan_history || [];
   if (!task) {
     ui.planBadge.textContent = "方案 —";
     ui.taskSummary.replaceChildren(el("p", "empty-copy", "等待玩家下达第一道军令。"));
     ui.planHistory.replaceChildren(el("p", "empty-copy", "尚无行动方案。"));
     return;
   }
-  ui.planBadge.textContent = `方案 v${task.current_plan_version}`;
+  const activePlan = plans.find((plan) => plan.version === task.current_plan_version);
+  ui.planBadge.textContent = `方案 v${task.current_plan_version} · ${activePlan?.source || "UNKNOWN"}`;
   const title = el("div", "task-title");
   title.append(
     el("span", `task-icon ${statusClass(task.status)}`, "令"),
     (() => {
       const copy = el("div");
       copy.append(
-        el("strong", "", translateText(task.goal_description)),
+        el("strong", "", translateText(task.raw_goal || task.goal_description)),
+        el("span", "", `Raw Goal · ${task.raw_goal || task.goal_description}`),
         el("span", "", `军令 ${shortId(task.id)}`)
       );
       return copy;
@@ -334,19 +390,41 @@ function renderTask(task, plans) {
     ["状态", label(task.status)],
     ["当前方案", `v${task.current_plan_version}`],
     ["调整次数", String(task.replan_count)],
-    ["统筹者", officerName(task.owner_officer)],
+    ["Resolution", label(task.objective_resolution?.status)],
+    ["Last Replan Reason", failureName(activePlan?.replan_reason || task.last_error_code)],
   ].forEach(([name, value]) => {
     const stat = el("div");
     stat.append(el("span", "", name), el("strong", "", value));
     stats.appendChild(stat);
   });
-  ui.taskSummary.replaceChildren(title, stats);
+  const scope = el("section", "scope-card");
+  const scopeHeader = el("div", "scope-header");
+  scopeHeader.append(
+    el("strong", "", "Frozen Objective Scope"),
+    el("span", `mini-chip ${task.objective_scope?.frozen ? "success" : "warning"}`, task.objective_scope?.frozen ? "FROZEN" : "UNCONFIRMED")
+  );
+  const scopeKeys = el("div", "scope-keys");
+  (task.objective_scope?.objective_keys || []).forEach((key) => scopeKeys.appendChild(el("code", "scope-key", key)));
+  scope.append(
+    scopeHeader,
+    scopeKeys,
+    el("small", "", `Catalog ${task.objective_scope?.catalog_version || "—"} · freeze ${task.objective_scope?.freeze_source || "—"}`)
+  );
+  const evaluation = renderObjectiveEvaluation(snapshot.objective_evaluation);
+  const stop = renderEarlyStop(snapshot.early_stop);
+  ui.taskSummary.replaceChildren(title, stats, scope, evaluation, stop);
 
   if (!plans.length) {
     ui.planHistory.replaceChildren(el("p", "empty-copy", "规划尚未通过后端验证。"));
     return;
   }
+  const flow = el("div", "plan-flow");
+  plans.forEach((plan, index) => {
+    if (index) flow.appendChild(el("span", "plan-arrow", `→ ${failureName(plan.replan_reason) || "REPLAN"} →`));
+    flow.appendChild(el("strong", "", `v${plan.version} ${plan.source || "UNKNOWN"}`));
+  });
   ui.planHistory.replaceChildren(
+    flow,
     ...[...plans].reverse().map((plan) => {
       const details = el("details", "plan-card");
       details.open = plan.version === task.current_plan_version;
@@ -358,7 +436,7 @@ function renderTask(task, plans) {
           const copy = el("div");
           copy.append(
             el("strong", "", `方案 v${plan.version}`),
-            el("span", "", officerName(plan.created_by_officer))
+            el("span", "", `${plan.source || "UNKNOWN"} · ${plan.planner_model || "no model"}`)
           );
           return copy;
         })()
@@ -369,6 +447,21 @@ function renderTask(task, plans) {
       );
       const body = el("div", "plan-body");
       body.appendChild(el("p", "strategy-copy", translateText(plan.strategy_summary) || "—"));
+      const previousPlan = plans.find((candidate) => candidate.version === plan.version - 1);
+      if (previousPlan) {
+        const previousKeys = new Set((previousPlan.steps || []).map(stepComparisonKey));
+        const added = (plan.steps || []).filter((step) => !previousKeys.has(stepComparisonKey(step)));
+        body.appendChild(
+          keyValue(
+            `相对 v${previousPlan.version} 新增 ${added.length} 个步骤`,
+            added.map((step) => ({
+              sequence: step.sequence,
+              description: translateText(step.description),
+              tool: step.selected_tool_name,
+            }))
+          )
+        );
+      }
       if (plan.replan_reason) {
         const reason = el("div", "replan-reason");
         reason.append(
@@ -388,7 +481,7 @@ function renderTask(task, plans) {
       );
       body.appendChild(validation);
       const steps = el("div", "step-list");
-      (plan.steps || []).forEach((step) => steps.appendChild(renderStep(step)));
+      (plan.steps || []).forEach((step) => steps.appendChild(renderStep(step, snapshot.operation_wait_pairs || [], plan.version)));
       body.appendChild(steps);
       details.append(summary, body);
       return details;
@@ -396,7 +489,7 @@ function renderTask(task, plans) {
   );
 }
 
-function renderStep(step) {
+function renderStep(step, operationWaitPairs, planVersion) {
   const row = el("div", `step-row ${statusClass(step.status)}`);
   const sequence = el("span", "step-sequence", String(step.sequence).padStart(2, "0"));
   const body = el("div", "step-copy");
@@ -411,8 +504,84 @@ function renderStep(step) {
   if (step.failure_code) {
     body.appendChild(el("code", "failure-chip", failureName(step.failure_code)));
   }
+  const skipReason = step.actual_result?.skip_reason;
+  if (skipReason) {
+    body.appendChild(el("p", "step-note", `Skipped: ${label(skipReason)}`));
+  }
+  if (step.execution_type === "WAIT_FOR_WORLD_EVENT") {
+    const pair = operationWaitPairs.find(
+      (item) => item.plan_version === planVersion && item.wait_step_sequence === step.sequence
+    );
+    if (pair) {
+      const lifecycle = el("div", "wait-lifecycle");
+      lifecycle.append(
+        el("strong", "", `Operation ${shortId(pair.operation_id)}`),
+        el("span", `mini-chip ${statusClass(pair.operation_status)}`, pair.operation_status),
+        el("span", "plan-arrow", "→ WAIT →"),
+        el("span", `mini-chip ${statusClass(pair.wait_status)}`, pair.wait_status)
+      );
+      const result = el("details", "result-details");
+      result.append(el("summary", "", "Operation / WAIT terminal result"), jsonBlock(localizeObject(pair)));
+      body.append(lifecycle, result);
+    } else {
+      body.appendChild(el("p", "step-note warning", "WAIT has no persisted operation pair"));
+    }
+  }
   row.append(sequence, body, el("span", "step-status", label(step.status)));
   return row;
+}
+
+function renderObjectiveEvaluation(evaluation) {
+  const section = el("section", "evaluation-card");
+  const header = el("div", "scope-header");
+  header.append(
+    el("strong", "", "Backend Objective Evaluation"),
+    el("span", `mini-chip ${evaluation?.scope_satisfied ? "success" : "warning"}`, evaluation?.scope_satisfied ? "SATISFIED" : "INCOMPLETE")
+  );
+  section.append(header, el("small", "", evaluation?.source || "Awaiting frozen scope"));
+  (evaluation?.objectives || []).forEach((objective) => {
+    const item = el("details", "objective-item");
+    item.appendChild(el("summary", "", `${objective.satisfied ? "✓" : "○"} ${objective.objective_key}`));
+    const requirements = el("div", "requirement-list");
+    (objective.requirements || []).forEach((requirement) => {
+      requirements.appendChild(
+        el("div", `requirement-row ${requirement.satisfied ? "success" : "warning"}`, `${requirement.fact_key}: ${compact(requirement.actual_value)} / ${requirement.accepted_values.join(" | ")}`)
+      );
+    });
+    item.appendChild(requirements);
+    section.appendChild(item);
+  });
+  if (evaluation?.outside_scope_state?.length) {
+    const outside = el("details", "objective-item outside-scope");
+    outside.appendChild(el("summary", "", "Outside current Scope"));
+    const list = el("div", "requirement-list");
+    evaluation.outside_scope_state.forEach((fact) => {
+      list.appendChild(
+        el("div", "requirement-row", `${fact.node_key}.${fact.fact_key} = ${compact(fact.actual_value)} · ${fact.scope_relation}`)
+      );
+    });
+    outside.appendChild(list);
+    section.appendChild(outside);
+  }
+  return section;
+}
+
+function renderEarlyStop(earlyStop) {
+  const section = el("section", `early-stop-card ${earlyStop?.triggered ? "triggered" : ""}`);
+  section.append(
+    el("strong", "", earlyStop?.triggered ? "Early stop triggered" : "Early stop not triggered"),
+    el("span", "", earlyStop?.triggered ? `${earlyStop.skipped_future_step_count} genuinely future step(s) skipped · ${earlyStop.reason}` : "No scope-satisfied skip was recorded.")
+  );
+  return section;
+}
+
+function stepComparisonKey(step) {
+  return JSON.stringify([
+    step.execution_type,
+    step.action_intent,
+    step.selected_tool_name,
+    step.tool_arguments || {},
+  ]);
 }
 
 function renderWaiting(snapshot) {
@@ -678,17 +847,28 @@ function timelineKind(kind) {
   return {
     PLAYER_COMMAND: "玩家军令",
     STRATEGIST_REPORT: "军师回复",
-    PLAN_CREATED: "提出方案",
+    PLAN: "初始方案",
     REPLAN: "调整方案",
-    OFFICER_ACTION: "行动汇报",
-    FINAL_REPORT: "最终汇报",
+    TOOL_CALL: "工具调用",
+    WORLD_OPERATION: "世界行动",
+    WAIT_RESULT: "等待结算",
+    FAILURE: "执行失败",
+    KNOWLEDGE_REVEALED: "新知识揭示",
+    OBJECTIVE_EVALUATION: "目标评估",
+    EARLY_STOP: "范围内提前停止",
+    TASK_COMPLETED: "任务完成",
     DECISION_REQUEST: "请示主公",
-    WORLD_EVENT: "世界结算",
   }[kind] || String(kind || "记录").replaceAll("_", " ");
 }
 
 function markerText(kind, actor) {
-  if (kind === "WORLD_EVENT") return "世";
+  if (kind === "WORLD_OPERATION") return "世";
+  if (kind === "WAIT_RESULT") return "等";
+  if (kind === "FAILURE") return "败";
+  if (kind === "KNOWLEDGE_REVEALED") return "知";
+  if (kind === "OBJECTIVE_EVALUATION") return "验";
+  if (kind === "EARLY_STOP") return "止";
+  if (kind === "TASK_COMPLETED") return "成";
   if (kind === "PLAYER_COMMAND") return "主";
   if (kind === "DECISION_REQUEST") return "决";
   return officerName(actor, "录").slice(0, 1);
