@@ -53,6 +53,7 @@ def test_planning_constraints_are_guardrails_not_a_route_blueprint(session: Sess
         "respect_tool_and_officer_authority": True,
         "asynchronous_operations_require_adjacent_wait_steps": True,
         "do_not_repeat_completed_effects": True,
+        "do_not_pursue_terminal_effects_outside_frozen_scope": True,
     }
     instruction = STARFIRE_PLANNING_POLICY.planner_instruction("PLAN")
     assert "ten steps" not in instruction

@@ -11,6 +11,7 @@ from app.scenarios.contracts import (
     ScenarioPlanIssue,
     ScenarioRuntimeState,
 )
+from app.scenarios.starfire.objective_catalog import STARFIRE_OBJECTIVE_CATALOG
 
 _EXECUTION_TOOLS = frozenset(
     {
@@ -127,6 +128,25 @@ class StarfirePlanningPolicy:
         del selected_tools, wait_count, is_replan, state
         issues: list[ScenarioPlanIssue] = []
         for index, step in enumerate(steps):
+            terminal_effect = self._terminal_action_effect(step)
+            if terminal_effect is not None and terminal_effect not in self._in_scope_terminal_facts(
+                scope
+            ):
+                tool_name = str(step.get("selected_tool_name"))
+                node_key, fact_key = terminal_effect
+                issues.append(
+                    ScenarioPlanIssue(
+                        code="PLAN_TERMINAL_EFFECT_OUTSIDE_OBJECTIVE_SCOPE",
+                        path=f"steps.{index}.selected_tool_name",
+                        message=(
+                            f"{tool_name} pursues terminal effect {node_key}.{fact_key}, "
+                            "which is neither a terminal requirement nor a prerequisite "
+                            "of the frozen objective_scope. Remove this terminal action "
+                            "and its paired wait; keep only actions that support the "
+                            "current frozen scope."
+                        ),
+                    )
+                )
             if step.get("selected_tool_name") != "negotiate_village_support":
                 continue
             arguments = step.get("tool_arguments")
@@ -196,6 +216,7 @@ class StarfirePlanningPolicy:
         scope: ObjectiveScope,
     ) -> Mapping[str, object]:
         canonical_facts = self._canonical_facts(state)
+        objective_facts, prerequisite_facts = self._scoped_terminal_fact_groups(scope)
         return {
             "canonical_facts": canonical_facts,
             "planning_kind": kind,
@@ -206,6 +227,21 @@ class StarfirePlanningPolicy:
                 "respect_tool_and_officer_authority": True,
                 "asynchronous_operations_require_adjacent_wait_steps": True,
                 "do_not_repeat_completed_effects": True,
+                "do_not_pursue_terminal_effects_outside_frozen_scope": True,
+            },
+            "terminal_effect_scope": {
+                "objective_terminal_facts": sorted(
+                    self._format_ref(ref) for ref in objective_facts
+                ),
+                "prerequisite_terminal_facts": sorted(
+                    self._format_ref(ref) for ref in prerequisite_facts
+                ),
+                "rule": (
+                    "A terminal action is valid only when its terminal fact is an explicit "
+                    "objective terminal fact or a declared prerequisite terminal fact. "
+                    "Information gathering and supporting actions remain available when "
+                    "they help the frozen scope. Do not add later terminal outcomes."
+                ),
             },
             "final_verification": "BACKEND_SCOPED_OBJECTIVE_EVALUATOR",
         }
@@ -224,6 +260,9 @@ class StarfirePlanningPolicy:
             "preserve objective_scope, and write strategy_summary and step descriptions in "
             "concise Simplified Chinese. The request already contains the latest Known "
             "World; do not add routine initial, post-operation, or final inspection steps. "
+            "Treat objective_scope as the complete set of requested terminal outcomes. "
+            "Do not describe or plan any later terminal outcome outside that scope; allowed "
+            "tools may still be used for information, support, or declared prerequisites. "
             "Use inspect_command_state only when necessary observable information is "
             "missing. Backend scoped objective evaluation owns final verification."
         )
@@ -244,6 +283,43 @@ class StarfirePlanningPolicy:
             for node_key, fact_key in refs
             if state.node_known(node_key) and state.fact_known(node_key, fact_key)
         }
+
+    @staticmethod
+    def _terminal_action_effect(step: Mapping[str, Any]) -> tuple[str, str] | None:
+        tool_name = step.get("selected_tool_name")
+        if tool_name == "start_outpost_repair":
+            return ("starfire_outpost", "outpost_status")
+        if tool_name == "start_trade_route_test":
+            return ("northern_trade_route", "trade_route_status")
+        if tool_name == "start_military_operation":
+            arguments = step.get("tool_arguments")
+            if isinstance(arguments, Mapping) and arguments.get("mission_type") == "CLEAR_VALLEY":
+                return ("northern_valley", "valley_security")
+        return None
+
+    @staticmethod
+    def _scoped_terminal_fact_groups(
+        scope: ObjectiveScope,
+    ) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        objective_facts = {
+            (requirement.node_key, requirement.fact_key)
+            for requirement in STARFIRE_OBJECTIVE_CATALOG.verification_requirements(scope)
+        }
+        prerequisite_facts = {
+            (requirement.node_key, requirement.fact_key)
+            for prerequisite in STARFIRE_OBJECTIVE_CATALOG.prerequisites(scope)
+            for requirement in prerequisite.requirements
+        }
+        return objective_facts, prerequisite_facts
+
+    @classmethod
+    def _in_scope_terminal_facts(cls, scope: ObjectiveScope) -> set[tuple[str, str]]:
+        objective_facts, prerequisite_facts = cls._scoped_terminal_fact_groups(scope)
+        return objective_facts | prerequisite_facts
+
+    @staticmethod
+    def _format_ref(ref: tuple[str, str]) -> str:
+        return f"{ref[0]}.{ref[1]}"
 
     @staticmethod
     def _value(state: ScenarioRuntimeState, node_key: str, fact_key: str) -> str:

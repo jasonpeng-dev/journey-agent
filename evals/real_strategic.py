@@ -63,6 +63,7 @@ class RealStrategicResult:
     skipped_waits_due_to_scope: list[dict[str, object]]
     skipped_inspects_due_to_scope: list[dict[str, object]]
     settled_operation_wait_violations: list[dict[str, object]]
+    scope_external_terminal_steps: list[dict[str, object]]
 
 
 GOAL = "修复星火前哨并重新打通北方商路。"
@@ -434,6 +435,11 @@ async def _run_trial(
             task.id,
             steps,
         )
+        scope_external_terminal_steps = (
+            _selected_tool_steps(plans, steps, "start_trade_route_test")
+            if goal == RESTORE_ONLY_GOAL
+            else []
+        )
         common_passed = bool(
             task.status == AgentTaskStatus.SUCCEEDED
             and plans
@@ -471,6 +477,7 @@ async def _run_trial(
                 common_passed
                 and scope.objective_keys == ("RESTORE_STARFIRE_OUTPOST",)
                 and world.get("northern_trade_route_status") == "CLOSED"
+                and scope_external_terminal_steps == []
             )
         else:
             passed = bool(
@@ -514,6 +521,7 @@ async def _run_trial(
             skipped_waits_due_to_scope=skipped_waits_due_to_scope,
             skipped_inspects_due_to_scope=skipped_inspects_due_to_scope,
             settled_operation_wait_violations=settled_operation_wait_violations,
+            scope_external_terminal_steps=scope_external_terminal_steps,
         )
 
 
@@ -625,6 +633,24 @@ def _plan_summaries(
             }
         )
     return result
+
+
+def _selected_tool_steps(
+    plans: list[AgentPlan],
+    steps: list[AgentStep],
+    tool_name: str,
+) -> list[dict[str, object]]:
+    plan_versions = {plan.id: plan.version for plan in plans}
+    return [
+        {
+            "plan_version": plan_versions.get(step.plan_id),
+            "step_sequence": step.sequence,
+            "status": step.status.value,
+            "selected_tool_name": step.selected_tool_name,
+        }
+        for step in steps
+        if step.selected_tool_name == tool_name
+    ]
 
 
 def _legacy_argument_uses(

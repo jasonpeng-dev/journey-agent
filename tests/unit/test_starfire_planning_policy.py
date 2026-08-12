@@ -1,11 +1,17 @@
 from uuid import uuid4
 
+import pytest
+
 from app.scenarios.registry import scenario_binding
 from app.scenarios.starfire.fallback_plans import (
     STARFIRE_FALLBACK_PLANS,
     initial_strategic_starfire_plan,
 )
-from app.scenarios.starfire.objective_catalog import FULL_STARFIRE_SCOPE
+from app.scenarios.starfire.objective_catalog import (
+    FULL_STARFIRE_SCOPE,
+    STARFIRE_OBJECTIVE_CATALOG,
+    StarfireObjectiveKey,
+)
 from app.scenarios.starfire.planning_policy import STARFIRE_PLANNING_POLICY
 from app.scenarios.starfire.ruleset import (
     StarfireFactState,
@@ -89,6 +95,101 @@ def test_starfire_policy_leaves_strategy_order_to_execution_rules() -> None:
     )
 
     assert issues == ()
+
+
+@pytest.mark.parametrize(
+    ("objective_key", "terminal_step", "expected_rejected"),
+    [
+        (
+            StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST,
+            {
+                "selected_tool_name": "start_trade_route_test",
+                "tool_arguments": {"target_key": "northern_trade_route"},
+            },
+            True,
+        ),
+        (
+            StarfireObjectiveKey.SECURE_NORTHERN_VALLEY,
+            {
+                "selected_tool_name": "start_outpost_repair",
+                "tool_arguments": {"target_key": "starfire_outpost"},
+            },
+            True,
+        ),
+        (
+            StarfireObjectiveKey.GATHER_VALLEY_INTELLIGENCE,
+            {
+                "selected_tool_name": "start_military_operation",
+                "tool_arguments": {"mission_type": "CLEAR_VALLEY"},
+            },
+            True,
+        ),
+        (
+            StarfireObjectiveKey.OPEN_NORTHERN_TRADE_ROUTE,
+            {
+                "selected_tool_name": "start_outpost_repair",
+                "tool_arguments": {"target_key": "starfire_outpost"},
+            },
+            False,
+        ),
+        (
+            StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST,
+            {
+                "selected_tool_name": "start_military_operation",
+                "tool_arguments": {"mission_type": "CLEAR_VALLEY"},
+            },
+            False,
+        ),
+        (
+            StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST,
+            {
+                "selected_tool_name": "start_military_operation",
+                "tool_arguments": {"mission_type": "DISRUPT_SUPPLY"},
+            },
+            False,
+        ),
+        (
+            StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST,
+            {
+                "selected_tool_name": "start_recon_operation",
+                "tool_arguments": {"target_key": "northern_valley"},
+            },
+            False,
+        ),
+    ],
+)
+def test_terminal_actions_respect_objective_and_prerequisite_scope(
+    objective_key: StarfireObjectiveKey,
+    terminal_step: dict[str, object],
+    expected_rejected: bool,
+) -> None:
+    scope = STARFIRE_OBJECTIVE_CATALOG.scope([objective_key])
+
+    issues = STARFIRE_PLANNING_POLICY.validate_candidate_plan(
+        [terminal_step],
+        [str(terminal_step["selected_tool_name"])],
+        0,
+        is_replan=False,
+        state=_state(),
+        scope=scope,
+    )
+
+    scope_issues = [
+        issue for issue in issues if issue.code == "PLAN_TERMINAL_EFFECT_OUTSIDE_OBJECTIVE_SCOPE"
+    ]
+    assert bool(scope_issues) is expected_rejected
+
+
+def test_scope_constraints_expose_terminal_boundaries_without_tool_blueprint() -> None:
+    scope = STARFIRE_OBJECTIVE_CATALOG.scope([StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST])
+
+    constraints = STARFIRE_PLANNING_POLICY.build_planning_constraints("PLAN", None, _state(), scope)
+    boundary = constraints["terminal_effect_scope"]
+
+    assert isinstance(boundary, dict)
+    assert boundary["objective_terminal_facts"] == ["starfire_outpost.outpost_status"]
+    assert boundary["prerequisite_terminal_facts"] == ["northern_valley.valley_security"]
+    assert "start_trade_route_test" not in str(boundary)
 
 
 def test_state_aware_fallback_uses_only_remaining_canonical_suffix() -> None:
