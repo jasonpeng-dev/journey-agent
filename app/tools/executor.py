@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from time import perf_counter
+from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -24,10 +25,13 @@ from app.infrastructure.db.models import (
     AgentStep,
     AgentTask,
     ConversationSession,
+    GameInstanceOfficerAppointment,
     OfficerAppointment,
     PlayerDecisionRequest,
     ToolExecution,
 )
+from app.scenarios.runtime_binding import interaction_resolver_for_task
+from app.services.interaction_targets import interaction_target_resolver
 from app.tools.handlers import snapshot
 from app.tools.interaction_validation import resolve_tool_interaction
 from app.tools.registry import ToolRegistry
@@ -59,6 +63,7 @@ class ToolExecutor:
         )
         self.db.add(trace)
         try:
+            self._validate_runtime_scope(context)
             if not tool:
                 raise AppError("UNKNOWN_TOOL", "Tool is not registered")
             try:
@@ -158,17 +163,29 @@ class ToolExecutor:
                 step.status = AgentStepStatus.IN_PROGRESS
                 step.attempts += 1
                 step.started_at = step.started_at or datetime.now(UTC)
-            appointment = None
+            appointment: Any = None
             if npc.role.value in {"STRATEGIST", "GENERAL", "STEWARD"}:
-                appointment = self.db.scalar(
-                    select(OfficerAppointment)
-                    .where(
-                        OfficerAppointment.player_id == context.player_id,
-                        OfficerAppointment.npc_id == npc.id,
+                if context.runtime_scope is None:
+                    appointment = self.db.scalar(
+                        select(OfficerAppointment)
+                        .where(
+                            OfficerAppointment.player_id == context.player_id,
+                            OfficerAppointment.npc_id == npc.id,
+                        )
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
                     )
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
+                else:
+                    appointment = self.db.scalar(
+                        select(GameInstanceOfficerAppointment)
+                        .where(
+                            GameInstanceOfficerAppointment.game_instance_id
+                            == context.runtime_scope.game_instance_id,
+                            GameInstanceOfficerAppointment.npc_id == npc.id,
+                        )
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
                 actual_policy_version = (
                     appointment.version if appointment is not None else npc.profile_version
                 )
@@ -196,10 +213,18 @@ class ToolExecutor:
                 if run is not None:
                     run.authority_policy_version = actual_policy_version
             if tool.interaction_requirement is not None:
+                task_for_interaction = (
+                    self.db.get(AgentTask, context.task_id) if context.task_id is not None else None
+                )
                 resolve_tool_interaction(
                     context.scenario_key,
                     tool.interaction_requirement,
                     args,
+                    resolver=(
+                        interaction_resolver_for_task(self.db, task_for_interaction)
+                        if context.runtime_scope is not None and task_for_interaction is not None
+                        else interaction_target_resolver
+                    ),
                 )
             if tool.preflight is not None:
                 tool.preflight(self.db, context, args)
@@ -269,6 +294,12 @@ class ToolExecutor:
                     )
                     .where(
                         ConversationSession.player_id == context.player_id,
+                        ConversationSession.game_instance_id
+                        == (
+                            context.runtime_scope.game_instance_id
+                            if context.runtime_scope is not None
+                            else None
+                        ),
                         ToolExecution.idempotency_key == trace.idempotency_key,
                         ToolExecution.execution_status == "SUCCEEDED",
                     )
@@ -502,6 +533,11 @@ class ToolExecutor:
         if decision is None:
             decision = PlayerDecisionRequest(
                 player_id=context.player_id,
+                game_instance_id=(
+                    context.runtime_scope.game_instance_id
+                    if context.runtime_scope is not None
+                    else None
+                ),
                 task_id=context.task_id,
                 step_id=context.step_id,
                 requested_by_npc_id=context.npc_id,
@@ -556,3 +592,32 @@ class ToolExecutor:
         trace.duration_ms = int((perf_counter() - started) * 1000)
         self.db.commit()
         return result
+
+    def _validate_runtime_scope(self, context: ToolContext) -> None:
+        session = self.db.get(ConversationSession, context.session_id)
+        if session is None:
+            raise AppError("SESSION_NOT_FOUND", "The ToolContext session does not exist")
+        expected_instance = (
+            context.runtime_scope.game_instance_id if context.runtime_scope is not None else None
+        )
+        if session.player_id != context.player_id or session.game_instance_id != expected_instance:
+            raise AppError(
+                "RUNTIME_SCOPE_SESSION_MISMATCH",
+                "The ToolContext does not match its ConversationSession ownership",
+                status_code=403,
+            )
+        if context.runtime_scope is not None:
+            if context.runtime_scope.player_id != context.player_id:
+                raise AppError(
+                    "RUNTIME_SCOPE_PLAYER_MISMATCH",
+                    "The ToolContext Player does not match its RuntimeScope",
+                    status_code=403,
+                )
+            if context.task_id is not None:
+                task = self.db.get(AgentTask, context.task_id)
+                if task is None or task.game_instance_id != expected_instance:
+                    raise AppError(
+                        "RUNTIME_SCOPE_TASK_MISMATCH",
+                        "The ToolContext task belongs to another GameInstance",
+                        status_code=403,
+                    )

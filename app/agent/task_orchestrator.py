@@ -34,11 +34,16 @@ from app.infrastructure.db.models import (
     AgentStep,
     AgentTask,
     ConversationSession,
+    GameInstanceOfficerAppointment,
     Memory,
     OfficerAppointment,
 )
 from app.scenarios.contracts import ObjectiveResolutionStatus
-from app.scenarios.registry import scenario_binding
+from app.scenarios.runtime_binding import (
+    interaction_resolver_for_task,
+    runtime_scope_for_task,
+    scenario_binding_for_task,
+)
 from app.services.game import GameService
 from app.services.tasks import TaskService
 from app.tools.catalog import build_registry
@@ -195,9 +200,7 @@ class TaskOrchestrator:
         objective_keys: list[str] | None,
         clarification_text: str | None,
     ) -> str:
-        scenario = scenario_binding(task.scenario_key)
-        if scenario is None:
-            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        scenario = scenario_binding_for_task(self.db, task)
         resolver = StarfireGoalResolver(scenario.objective_catalog)
         if clarification_text is not None:
             result = resolver.resolve(clarification_text)
@@ -240,9 +243,7 @@ class TaskOrchestrator:
                 "A resolved task must be confirmed before planning",
                 status_code=409,
             )
-        scenario = scenario_binding(task.scenario_key)
-        if scenario is None:
-            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        scenario = scenario_binding_for_task(self.db, task)
         result = StarfireGoalResolver(scenario.objective_catalog).resolve(task.goal_description)
         self.tasks.record_goal_resolution(task, result)
         if result.status == ObjectiveResolutionStatus.RESOLVED:
@@ -268,12 +269,7 @@ class TaskOrchestrator:
         if self.tasks.complete_if_scope_satisfied(task, current_plan):
             self.db.commit()
             return task, None, "TASK_SUCCEEDED"
-        scenario = scenario_binding(task.scenario_key)
-        if scenario is None:
-            task.status = AgentTaskStatus.BLOCKED
-            task.last_error_code = "TASK_SCENARIO_UNSUPPORTED"
-            self.db.commit()
-            return task, None, "BLOCKED"
+        scenario = scenario_binding_for_task(self.db, task)
         if reason in SECURITY_FAILURES:
             task.status = AgentTaskStatus.BLOCKED
             task.last_error_code = reason
@@ -295,7 +291,10 @@ class TaskOrchestrator:
             replan_reason=reason,
         )
         if not result.ok and scenario.fallback_plans.supports_state_aware_recovery(reason):
-            state = GameService(self.db).scenario_known_state(task.player_id)
+            state = GameService(
+                self.db,
+                runtime_scope_for_task(self.db, task),
+            ).scenario_known_state(task.player_id)
             scope = self.tasks.require_frozen_scope(task)
             task.status = AgentTaskStatus.ACTIVE
             task.last_error_code = reason
@@ -328,11 +327,8 @@ class TaskOrchestrator:
         tool_name = "replan_task" if replan_reason is not None else "create_task_plan"
         owner = self.db.get(NPC, task.owner_npc_id)
         assert owner is not None
-        _authority_limits, authority_policy_version = self._authority_context(
-            task.player_id,
-            owner,
-        )
-        game = GameService(self.db)
+        _authority_limits, authority_policy_version = self._authority_context(task, owner)
+        game = GameService(self.db, runtime_scope_for_task(self.db, task))
         knowledge = game.scenario_known_state(task.player_id)
         definition = next(
             (
@@ -340,6 +336,7 @@ class TaskOrchestrator:
                 for item in self.registry.definitions(
                     task.scenario_key,
                     target_states=knowledge.known_target_states(),
+                    target_resolver=interaction_resolver_for_task(self.db, task),
                 )
                 if item.name == tool_name
             ),
@@ -377,14 +374,7 @@ class TaskOrchestrator:
         )
         request["next_plan_version"] = task.current_plan_version + 1
         request_json = json.dumps(request, ensure_ascii=False)
-        scenario = scenario_binding(task.scenario_key)
-        if scenario is None:
-            return run, self._finish_planning_failure(
-                run,
-                task,
-                "TASK_SCENARIO_UNSUPPORTED",
-                TerminationReason.INTERNAL_ERROR,
-            )
+        scenario = scenario_binding_for_task(self.db, task)
         replan_instruction = (
             " This is a replan: preserve every already succeeded step and do not "
             "repeat completed world operations or resource-consuming writes. "
@@ -545,6 +535,7 @@ class TaskOrchestrator:
                         agent_run_id=run.id,
                         message_id=run.request_id,
                         scenario_key=task.scenario_key,
+                        runtime_scope=runtime_scope_for_task(self.db, task),
                         task_id=task.id,
                         plan_source=source,
                         planner_model=response.model,
@@ -620,10 +611,7 @@ class TaskOrchestrator:
     ) -> tuple[AgentRun, ToolResult]:
         owner = self.db.get(NPC, task.owner_npc_id)
         assert owner is not None
-        _authority_limits, authority_policy_version = self._authority_context(
-            task.player_id,
-            owner,
-        )
+        _authority_limits, authority_policy_version = self._authority_context(task, owner)
         run = AgentRun(
             request_id=uuid4(),
             session_id=session.id,
@@ -669,6 +657,7 @@ class TaskOrchestrator:
                 agent_run_id=run.id,
                 message_id=run.request_id,
                 scenario_key=task.scenario_key,
+                runtime_scope=runtime_scope_for_task(self.db, task),
                 task_id=task.id,
                 plan_source=plan_source,
                 planner_model="deterministic-baseline",
@@ -743,14 +732,12 @@ class TaskOrchestrator:
             else self.db.get(NPC, task.owner_npc_id)
         )
         assert actor is not None
-        authority_limits, authority_policy_version = self._authority_context(
-            task.player_id,
-            actor,
-        )
+        authority_limits, authority_policy_version = self._authority_context(task, actor)
         memories = self.db.scalars(
             select(Memory)
             .where(
                 Memory.player_id == task.player_id,
+                Memory.game_instance_id == task.game_instance_id,
                 Memory.npc_id == actor.id,
             )
             .order_by(Memory.importance.desc(), Memory.created_at.desc())
@@ -773,7 +760,7 @@ class TaskOrchestrator:
         )
         self.db.add(run)
         self.db.commit()
-        game = GameService(self.db)
+        game = GameService(self.db, runtime_scope_for_task(self.db, task))
         knowledge = game.scenario_known_state(task.player_id)
         verified_known_state = game.inspect_command_state(
             task.player_id,
@@ -785,6 +772,7 @@ class TaskOrchestrator:
                 for item in self.registry.definitions(
                     task.scenario_key,
                     target_states=knowledge.known_target_states(),
+                    target_resolver=interaction_resolver_for_task(self.db, task),
                 )
                 if item.name == tool_name
             ),
@@ -863,6 +851,7 @@ class TaskOrchestrator:
                 agent_run_id=run.id,
                 message_id=run.request_id,
                 scenario_key=task.scenario_key,
+                runtime_scope=runtime_scope_for_task(self.db, task),
                 task_id=task.id,
                 plan_id=plan.id if plan else None,
                 step_id=step.id if step else None,
@@ -972,10 +961,7 @@ class TaskOrchestrator:
             else self.db.get(NPC, task.owner_npc_id)
         )
         assert actor is not None
-        _authority_limits, authority_policy_version = self._authority_context(
-            task.player_id,
-            actor,
-        )
+        _authority_limits, authority_policy_version = self._authority_context(task, actor)
         run = AgentRun(
             request_id=uuid4(),
             session_id=session.id,
@@ -1001,10 +987,17 @@ class TaskOrchestrator:
 
     def _authority_context(
         self,
-        player_id: UUID,
+        task: AgentTask,
         officer: NPC,
     ) -> tuple[dict[str, Any], int]:
-        appointment = self.db.get(OfficerAppointment, (player_id, officer.id))
+        appointment = (
+            self.db.get(OfficerAppointment, (task.player_id, officer.id))
+            if task.game_instance_id is None
+            else self.db.get(
+                GameInstanceOfficerAppointment,
+                (task.game_instance_id, officer.id),
+            )
+        )
         if appointment is not None and appointment.status == "ACTIVE":
             return (
                 effective_authority_limits(
@@ -1017,9 +1010,7 @@ class TaskOrchestrator:
 
     def _resolved_arguments(self, task: AgentTask, step: AgentStep) -> dict[str, Any]:
         arguments = dict(step.tool_arguments)
-        scenario = scenario_binding(task.scenario_key)
-        if scenario is None:
-            raise ValueError(f"Scenario planning policy is not registered: {task.scenario_key}")
+        scenario = scenario_binding_for_task(self.db, task)
         if step.selected_tool_name in scenario.planning_policy.idempotent_tools:
             arguments["idempotency_key"] = (
                 f"task-{task.id}-plan-{task.current_plan_version}-step-{step.sequence}"

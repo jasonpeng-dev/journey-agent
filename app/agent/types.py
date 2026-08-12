@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.domain.runtime_scope import RuntimeScope
+
 
 class ToolCall(BaseModel):
     id: str
@@ -49,6 +51,7 @@ class ToolContext:
     agent_run_id: UUID
     message_id: UUID
     scenario_key: str
+    runtime_scope: RuntimeScope | None = None
     task_id: UUID | None = None
     plan_id: UUID | None = None
     step_id: UUID | None = None

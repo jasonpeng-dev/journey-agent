@@ -67,6 +67,27 @@ def test_migrated_game_instance_binding_is_database_immutable(
     _upgrade(monkeypatch, database_url, "head")
     engine = create_engine(database_url)
     assert "game_instances" in inspect(engine).get_table_names()
+    runtime_tables = {
+        "game_instance_node_states",
+        "game_instance_fact_states",
+        "game_instance_resource_states",
+        "game_instance_world_facts",
+        "game_instance_officer_appointments",
+    }
+    assert runtime_tables.issubset(inspect(engine).get_table_names())
+    for table_name in (
+        "conversation_sessions",
+        "memories",
+        "agent_tasks",
+        "world_operations",
+        "player_decision_requests",
+    ):
+        instance_column = next(
+            column
+            for column in inspect(engine).get_columns(table_name)
+            if column["name"] == "game_instance_id"
+        )
+        assert instance_column["nullable"] is True
     with Session(engine) as db:
         seed_scenario_definitions(db)
         scenario = ScenarioDefinitionRepository(db).find_scenario("starfire_command")

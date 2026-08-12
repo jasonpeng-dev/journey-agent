@@ -38,19 +38,26 @@ def test_scope_migration_backfills_only_preexisting_tasks(
     with Session(engine) as db:
         seed_demo_world(db)
         player = GameService(db).create_player("Legacy Task Player")
-        conversation = ConversationSession(
-            player_id=player.id,
-            npc_id=seed_id("npc:shen_ce"),
+        conversation_id = uuid4()
+        officer_id = seed_id("npc:shen_ce")
+        now = datetime.now(UTC)
+        conversations = Table("conversation_sessions", MetaData(), autoload_with=engine)
+        db.execute(
+            insert(conversations).values(
+                id=conversation_id.hex,
+                player_id=player.id.hex,
+                npc_id=officer_id.hex,
+                status="ACTIVE",
+                summary="",
+                created_at=now,
+                updated_at=now,
+            )
         )
-        db.add(conversation)
         db.commit()
         player_id = player.id
-        officer_id = conversation.npc_id
-        conversation_id = conversation.id
         metadata = MetaData()
         tasks = Table("agent_tasks", metadata, autoload_with=engine)
         legacy_task_id = uuid4()
-        now = datetime.now(UTC)
         db.execute(
             insert(tasks).values(
                 id=legacy_task_id.hex,

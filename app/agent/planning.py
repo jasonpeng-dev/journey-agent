@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any, Literal
-from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
@@ -17,6 +16,7 @@ from app.infrastructure.db.models import (
     AgentStep,
     AgentTask,
     ConversationSession,
+    GameInstanceOfficerAppointment,
     Memory,
     OfficerAppointment,
 )
@@ -27,7 +27,11 @@ from app.scenarios.contracts import (
     ScenarioRuntimeState,
     project_known_relation_payloads,
 )
-from app.scenarios.registry import scenario_binding
+from app.scenarios.runtime_binding import (
+    interaction_resolver_for_task,
+    runtime_scope_for_task,
+    scenario_binding_for_task,
+)
 from app.services.game import GameService
 from app.services.tasks import TaskService
 from app.tools.handlers import CreateTaskPlanArgs, ReplanTaskArgs
@@ -120,13 +124,7 @@ class PlanValidator:
                 )
             )
             return PlanValidationResult(status="REJECTED", errors=issues)
-        scenario = scenario_binding(task.scenario_key)
-        if scenario is None:
-            return self._rejected(
-                "PLAN_SCENARIO_UNSUPPORTED",
-                "scenario_key",
-                "The task scenario does not provide a planning policy",
-            )
+        scenario = scenario_binding_for_task(self.db, task)
         policy = scenario.planning_policy
         self._materialize_adjacent_world_wait_references(parsed.steps, policy)
         try:
@@ -149,7 +147,10 @@ class PlanValidator:
                     message="The proposed Plan must preserve the Task's frozen objective scope",
                 )
             )
-        scenario_state = GameService(self.db).scenario_known_state(task.player_id)
+        scenario_state = GameService(
+            self.db,
+            runtime_scope_for_task(self.db, task),
+        ).scenario_known_state(task.player_id)
 
         wait_count = 0
         descriptions: set[str] = set()
@@ -316,7 +317,14 @@ class PlanValidator:
                 )
             )
             return None
-        appointment = self.db.get(OfficerAppointment, (task.player_id, officer.id))
+        appointment = (
+            self.db.get(OfficerAppointment, (task.player_id, officer.id))
+            if task.game_instance_id is None
+            else self.db.get(
+                GameInstanceOfficerAppointment,
+                (task.game_instance_id, officer.id),
+            )
+        )
         if appointment is None or appointment.status != "ACTIVE":
             issues.append(
                 PlanValidationIssue(
@@ -420,6 +428,7 @@ class PlanValidator:
                     task.scenario_key,
                     tool.interaction_requirement,
                     validated_arguments,
+                    resolver=interaction_resolver_for_task(self.db, task),
                 )
             except AppError as exc:
                 issues.append(
@@ -782,17 +791,32 @@ def build_planning_request(
 ) -> dict[str, Any]:
     npc = db.get(NPC, session.npc_id)
     assert npc is not None
-    appointments: dict[UUID, OfficerAppointment] = {}
-    officer_rows = db.execute(
-        select(NPC, OfficerAppointment)
-        .join(OfficerAppointment, OfficerAppointment.npc_id == NPC.id)
-        .where(
-            OfficerAppointment.player_id == task.player_id,
-            OfficerAppointment.status == "ACTIVE",
-            NPC.enabled.is_(True),
-        )
-        .order_by(NPC.key)
-    ).all()
+    officer_rows: Any
+    if task.game_instance_id is None:
+        officer_rows = db.execute(
+            select(NPC, OfficerAppointment)
+            .join(OfficerAppointment, OfficerAppointment.npc_id == NPC.id)
+            .where(
+                OfficerAppointment.player_id == task.player_id,
+                OfficerAppointment.status == "ACTIVE",
+                NPC.enabled.is_(True),
+            )
+            .order_by(NPC.key)
+        ).all()
+    else:
+        officer_rows = db.execute(
+            select(NPC, GameInstanceOfficerAppointment)
+            .join(
+                GameInstanceOfficerAppointment,
+                GameInstanceOfficerAppointment.npc_id == NPC.id,
+            )
+            .where(
+                GameInstanceOfficerAppointment.game_instance_id == task.game_instance_id,
+                GameInstanceOfficerAppointment.status == "ACTIVE",
+                NPC.enabled.is_(True),
+            )
+            .order_by(NPC.key)
+        ).all()
     execution_officers = [officer for officer, _appointment in officer_rows]
     appointments = {officer.id: appointment for officer, appointment in officer_rows}
     valid_policy_officer_ids = {
@@ -803,12 +827,10 @@ def build_planning_request(
             (appointments[officer.id].authority_overrides if officer.id in appointments else None),
         )
     }
-    game = GameService(db)
+    game = GameService(db, runtime_scope_for_task(db, task))
     scenario_state = game.scenario_known_state(task.player_id)
     verified_state = game.inspect_command_state(task.player_id, known_state=scenario_state)
-    scenario = scenario_binding(task.scenario_key)
-    if scenario is None:
-        raise ValueError(f"Scenario planning policy is not registered: {task.scenario_key}")
+    scenario = scenario_binding_for_task(db, task)
     policy = scenario.planning_policy
     scope = TaskService(db).require_frozen_scope(task)
     definitions = [scenario.objective_catalog.definitions[key] for key in scope.objective_keys]
@@ -821,6 +843,7 @@ def build_planning_request(
     for definition in registry.definitions(
         task.scenario_key,
         target_states=scenario_state.known_target_states(),
+        target_resolver=interaction_resolver_for_task(db, task),
     ):
         if definition.name not in scenario_tools:
             continue
@@ -960,7 +983,7 @@ def build_planning_request(
             ),
             "authority_policy_status": "INVALID" if owner_policy_errors else "VALID",
             "authority_policy_errors": owner_policy_errors,
-            "memory_summary": _officer_memories(db, task.player_id, npc.id),
+            "memory_summary": _officer_memories(db, task.player_id, npc.id, task.game_instance_id),
         },
         "officers": [
             {
@@ -998,6 +1021,7 @@ def build_planning_request(
                     db,
                     task.player_id,
                     officer.id,
+                    task.game_instance_id,
                 ),
             }
             for officer in execution_officers
@@ -1072,12 +1096,21 @@ def _officer_key(db: Session, officer_id: Any, fallback: str) -> str:
     return officer.key if officer is not None else fallback
 
 
-def _officer_memories(db: Session, player_id: Any, officer_id: Any) -> list[str]:
+def _officer_memories(
+    db: Session,
+    player_id: Any,
+    officer_id: Any,
+    game_instance_id: Any = None,
+) -> list[str]:
     return [
         memory.content
         for memory in db.scalars(
             select(Memory)
-            .where(Memory.player_id == player_id, Memory.npc_id == officer_id)
+            .where(
+                Memory.player_id == player_id,
+                Memory.game_instance_id == game_instance_id,
+                Memory.npc_id == officer_id,
+            )
             .order_by(Memory.importance.desc(), Memory.created_at.desc())
             .limit(5)
         ).all()

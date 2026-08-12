@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid5
@@ -14,9 +15,15 @@ from app.domain.enums import (
     NPCRole,
     WorldOperationStatus,
 )
+from app.domain.runtime_scope import RuntimeScope
+from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.world import AccessState, Visibility
 from app.infrastructure.db.models import (
     NPC,
+    GameInstanceFactState,
+    GameInstanceNodeState,
+    GameInstanceResourceState,
+    GameInstanceWorldFact,
     OfficerAppointment,
     Player,
     PlayerDomainState,
@@ -46,16 +53,88 @@ from app.scenarios.starfire.ruleset import (
     StarfireRuleState,
     StarfireRuleViolation,
 )
+from app.scenarios.versions import ScenarioVersionRepository
+from app.services.game_instances import GameInstanceService
 
 SEED_NAMESPACE = UUID("3e16a11d-9cf5-4981-af7a-152c28331300")
 
 
+@dataclass(slots=True)
+class _InstanceResourceLedger:
+    rows: dict[str, GameInstanceResourceState]
+
+    def _row(self, key: str) -> GameInstanceResourceState:
+        row = self.rows.get(key)
+        if row is None:
+            raise AppError(
+                "INSTANCE_RESOURCE_NOT_INITIALIZED",
+                f"The GameInstance resource {key} is missing",
+            )
+        return row
+
+    @property
+    def soldiers_total(self) -> int:
+        return self._row("soldiers").value
+
+    @soldiers_total.setter
+    def soldiers_total(self, value: int) -> None:
+        self._row("soldiers").value = value
+
+    @property
+    def soldiers_committed(self) -> int:
+        return self._row("soldiers").reserved_value
+
+    @soldiers_committed.setter
+    def soldiers_committed(self, value: int) -> None:
+        self._row("soldiers").reserved_value = value
+
+    @property
+    def food(self) -> int:
+        return self._row("food").value
+
+    @food.setter
+    def food(self, value: int) -> None:
+        self._row("food").value = value
+
+    @property
+    def morale(self) -> int:
+        return self._row("morale").value
+
+    @morale.setter
+    def morale(self, value: int) -> None:
+        self._row("morale").value = value
+
+    @property
+    def gold(self) -> int:
+        return self._row("gold").value
+
+    @gold.setter
+    def gold(self, value: int) -> None:
+        self._row("gold").value = value
+
+    @property
+    def version(self) -> int:
+        return max(row.version for row in self.rows.values())
+
+    @version.setter
+    def version(self, value: int) -> None:
+        for row in self.rows.values():
+            row.version = value
+
+
 class GameService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, scope: RuntimeScope | None = None):
         self.db = db
         self.ruleset = StarfireRuleset()
+        self.scope = scope
+        self._version_snapshot: ScenarioVersionSnapshot | None = None
+        if scope is not None:
+            persisted = GameInstanceService(db).load(scope.game_instance_id)
+            scope.assert_compatible(persisted)
+            self._version_snapshot = ScenarioVersionRepository(db).load(scope.scenario_version_id)
 
     def get_player(self, player_id: UUID, *, lock: bool = False) -> Player:
+        self._assert_player(player_id)
         query = select(Player).where(Player.id == player_id)
         if lock:
             query = query.with_for_update()
@@ -120,9 +199,23 @@ class GameService:
         self.db.flush()
         return player
 
-    def list_nodes(self, player_id: UUID) -> list[tuple[WorldNode, PlayerNodeState]]:
+    def list_nodes(self, player_id: UUID) -> list[tuple[Any, Any]]:
         """Return the player's strategic map nodes and their verified state."""
         self.get_player(player_id)
+        if self.scope is not None:
+            states = {
+                state.node_key: state
+                for state in self.db.scalars(
+                    select(GameInstanceNodeState).where(
+                        GameInstanceNodeState.game_instance_id == self.scope.game_instance_id
+                    )
+                ).all()
+            }
+            return [
+                (node, states[node.key])
+                for node in self._world_definition().nodes
+                if node.key in states
+            ]
         return list(
             self.db.execute(
                 select(WorldNode, PlayerNodeState)
@@ -131,8 +224,21 @@ class GameService:
             ).tuples()
         )
 
-    def unlock_node(self, player_id: UUID, node_key: str) -> PlayerNodeState:
+    def unlock_node(self, player_id: UUID, node_key: str) -> Any:
         canonical_key = canonical_node_key(node_key)
+        self._assert_player(player_id)
+        if self.scope is not None:
+            instance_state = self.db.get(
+                GameInstanceNodeState,
+                (self.scope.game_instance_id, canonical_key),
+            )
+            if instance_state is None:
+                raise NotFoundError("game_instance_node", canonical_key)
+            if instance_state.status == NodeStatus.LOCKED:
+                instance_state.status = NodeStatus.AVAILABLE
+                instance_state.version += 1
+                self.db.flush()
+            return instance_state
         node = self.db.scalar(select(WorldNode).where(WorldNode.key == canonical_key))
         if not node:
             raise NotFoundError("node", node_key)
@@ -147,13 +253,30 @@ class GameService:
 
     def get_world_fact(self, player_id: UUID, key: str) -> dict[str, object]:
         self.get_player(player_id)
+        if self.scope is not None:
+            instance_fact = self.db.get(GameInstanceWorldFact, (self.scope.game_instance_id, key))
+            return {} if instance_fact is None else dict(instance_fact.value)
         fact = self.db.get(PlayerWorldFact, (player_id, key))
         return {} if fact is None else dict(fact.value)
 
-    def set_world_fact(
-        self, player_id: UUID, key: str, value: dict[str, object]
-    ) -> PlayerWorldFact:
+    def set_world_fact(self, player_id: UUID, key: str, value: dict[str, object]) -> Any:
         self.get_player(player_id, lock=True)
+        if self.scope is not None:
+            instance_fact = self.db.get(GameInstanceWorldFact, (self.scope.game_instance_id, key))
+            if instance_fact is None:
+                instance_fact = GameInstanceWorldFact(
+                    game_instance_id=self.scope.game_instance_id,
+                    key=key,
+                    value=value,
+                    version=1,
+                )
+                self.db.add(instance_fact)
+            else:
+                instance_fact.value = value
+                instance_fact.version += 1
+            self._sync_legacy_fact_to_canonical(player_id, key, value)
+            self.db.flush()
+            return instance_fact
         fact = self.db.get(PlayerWorldFact, (player_id, key))
         if fact is None:
             fact = PlayerWorldFact(player_id=player_id, key=key, value=value, version=1)
@@ -172,18 +295,13 @@ class GameService:
         known_state: StarfireKnowledgeState | None = None,
     ) -> dict[str, object]:
         player = self.get_player(player_id)
-        domain = self.db.get(PlayerDomainState, player_id)
-        if domain is None:
-            raise AppError(
-                "DOMAIN_STATE_NOT_INITIALIZED",
-                "The player's strategic domain state is missing",
-            )
+        domain = self._domain_state(player_id)
         resources = {
             "soldiers_total": domain.soldiers_total,
             "soldiers_available": domain.soldiers_total - domain.soldiers_committed,
             "soldiers_committed": domain.soldiers_committed,
             "food": domain.food,
-            "gold": player.gold,
+            "gold": self._gold(player, domain),
             "morale": domain.morale,
             "version": domain.version,
         }
@@ -215,6 +333,30 @@ class GameService:
 
         player = self.get_player(player_id)
         domain = self._domain_state(player_id)
+        if self.scope is not None:
+            node_rows = self.db.scalars(
+                select(GameInstanceNodeState).where(
+                    GameInstanceNodeState.game_instance_id == self.scope.game_instance_id,
+                    GameInstanceNodeState.visibility == Visibility.KNOWN,
+                )
+            ).all()
+            node_access = {row.node_key: self._access_state(row.status) for row in node_rows}
+            known_node_keys = frozenset(node_access)
+            instance_fact_rows = self.db.scalars(
+                select(GameInstanceFactState).where(
+                    GameInstanceFactState.game_instance_id == self.scope.game_instance_id,
+                    GameInstanceFactState.node_key.in_(known_node_keys),
+                    GameInstanceFactState.visibility == Visibility.KNOWN,
+                )
+            ).all()
+            return StarfireKnowledgeState(
+                facts={
+                    (fact.node_key, fact.fact_key): str(fact.truth_value)
+                    for fact in instance_fact_rows
+                },
+                node_access=node_access,
+                resources=self._resources(player, domain),
+            )
         rows = self.db.execute(
             select(WorldNode, PlayerNodeState)
             .join(PlayerNodeState, PlayerNodeState.node_id == WorldNode.id)
@@ -500,8 +642,12 @@ class GameService:
         )
         domain.food += outcome.food_delta
         domain.version += 1
-        player.gold += outcome.gold_delta
-        player.version += 1
+        if self.scope is None:
+            player.gold += outcome.gold_delta
+            player.version += 1
+        else:
+            assert isinstance(domain, _InstanceResourceLedger)
+            domain.gold += outcome.gold_delta
         return self._create_operation(
             player_id=player_id,
             officer_npc_id=officer_npc_id,
@@ -558,6 +704,7 @@ class GameService:
         )
         if operation is None:
             raise NotFoundError("world_operation", operation_id)
+        self._assert_operation_scope(operation)
         if operation.status == WorldOperationStatus.RESOLVED:
             if operation.resolution_key == resolution_key:
                 return operation
@@ -633,6 +780,7 @@ class GameService:
     ) -> WorldOperation:
         operation = WorldOperation(
             player_id=player_id,
+            game_instance_id=(self.scope.game_instance_id if self.scope is not None else None),
             task_id=task_id,
             source_step_id=source_step_id,
             officer_npc_id=officer_npc_id,
@@ -646,9 +794,12 @@ class GameService:
         return operation
 
     def _find_operation(self, player_id: UUID, idempotency_key: str) -> WorldOperation | None:
+        self._assert_player(player_id)
+        instance_id = self.scope.game_instance_id if self.scope is not None else None
         return self.db.scalar(
             select(WorldOperation).where(
                 WorldOperation.player_id == player_id,
+                WorldOperation.game_instance_id == instance_id,
                 WorldOperation.idempotency_key == idempotency_key,
             )
         )
@@ -676,7 +827,23 @@ class GameService:
             )
         return existing
 
-    def _domain_state(self, player_id: UUID, *, lock: bool = False) -> PlayerDomainState:
+    def _domain_state(
+        self, player_id: UUID, *, lock: bool = False
+    ) -> PlayerDomainState | _InstanceResourceLedger:
+        self._assert_player(player_id)
+        if self.scope is not None:
+            instance_query = select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == self.scope.game_instance_id
+            )
+            if lock:
+                instance_query = instance_query.with_for_update()
+            rows = self.db.scalars(instance_query).all()
+            if not rows:
+                raise AppError(
+                    "DOMAIN_STATE_NOT_INITIALIZED",
+                    "GameInstance strategic resources are missing",
+                )
+            return _InstanceResourceLedger({row.resource_key: row for row in rows})
         query = select(PlayerDomainState).where(PlayerDomainState.player_id == player_id)
         if lock:
             query = query.with_for_update()
@@ -691,7 +858,7 @@ class GameService:
         troop_count: int,
         *,
         lock: bool,
-    ) -> PlayerDomainState:
+    ) -> PlayerDomainState | _InstanceResourceLedger:
         domain = self._domain_state(player_id, lock=lock)
         available = domain.soldiers_total - domain.soldiers_committed
         if troop_count < 1 or troop_count > available:
@@ -788,6 +955,25 @@ class GameService:
         return canonical_target
 
     def _ensure_known_accessible_node(self, player_id: UUID, node_key: str) -> None:
+        self._assert_player(player_id)
+        if self.scope is not None:
+            instance_state = self.db.get(
+                GameInstanceNodeState,
+                (self.scope.game_instance_id, node_key),
+            )
+            if instance_state is None or instance_state.visibility != Visibility.KNOWN:
+                raise AppError(
+                    "INTERACTION_TARGET_HIDDEN",
+                    "The interaction target has not been discovered",
+                    retryable=True,
+                )
+            if instance_state.status == NodeStatus.LOCKED:
+                raise AppError(
+                    "INTERACTION_TARGET_LOCKED",
+                    "The interaction target is not currently accessible",
+                    retryable=True,
+                )
+            return
         node = self.db.scalar(select(WorldNode).where(WorldNode.key == node_key))
         state = self.db.get(PlayerNodeState, (player_id, node.id)) if node is not None else None
         if state is None or state.visibility != Visibility.KNOWN:
@@ -808,10 +994,24 @@ class GameService:
         player_id: UUID,
         *,
         player: Player | None = None,
-        domain: PlayerDomainState | None = None,
+        domain: PlayerDomainState | _InstanceResourceLedger | None = None,
     ) -> StarfireRuleState:
         current_player = player or self.get_player(player_id)
         current_domain = domain or self._domain_state(player_id)
+        if self.scope is not None:
+            fact_rows = self.db.scalars(
+                select(GameInstanceFactState).where(
+                    GameInstanceFactState.game_instance_id == self.scope.game_instance_id
+                )
+            ).all()
+            facts = {
+                (fact.node_key, fact.fact_key): StarfireFactState(str(fact.truth_value))
+                for fact in fact_rows
+            }
+            return StarfireRuleState(
+                facts=facts,
+                resources=self._resources(current_player, current_domain),
+            )
         rows = self.db.execute(
             select(PlayerWorldFactState, WorldNode)
             .join(WorldNode, WorldNode.id == PlayerWorldFactState.node_id)
@@ -829,11 +1029,14 @@ class GameService:
         )
 
     @staticmethod
-    def _resources(player: Player, domain: PlayerDomainState) -> StarfireResources:
+    def _resources(
+        player: Player,
+        domain: PlayerDomainState | _InstanceResourceLedger,
+    ) -> StarfireResources:
         return StarfireResources(
             soldiers_available=domain.soldiers_total - domain.soldiers_committed,
             food=domain.food,
-            gold=player.gold,
+            gold=domain.gold if isinstance(domain, _InstanceResourceLedger) else player.gold,
             morale=domain.morale,
         )
 
@@ -843,7 +1046,7 @@ class GameService:
         supply_status, _ = self._persisted_fact_status(player_id, "enemy_supply_route", "UNKNOWN")
         supply = project_legacy_supply_status(supply_status)
         facts: dict[tuple[str, str], StarfireFactState] = {}
-        for node in STARFIRE_WORLD.nodes:
+        for node in self._world_definition().nodes:
             for definition in node.facts:
                 legacy_key = legacy_fact_key(node.key, definition.key)
                 value = str(definition.initial_value)
@@ -861,6 +1064,15 @@ class GameService:
         legacy_key: str,
         default: str,
     ) -> tuple[str, bool]:
+        if self.scope is not None:
+            instance_fact = self.db.get(
+                GameInstanceWorldFact,
+                (self.scope.game_instance_id, legacy_key),
+            )
+            if instance_fact is None:
+                return default, False
+            status = instance_fact.value.get("status")
+            return (str(status), True) if status is not None else (default, False)
         fact = self.db.get(PlayerWorldFact, (player_id, legacy_key))
         if fact is None:
             return default, False
@@ -873,8 +1085,8 @@ class GameService:
         outcome: RuleOutcome,
         *,
         operation_id: UUID | None = None,
-    ) -> dict[tuple[str, str], PlayerWorldFact]:
-        persisted: dict[tuple[str, str], PlayerWorldFact] = {}
+    ) -> dict[tuple[str, str], Any]:
+        persisted: dict[tuple[str, str], Any] = {}
         for update in outcome.fact_updates:
             truth_value = update.value.get("status")
             if truth_value is None:
@@ -945,13 +1157,36 @@ class GameService:
         player_id: UUID,
         node_key: str,
         fact_key: str,
-    ) -> PlayerWorldFactState:
+    ) -> Any:
+        if self.scope is not None:
+            instance_fact = self.db.get(
+                GameInstanceFactState,
+                (self.scope.game_instance_id, node_key, fact_key),
+            )
+            if instance_fact is None:
+                definition = self._world_definition().node(node_key)
+                initial = definition.fact(fact_key) if definition is not None else None
+                if initial is None:
+                    raise AppError(
+                        "STARFIRE_DEFINITION_INVALID",
+                        "A required ScenarioVersion fact definition is missing",
+                    )
+                instance_fact = GameInstanceFactState(
+                    game_instance_id=self.scope.game_instance_id,
+                    node_key=node_key,
+                    fact_key=fact_key,
+                    truth_value=initial.initial_value,
+                    visibility=initial.initial_visibility,
+                )
+                self.db.add(instance_fact)
+                self.db.flush()
+            return instance_fact
         node = self.db.scalar(select(WorldNode).where(WorldNode.key == node_key))
         if node is None:
             raise NotFoundError("node", node_key)
         fact = self.db.get(PlayerWorldFactState, (player_id, node.id, fact_key))
         if fact is None:
-            definition = STARFIRE_WORLD.node(node_key)
+            definition = self._world_definition().node(node_key)
             initial = definition.fact(fact_key) if definition is not None else None
             if initial is None:
                 raise AppError(
@@ -977,7 +1212,7 @@ class GameService:
         truth_value: object,
         *,
         visibility: Visibility | None = None,
-    ) -> PlayerWorldFactState:
+    ) -> Any:
         fact = self._fact_record(player_id, node_key, fact_key)
         changed = fact.truth_value != truth_value
         if changed:
@@ -995,7 +1230,7 @@ class GameService:
         node_key: str,
         fact_key: str,
         visibility: Visibility,
-    ) -> PlayerWorldFactState:
+    ) -> Any:
         fact = self._fact_record(player_id, node_key, fact_key)
         if fact.visibility != visibility:
             fact.visibility = visibility
@@ -1007,7 +1242,18 @@ class GameService:
         player_id: UUID,
         node_key: str,
         visibility: Visibility,
-    ) -> PlayerNodeState:
+    ) -> Any:
+        if self.scope is not None:
+            instance_state = self.db.get(
+                GameInstanceNodeState,
+                (self.scope.game_instance_id, node_key),
+            )
+            if instance_state is None:
+                raise NotFoundError("game_instance_node", node_key)
+            if instance_state.visibility != visibility:
+                instance_state.visibility = visibility
+                instance_state.version += 1
+            return instance_state
         node = self.db.scalar(select(WorldNode).where(WorldNode.key == node_key))
         if node is None:
             raise NotFoundError("node", node_key)
@@ -1029,8 +1275,25 @@ class GameService:
         if legacy_key is None:
             return
         fact = self._fact_record(player_id, node_key, fact_key)
-        legacy = self.db.get(PlayerWorldFact, (player_id, legacy_key))
         value = {"status": fact.truth_value}
+        if self.scope is not None:
+            instance_legacy = self.db.get(
+                GameInstanceWorldFact,
+                (self.scope.game_instance_id, legacy_key),
+            )
+            if instance_legacy is None:
+                self.db.add(
+                    GameInstanceWorldFact(
+                        game_instance_id=self.scope.game_instance_id,
+                        key=legacy_key,
+                        value=value,
+                    )
+                )
+            elif instance_legacy.value.get("status") != fact.truth_value:
+                instance_legacy.value = value
+                instance_legacy.version += 1
+            return
+        legacy = self.db.get(PlayerWorldFact, (player_id, legacy_key))
         if legacy is None:
             self.db.add(PlayerWorldFact(player_id=player_id, key=legacy_key, value=value))
         elif legacy.value.get("status") != fact.truth_value:
@@ -1043,13 +1306,29 @@ class GameService:
         node_key: str,
         fact_key: str,
         value: dict[str, object],
-    ) -> PlayerWorldFact:
+    ) -> Any:
         legacy_key = legacy_fact_key(node_key, fact_key)
         if legacy_key is None:
             raise AppError(
                 "STARFIRE_RULE_OUTCOME_INVALID",
                 "A Starfire rule produced a fact without a persistence projection",
             )
+        if self.scope is not None:
+            instance_legacy = self.db.get(
+                GameInstanceWorldFact,
+                (self.scope.game_instance_id, legacy_key),
+            )
+            if instance_legacy is None:
+                instance_legacy = GameInstanceWorldFact(
+                    game_instance_id=self.scope.game_instance_id,
+                    key=legacy_key,
+                    value=value,
+                )
+                self.db.add(instance_legacy)
+            else:
+                instance_legacy.value = value
+                instance_legacy.version += 1
+            return instance_legacy
         legacy = self.db.get(PlayerWorldFact, (player_id, legacy_key))
         if legacy is None:
             legacy = PlayerWorldFact(player_id=player_id, key=legacy_key, value=value)
@@ -1090,6 +1369,47 @@ class GameService:
         domain.morale = max(0, min(100, domain.morale + morale_delta))
         domain.version += 1
         self.db.flush()
+
+    def _assert_player(self, player_id: UUID) -> None:
+        if self.scope is not None and self.scope.player_id != player_id:
+            raise AppError(
+                "RUNTIME_SCOPE_PLAYER_MISMATCH",
+                "The requested Player does not own this GameInstance runtime",
+                status_code=403,
+            )
+
+    def _assert_operation_scope(self, operation: WorldOperation) -> None:
+        if self.scope is None:
+            if operation.game_instance_id is not None:
+                raise AppError(
+                    "RUNTIME_SCOPE_REQUIRED",
+                    "An instance-owned WorldOperation requires an explicit RuntimeScope",
+                    status_code=409,
+                )
+            return
+        if (
+            operation.game_instance_id != self.scope.game_instance_id
+            or operation.player_id != self.scope.player_id
+        ):
+            raise AppError(
+                "RUNTIME_SCOPE_INSTANCE_MISMATCH",
+                "The WorldOperation belongs to another GameInstance",
+                status_code=403,
+            )
+
+    def _world_definition(self) -> Any:
+        return (
+            self._version_snapshot.definition.world
+            if self._version_snapshot is not None
+            else STARFIRE_WORLD
+        )
+
+    @staticmethod
+    def _gold(
+        player: Player,
+        domain: PlayerDomainState | _InstanceResourceLedger,
+    ) -> int:
+        return domain.gold if isinstance(domain, _InstanceResourceLedger) else player.gold
 
 
 def seed_id(key: str) -> UUID:

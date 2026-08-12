@@ -18,6 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     inspect,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -190,6 +191,89 @@ def _reject_game_instance_binding_drift(
         )
 
 
+class GameInstanceNodeState(TimestampMixin, Base):
+    """Instance-owned node access and knowledge state, keyed by snapshot Node key."""
+
+    __tablename__ = "game_instance_node_states"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    node_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    status: Mapped[NodeStatus] = mapped_column(Enum(NodeStatus, native_enum=False))
+    visibility: Mapped[Visibility] = mapped_column(
+        Enum(Visibility, native_enum=False), default=Visibility.KNOWN
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceFactState(TimestampMixin, Base):
+    """Instance-owned canonical Truth and independent Knowledge visibility."""
+
+    __tablename__ = "game_instance_fact_states"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    node_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    fact_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    truth_value: Mapped[Any] = mapped_column(JSON)
+    visibility: Mapped[Visibility] = mapped_column(
+        Enum(Visibility, native_enum=False), default=Visibility.KNOWN
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceResourceState(TimestampMixin, Base):
+    """Generic Instance-owned balance initialized from ScenarioVersion resources."""
+
+    __tablename__ = "game_instance_resource_states"
+    __table_args__ = (
+        CheckConstraint("value >= 0", name="ck_instance_resource_value"),
+        CheckConstraint(
+            "reserved_value >= 0 AND reserved_value <= value",
+            name="ck_instance_resource_reserved",
+        ),
+    )
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    resource_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[int] = mapped_column(Integer)
+    reserved_value: Mapped[int] = mapped_column(Integer, default=0)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceWorldFact(TimestampMixin, Base):
+    """Instance-owned compatibility projection for existing flat fact consumers."""
+
+    __tablename__ = "game_instance_world_facts"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceOfficerAppointment(TimestampMixin, Base):
+    """Instance-owned officer assignment; NPC identity remains global definition data."""
+
+    __tablename__ = "game_instance_officer_appointments"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    npc_id: Mapped[UUID] = mapped_column(
+        ForeignKey("npcs.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
+    authority_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class PlayerNodeState(TimestampMixin, Base):
     __tablename__ = "player_node_states"
 
@@ -301,6 +385,11 @@ class ConversationSession(UUIDPrimaryKey, TimestampMixin, Base):
     __tablename__ = "conversation_sessions"
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
+    game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"),
+        index=True,
+        server_default=text("NULL"),
+    )
     npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
     status: Mapped[SessionStatus] = mapped_column(
         Enum(SessionStatus, native_enum=False), default=SessionStatus.ACTIVE
@@ -326,9 +415,20 @@ class Memory(UUIDPrimaryKey, Base):
     __tablename__ = "memories"
     __table_args__ = (
         Index("ix_memories_player_npc_importance", "player_id", "npc_id", "importance"),
+        Index(
+            "ix_memories_instance_npc_importance",
+            "game_instance_id",
+            "npc_id",
+            "importance",
+        ),
     )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
+    game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"),
+        index=True,
+        server_default=text("NULL"),
+    )
     npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
     type: Mapped[MemoryType] = mapped_column(Enum(MemoryType, native_enum=False))
     content: Mapped[str] = mapped_column(Text)
@@ -377,9 +477,17 @@ class AgentRun(UUIDPrimaryKey, Base):
 
 class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     __tablename__ = "agent_tasks"
-    __table_args__ = (Index("ix_agent_tasks_player_status", "player_id", "status"),)
+    __table_args__ = (
+        Index("ix_agent_tasks_player_status", "player_id", "status"),
+        Index("ix_agent_tasks_instance_status", "game_instance_id", "status"),
+    )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
+    game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"),
+        index=True,
+        server_default=text("NULL"),
+    )
     owner_npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
     origin_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     last_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
@@ -505,11 +613,31 @@ class WorldOperation(UUIDPrimaryKey, TimestampMixin, Base):
 
     __tablename__ = "world_operations"
     __table_args__ = (
-        UniqueConstraint("player_id", "idempotency_key"),
+        Index(
+            "uq_world_operations_legacy_idempotency",
+            "player_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("game_instance_id IS NULL"),
+            postgresql_where=text("game_instance_id IS NULL"),
+        ),
+        Index(
+            "uq_world_operations_instance_idempotency",
+            "game_instance_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("game_instance_id IS NOT NULL"),
+            postgresql_where=text("game_instance_id IS NOT NULL"),
+        ),
         Index("ix_world_operations_task_status", "task_id", "status"),
     )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
+    game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"),
+        index=True,
+        server_default=text("NULL"),
+    )
     task_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("agent_tasks.id", ondelete="SET NULL"), index=True
     )
@@ -537,6 +665,11 @@ class PlayerDecisionRequest(UUIDPrimaryKey, TimestampMixin, Base):
     __table_args__ = (Index("ix_decisions_task_status", "task_id", "status"),)
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
+    game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"),
+        index=True,
+        server_default=text("NULL"),
+    )
     task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
     step_id: Mapped[UUID] = mapped_column(ForeignKey("agent_steps.id", ondelete="CASCADE"))
     requested_by_npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
