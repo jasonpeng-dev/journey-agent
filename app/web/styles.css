@@ -632,13 +632,17 @@ details > summary::-webkit-details-marker {
   font-size: 8px;
 }
 
+.observer-fact {
+  grid-template-columns: minmax(0, 1fr) repeat(2, minmax(70px, auto));
+}
+
 .observer-fact small {
   grid-column: 1 / -1;
   color: var(--ink-soft);
 }
 
 .relation-row {
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(70px, auto) minmax(0, 1fr);
 }
 
 .relation-row .mini-chip {
@@ -1001,6 +1005,52 @@ details > summary::-webkit-details-marker {
   font-size: 8px;
 }
 
+.objective-display,
+.plan-flow-source,
+.labeled-technical-value,
+.dual-badge,
+.failure-display {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.technical-id {
+  color: #8b857a;
+  background: transparent;
+  font-size: 7px;
+  font-weight: 500;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.dual-badge {
+  padding: 4px 7px;
+}
+
+.dual-badge strong {
+  font-size: 9px;
+}
+
+.labeled-technical-value small {
+  color: var(--ink-soft);
+  font-size: 7px;
+}
+
+.labeled-technical-value strong {
+  font-size: 9px;
+}
+
+.objective-display strong {
+  font-size: 9px;
+}
+
+.objective-item > summary .technical-id {
+  display: block;
+  margin-top: 2px;
+}
+
 .objective-item > summary {
   color: var(--ink);
   font-size: 9px;
@@ -1014,11 +1064,18 @@ details > summary::-webkit-details-marker {
 }
 
 .requirement-row {
+  display: grid;
+  gap: 2px;
   padding: 5px 6px;
   border-left: 3px solid var(--gold);
   border-radius: 5px;
   background: #fff;
   font-size: 8px;
+}
+
+.requirement-row small {
+  color: var(--ink-soft);
+  font-size: 7px;
 }
 
 .requirement-row.success {
@@ -1052,6 +1109,11 @@ details > summary::-webkit-details-marker {
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.task-stats .technical-id {
+  display: block;
+  margin-top: 2px;
 }
 
 .waiting-card {
@@ -1108,6 +1170,10 @@ details > summary::-webkit-details-marker {
 .plan-arrow {
   color: #9a8051;
   font-size: 8px;
+}
+
+.plan-flow-source .technical-id {
+  margin-top: 2px;
 }
 
 .plan-card {
