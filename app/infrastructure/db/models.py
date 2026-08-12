@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -95,6 +96,16 @@ class ScenarioVersion(UUIDPrimaryKey, Base):
     behavior_bundle_version: Mapped[str] = mapped_column(String(100))
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ScenarioVersionImmutableError(RuntimeError):
+    """Raised when ORM code attempts to mutate a published ScenarioVersion."""
+
+
+@event.listens_for(ScenarioVersion, "before_update")
+@event.listens_for(ScenarioVersion, "before_delete")
+def _reject_scenario_version_mutation(*_args: object) -> None:
+    raise ScenarioVersionImmutableError("Published ScenarioVersion rows are immutable")
 
 
 class World(UUIDPrimaryKey, TimestampMixin, Base):
