@@ -132,7 +132,13 @@ def test_strategic_facade_auto_drives_to_pauses_and_completion(
     assert task["current_plan_version"] == 2
     assert snapshot["known_world_state"]["starfire_outpost_status"] == "OPERATIONAL"
     assert snapshot["known_world_state"]["northern_trade_route_status"] == "OPEN"
-    assert any(item["kind"] == "FINAL_REPORT" for item in snapshot["timeline"])
+    assert not any(item["kind"] == "FINAL_REPORT" for item in snapshot["timeline"])
+    assert any(
+        step["status"] == "SKIPPED"
+        and step["actual_result"] == {"skip_reason": "OBJECTIVE_SCOPE_SATISFIED"}
+        for plan in task["plans"]
+        for step in plan["steps"]
+    )
     assert any(run["tools"] for run in snapshot["recent_traces"])
 
 

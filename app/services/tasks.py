@@ -35,6 +35,7 @@ from app.scenarios.contracts import (
     ObjectiveContractError,
     ObjectiveResolutionStatus,
     ObjectiveScope,
+    ScopedObjectiveEvaluation,
 )
 from app.scenarios.registry import scenario_binding, scenario_objective_catalog
 from app.services.game import GameService
@@ -198,6 +199,34 @@ class TaskService:
         task.version += 1
         self.db.flush()
         return scope
+
+    def resolve_and_freeze_scope(
+        self,
+        task: AgentTask,
+        scope: ObjectiveScope,
+        *,
+        resolver_source: str,
+        resolver_version: str,
+        confirmation_source: str,
+        freeze_source: str,
+    ) -> ObjectiveScope:
+        """Persist an exact resolution and freeze it in the caller's transaction."""
+
+        self.record_goal_resolution(
+            task,
+            GoalResolutionResult(
+                status=ObjectiveResolutionStatus.RESOLVED,
+                scope=scope,
+                resolver_source=resolver_source,
+                resolver_version=resolver_version,
+            ),
+        )
+        return self.confirm_and_freeze_scope(
+            task,
+            scope,
+            confirmation_source=confirmation_source,
+            freeze_source=freeze_source,
+        )
 
     def load_frozen_scope(self, task: AgentTask) -> ObjectiveScope | None:
         if task.objective_frozen_at is None:
@@ -611,32 +640,80 @@ class TaskService:
         self.db.flush()
         return "REPLAN_REQUIRED"
 
+    def evaluate_scope(self, task: AgentTask) -> ScopedObjectiveEvaluation:
+        scope = self.require_frozen_scope(task)
+        catalog = scenario_objective_catalog(task.scenario_key, scope.catalog_version)
+        if catalog is None:
+            raise AppError(
+                "OBJECTIVE_CATALOG_VERSION_UNAVAILABLE",
+                "The objective catalog version frozen by the task is unavailable",
+                status_code=409,
+            )
+        state = GameService(self.db).scenario_truth_state(task.player_id)
+        return catalog.evaluate(scope, state)
+
+    def complete_if_scope_satisfied(
+        self,
+        task: AgentTask,
+        plan: AgentPlan | None = None,
+    ) -> bool:
+        evaluation = self.evaluate_scope(task)
+        if not evaluation.completed:
+            return False
+        if plan is not None:
+            steps = self.plan_steps(plan.id)
+            if any(step.status == AgentStepStatus.IN_PROGRESS for step in steps):
+                return False
+            now = datetime.now(UTC)
+            for step in steps:
+                if step.status in {
+                    AgentStepStatus.PENDING,
+                    AgentStepStatus.REQUIRES_PLAYER_DECISION,
+                    AgentStepStatus.WAITING_FOR_PLAYER_ACTION,
+                    AgentStepStatus.WAITING_FOR_WORLD_EVENT,
+                }:
+                    step.status = AgentStepStatus.SKIPPED
+                    step.actual_result = {"skip_reason": "OBJECTIVE_SCOPE_SATISFIED"}
+                    step.completed_at = now
+            plan.status = AgentPlanStatus.SUCCEEDED
+        self._complete_task(task, plan, evaluation)
+        return True
+
     def finish_if_complete(self, task: AgentTask, plan: AgentPlan) -> bool:
         steps = self.plan_steps(plan.id)
         if not steps or any(step.status != AgentStepStatus.SUCCEEDED for step in steps):
             return False
-        scenario = scenario_binding(task.scenario_key)
-        if scenario is None:
-            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
-        state = GameService(self.db).scenario_truth_state(task.player_id)
-        objective = scenario.objective_evaluator.evaluate(state)
-        if not objective.completed:
+        evaluation = self.evaluate_scope(task)
+        if not evaluation.completed:
             plan.status = AgentPlanStatus.FAILED
             task.status = AgentTaskStatus.BLOCKED
             task.last_error_code = "TASK_GOAL_NOT_VERIFIED"
             task.version += 1
             self.db.flush()
             return False
-        now = datetime.now(UTC)
         plan.status = AgentPlanStatus.SUCCEEDED
+        self._complete_task(task, plan, evaluation)
+        return True
+
+    def _complete_task(
+        self,
+        task: AgentTask,
+        plan: AgentPlan | None,
+        evaluation: ScopedObjectiveEvaluation,
+    ) -> None:
+        now = datetime.now(UTC)
         task.status = AgentTaskStatus.SUCCEEDED
         task.completed_at = now
         task.last_error_code = None
         task.version += 1
         source_event_id = f"strategic-task:{task.id}:completed"
+        steps = self.plan_steps(plan.id) if plan is not None else []
         officer_ids = {step.assigned_npc_id for step in steps if step.assigned_npc_id is not None}
         officer_ids.add(task.owner_npc_id)
-        report = f"Command completed under Plan v{plan.version}: {objective.summary}."
+        plan_label = f"Plan v{plan.version}" if plan is not None else "scope precheck"
+        report = (
+            f"Command completed under {plan_label}: {', '.join(evaluation.scope.objective_keys)}."
+        )
         for officer_id in officer_ids:
             existing = self.db.scalar(
                 select(Memory).where(
@@ -658,7 +735,6 @@ class TaskService:
                     )
                 )
         self.db.flush()
-        return True
 
     def bind_session(self, task: AgentTask, session: ConversationSession) -> None:
         if session.player_id != task.player_id:

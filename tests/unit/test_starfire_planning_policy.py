@@ -5,6 +5,7 @@ from app.scenarios.starfire.fallback_plans import (
     STARFIRE_FALLBACK_PLANS,
     initial_strategic_starfire_plan,
 )
+from app.scenarios.starfire.objective_catalog import FULL_STARFIRE_SCOPE
 from app.scenarios.starfire.planning_policy import STARFIRE_PLANNING_POLICY
 from app.scenarios.starfire.ruleset import (
     StarfireFactState,
@@ -23,7 +24,7 @@ def test_registry_binds_starfire_planning_objectives_and_fallbacks() -> None:
 
 
 def test_starfire_policy_accepts_current_initial_fallback_plan() -> None:
-    proposal = initial_strategic_starfire_plan(uuid4())
+    proposal = initial_strategic_starfire_plan(uuid4(), FULL_STARFIRE_SCOPE)
     steps = proposal["steps"]
     selected_tools = [
         str(step["selected_tool_name"]) for step in steps if step["selected_tool_name"] is not None
@@ -35,6 +36,7 @@ def test_starfire_policy_accepts_current_initial_fallback_plan() -> None:
         sum(step["execution_type"] != "TOOL" for step in steps),
         is_replan=False,
         state=_state(),
+        scope=FULL_STARFIRE_SCOPE,
     )
 
     assert issues == ()
@@ -51,7 +53,7 @@ def test_starfire_policy_uses_canonical_state_for_completed_effects() -> None:
     assert STARFIRE_PLANNING_POLICY.effect_satisfied("start_outpost_repair", {}, state)
     assert not STARFIRE_PLANNING_POLICY.effect_satisfied("start_trade_route_test", {}, state)
     constraints = STARFIRE_PLANNING_POLICY.build_planning_constraints(
-        "REPLAN", "TRADE_SUPPORT_REQUIRED", state
+        "REPLAN", "TRADE_SUPPORT_REQUIRED", state, FULL_STARFIRE_SCOPE
     )
     canonical = constraints["canonical_facts"]
     assert isinstance(canonical, dict)
@@ -60,7 +62,7 @@ def test_starfire_policy_uses_canonical_state_for_completed_effects() -> None:
 
 
 def test_starfire_policy_rejects_wrong_business_order() -> None:
-    proposal = initial_strategic_starfire_plan(uuid4())
+    proposal = initial_strategic_starfire_plan(uuid4(), FULL_STARFIRE_SCOPE)
     steps = proposal["steps"]
     repair_index = next(
         index
@@ -83,6 +85,7 @@ def test_starfire_policy_rejects_wrong_business_order() -> None:
         sum(step["execution_type"] != "TOOL" for step in steps),
         is_replan=False,
         state=_state(),
+        scope=FULL_STARFIRE_SCOPE,
     )
 
     assert "PLAN_STEP_ORDER_INVALID" in {issue.code for issue in issues}
@@ -98,6 +101,7 @@ def test_state_aware_fallback_uses_only_remaining_canonical_suffix() -> None:
             outpost_status="OPERATIONAL",
             trade_route_status="CLOSED",
         ),
+        FULL_STARFIRE_SCOPE,
     )
     tool_steps = [step for step in proposal["steps"] if step["selected_tool_name"]]
     tool_names = [step["selected_tool_name"] for step in tool_steps]

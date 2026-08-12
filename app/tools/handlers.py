@@ -127,8 +127,15 @@ class PlanStepArgs(StrictArgs):
     resume_condition: dict[str, Any] | None = None
 
 
+class PlanObjectiveScopeArgs(StrictArgs):
+    scenario_key: str = Field(min_length=1, max_length=100)
+    catalog_version: str = Field(min_length=1, max_length=100)
+    objective_keys: list[str] = Field(min_length=1, max_length=20)
+
+
 class CreateTaskPlanArgs(StrictArgs):
     task_id: UUID
+    objective_scope: PlanObjectiveScopeArgs
     strategy_summary: str = Field(min_length=3, max_length=1000)
     steps: list[PlanStepArgs] = Field(min_length=1, max_length=12)
     idempotency_key: str = Field(min_length=8, max_length=160)

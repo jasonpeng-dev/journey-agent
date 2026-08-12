@@ -28,6 +28,7 @@ from app.infrastructure.db.models import (
     ToolExecution,
 )
 from app.scenarios.starfire.fallback_plans import initial_strategic_starfire_plan
+from app.scenarios.starfire.objective_catalog import FULL_STARFIRE_SCOPE
 from app.services.game import GameService, seed_id
 from app.services.seed import seed_demo_world
 from app.services.tasks import TaskService
@@ -222,12 +223,21 @@ def _run_plan_validation_case(scenario: dict[str, Any]) -> tuple[bool, str]:
         )
         db.add(conversation)
         db.flush()
-        task = TaskService(db).create_task(
+        tasks = TaskService(db)
+        task = tasks.create_task(
             conversation,
             "修复星火前哨并重新打通北方商路。",
             "starfire_command",
         )
-        proposal = deepcopy(initial_strategic_starfire_plan(task.id))
+        tasks.resolve_and_freeze_scope(
+            task,
+            FULL_STARFIRE_SCOPE,
+            resolver_source="EVAL_FIXTURE",
+            resolver_version="v1",
+            confirmation_source="EVAL_FIXTURE",
+            freeze_source="EVAL_FIXTURE",
+        )
+        proposal = deepcopy(initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE))
         tool_name = "create_task_plan"
         mutation = str(scenario["mutation"])
         operation = next(

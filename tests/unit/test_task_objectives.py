@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.enums import AgentStepStatus
 from app.infrastructure.db.models import AgentRun, ConversationSession
+from app.scenarios.starfire.objective_catalog import FULL_STARFIRE_SCOPE
 from app.services.game import GameService, seed_id
 from app.services.tasks import TaskService
 
@@ -35,6 +36,14 @@ def test_starfire_task_completion_requires_all_world_objectives(
     session.flush()
     tasks = TaskService(session)
     task = tasks.create_task(conversation, "Verify the Starfire objective", "starfire_command")
+    tasks.resolve_and_freeze_scope(
+        task,
+        FULL_STARFIRE_SCOPE,
+        resolver_source="TEST",
+        resolver_version="v1",
+        confirmation_source="TEST",
+        freeze_source="TEST",
+    )
     run = AgentRun(
         request_id=uuid4(),
         session_id=conversation.id,

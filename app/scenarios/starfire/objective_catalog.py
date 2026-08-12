@@ -240,3 +240,6 @@ class StarfireObjectiveCatalog:
 
 
 STARFIRE_OBJECTIVE_CATALOG = StarfireObjectiveCatalog()
+FULL_STARFIRE_SCOPE = STARFIRE_OBJECTIVE_CATALOG.scope(
+    [StarfireObjectiveKey.FULL_NORTHERN_RECOVERY]
+)

@@ -300,6 +300,7 @@ class ScenarioPlanningPolicy(Protocol):
         *,
         is_replan: bool,
         state: ScenarioRuntimeState,
+        scope: ObjectiveScope,
     ) -> tuple[ScenarioPlanIssue, ...]: ...
 
     def effect_satisfied(
@@ -314,6 +315,7 @@ class ScenarioPlanningPolicy(Protocol):
         kind: Literal["PLAN", "REPLAN"],
         reason: str | None,
         state: ScenarioRuntimeState,
+        scope: ObjectiveScope,
     ) -> Mapping[str, object]: ...
 
     def replan_guidance(self, reason: str | None) -> str | None: ...
@@ -328,9 +330,15 @@ class ScenarioObjectiveEvaluator(Protocol):
 class ScenarioFallbackPlans(Protocol):
     def supports_state_aware_recovery(self, reason: str) -> bool: ...
 
-    def initial(self, task_id: UUID) -> dict[str, Any]: ...
+    def initial(self, task_id: UUID, scope: ObjectiveScope) -> dict[str, Any]: ...
 
-    def recovery(self, task_id: UUID, next_version: int, reason: str) -> dict[str, Any]: ...
+    def recovery(
+        self,
+        task_id: UUID,
+        next_version: int,
+        reason: str,
+        scope: ObjectiveScope,
+    ) -> dict[str, Any]: ...
 
     def state_aware_recovery(
         self,
@@ -338,4 +346,5 @@ class ScenarioFallbackPlans(Protocol):
         next_version: int,
         reason: str,
         state: ScenarioRuntimeState,
+        scope: ObjectiveScope,
     ) -> dict[str, Any]: ...

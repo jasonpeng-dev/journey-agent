@@ -75,6 +75,9 @@ class TaskOrchestrator:
         if resolution_event is not None:
             self.db.commit()
             return task, None, resolution_event
+        if self.tasks.complete_if_scope_satisfied(task):
+            self.db.commit()
+            return task, None, "TASK_SUCCEEDED"
         run, result = await self._generate_plan(session, task)
         return task, run, "PLANNED" if result.ok else "PLANNING_FAILED"
 
@@ -100,8 +103,14 @@ class TaskOrchestrator:
             if resolution_event is not None:
                 self.db.commit()
                 return task, None, resolution_event
+            if self.tasks.complete_if_scope_satisfied(task):
+                self.db.commit()
+                return task, None, "TASK_SUCCEEDED"
             self.db.commit()
             return await self._plan_missing_task(task, session)
+        if self.tasks.complete_if_scope_satisfied(task, plan):
+            self.db.commit()
+            return task, None, "TASK_SUCCEEDED"
         failed = self.db.scalar(
             select(AgentStep)
             .where(
@@ -123,6 +132,8 @@ class TaskOrchestrator:
             return task, None, "REQUIRES_PLAYER_DECISION"
         if step.execution_type != StepExecutionType.TOOL:
             outcome = self.tasks.evaluate_wait(task, step)
+            if outcome == "RESUMED" and self.tasks.complete_if_scope_satisfied(task, plan):
+                outcome = "TASK_SUCCEEDED"
             self.db.commit()
             run = self._record_wait_check(session, task, plan, step, outcome)
             if outcome == "REPLAN_REQUIRED":
@@ -149,8 +160,10 @@ class TaskOrchestrator:
         )
         plan = self.tasks.current_plan(task)
         assert plan is not None
-        if result.ok and self.tasks.next_step(plan.id) is None:
-            self.tasks.finish_if_complete(task, plan)
+        if result.ok:
+            completed = self.tasks.complete_if_scope_satisfied(task, plan)
+            if not completed and self.tasks.next_step(plan.id) is None:
+                self.tasks.finish_if_complete(task, plan)
             self.db.commit()
         if result.code == "PLAYER_APPROVAL_REQUIRED":
             return task, run, "REQUIRES_PLAYER_DECISION"
@@ -238,6 +251,10 @@ class TaskOrchestrator:
         session: ConversationSession,
         reason: str,
     ) -> tuple[AgentTask, AgentRun | None, str]:
+        current_plan = self.tasks.current_plan(task)
+        if self.tasks.complete_if_scope_satisfied(task, current_plan):
+            self.db.commit()
+            return task, None, "TASK_SUCCEEDED"
         scenario = scenario_binding(task.scenario_key)
         if scenario is None:
             task.status = AgentTaskStatus.BLOCKED
@@ -266,6 +283,7 @@ class TaskOrchestrator:
         )
         if not result.ok and scenario.fallback_plans.supports_state_aware_recovery(reason):
             state = GameService(self.db).scenario_known_state(task.player_id)
+            scope = self.tasks.require_frozen_scope(task)
             task.status = AgentTaskStatus.ACTIVE
             task.last_error_code = reason
             self.db.commit()
@@ -277,6 +295,7 @@ class TaskOrchestrator:
                     task.current_plan_version + 1,
                     reason,
                     state,
+                    scope,
                 ),
                 tool_name="replan_task",
                 purpose="REPLAN",

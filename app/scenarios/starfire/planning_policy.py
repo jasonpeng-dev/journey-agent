@@ -7,8 +7,13 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from app.scenarios.contracts import (
+    ObjectiveScope,
     ScenarioPlanIssue,
     ScenarioRuntimeState,
+)
+from app.scenarios.starfire.objective_catalog import (
+    STARFIRE_OBJECTIVE_CATALOG,
+    StarfireObjectiveKey,
 )
 
 _EXECUTION_TOOLS = frozenset(
@@ -157,13 +162,10 @@ class StarfirePlanningPolicy:
         *,
         is_replan: bool,
         state: ScenarioRuntimeState,
+        scope: ObjectiveScope,
     ) -> tuple[ScenarioPlanIssue, ...]:
         issues: list[ScenarioPlanIssue] = []
-        required = {
-            "start_military_operation",
-            "start_outpost_repair",
-            "start_trade_route_test",
-        }
+        required = self._required_tools(scope)
         if is_replan:
             required = {tool for tool in required if not self.effect_satisfied(tool, {}, state)}
         for tool_name in sorted(required.difference(selected_tools)):
@@ -174,12 +176,13 @@ class StarfirePlanningPolicy:
                     message=f"The command plan cannot satisfy its goal without {tool_name}",
                 )
             )
-        if not is_replan and wait_count < 3:
+        required_waits = len(required.intersection(self.operation_tools))
+        if not is_replan and wait_count < required_waits:
             issues.append(
                 ScenarioPlanIssue(
                     code="PLAN_GOAL_COVERAGE_INCOMPLETE",
                     path="steps",
-                    message="Military, construction, and trade outcomes must be world-verified",
+                    message="Every scoped asynchronous operation must be world-verified",
                 )
             )
         for index, step in enumerate(steps):
@@ -231,7 +234,7 @@ class StarfirePlanningPolicy:
                         message=f"{before} must occur before {after}",
                     )
                 )
-        issues.extend(self._validate_final_verification(steps))
+        issues.extend(self._validate_final_verification(steps, scope))
         return tuple(issues)
 
     def effect_satisfied(
@@ -270,6 +273,7 @@ class StarfirePlanningPolicy:
         kind: Literal["PLAN", "REPLAN"],
         reason: str | None,
         state: ScenarioRuntimeState,
+        scope: ObjectiveScope,
     ) -> Mapping[str, object]:
         canonical_facts = self._canonical_facts(state)
         return {
@@ -281,19 +285,7 @@ class StarfirePlanningPolicy:
                         "Do not add inspect_task_requirements or a redundant initial "
                         "inspection step"
                     ),
-                    "ordered_phases": [
-                        "start_recon_operation",
-                        "WAIT_FOR_WORLD_EVENT for reconnaissance",
-                        "negotiate_village_support for GUIDE or SUPPLIES",
-                        "start_military_operation to secure the valley",
-                        "WAIT_FOR_WORLD_EVENT for military resolution",
-                        "start_outpost_repair",
-                        "WAIT_FOR_WORLD_EVENT for construction",
-                        "start_trade_route_test",
-                        "WAIT_FOR_WORLD_EVENT for trade resolution",
-                        "inspect_command_state with action_intent=VERIFY_AND_REPORT",
-                    ],
-                    "exact_step_count": 10,
+                    "ordered_phases": self._scoped_blueprint(scope),
                     "dependency_rules": [
                         "Military valley clearance must occur before outpost repair",
                         "Outpost repair must occur before the trade test",
@@ -317,10 +309,7 @@ class StarfirePlanningPolicy:
                 "allowed_tool_names": ["inspect_command_state"],
                 "selected_tool_name": "inspect_command_state",
                 "tool_arguments": {},
-                "expected_outcome": {
-                    "valley_security": "SAFE",
-                    "northern_trade_route_status": "OPEN",
-                },
+                "expected_outcome": self._verification_expectations(scope),
                 "resume_condition": None,
             },
         }
@@ -331,9 +320,8 @@ class StarfirePlanningPolicy:
     def planner_instruction(self, kind: Literal["PLAN", "REPLAN"]) -> str:
         if kind == "PLAN":
             return (
-                " For the initial starfire_command plan, follow "
-                "constraints.strategic_initial_plan_blueprint exactly: use ten steps in "
-                "the listed phase order and do not add a redundant inspection step. "
+                " Follow the frozen objective_scope and its scoped constraints; do not add "
+                "objectives, tools, or terminal verification outside that scope. "
                 "Write strategy_summary and every step description in concise Simplified Chinese."
             )
         return (
@@ -344,6 +332,7 @@ class StarfirePlanningPolicy:
     @staticmethod
     def _validate_final_verification(
         steps: Sequence[Mapping[str, Any]],
+        scope: ObjectiveScope,
     ) -> tuple[ScenarioPlanIssue, ...]:
         if not steps:
             return ()
@@ -367,19 +356,88 @@ class StarfirePlanningPolicy:
         issues = []
         expected_outcome = final.get("expected_outcome")
         expected_values = expected_outcome if isinstance(expected_outcome, Mapping) else {}
-        for key, expected in {
-            "valley_security": "SAFE",
-            "northern_trade_route_status": "OPEN",
-        }.items():
-            if expected_values.get(key) != expected:
+        for key, accepted in StarfirePlanningPolicy._verification_accepted(scope).items():
+            if expected_values.get(key) not in accepted:
                 issues.append(
                     ScenarioPlanIssue(
                         code="PLAN_FINAL_VERIFICATION_REQUIRED",
                         path=f"steps.{len(steps) - 1}.expected_outcome.{key}",
-                        message=f"The final verification must expect {key}={expected}",
+                        message=(f"The final verification must expect {key} in {sorted(accepted)}"),
                     )
                 )
         return tuple(issues)
+
+    @staticmethod
+    def _required_tools(scope: ObjectiveScope) -> set[str]:
+        keys = set(scope.objective_keys)
+        required: set[str] = set()
+        if StarfireObjectiveKey.GATHER_VALLEY_INTELLIGENCE.value in keys:
+            required.add("start_recon_operation")
+        if keys.intersection(
+            {
+                StarfireObjectiveKey.SECURE_NORTHERN_VALLEY.value,
+                StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST.value,
+                StarfireObjectiveKey.OPEN_NORTHERN_TRADE_ROUTE.value,
+                StarfireObjectiveKey.FULL_NORTHERN_RECOVERY.value,
+            }
+        ):
+            required.add("start_military_operation")
+        if keys.intersection(
+            {
+                StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST.value,
+                StarfireObjectiveKey.OPEN_NORTHERN_TRADE_ROUTE.value,
+                StarfireObjectiveKey.FULL_NORTHERN_RECOVERY.value,
+            }
+        ):
+            required.add("start_outpost_repair")
+        if keys.intersection(
+            {
+                StarfireObjectiveKey.OPEN_NORTHERN_TRADE_ROUTE.value,
+                StarfireObjectiveKey.FULL_NORTHERN_RECOVERY.value,
+            }
+        ):
+            required.add("start_trade_route_test")
+        return required
+
+    @staticmethod
+    def _verification_accepted(scope: ObjectiveScope) -> dict[str, frozenset[str]]:
+        field_by_fact = {
+            ("northern_valley", "valley_intelligence"): "valley_intelligence",
+            ("northern_valley", "valley_security"): "valley_security",
+            ("starfire_outpost", "outpost_status"): "starfire_outpost_status",
+            ("northern_trade_route", "trade_route_status"): ("northern_trade_route_status"),
+        }
+        return {
+            field_by_fact[(requirement.node_key, requirement.fact_key)]: (
+                requirement.accepted_values
+            )
+            for requirement in STARFIRE_OBJECTIVE_CATALOG.verification_requirements(scope)
+        }
+
+    @classmethod
+    def _verification_expectations(cls, scope: ObjectiveScope) -> dict[str, str]:
+        preferred = {
+            "valley_intelligence": "PARTIAL",
+            "valley_security": "SAFE",
+            "starfire_outpost_status": "OPERATIONAL",
+            "northern_trade_route_status": "OPEN",
+        }
+        return {field: preferred[field] for field in cls._verification_accepted(scope)}
+
+    @classmethod
+    def _scoped_blueprint(cls, scope: ObjectiveScope) -> list[str]:
+        required = cls._required_tools(scope)
+        phases: list[str] = []
+        for tool, description in (
+            ("start_recon_operation", "start_recon_operation and wait for resolution"),
+            ("start_military_operation", "secure the valley and wait for resolution"),
+            ("start_outpost_repair", "repair the outpost and wait for resolution"),
+            ("start_trade_route_test", "test the trade route and wait for resolution"),
+        ):
+            if tool in required:
+                phases.append(description)
+        phases.append("inspect_command_state with action_intent=VERIFY_AND_REPORT")
+        return phases
 
     def _replan_blueprint(
         self,

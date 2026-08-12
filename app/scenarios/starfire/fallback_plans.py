@@ -4,12 +4,17 @@ from typing import Any
 from uuid import UUID
 
 from app.domain.enums import StepExecutionType
-from app.scenarios.contracts import ScenarioRuntimeState
+from app.scenarios.contracts import ObjectiveScope, ScenarioRuntimeState
+from app.scenarios.starfire.objective_catalog import StarfireObjectiveKey
 
 
-def initial_strategic_starfire_plan(task_id: UUID) -> dict[str, Any]:
-    return {
+def initial_strategic_starfire_plan(
+    task_id: UUID,
+    scope: ObjectiveScope,
+) -> dict[str, Any]:
+    plan: dict[str, Any] = {
         "task_id": str(task_id),
+        "objective_scope": _scope_payload(scope),
         "strategy_summary": (
             "沈策先核验领地资源与公开情报, 再由韩烈侦察并清剿山谷, "
             "山谷安全后交由陆宁修复前哨并进行北方商路通行测试。"
@@ -95,23 +100,32 @@ def initial_strategic_starfire_plan(task_id: UUID) -> dict[str, Any]:
                 source_step_sequence=8,
                 success_outcomes=["COMPLETED"],
             ),
-            _report_step(),
+            _scoped_report_step(scope),
         ],
         "idempotency_key": f"task-plan-{task_id}-v1",
     }
+    stage = _scope_stage(scope)
+    last_operation_step = {1: 3, 2: 5, 3: 7, 4: 9}[stage]
+    plan["steps"] = [
+        *plan["steps"][:last_operation_step],
+        _scoped_report_step(scope),
+    ]
+    return plan
 
 
 def recovery_strategic_starfire_plan(
     task_id: UUID,
     next_version: int,
     reason: str,
+    scope: ObjectiveScope,
 ) -> dict[str, Any]:
     # A failed trade start means the military and construction suffix has
     # already succeeded. Repeating those operations would be unsafe and can
     # consume resources twice, so recover only the missing trade prerequisite.
     if reason == "TRADE_SUPPORT_REQUIRED":
-        return {
+        plan = {
             "task_id": str(task_id),
+            "objective_scope": _scope_payload(scope),
             "strategy_summary": (
                 "北方商路测试缺少村落支持。陆宁先以授权范围内的粮草换取向导, "
                 "再重新测试商路并由沈策核验结果。"
@@ -141,12 +155,14 @@ def recovery_strategic_starfire_plan(
                     source_step_sequence=2,
                     success_outcomes=["COMPLETED"],
                 ),
-                _strategic_report_step(),
+                _scoped_report_step(scope),
             ],
             "idempotency_key": f"task-replan-{task_id}-v{next_version}",
         }
-    return {
+        return _trim_recovery_plan(plan, scope)
+    plan = {
         "task_id": str(task_id),
+        "objective_scope": _scope_payload(scope),
         "strategy_summary": (
             "沈策根据新发现的敌军补给线调整方案: 先由陆宁争取村落向导, "
             "再命韩烈切断补给并重新清剿山谷, 最后将安全通道交由陆宁"
@@ -234,10 +250,11 @@ def recovery_strategic_starfire_plan(
                 source_step_sequence=8,
                 success_outcomes=["COMPLETED"],
             ),
-            _report_step(),
+            _scoped_report_step(scope),
         ],
         "idempotency_key": f"task-replan-{task_id}-v{next_version}",
     }
+    return _trim_recovery_plan(plan, scope)
 
 
 def state_aware_strategic_recovery_plan(
@@ -245,11 +262,13 @@ def state_aware_strategic_recovery_plan(
     next_version: int,
     reason: str,
     state: ScenarioRuntimeState,
+    scope: ObjectiveScope,
 ) -> dict[str, Any]:
     """Safe fallback when a model cannot produce a valid recovery suffix."""
     steps: list[dict[str, Any]] = []
     support = state.fact_value("north_village", "village_support")
-    if support not in {"GUIDE", "SUPPLIES"}:
+    stage = _scope_stage(scope)
+    if stage >= 4 and support not in {"GUIDE", "SUPPLIES"}:
         steps.append(
             _tool_step(
                 "陆宁以授权范围内的粮草换取村落向导支持",
@@ -262,7 +281,8 @@ def state_aware_strategic_recovery_plan(
             )
         )
     if (
-        reason == "ENCOUNTER_DEFEAT"
+        stage >= 2
+        and reason == "ENCOUNTER_DEFEAT"
         and state.fact_value("enemy_north_supply_route", "supply_status") == "ACTIVE"
     ):
         steps.append(
@@ -288,7 +308,7 @@ def state_aware_strategic_recovery_plan(
                 success_outcomes=["VICTORY"],
             )
         )
-    if state.fact_value("northern_valley", "valley_security") != "SAFE":
+    if stage >= 2 and state.fact_value("northern_valley", "valley_security") != "SAFE":
         steps.append(
             _tool_step(
                 "敌军补给受阻后韩烈再次谨慎清剿山谷",
@@ -312,7 +332,7 @@ def state_aware_strategic_recovery_plan(
                 success_outcomes=["VICTORY"],
             )
         )
-    if state.fact_value("starfire_outpost", "outpost_status") not in {
+    if stage >= 3 and state.fact_value("starfire_outpost", "outpost_status") not in {
         "OPERATIONAL",
         "RESTORED",
     }:
@@ -339,7 +359,7 @@ def state_aware_strategic_recovery_plan(
                 success_outcomes=["COMPLETED"],
             )
         )
-    if state.fact_value("northern_trade_route", "trade_route_status") != "OPEN":
+    if stage >= 4 and state.fact_value("northern_trade_route", "trade_route_status") != "OPEN":
         steps.append(
             _tool_step(
                 "陆宁重新测试北方商路通行状态",
@@ -358,9 +378,10 @@ def state_aware_strategic_recovery_plan(
                 success_outcomes=["COMPLETED"],
             )
         )
-    steps.append(_strategic_report_step())
+    steps.append(_scoped_report_step(scope))
     return {
         "task_id": str(task_id),
+        "objective_scope": _scope_payload(scope),
         "strategy_summary": (
             "模型方案未通过安全校验, 系统依据已验证世界状态启用受约束恢复方案: "
             "仅补足尚未完成的阶段, 避免重复消耗和重复行动。"
@@ -419,34 +440,14 @@ def _world_wait(
     }
 
 
-def _report_step() -> dict[str, Any]:
+def _scoped_report_step(scope: ObjectiveScope) -> dict[str, Any]:
     return _tool_step(
-        "沈策核验恢复后的安全通道, 并向主公汇报军令结果",
+        "沈策按照冻结的任务目标核验终局状态并向主公汇报",
         "shen_ce",
         "VERIFY_AND_REPORT",
         "inspect_command_state",
         {},
-        {
-            "valley_security": "SAFE",
-            "starfire_outpost_status": "OPERATIONAL",
-            "northern_trade_route_status": "OPEN",
-        },
-        constraints={"world_facts_must_be_verified": True},
-    )
-
-
-def _strategic_report_step() -> dict[str, Any]:
-    """Final verification that accepts either temporary or full restoration."""
-    return _tool_step(
-        "沈策核验安全山谷和已恢复的北方商路, 并向主公汇报",
-        "shen_ce",
-        "VERIFY_AND_REPORT",
-        "inspect_command_state",
-        {},
-        {
-            "valley_security": "SAFE",
-            "northern_trade_route_status": "OPEN",
-        },
+        _scope_expected_outcomes(scope),
         constraints={"world_facts_must_be_verified": True},
     )
 
@@ -455,11 +456,17 @@ class StarfireFallbackPlans:
     def supports_state_aware_recovery(self, reason: str) -> bool:
         return reason in {"ENCOUNTER_DEFEAT", "TRADE_SUPPORT_REQUIRED"}
 
-    def initial(self, task_id: UUID) -> dict[str, Any]:
-        return initial_strategic_starfire_plan(task_id)
+    def initial(self, task_id: UUID, scope: ObjectiveScope) -> dict[str, Any]:
+        return initial_strategic_starfire_plan(task_id, scope)
 
-    def recovery(self, task_id: UUID, next_version: int, reason: str) -> dict[str, Any]:
-        return recovery_strategic_starfire_plan(task_id, next_version, reason)
+    def recovery(
+        self,
+        task_id: UUID,
+        next_version: int,
+        reason: str,
+        scope: ObjectiveScope,
+    ) -> dict[str, Any]:
+        return recovery_strategic_starfire_plan(task_id, next_version, reason, scope)
 
     def state_aware_recovery(
         self,
@@ -467,8 +474,90 @@ class StarfireFallbackPlans:
         next_version: int,
         reason: str,
         state: ScenarioRuntimeState,
+        scope: ObjectiveScope,
     ) -> dict[str, Any]:
-        return state_aware_strategic_recovery_plan(task_id, next_version, reason, state)
+        return state_aware_strategic_recovery_plan(task_id, next_version, reason, state, scope)
+
+
+def _scope_payload(scope: ObjectiveScope) -> dict[str, object]:
+    return {
+        "scenario_key": scope.scenario_key,
+        "catalog_version": scope.catalog_version,
+        "objective_keys": list(scope.objective_keys),
+    }
+
+
+def _scope_stage(scope: ObjectiveScope) -> int:
+    keys = set(scope.objective_keys)
+    if keys.intersection(
+        {
+            StarfireObjectiveKey.OPEN_NORTHERN_TRADE_ROUTE.value,
+            StarfireObjectiveKey.FULL_NORTHERN_RECOVERY.value,
+        }
+    ):
+        return 4
+    if StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST.value in keys:
+        return 3
+    if StarfireObjectiveKey.SECURE_NORTHERN_VALLEY.value in keys:
+        return 2
+    return 1
+
+
+def _trim_recovery_plan(plan: dict[str, Any], scope: ObjectiveScope) -> dict[str, Any]:
+    stage = _scope_stage(scope)
+    allowed = {
+        "inspect_command_state",
+        "start_recon_operation",
+        "start_military_operation",
+    }
+    if stage >= 3:
+        allowed.add("start_outpost_repair")
+    if stage >= 4:
+        allowed.add("negotiate_village_support")
+        allowed.add("start_trade_route_test")
+    steps = list(plan["steps"])
+    kept: list[dict[str, Any]] = []
+    included_sequences: set[int] = set()
+    for sequence, step in enumerate(steps, start=1):
+        tool_name = step.get("selected_tool_name")
+        if step.get("execution_type") == StepExecutionType.TOOL.value:
+            if tool_name not in allowed:
+                continue
+            kept.append(step)
+            included_sequences.add(sequence)
+            continue
+        condition = step.get("resume_condition")
+        source = condition.get("source_step_sequence") if isinstance(condition, dict) else None
+        if source in included_sequences:
+            copied = dict(step)
+            copied_condition = dict(condition)
+            copied_condition["source_step_sequence"] = len(kept)
+            copied["resume_condition"] = copied_condition
+            kept.append(copied)
+    if not kept or kept[-1].get("action_intent") != "VERIFY_AND_REPORT":
+        kept.append(_scoped_report_step(scope))
+    plan["steps"] = kept
+    return plan
+
+
+def _scope_expected_outcomes(scope: ObjectiveScope) -> dict[str, str]:
+    keys = set(scope.objective_keys)
+    if StarfireObjectiveKey.FULL_NORTHERN_RECOVERY.value in keys:
+        return {
+            "valley_security": "SAFE",
+            "starfire_outpost_status": "OPERATIONAL",
+            "northern_trade_route_status": "OPEN",
+        }
+    expected: dict[str, str] = {}
+    if StarfireObjectiveKey.GATHER_VALLEY_INTELLIGENCE.value in keys:
+        expected["valley_intelligence"] = "PARTIAL"
+    if StarfireObjectiveKey.SECURE_NORTHERN_VALLEY.value in keys:
+        expected["valley_security"] = "SAFE"
+    if StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST.value in keys:
+        expected["starfire_outpost_status"] = "OPERATIONAL"
+    if StarfireObjectiveKey.OPEN_NORTHERN_TRADE_ROUTE.value in keys:
+        expected["northern_trade_route_status"] = "OPEN"
+    return expected
 
 
 STARFIRE_FALLBACK_PLANS = StarfireFallbackPlans()

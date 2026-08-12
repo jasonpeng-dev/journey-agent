@@ -20,7 +20,12 @@ from app.infrastructure.db.models import (
     Memory,
     OfficerAppointment,
 )
-from app.scenarios.contracts import ScenarioPlanningPolicy, ScenarioRuntimeState
+from app.scenarios.contracts import (
+    ObjectiveContractError,
+    ObjectiveScope,
+    ScenarioPlanningPolicy,
+    ScenarioRuntimeState,
+)
 from app.scenarios.registry import scenario_binding
 from app.services.game import GameService
 from app.services.tasks import TaskService
@@ -122,6 +127,26 @@ class PlanValidator:
                 "The task scenario does not provide a planning policy",
             )
         policy = scenario.planning_policy
+        try:
+            scope = TaskService(self.db).require_frozen_scope(task)
+        except AppError as exc:
+            return self._rejected(exc.code, "objective_scope", exc.message)
+        try:
+            proposed_scope = ObjectiveScope(
+                scenario_key=parsed.objective_scope.scenario_key,
+                catalog_version=parsed.objective_scope.catalog_version,
+                objective_keys=tuple(parsed.objective_scope.objective_keys),
+            )
+        except ObjectiveContractError as exc:
+            return self._rejected("PLAN_OBJECTIVE_SCOPE_INVALID", "objective_scope", exc.message)
+        if proposed_scope != scope:
+            issues.append(
+                PlanValidationIssue(
+                    code="PLAN_OBJECTIVE_SCOPE_MISMATCH",
+                    path="objective_scope",
+                    message="The proposed Plan must preserve the Task's frozen objective scope",
+                )
+            )
         scenario_state = GameService(self.db).scenario_known_state(task.player_id)
 
         wait_count = 0
@@ -237,6 +262,7 @@ class PlanValidator:
                 wait_count,
                 is_replan=replan_reason is not None,
                 state=scenario_state,
+                scope=scope,
             )
         )
         self._validate_operation_wait_pairing(parsed.steps, issues, policy)
@@ -761,6 +787,8 @@ def build_planning_request(
     if scenario is None:
         raise ValueError(f"Scenario planning policy is not registered: {task.scenario_key}")
     policy = scenario.planning_policy
+    scope = TaskService(db).require_frozen_scope(task)
+    definitions = [scenario.objective_catalog.definitions[key] for key in scope.objective_keys]
     allowed_tools: list[dict[str, Any]] = []
     scenario_tools = policy.execution_tools
     for definition in registry.definitions(
@@ -851,6 +879,44 @@ def build_planning_request(
         "submission_tool": "replan_task" if kind == "REPLAN" else "create_task_plan",
         "task_id": str(task.id),
         "goal": task.goal_description,
+        "objective_scope": {
+            "scenario_key": scope.scenario_key,
+            "catalog_version": scope.catalog_version,
+            "objective_keys": list(scope.objective_keys),
+            "objectives": [
+                {
+                    "key": definition.key,
+                    "name": definition.name,
+                    "description": definition.description,
+                    "terminal_requirements": [
+                        {
+                            "key": requirement.key,
+                            "node_key": requirement.node_key,
+                            "fact_key": requirement.fact_key,
+                            "accepted_values": sorted(requirement.accepted_values),
+                            "description": requirement.description,
+                        }
+                        for requirement in definition.completion_requirements
+                    ],
+                }
+                for definition in definitions
+            ],
+            "prerequisites": [
+                {
+                    "key": prerequisite.key,
+                    "description": prerequisite.description,
+                    "requirements": [
+                        {
+                            "node_key": requirement.node_key,
+                            "fact_key": requirement.fact_key,
+                            "accepted_values": sorted(requirement.accepted_values),
+                        }
+                        for requirement in prerequisite.requirements
+                    ],
+                }
+                for prerequisite in scenario.objective_catalog.prerequisites(scope)
+            ],
+        },
         "scenario_key": task.scenario_key,
         "npc": {
             "key": npc.key,
@@ -922,7 +988,7 @@ def build_planning_request(
             "no_database_access": True,
             "no_state_patches": True,
             "security_failures_are_terminal": True,
-            **policy.build_planning_constraints(kind, replan_reason, scenario_state),
+            **policy.build_planning_constraints(kind, replan_reason, scenario_state, scope),
             "step_shapes": {
                 "tool_step": {
                     "execution_type": "TOOL",
