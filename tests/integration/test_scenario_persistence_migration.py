@@ -38,6 +38,13 @@ def test_fresh_database_persists_and_loads_starfire_definition(
         "scenario_drafts",
         "scenario_versions",
     }.issubset(inspect(engine).get_table_names())
+    inspector = inspect(engine)
+    assert "current_published_version_id" in {
+        column["name"] for column in inspector.get_columns("scenarios")
+    }
+    assert {"content_hash", "base_scenario_version_id"}.issubset(
+        {column["name"] for column in inspector.get_columns("scenario_drafts")}
+    )
     with Session(engine) as db:
         seed_scenario_definitions(db)
         db.commit()

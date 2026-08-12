@@ -49,6 +49,14 @@ class Scenario(UUIDPrimaryKey, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(String(30), default="DRAFT")
     version: Mapped[int] = mapped_column(Integer, default=1)
+    current_published_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "scenario_versions.id",
+            name="fk_scenarios_current_published_version",
+            ondelete="SET NULL",
+            use_alter=True,
+        )
+    )
 
 
 class ScenarioDraft(TimestampMixin, Base):
@@ -63,6 +71,10 @@ class ScenarioDraft(TimestampMixin, Base):
     definition_document: Mapped[dict[str, Any]] = mapped_column(JSON)
     validation_status: Mapped[str] = mapped_column(String(30), default="UNVALIDATED")
     validation_errors: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    base_scenario_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("scenario_versions.id", ondelete="SET NULL")
+    )
 
 
 class ScenarioVersion(UUIDPrimaryKey, Base):
