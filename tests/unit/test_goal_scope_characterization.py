@@ -150,7 +150,9 @@ def test_replan_context_serializes_the_same_frozen_scope(
     assert serialized["objective_scope"]["objective_keys"] == ["FULL_NORTHERN_RECOVERY"]
 
 
-def test_relations_currently_do_not_enter_the_planning_request(session: Session) -> None:
+def test_planning_request_contains_only_relations_between_known_nodes(
+    session: Session,
+) -> None:
     conversation, task = _task_context(session, "修复星火前哨并重新打通北方商路。")
 
     request = build_planning_request(
@@ -162,10 +164,10 @@ def test_relations_currently_do_not_enter_the_planning_request(session: Session)
         kind="PLAN",
     )
 
-    assert "relations" not in request
-    assert "known_relations" not in request
-    assert "UNLOCKS" not in json.dumps(request, ensure_ascii=False)
-    assert "ENABLES" not in json.dumps(request, ensure_ascii=False)
+    encoded = json.dumps(request["known_relations"], ensure_ascii=False)
+    assert "UNLOCKS" in encoded
+    assert "ENABLES" in encoded
+    assert "enemy_north_supply_route" not in encoded
 
 
 def test_known_locked_targets_are_advertised_but_execution_fails_closed(

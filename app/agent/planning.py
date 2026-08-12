@@ -25,6 +25,7 @@ from app.scenarios.contracts import (
     ObjectiveScope,
     ScenarioPlanningPolicy,
     ScenarioRuntimeState,
+    project_known_relation_payloads,
 )
 from app.scenarios.registry import scenario_binding
 from app.services.game import GameService
@@ -789,6 +790,10 @@ def build_planning_request(
     policy = scenario.planning_policy
     scope = TaskService(db).require_frozen_scope(task)
     definitions = [scenario.objective_catalog.definitions[key] for key in scope.objective_keys]
+    known_relations = project_known_relation_payloads(
+        scenario.world.relations,
+        scenario_state.node_access,
+    )
     allowed_tools: list[dict[str, Any]] = []
     scenario_tools = policy.execution_tools
     for definition in registry.definitions(
@@ -917,6 +922,7 @@ def build_planning_request(
                 for prerequisite in scenario.objective_catalog.prerequisites(scope)
             ],
         },
+        "known_relations": [dict(relation) for relation in known_relations],
         "scenario_key": task.scenario_key,
         "npc": {
             "key": npc.key,

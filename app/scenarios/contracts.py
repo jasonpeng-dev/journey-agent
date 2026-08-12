@@ -282,6 +282,26 @@ def project_known_relations(
     )
 
 
+def project_known_relation_payloads(
+    relations: Iterable[RelationDefinition],
+    known_node_access: Mapping[str, AccessState],
+) -> tuple[Mapping[str, str], ...]:
+    """Serialize only safe relation semantics; access remains information, not permission."""
+
+    return tuple(
+        MappingProxyType(
+            {
+                "source_node_key": relation.source_node_key,
+                "relation_type": relation.relation_type.value,
+                "target_node_key": relation.target_node_key,
+                "source_access": known_node_access[relation.source_node_key].value,
+                "target_access": known_node_access[relation.target_node_key].value,
+            }
+        )
+        for relation in project_known_relations(relations, known_node_access)
+    )
+
+
 class ScenarioPlanningPolicy(Protocol):
     execution_tools: frozenset[str]
     idempotent_tools: frozenset[str]

@@ -29,6 +29,7 @@ from app.infrastructure.db.models import (
     WorldNode,
     WorldOperation,
 )
+from app.scenarios.contracts import project_known_relation_payloads
 from app.scenarios.starfire.definition import STARFIRE_WORLD
 from app.scenarios.starfire.ruleset import StarfireKnowledgeState
 from app.services.game import GameService, seed_id
@@ -283,6 +284,13 @@ class StrategicSnapshotService:
         return {
             "classification": "PLAYER_AGENT_KNOWLEDGE",
             "nodes": nodes,
+            "known_relations": [
+                dict(relation)
+                for relation in project_known_relation_payloads(
+                    STARFIRE_WORLD.relations,
+                    node_access,
+                )
+            ],
         }
 
     def _observer_world_projection(self, player_id: UUID) -> dict[str, object]:
