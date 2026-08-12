@@ -158,6 +158,14 @@ class GameInstance(UUIDPrimaryKey, TimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("runtime_revision >= 0", name="ck_game_instance_runtime_revision"),
         Index("ix_game_instances_player_status", "player_id", "status"),
+        Index(
+            "uq_game_instances_player_creation_key",
+            "player_id",
+            "creation_key",
+            unique=True,
+            sqlite_where=text("creation_key IS NOT NULL"),
+            postgresql_where=text("creation_key IS NOT NULL"),
+        ),
     )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
@@ -169,6 +177,7 @@ class GameInstance(UUIDPrimaryKey, TimestampMixin, Base):
         default=GameInstanceStatus.PENDING_INITIALIZATION,
     )
     current_node_key: Mapped[str | None] = mapped_column(String(80))
+    creation_key: Mapped[str | None] = mapped_column(String(160))
     runtime_revision: Mapped[int] = mapped_column(Integer, default=0)
 
 
@@ -185,9 +194,14 @@ def _reject_game_instance_binding_drift(
     if (
         state.attrs.player_id.history.has_changes()
         or state.attrs.scenario_version_id.history.has_changes()
+        or (
+            state.attrs.creation_key.history.has_changes()
+            and state.attrs.creation_key.history.deleted
+            and state.attrs.creation_key.history.deleted[0] is not None
+        )
     ):
         raise GameInstanceBindingImmutableError(
-            "GameInstance Player and ScenarioVersion bindings are immutable"
+            "GameInstance Player, ScenarioVersion, and creation bindings are immutable"
         )
 
 

@@ -84,6 +84,16 @@ _IMPLEMENTATIONS = {
 }
 
 
+def require_runtime_implementation(ref: BehaviorBundleRef) -> BehaviorRuntimeImplementation:
+    implementation = _IMPLEMENTATIONS.get((ref.key, ref.version))
+    if implementation is None:
+        raise ScenarioRuntimeBindingError(
+            "SCENARIO_RUNTIME_BEHAVIOR_UNAVAILABLE",
+            "The exact ScenarioVersion behavior implementation is unavailable",
+        )
+    return implementation
+
+
 def scenario_binding_for_task(
     db: Session,
     task: AgentTask,
@@ -166,14 +176,7 @@ def _versioned_binding(
             "SCENARIO_RUNTIME_SCENARIO_MISMATCH",
             "Runtime record Scenario key does not match its ScenarioVersion",
         )
-    implementation = _IMPLEMENTATIONS.get(
-        (definition.behavior_bundle.key, definition.behavior_bundle.version)
-    )
-    if implementation is None:
-        raise ScenarioRuntimeBindingError(
-            "SCENARIO_RUNTIME_BEHAVIOR_UNAVAILABLE",
-            "The exact ScenarioVersion behavior implementation is unavailable",
-        )
+    implementation = require_runtime_implementation(definition.behavior_bundle)
     catalog = PersistedObjectiveCatalog(
         scenario_key=definition.world.key,
         catalog_version=definition.objective_catalog_version,
@@ -196,6 +199,7 @@ __all__ = [
     "ScenarioRuntimeBindingError",
     "VersionedScenarioBinding",
     "interaction_resolver_for_task",
+    "require_runtime_implementation",
     "runtime_scope_for_task",
     "scenario_binding_for_session",
     "scenario_binding_for_task",

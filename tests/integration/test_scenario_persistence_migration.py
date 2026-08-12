@@ -67,6 +67,9 @@ def test_migrated_game_instance_binding_is_database_immutable(
     _upgrade(monkeypatch, database_url, "head")
     engine = create_engine(database_url)
     assert "game_instances" in inspect(engine).get_table_names()
+    assert "creation_key" in {
+        column["name"] for column in inspect(engine).get_columns("game_instances")
+    }
     runtime_tables = {
         "game_instance_node_states",
         "game_instance_fact_states",
