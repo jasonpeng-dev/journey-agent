@@ -18,6 +18,7 @@ from app.domain.enums import (
     StepExecutionType,
     WorldOperationStatus,
 )
+from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import (
     NPC,
     AgentPlan,
@@ -25,6 +26,7 @@ from app.infrastructure.db.models import (
     AgentStep,
     AgentTask,
     ConversationSession,
+    GameInstanceOfficerAppointment,
     Memory,
     OfficerAppointment,
     PlayerDecisionRequest,
@@ -37,8 +39,13 @@ from app.scenarios.contracts import (
     ObjectiveScope,
     ScopedObjectiveEvaluation,
 )
-from app.scenarios.registry import scenario_binding, scenario_objective_catalog
+from app.scenarios.registry import scenario_objective_catalog
+from app.scenarios.runtime_binding import (
+    scenario_binding_for_session,
+    scenario_binding_for_task,
+)
 from app.services.game import GameService
+from app.services.game_instances import GameInstanceService
 
 TERMINAL_STEP_STATUSES = frozenset(
     {
@@ -62,17 +69,24 @@ class TaskService:
         scenario_key: str,
         planning_mode: str = "PROVIDER",
     ) -> AgentTask:
-        scenario = scenario_binding(scenario_key)
-        if scenario is None:
-            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        scenario_binding_for_session(
+            self.db,
+            session,
+            expected_scenario_key=scenario_key,
+        )
         if planning_mode not in PLANNING_MODES:
             raise AppError("PLANNING_MODE_INVALID", "The planning mode is not supported")
         owner = self.db.get(NPC, session.npc_id)
-        appointment = (
-            self.db.get(OfficerAppointment, (session.player_id, session.npc_id))
-            if owner is not None
-            else None
-        )
+        appointment = None
+        if owner is not None:
+            appointment = (
+                self.db.get(OfficerAppointment, (session.player_id, session.npc_id))
+                if session.game_instance_id is None
+                else self.db.get(
+                    GameInstanceOfficerAppointment,
+                    (session.game_instance_id, session.npc_id),
+                )
+            )
         if (
             owner is None
             or owner.role.value != "STRATEGIST"
@@ -87,6 +101,7 @@ class TaskService:
         active = self.db.scalar(
             select(AgentTask).where(
                 AgentTask.player_id == session.player_id,
+                AgentTask.game_instance_id == session.game_instance_id,
                 AgentTask.scenario_key == scenario_key,
                 AgentTask.status.in_(
                     [
@@ -103,6 +118,7 @@ class TaskService:
             return active
         task = AgentTask(
             player_id=session.player_id,
+            game_instance_id=session.game_instance_id,
             owner_npc_id=session.npc_id,
             origin_session_id=session.id,
             last_session_id=session.id,
@@ -317,14 +333,17 @@ class TaskService:
             objective_keys=tuple(task.objective_scope_keys),
         )
 
-    @staticmethod
-    def _validate_task_scope(task: AgentTask, scope: ObjectiveScope) -> None:
+    def _validate_task_scope(self, task: AgentTask, scope: ObjectiveScope) -> None:
         if scope.scenario_key != task.scenario_key:
             raise AppError(
                 "OBJECTIVE_SCOPE_SCENARIO_MISMATCH",
                 "The objective scope belongs to a different scenario",
             )
-        catalog = scenario_objective_catalog(task.scenario_key, scope.catalog_version)
+        catalog = (
+            scenario_objective_catalog(task.scenario_key, scope.catalog_version)
+            if task.game_instance_id is None
+            else scenario_binding_for_task(self.db, task).objective_catalog
+        )
         if catalog is None:
             raise AppError(
                 "OBJECTIVE_CATALOG_VERSION_UNAVAILABLE",
@@ -399,9 +418,7 @@ class TaskService:
         validation_errors: list[dict[str, Any]] | None = None,
     ) -> AgentPlan:
         task = self.get_task(task_id, lock=True)
-        scenario = scenario_binding(task.scenario_key)
-        if scenario is None:
-            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        scenario = scenario_binding_for_task(self.db, task)
         if not steps or len(steps) > 12:
             raise AppError("PLAN_STEP_COUNT_INVALID", "A plan must contain 1 to 12 steps")
         old_plan = self.current_plan(task)
@@ -546,7 +563,7 @@ class TaskService:
                 "RESUME_CONDITION_INVALID",
                 "The player action wait must identify a verified fact and field",
             )
-        fact = GameService(self.db).get_world_fact(task.player_id, fact_key)
+        fact = self._game(task).get_world_fact(task.player_id, fact_key)
         if fact.get(field) != condition.get("equals"):
             self.mark_waiting_for_player_action(task, step)
             return "WAITING_FOR_PLAYER_ACTION"
@@ -593,6 +610,7 @@ class TaskService:
             source_step is None
             or operation is None
             or operation.player_id != task.player_id
+            or operation.game_instance_id != task.game_instance_id
             or operation.task_id != task.id
             or operation.source_step_id != source_step.id
         ):
@@ -642,14 +660,18 @@ class TaskService:
 
     def evaluate_scope(self, task: AgentTask) -> ScopedObjectiveEvaluation:
         scope = self.require_frozen_scope(task)
-        catalog = scenario_objective_catalog(task.scenario_key, scope.catalog_version)
+        catalog = (
+            scenario_objective_catalog(task.scenario_key, scope.catalog_version)
+            if task.game_instance_id is None
+            else scenario_binding_for_task(self.db, task).objective_catalog
+        )
         if catalog is None:
             raise AppError(
                 "OBJECTIVE_CATALOG_VERSION_UNAVAILABLE",
                 "The objective catalog version frozen by the task is unavailable",
                 status_code=409,
             )
-        state = GameService(self.db).scenario_truth_state(task.player_id)
+        state = self._game(task).scenario_truth_state(task.player_id)
         return catalog.evaluate(scope, state)
 
     def complete_if_scope_satisfied(
@@ -726,6 +748,7 @@ class TaskService:
                 self.db.add(
                     Memory(
                         player_id=task.player_id,
+                        game_instance_id=task.game_instance_id,
                         npc_id=officer_id,
                         type=MemoryType.WORLD_EVENT,
                         content=report,
@@ -741,6 +764,12 @@ class TaskService:
             raise AppError(
                 "TASK_PLAYER_MISMATCH",
                 "The session player does not own this task",
+                status_code=403,
+            )
+        if session.game_instance_id != task.game_instance_id:
+            raise AppError(
+                "TASK_INSTANCE_MISMATCH",
+                "The session and task belong to different GameInstances",
                 status_code=403,
             )
         if session.npc_id != task.owner_npc_id:
@@ -777,6 +806,12 @@ class TaskService:
         )
         if decision is None:
             raise NotFoundError("decision_request", decision_id)
+        if decision.game_instance_id != task.game_instance_id:
+            raise AppError(
+                "DECISION_INSTANCE_MISMATCH",
+                "The decision belongs to another GameInstance",
+                status_code=403,
+            )
         if decision.status != DecisionStatus.PENDING:
             if decision.selected_option == option_id:
                 return decision, "DECISION_ALREADY_RESOLVED"
@@ -943,6 +978,9 @@ class TaskService:
         frozen_scope = self.load_frozen_scope(task)
         return {
             "id": str(task.id),
+            "game_instance_id": (
+                str(task.game_instance_id) if task.game_instance_id is not None else None
+            ),
             "player_id": str(task.player_id),
             "owner_npc_id": str(task.owner_npc_id),
             "owner_officer": _officer_ref(owner),
@@ -1037,6 +1075,18 @@ class TaskService:
                 for plan in plans
             ],
         }
+
+    def _game(self, task: AgentTask) -> GameService:
+        if task.game_instance_id is None:
+            return GameService(self.db)
+        scope = GameInstanceService(self.db).load(GameInstanceId(task.game_instance_id))
+        if scope.player_id != task.player_id:
+            raise AppError(
+                "TASK_INSTANCE_PLAYER_MISMATCH",
+                "The task Player does not match its GameInstance",
+                status_code=403,
+            )
+        return GameService(self.db, scope)
 
 
 def _operation_id_from_step(step: AgentStep | None) -> UUID | None:

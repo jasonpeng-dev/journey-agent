@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session
 
 from app.agent.types import ToolContext
 from app.core.errors import AppError
+from app.infrastructure.db.models import AgentTask
+from app.scenarios.runtime_binding import interaction_resolver_for_task
 from app.services.game import GameService
+from app.services.interaction_targets import (
+    InteractionTargetResolver,
+    interaction_target_resolver,
+)
 from app.services.tasks import TaskService
 from app.tools.interaction_validation import (
     MILITARY_INTERACTION,
@@ -145,14 +151,33 @@ class ReplanTaskArgs(CreateTaskPlanArgs):
     replan_reason: str = Field(min_length=3, max_length=160)
 
 
+def _interaction_resolver(db: Session, context: ToolContext) -> InteractionTargetResolver:
+    if context.runtime_scope is None:
+        return interaction_target_resolver
+    if context.task_id is None:
+        raise AppError(
+            "RUNTIME_SCOPE_TASK_REQUIRED",
+            "An instance-owned interaction requires an AgentTask",
+        )
+    task = db.get(AgentTask, context.task_id)
+    if task is None:
+        raise AppError("TASK_NOT_FOUND", "The AgentTask does not exist")
+    return interaction_resolver_for_task(db, task)
+
+
 def inspect_command_state(db: Session, context: ToolContext, _args: BaseModel) -> dict[str, Any]:
-    return GameService(db).inspect_command_state(context.player_id)
+    return GameService(db, context.runtime_scope).inspect_command_state(context.player_id)
 
 
 def preflight_recon_operation(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = ReconOperationArgs.model_validate(args)
-    target = resolve_tool_interaction(context.scenario_key, RECON_INTERACTION, parsed)
-    GameService(db).preflight_recon_operation(
+    target = resolve_tool_interaction(
+        context.scenario_key,
+        RECON_INTERACTION,
+        parsed,
+        resolver=_interaction_resolver(db, context),
+    )
+    GameService(db, context.runtime_scope).preflight_recon_operation(
         player_id=context.player_id,
         troop_count=parsed.troop_count,
         target_key=target.key,
@@ -162,8 +187,13 @@ def preflight_recon_operation(db: Session, context: ToolContext, args: BaseModel
 
 def start_recon_operation(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = ReconOperationArgs.model_validate(args)
-    target = resolve_tool_interaction(context.scenario_key, RECON_INTERACTION, parsed)
-    operation = GameService(db).start_recon_operation(
+    target = resolve_tool_interaction(
+        context.scenario_key,
+        RECON_INTERACTION,
+        parsed,
+        resolver=_interaction_resolver(db, context),
+    )
+    operation = GameService(db, context.runtime_scope).start_recon_operation(
         player_id=context.player_id,
         officer_npc_id=context.npc_id,
         task_id=context.task_id,
@@ -178,8 +208,13 @@ def start_recon_operation(db: Session, context: ToolContext, args: BaseModel) ->
 
 def preflight_military_operation(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = MilitaryOperationArgs.model_validate(args)
-    target = resolve_tool_interaction(context.scenario_key, MILITARY_INTERACTION, parsed)
-    GameService(db).preflight_military_operation(
+    target = resolve_tool_interaction(
+        context.scenario_key,
+        MILITARY_INTERACTION,
+        parsed,
+        resolver=_interaction_resolver(db, context),
+    )
+    GameService(db, context.runtime_scope).preflight_military_operation(
         player_id=context.player_id,
         troop_count=parsed.troop_count,
         mission_type=parsed.mission_type,
@@ -190,8 +225,13 @@ def preflight_military_operation(db: Session, context: ToolContext, args: BaseMo
 
 def start_military_operation(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = MilitaryOperationArgs.model_validate(args)
-    target = resolve_tool_interaction(context.scenario_key, MILITARY_INTERACTION, parsed)
-    operation = GameService(db).start_military_operation(
+    target = resolve_tool_interaction(
+        context.scenario_key,
+        MILITARY_INTERACTION,
+        parsed,
+        resolver=_interaction_resolver(db, context),
+    )
+    operation = GameService(db, context.runtime_scope).start_military_operation(
         player_id=context.player_id,
         officer_npc_id=context.npc_id,
         task_id=context.task_id,
@@ -207,7 +247,7 @@ def start_military_operation(db: Session, context: ToolContext, args: BaseModel)
 
 def preflight_village_support(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = VillageSupportArgs.model_validate(args)
-    GameService(db).preflight_village_support(
+    GameService(db, context.runtime_scope).preflight_village_support(
         player_id=context.player_id,
         food_offer=parsed.food_offer,
         requested_support=parsed.requested_support,
@@ -216,7 +256,7 @@ def preflight_village_support(db: Session, context: ToolContext, args: BaseModel
 
 def negotiate_village_support(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = VillageSupportArgs.model_validate(args)
-    return GameService(db).negotiate_village_support(
+    return GameService(db, context.runtime_scope).negotiate_village_support(
         player_id=context.player_id,
         food_offer=parsed.food_offer,
         requested_support=parsed.requested_support,
@@ -225,8 +265,13 @@ def negotiate_village_support(db: Session, context: ToolContext, args: BaseModel
 
 def preflight_outpost_repair(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = OutpostRepairArgs.model_validate(args)
-    target = resolve_tool_interaction(context.scenario_key, REPAIR_INTERACTION, parsed)
-    GameService(db).preflight_outpost_repair(
+    target = resolve_tool_interaction(
+        context.scenario_key,
+        REPAIR_INTERACTION,
+        parsed,
+        resolver=_interaction_resolver(db, context),
+    )
+    GameService(db, context.runtime_scope).preflight_outpost_repair(
         player_id=context.player_id,
         food_commitment=parsed.food_commitment,
         gold_commitment=parsed.gold_commitment,
@@ -237,8 +282,13 @@ def preflight_outpost_repair(db: Session, context: ToolContext, args: BaseModel)
 
 def start_outpost_repair(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = OutpostRepairArgs.model_validate(args)
-    target = resolve_tool_interaction(context.scenario_key, REPAIR_INTERACTION, parsed)
-    operation = GameService(db).start_outpost_repair(
+    target = resolve_tool_interaction(
+        context.scenario_key,
+        REPAIR_INTERACTION,
+        parsed,
+        resolver=_interaction_resolver(db, context),
+    )
+    operation = GameService(db, context.runtime_scope).start_outpost_repair(
         player_id=context.player_id,
         officer_npc_id=context.npc_id,
         task_id=context.task_id,
@@ -254,8 +304,13 @@ def start_outpost_repair(db: Session, context: ToolContext, args: BaseModel) -> 
 
 def preflight_trade_route_test(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = TradeRouteTestArgs.model_validate(args)
-    target = resolve_tool_interaction(context.scenario_key, TRADE_ROUTE_INTERACTION, parsed)
-    GameService(db).preflight_trade_route_test(
+    target = resolve_tool_interaction(
+        context.scenario_key,
+        TRADE_ROUTE_INTERACTION,
+        parsed,
+        resolver=_interaction_resolver(db, context),
+    )
+    GameService(db, context.runtime_scope).preflight_trade_route_test(
         player_id=context.player_id,
         route_key=target.key,
     )
@@ -263,8 +318,13 @@ def preflight_trade_route_test(db: Session, context: ToolContext, args: BaseMode
 
 def start_trade_route_test(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:
     parsed = TradeRouteTestArgs.model_validate(args)
-    target = resolve_tool_interaction(context.scenario_key, TRADE_ROUTE_INTERACTION, parsed)
-    operation = GameService(db).start_trade_route_test(
+    target = resolve_tool_interaction(
+        context.scenario_key,
+        TRADE_ROUTE_INTERACTION,
+        parsed,
+        resolver=_interaction_resolver(db, context),
+    )
+    operation = GameService(db, context.runtime_scope).start_trade_route_test(
         player_id=context.player_id,
         officer_npc_id=context.npc_id,
         task_id=context.task_id,
@@ -340,8 +400,10 @@ def replan_task(db: Session, context: ToolContext, args: BaseModel) -> dict[str,
 
 
 def snapshot(db: Session, context: ToolContext) -> dict[str, Any]:
-    player = GameService(db).get_player(context.player_id)
+    player = GameService(db, context.runtime_scope).get_player(context.player_id)
     return {
         "player": {"id": str(player.id), "version": player.version},
-        "strategic_command": GameService(db).inspect_command_state(context.player_id),
+        "strategic_command": GameService(db, context.runtime_scope).inspect_command_state(
+            context.player_id
+        ),
     }

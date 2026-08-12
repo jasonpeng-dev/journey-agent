@@ -247,22 +247,31 @@ def test_upgrade_merges_legacy_nodes_without_rewriting_history(
                 ),
             ]
         )
-        operation = WorldOperation(
-            player_id=known_player.id,
-            officer_npc_id=officer.id,
-            operation_type="MILITARY",
-            target_key="ambush_valley",
-            status=WorldOperationStatus.PENDING,
-            parameters={"mission_type": "CLEAR_VALLEY"},
-            idempotency_key=f"legacy-operation-{uuid4()}",
+        operation_id = uuid4()
+        legacy_operations = Table(
+            "world_operations",
+            MetaData(),
+            autoload_with=db.get_bind(),
         )
-        db.add(operation)
+        db.execute(
+            legacy_operations.insert().values(
+                id=operation_id.hex,
+                player_id=known_player.id.hex,
+                officer_npc_id=officer.id.hex,
+                operation_type="MILITARY",
+                target_key="ambush_valley",
+                status=WorldOperationStatus.PENDING.value,
+                parameters={"mission_type": "CLEAR_VALLEY"},
+                idempotency_key=f"legacy-operation-{uuid4()}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
         db.commit()
         unknown_player_id = unknown_player.id
         known_player_id = known_player.id
         disrupted_player_id = disrupted_player.id
         officer_id = officer.id
-        operation_id = operation.id
     engine.dispose()
 
     _upgrade(monkeypatch, database_url, "head")

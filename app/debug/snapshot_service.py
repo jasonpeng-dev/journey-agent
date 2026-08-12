@@ -11,6 +11,7 @@ from app.agent.authority import authority_policy_errors, effective_authority_lim
 from app.core.config import Settings
 from app.core.errors import AppError, NotFoundError
 from app.domain.enums import AgentTaskStatus, NodeStatus, SessionStatus
+from app.domain.runtime_scope import GameInstanceId
 from app.domain.world import AccessState, Visibility
 from app.infrastructure.db.models import (
     NPC,
@@ -20,9 +21,12 @@ from app.infrastructure.db.models import (
     AgentTask,
     ConversationMessage,
     ConversationSession,
+    GameInstanceFactState,
+    GameInstanceNodeState,
+    GameInstanceOfficerAppointment,
+    GameInstanceWorldFact,
     OfficerAppointment,
     PlayerDecisionRequest,
-    PlayerDomainState,
     PlayerNodeState,
     PlayerWorldFact,
     PlayerWorldFactState,
@@ -31,10 +35,10 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.scenarios.contracts import project_known_relation_payloads
-from app.scenarios.starfire.definition import STARFIRE_WORLD
-from app.scenarios.starfire.objective_catalog import STARFIRE_OBJECTIVE_CATALOG
+from app.scenarios.runtime_binding import scenario_binding_for_session, scenario_binding_for_task
 from app.scenarios.starfire.ruleset import StarfireKnowledgeState
 from app.services.game import GameService, seed_id
+from app.services.game_instances import GameInstanceService
 from app.services.tasks import TaskService
 
 
@@ -51,29 +55,42 @@ class StrategicSnapshotService:
         include_hidden_truth: bool,
     ) -> dict[str, object]:
         session = self._session(session_id)
-        player = GameService(self.db).get_player(session.player_id)
-        domain = self.db.get(PlayerDomainState, player.id)
-        if domain is None:
-            raise AppError("DOMAIN_STATE_NOT_INITIALIZED", "Strategic resources are missing")
-        game = GameService(self.db)
+        scope = (
+            GameInstanceService(self.db).load(GameInstanceId(session.game_instance_id))
+            if session.game_instance_id is not None
+            else None
+        )
+        game = GameService(self.db, scope)
+        player = game.get_player(session.player_id)
         command_state = game.inspect_command_state(player.id)
         resources = dict(cast(dict[str, object], command_state["resources"]))
         world = dict(cast(dict[str, object], command_state["world"]))
-        task = self._latest_task(player.id)
+        task = self._latest_task(session.game_instance_id, player.id)
         serialized_task = TaskService(self.db).serialize(task) if task is not None else None
         objective_evaluation = self._objective_evaluation(task)
         operation_wait_pairs = self._operation_wait_pairs(task)
         early_stop = self._early_stop(task)
         trace = self._trace(task) if include_trace and task is not None else []
         messages = self._messages(session.id)
-        officers = self._officers(player.id)
-        known_world = self._known_world_state(player.id, world)
-        player_world = self._player_world_projection(game.scenario_known_state(player.id))
+        officers = self._officers(session.game_instance_id, player.id)
+        known_world = self._known_world_state(session.game_instance_id, player.id, world)
+        binding = scenario_binding_for_session(
+            self.db, session, expected_scenario_key="starfire_command"
+        )
+        player_world = self._player_world_projection(
+            game.scenario_known_state(player.id), binding.world
+        )
         observer_world = (
-            self._observer_world_projection(player.id, task) if include_hidden_truth else None
+            self._observer_world_projection(
+                session.game_instance_id, player.id, task, binding.world
+            )
+            if include_hidden_truth
+            else None
         )
         snapshot_version = (
-            f"p{player.version}-d{domain.version}-t{task.version if task is not None else 0}"
+            f"i{scope.game_instance_id if scope else 'legacy'}"
+            f"-v{scope.scenario_version_id if scope else 'registry'}"
+            f"-t{task.version if task is not None else 0}"
         )
         active_plan = None
         plan_history: list[dict[str, Any]] = []
@@ -123,7 +140,9 @@ class StrategicSnapshotService:
             "scenario": {
                 "key": "starfire_command",
                 "name": "Starfire Strategic Command",
+                "version_id": str(scope.scenario_version_id) if scope else None,
             },
+            "game_instance_id": str(scope.game_instance_id) if scope else None,
             "snapshot_version": snapshot_version,
             "player": {
                 "id": str(player.id),
@@ -188,11 +207,16 @@ class StrategicSnapshotService:
             raise AppError("SESSION_CLOSED", "The strategic command session is closed")
         return session
 
-    def _latest_task(self, player_id: UUID) -> AgentTask | None:
+    def _latest_task(self, game_instance_id: UUID | None, player_id: UUID) -> AgentTask | None:
+        owner = (
+            AgentTask.game_instance_id == game_instance_id
+            if game_instance_id is not None
+            else AgentTask.player_id == player_id
+        )
         return self.db.scalar(
             select(AgentTask)
             .where(
-                AgentTask.player_id == player_id,
+                owner,
                 AgentTask.scenario_key == "starfire_command",
             )
             .order_by(AgentTask.created_at.desc())
@@ -210,11 +234,19 @@ class StrategicSnapshotService:
             "role": officer.role.value,
         }
 
-    def _officers(self, player_id: UUID) -> list[dict[str, object]]:
+    def _officers(self, game_instance_id: UUID | None, player_id: UUID) -> list[dict[str, object]]:
+        appointment_type = (
+            GameInstanceOfficerAppointment if game_instance_id is not None else OfficerAppointment
+        )
+        owner = (
+            GameInstanceOfficerAppointment.game_instance_id == game_instance_id
+            if game_instance_id is not None
+            else OfficerAppointment.player_id == player_id
+        )
         rows = self.db.execute(
-            select(OfficerAppointment, NPC)
-            .join(NPC, NPC.id == OfficerAppointment.npc_id)
-            .where(OfficerAppointment.player_id == player_id)
+            select(appointment_type, NPC)
+            .join(NPC, NPC.id == appointment_type.npc_id)
+            .where(owner)
             .order_by(NPC.role, NPC.name)
         ).all()
         return [
@@ -243,15 +275,18 @@ class StrategicSnapshotService:
 
     def _known_world_state(
         self,
+        game_instance_id: UUID | None,
         player_id: UUID,
         world: dict[str, object],
     ) -> dict[str, object]:
-        facts = {
-            fact.key: fact.value
-            for fact in self.db.scalars(
-                select(PlayerWorldFact).where(PlayerWorldFact.player_id == player_id)
-            ).all()
-        }
+        fact_type = GameInstanceWorldFact if game_instance_id is not None else PlayerWorldFact
+        owner = (
+            GameInstanceWorldFact.game_instance_id == game_instance_id
+            if game_instance_id is not None
+            else PlayerWorldFact.player_id == player_id
+        )
+        fact_rows: Any = self.db.scalars(select(fact_type).where(owner)).all()
+        facts = {fact.key: fact.value for fact in fact_rows}
         return {
             **world,
             "village_relation": world.get("village_support", "NONE"),
@@ -265,11 +300,13 @@ class StrategicSnapshotService:
         }
 
     @staticmethod
-    def _player_world_projection(known: StarfireKnowledgeState) -> dict[str, object]:
+    def _player_world_projection(
+        known: StarfireKnowledgeState, world_definition: Any
+    ) -> dict[str, object]:
         facts = known.facts
         node_access = known.node_access
         nodes = []
-        for definition in STARFIRE_WORLD.nodes:
+        for definition in world_definition.nodes:
             if definition.key not in node_access:
                 continue
             nodes.append(
@@ -295,7 +332,7 @@ class StrategicSnapshotService:
             "known_relations": [
                 dict(relation)
                 for relation in project_known_relation_payloads(
-                    STARFIRE_WORLD.relations,
+                    world_definition.relations,
                     node_access,
                 )
             ],
@@ -303,25 +340,45 @@ class StrategicSnapshotService:
 
     def _observer_world_projection(
         self,
+        game_instance_id: UUID | None,
         player_id: UUID,
         task: AgentTask | None,
+        world_definition: Any,
     ) -> dict[str, object]:
-        rows = self.db.execute(
-            select(WorldNode, PlayerNodeState)
-            .join(PlayerNodeState, PlayerNodeState.node_id == WorldNode.id)
-            .where(PlayerNodeState.player_id == player_id)
-        ).all()
-        state_by_key = {node.key: state for node, state in rows}
-        node_ids = {node.id: node.key for node, _state in rows}
-        fact_rows = self.db.scalars(
-            select(PlayerWorldFactState).where(PlayerWorldFactState.player_id == player_id)
-        ).all()
+        if game_instance_id is not None:
+            rows = self.db.scalars(
+                select(GameInstanceNodeState).where(
+                    GameInstanceNodeState.game_instance_id == game_instance_id
+                )
+            ).all()
+            state_by_key = {state.node_key: state for state in rows}
+            fact_rows: Any = self.db.scalars(
+                select(GameInstanceFactState).where(
+                    GameInstanceFactState.game_instance_id == game_instance_id
+                )
+            ).all()
+
+            def fact_node_key(fact: Any) -> str:
+                return str(fact.node_key)
+        else:
+            legacy_rows = self.db.execute(
+                select(WorldNode, PlayerNodeState)
+                .join(PlayerNodeState, PlayerNodeState.node_id == WorldNode.id)
+                .where(PlayerNodeState.player_id == player_id)
+            ).all()
+            state_by_key = {node.key: state for node, state in legacy_rows}
+            node_keys = {node.id: node.key for node, _state in legacy_rows}
+            fact_rows = self.db.scalars(
+                select(PlayerWorldFactState).where(PlayerWorldFactState.player_id == player_id)
+            ).all()
+
+            def fact_node_key(fact: Any) -> str:
+                return str(node_keys[fact.node_id])
+
         facts: dict[str, list[dict[str, object]]] = {}
         reveal_sources = self._fact_reveal_sources(task)
         for fact in fact_rows:
-            node_key = node_ids.get(fact.node_id)
-            if node_key is None:
-                continue
+            node_key = fact_node_key(fact)
             fact_payload: dict[str, object] = {
                 "key": fact.fact_key,
                 "truth": fact.truth_value,
@@ -342,7 +399,7 @@ class StrategicSnapshotService:
                 str(item["relation_type"]),
                 str(item["target_node_key"]),
             )
-            for item in project_known_relation_payloads(STARFIRE_WORLD.relations, known_access)
+            for item in project_known_relation_payloads(world_definition.relations, known_access)
         }
         return {
             "classification": "DEVELOPER_ONLY_READ_ONLY",
@@ -360,7 +417,7 @@ class StrategicSnapshotService:
                         facts.get(definition.key, []), key=lambda item: str(item["key"])
                     ),
                 }
-                for definition in STARFIRE_WORLD.nodes
+                for definition in world_definition.nodes
                 if definition.key in state_by_key
             ],
             "relations": [
@@ -375,7 +432,7 @@ class StrategicSnapshotService:
                     )
                     in visible_relations,
                 }
-                for relation in STARFIRE_WORLD.relations
+                for relation in world_definition.relations
             ],
             "resolution_rules": {
                 "first_clear_attempt": "DEFEAT_UNTIL_SUPPLY_DISRUPTED",
@@ -599,7 +656,12 @@ class StrategicSnapshotService:
         if service.load_frozen_scope(task) is None:
             return None
         evaluation = service.evaluate_scope(task)
-        known = GameService(self.db).scenario_known_state(task.player_id)
+        scope = (
+            GameInstanceService(self.db).load(GameInstanceId(task.game_instance_id))
+            if task.game_instance_id is not None
+            else None
+        )
+        known = GameService(self.db, scope).scenario_known_state(task.player_id)
         scoped_refs = {
             (item.requirement.node_key, item.requirement.fact_key)
             for objective in evaluation.objectives
@@ -607,7 +669,8 @@ class StrategicSnapshotService:
         }
         outside_scope_state: list[dict[str, object]] = []
         seen_refs: set[tuple[str, str]] = set()
-        for definition in STARFIRE_OBJECTIVE_CATALOG.definitions.values():
+        catalog = scenario_binding_for_task(self.db, task).objective_catalog
+        for definition in catalog.definitions.values():
             for requirement in definition.completion_requirements:
                 ref = (requirement.node_key, requirement.fact_key)
                 if ref in scoped_refs or ref in seen_refs or not known.fact_known(*ref):
