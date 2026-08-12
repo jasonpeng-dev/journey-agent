@@ -124,9 +124,12 @@ class TaskOrchestrator:
             return await self._replan(task, session, failed.failure_code or "RECOVERABLE_FAILURE")
         step = self.tasks.next_step(plan.id)
         if step is None:
-            completed = self.tasks.finish_if_complete(task, plan)
             self.db.commit()
-            return task, None, "TASK_SUCCEEDED" if completed else "NO_EXECUTABLE_STEP"
+            return await self._replan(
+                task,
+                session,
+                "PLAN_EXHAUSTED_SCOPE_INCOMPLETE",
+            )
         if step.status == AgentStepStatus.REQUIRES_PLAYER_DECISION:
             self.db.commit()
             return task, None, "REQUIRES_PLAYER_DECISION"
@@ -162,9 +165,14 @@ class TaskOrchestrator:
         assert plan is not None
         if result.ok:
             completed = self.tasks.complete_if_scope_satisfied(task, plan)
-            if not completed and self.tasks.next_step(plan.id) is None:
-                self.tasks.finish_if_complete(task, plan)
+            exhausted = not completed and self.tasks.next_step(plan.id) is None
             self.db.commit()
+            if exhausted:
+                return await self._replan(
+                    task,
+                    session,
+                    "PLAN_EXHAUSTED_SCOPE_INCOMPLETE",
+                )
         if result.code == "PLAYER_APPROVAL_REQUIRED":
             return task, run, "REQUIRES_PLAYER_DECISION"
         return task, run, "STEP_SUCCEEDED" if result.ok else "STEP_FAILED"

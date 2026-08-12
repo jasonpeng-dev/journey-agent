@@ -113,6 +113,7 @@ class StarfirePlanningPolicy:
             "VALLEY_UNSAFE",
             "TRADE_SUPPORT_REQUIRED",
             "WORLD_STATE_CHANGED",
+            "PLAN_EXHAUSTED_SCOPE_INCOMPLETE",
         }
     )
 
@@ -176,6 +177,8 @@ class StarfirePlanningPolicy:
             }
         if tool_name == "start_military_operation":
             if tool_arguments.get("mission_type") == "DISRUPT_SUPPLY":
+                if not state.fact_known("enemy_north_supply_route", "supply_status"):
+                    return False
                 return (
                     self._value(state, "enemy_north_supply_route", "supply_status") == "DISRUPTED"
                 )

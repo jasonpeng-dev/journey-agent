@@ -61,12 +61,19 @@ class MockModelProvider:
                 objective_keys=tuple(str(key) for key in raw_scope["objective_keys"]),
             )
             if request["kind"] == "REPLAN":
-                arguments = scenario.fallback_plans.recovery(
-                    task_id,
-                    int(request["next_plan_version"]),
-                    str(request["failure_code"]),
-                    scope,
-                )
+                failure_code = str(request["failure_code"])
+                next_version = int(request["next_plan_version"])
+                if failure_code == "PLAN_EXHAUSTED_SCOPE_INCOMPLETE":
+                    arguments = scenario.fallback_plans.initial(task_id, scope)
+                    arguments["replan_reason"] = failure_code
+                    arguments["idempotency_key"] = f"task-replan-{task_id}-v{next_version}"
+                else:
+                    arguments = scenario.fallback_plans.recovery(
+                        task_id,
+                        next_version,
+                        failure_code,
+                        scope,
+                    )
                 tool_name = "replan_task"
             else:
                 arguments = scenario.fallback_plans.initial(task_id, scope)
