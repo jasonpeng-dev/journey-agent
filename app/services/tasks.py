@@ -30,7 +30,12 @@ from app.infrastructure.db.models import (
     PlayerDecisionRequest,
     WorldOperation,
 )
-from app.scenarios.registry import scenario_binding
+from app.scenarios.contracts import (
+    GoalResolutionResult,
+    ObjectiveResolutionStatus,
+    ObjectiveScope,
+)
+from app.scenarios.registry import scenario_binding, scenario_objective_catalog
 from app.services.game import GameService
 
 TERMINAL_STEP_STATUSES = frozenset(
@@ -101,11 +106,156 @@ class TaskService:
             last_session_id=session.id,
             goal_description=goal_description,
             scenario_key=scenario_key,
+            objective_resolution_status=ObjectiveResolutionStatus.UNRESOLVED.value,
             planning_mode=planning_mode,
         )
         self.db.add(task)
         self.db.flush()
         return task
+
+    def record_goal_resolution(
+        self,
+        task: AgentTask,
+        result: GoalResolutionResult,
+    ) -> None:
+        """Persist a resolver result without confirming or freezing its scope."""
+
+        if task.objective_frozen_at is not None:
+            raise AppError(
+                "OBJECTIVE_SCOPE_FROZEN",
+                "A frozen task objective scope cannot be resolved again",
+                status_code=409,
+            )
+        if result.status == ObjectiveResolutionStatus.CONFIRMED:
+            raise AppError(
+                "OBJECTIVE_CONFIRMATION_REQUIRED",
+                "Goal resolution must be confirmed through the atomic freeze operation",
+            )
+        if result.scope is not None:
+            self._validate_task_scope(task, result.scope)
+        task.objective_resolution_status = result.status.value
+        task.objective_scope_keys = (
+            list(result.scope.objective_keys) if result.scope is not None else None
+        )
+        task.objective_catalog_version = (
+            result.scope.catalog_version if result.scope is not None else None
+        )
+        task.objective_resolver_source = result.resolver_source
+        task.objective_resolver_version = result.resolver_version
+        task.objective_resolution_metadata = {
+            "candidate_scopes": [self._scope_payload(scope) for scope in result.candidate_scopes],
+            "clarification_prompt": result.clarification_prompt,
+        }
+        task.objective_resolved_at = datetime.now(UTC)
+        task.version += 1
+        self.db.flush()
+
+    def confirm_and_freeze_scope(
+        self,
+        task: AgentTask,
+        scope: ObjectiveScope,
+        *,
+        confirmation_source: str,
+        freeze_source: str,
+    ) -> ObjectiveScope:
+        """Atomically confirm one canonical scope and make it immutable for the Task."""
+
+        self._validate_task_scope(task, scope)
+        if not confirmation_source.strip() or not freeze_source.strip():
+            raise AppError(
+                "OBJECTIVE_PROVENANCE_REQUIRED",
+                "Objective confirmation and freeze provenance are required",
+            )
+        if task.objective_frozen_at is not None:
+            existing = self.require_frozen_scope(task)
+            if existing == scope:
+                return existing
+            raise AppError(
+                "OBJECTIVE_SCOPE_FROZEN",
+                "A frozen task objective scope cannot be changed",
+                status_code=409,
+            )
+        if task.objective_resolution_status != ObjectiveResolutionStatus.RESOLVED.value:
+            raise AppError(
+                "OBJECTIVE_SCOPE_NOT_RESOLVED",
+                "Only a resolved objective scope can be confirmed",
+                status_code=409,
+            )
+        stored = self._stored_scope(task)
+        if stored != scope:
+            raise AppError(
+                "OBJECTIVE_SCOPE_CONFIRMATION_MISMATCH",
+                "The confirmed scope must equal the resolved scope",
+                status_code=409,
+            )
+        now = datetime.now(UTC)
+        task.objective_resolution_status = ObjectiveResolutionStatus.CONFIRMED.value
+        task.objective_confirmed_at = now
+        task.objective_confirmation_source = confirmation_source
+        task.objective_frozen_at = now
+        task.objective_freeze_source = freeze_source
+        task.version += 1
+        self.db.flush()
+        return scope
+
+    def load_frozen_scope(self, task: AgentTask) -> ObjectiveScope | None:
+        if task.objective_frozen_at is None:
+            return None
+        return self.require_frozen_scope(task)
+
+    def require_frozen_scope(self, task: AgentTask) -> ObjectiveScope:
+        if (
+            task.objective_resolution_status != ObjectiveResolutionStatus.CONFIRMED.value
+            or task.objective_frozen_at is None
+        ):
+            raise AppError(
+                "OBJECTIVE_SCOPE_NOT_FROZEN",
+                "The task does not have a confirmed frozen objective scope",
+                status_code=409,
+            )
+        scope = self._stored_scope(task)
+        if scope is None:
+            raise AppError(
+                "OBJECTIVE_SCOPE_CORRUPT",
+                "The frozen task objective scope is incomplete",
+                status_code=409,
+            )
+        self._validate_task_scope(task, scope)
+        return scope
+
+    @staticmethod
+    def _scope_payload(scope: ObjectiveScope) -> dict[str, object]:
+        return {
+            "scenario_key": scope.scenario_key,
+            "catalog_version": scope.catalog_version,
+            "objective_keys": list(scope.objective_keys),
+        }
+
+    @staticmethod
+    def _stored_scope(task: AgentTask) -> ObjectiveScope | None:
+        if task.objective_catalog_version is None or task.objective_scope_keys is None:
+            return None
+        return ObjectiveScope(
+            scenario_key=task.scenario_key,
+            catalog_version=task.objective_catalog_version,
+            objective_keys=tuple(task.objective_scope_keys),
+        )
+
+    @staticmethod
+    def _validate_task_scope(task: AgentTask, scope: ObjectiveScope) -> None:
+        if scope.scenario_key != task.scenario_key:
+            raise AppError(
+                "OBJECTIVE_SCOPE_SCENARIO_MISMATCH",
+                "The objective scope belongs to a different scenario",
+            )
+        catalog = scenario_objective_catalog(task.scenario_key, scope.catalog_version)
+        if catalog is None:
+            raise AppError(
+                "OBJECTIVE_CATALOG_VERSION_UNAVAILABLE",
+                "The objective catalog version frozen by the task is unavailable",
+                status_code=409,
+            )
+        catalog.scope(scope.objective_keys)
 
     def get_task(self, task_id: UUID, *, lock: bool = False) -> AgentTask:
         query = select(AgentTask).where(AgentTask.id == task_id)
@@ -659,6 +809,7 @@ class TaskService:
             and task.status == AgentTaskStatus.WAITING_FOR_WORLD_EVENT
         ):
             waiting = {"kind": "WORLD_EVENT", **pending_world_event}
+        frozen_scope = self.load_frozen_scope(task)
         return {
             "id": str(task.id),
             "player_id": str(task.player_id),
@@ -673,6 +824,26 @@ class TaskService:
             "origin_session_id": str(task.origin_session_id),
             "last_session_id": str(task.last_session_id),
             "goal_description": task.goal_description,
+            "raw_goal": task.goal_description,
+            "objective_resolution": {
+                "status": task.objective_resolution_status,
+                "resolver_source": task.objective_resolver_source,
+                "resolver_version": task.objective_resolver_version,
+                "metadata": task.objective_resolution_metadata,
+                "resolved_at": task.objective_resolved_at,
+                "confirmed_at": task.objective_confirmed_at,
+                "confirmation_source": task.objective_confirmation_source,
+            },
+            "objective_scope": (
+                None
+                if frozen_scope is None
+                else {
+                    **self._scope_payload(frozen_scope),
+                    "frozen": True,
+                    "frozen_at": task.objective_frozen_at,
+                    "freeze_source": task.objective_freeze_source,
+                }
+            ),
             "scenario_key": task.scenario_key,
             "planning_mode": task.planning_mode,
             "status": task.status.value,

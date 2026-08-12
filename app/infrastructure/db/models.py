@@ -275,6 +275,17 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     last_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     goal_description: Mapped[str] = mapped_column(Text)
     scenario_key: Mapped[str] = mapped_column(String(100))
+    objective_resolution_status: Mapped[str] = mapped_column(String(30), default="UNRESOLVED")
+    objective_scope_keys: Mapped[list[str] | None] = mapped_column(JSON)
+    objective_catalog_version: Mapped[str | None] = mapped_column(String(100))
+    objective_resolver_source: Mapped[str | None] = mapped_column(String(100))
+    objective_resolver_version: Mapped[str | None] = mapped_column(String(100))
+    objective_resolution_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    objective_resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    objective_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    objective_confirmation_source: Mapped[str | None] = mapped_column(String(100))
+    objective_frozen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    objective_freeze_source: Mapped[str | None] = mapped_column(String(100))
     planning_mode: Mapped[str] = mapped_column(String(40), default="PROVIDER")
     status: Mapped[AgentTaskStatus] = mapped_column(
         Enum(AgentTaskStatus, native_enum=False, length=30),

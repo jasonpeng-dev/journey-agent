@@ -449,6 +449,17 @@ class StrategicSnapshotService:
         return items[-60:]
 
     def _trace(self, task: AgentTask) -> list[dict[str, object]]:
+        scope = TaskService(self.db).load_frozen_scope(task)
+        scope_snapshot = (
+            None
+            if scope is None
+            else {
+                "scenario_key": scope.scenario_key,
+                "catalog_version": scope.catalog_version,
+                "objective_keys": list(scope.objective_keys),
+                "frozen": True,
+            }
+        )
         runs = self.db.scalars(
             select(AgentRun)
             .where(AgentRun.task_id == task.id)
@@ -468,6 +479,7 @@ class StrategicSnapshotService:
                     "actor_npc_id": str(run.actor_npc_id) if run.actor_npc_id else None,
                     "actor": self._officer(run.actor_npc_id) if run.actor_npc_id else None,
                     "purpose": run.purpose,
+                    "objective_scope": scope_snapshot,
                     "status": run.status.value,
                     "model": run.model,
                     "token_usage": run.token_usage,

@@ -90,7 +90,7 @@ def test_current_final_verification_and_objective_evaluator_are_not_equivalent()
         "在南海建立一支目前场景完全不支持的舰队。",
     ],
 )
-def test_ambiguous_and_unsupported_goals_currently_have_no_resolution_lifecycle(
+def test_new_goals_enter_the_unresolved_scope_lifecycle_without_implicit_full(
     session: Session,
     goal: str,
 ) -> None:
@@ -99,8 +99,9 @@ def test_ambiguous_and_unsupported_goals_currently_have_no_resolution_lifecycle(
     assert task.goal_description == goal
     assert task.status == AgentTaskStatus.ACTIVE
     assert task.current_plan_version == 0
-    assert "objective_scope" not in AgentTask.__table__.columns
-    assert "objective_resolution_status" not in AgentTask.__table__.columns
+    assert "objective_scope_keys" in AgentTask.__table__.columns
+    assert task.objective_resolution_status == "UNRESOLVED"
+    assert task.objective_scope_keys is None
 
 
 def test_mock_planner_currently_ignores_goal_text() -> None:
@@ -142,7 +143,7 @@ def test_replan_context_currently_has_goal_text_but_no_frozen_scope(
 
     assert request["goal"] == task.goal_description
     assert "objective_scope" not in request
-    assert "objective_scope" not in serialized
+    assert serialized["objective_scope"] is None
 
 
 def test_relations_currently_do_not_enter_the_planning_request(session: Session) -> None:
