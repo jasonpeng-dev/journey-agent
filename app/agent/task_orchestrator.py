@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.agent.authority import effective_authority_limits
+from app.agent.goal_resolution import StarfireGoalResolver
 from app.agent.planning import PlanValidationIssue, PlanValidator, build_planning_request
 from app.agent.providers import ProviderFailure, ProviderOutputFailure
 from app.agent.task_policy import (
@@ -18,6 +19,7 @@ from app.agent.task_policy import (
 )
 from app.agent.types import Message, ModelProvider, ToolCall, ToolContext, ToolResult
 from app.core.config import Settings
+from app.core.errors import AppError
 from app.domain.enums import (
     AgentStepStatus,
     AgentTaskStatus,
@@ -35,6 +37,7 @@ from app.infrastructure.db.models import (
     Memory,
     OfficerAppointment,
 )
+from app.scenarios.contracts import ObjectiveResolutionStatus
 from app.scenarios.registry import scenario_binding
 from app.services.game import GameService
 from app.services.tasks import TaskService
@@ -68,6 +71,10 @@ class TaskOrchestrator:
         self.db.commit()
         if self.tasks.current_plan(task) is not None:
             return task, None, "EXISTING_TASK"
+        resolution_event = self._ensure_goal_scope(task)
+        if resolution_event is not None:
+            self.db.commit()
+            return task, None, resolution_event
         run, result = await self._generate_plan(session, task)
         return task, run, "PLANNED" if result.ok else "PLANNING_FAILED"
 
@@ -89,6 +96,10 @@ class TaskOrchestrator:
             return task, None, "REQUIRES_PLAYER_DECISION"
         plan = self.tasks.current_plan(task)
         if plan is None:
+            resolution_event = self._ensure_goal_scope(task)
+            if resolution_event is not None:
+                self.db.commit()
+                return task, None, resolution_event
             self.db.commit()
             return await self._plan_missing_task(task, session)
         failed = self.db.scalar(
@@ -150,6 +161,76 @@ class TaskOrchestrator:
     ) -> tuple[AgentTask, AgentRun | None, str]:
         run, result = await self._generate_plan(session, task)
         return task, run, "PLANNED" if result.ok else "PLANNING_FAILED"
+
+    def clarify_goal(
+        self,
+        task: AgentTask,
+        *,
+        objective_keys: list[str] | None,
+        clarification_text: str | None,
+    ) -> str:
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        resolver = StarfireGoalResolver(scenario.objective_catalog)
+        if clarification_text is not None:
+            result = resolver.resolve(clarification_text)
+        elif objective_keys is not None:
+            result = resolver.confirm_candidate(
+                self.tasks.clarification_candidates(task),
+                objective_keys,
+            )
+        else:
+            raise AppError(
+                "GOAL_CLARIFICATION_INPUT_INVALID",
+                "Clarification text or one candidate scope is required",
+            )
+        self.tasks.record_goal_resolution(task, result)
+        if result.status == ObjectiveResolutionStatus.RESOLVED:
+            assert result.scope is not None
+            self.tasks.confirm_and_freeze_scope(
+                task,
+                result.scope,
+                confirmation_source="PLAYER_CLARIFICATION",
+                freeze_source="GOAL_RESOLUTION",
+            )
+            return "GOAL_CONFIRMED"
+        if result.status == ObjectiveResolutionStatus.NEEDS_CLARIFICATION:
+            return "GOAL_CLARIFICATION_REQUIRED"
+        return "GOAL_UNSUPPORTED"
+
+    def _ensure_goal_scope(self, task: AgentTask) -> str | None:
+        status = ObjectiveResolutionStatus(task.objective_resolution_status)
+        if status == ObjectiveResolutionStatus.CONFIRMED:
+            self.tasks.require_frozen_scope(task)
+            return None
+        if status == ObjectiveResolutionStatus.NEEDS_CLARIFICATION:
+            return "GOAL_CLARIFICATION_REQUIRED"
+        if status == ObjectiveResolutionStatus.UNSUPPORTED:
+            return "GOAL_UNSUPPORTED"
+        if status != ObjectiveResolutionStatus.UNRESOLVED:
+            raise AppError(
+                "OBJECTIVE_SCOPE_NOT_FROZEN",
+                "A resolved task must be confirmed before planning",
+                status_code=409,
+            )
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        result = StarfireGoalResolver(scenario.objective_catalog).resolve(task.goal_description)
+        self.tasks.record_goal_resolution(task, result)
+        if result.status == ObjectiveResolutionStatus.RESOLVED:
+            assert result.scope is not None
+            self.tasks.confirm_and_freeze_scope(
+                task,
+                result.scope,
+                confirmation_source="EXACT_GOAL",
+                freeze_source="GOAL_RESOLUTION",
+            )
+            return None
+        if result.status == ObjectiveResolutionStatus.NEEDS_CLARIFICATION:
+            return "GOAL_CLARIFICATION_REQUIRED"
+        return "GOAL_UNSUPPORTED"
 
     async def _replan(
         self,

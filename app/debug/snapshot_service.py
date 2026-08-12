@@ -98,6 +98,12 @@ class StrategicSnapshotService:
             else None
         )
         status = serialized_task.get("status") if isinstance(serialized_task, dict) else None
+        objective_status = (
+            serialized_task.get("objective_resolution", {}).get("status")
+            if isinstance(serialized_task, dict)
+            and isinstance(serialized_task.get("objective_resolution"), dict)
+            else None
+        )
         return {
             "runtime": {
                 "environment": self.settings.app_env,
@@ -147,10 +153,14 @@ class StrategicSnapshotService:
                     isinstance(pending_world_event, dict)
                     and pending_world_event.get("status") == "PENDING"
                 ),
+                "requires_goal_clarification": objective_status == "NEEDS_CLARIFICATION",
                 "shows_player_action": pending_player_action is not None,
             },
             "polling": {
-                "recommended": status == AgentTaskStatus.ACTIVE.value,
+                "recommended": (
+                    status == AgentTaskStatus.ACTIVE.value
+                    and objective_status in {None, "CONFIRMED"}
+                ),
                 "interval_ms": 1800,
             },
         }

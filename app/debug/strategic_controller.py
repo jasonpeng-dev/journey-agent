@@ -108,12 +108,47 @@ class StrategicDebugController:
                 )
             )
             self.db.commit()
-        events = await self.drive_until_pause(task.id, session)
+        events = (
+            []
+            if start_event in {"GOAL_CLARIFICATION_REQUIRED", "GOAL_UNSUPPORTED"}
+            else await self.drive_until_pause(task.id, session)
+        )
         return {
             "event": start_event,
             "command_id": idempotency_key or f"command-{uuid4().hex}",
             "task_id": str(task.id),
             "transitions": events,
+            "task_status": task.status.value,
+        }
+
+    async def clarify_goal(
+        self,
+        task_id: UUID,
+        session_id: UUID,
+        *,
+        objective_keys: list[str] | None,
+        clarification_text: str | None,
+    ) -> dict[str, object]:
+        session = self._strategic_session(session_id)
+        task = self._strategic_task(task_id, session)
+        orchestrator = TaskOrchestrator(
+            self.db,
+            build_provider(self.settings),
+            self.settings,
+        )
+        event = orchestrator.clarify_goal(
+            task,
+            objective_keys=objective_keys,
+            clarification_text=clarification_text,
+        )
+        self.db.commit()
+        transitions = (
+            await self.drive_until_pause(task.id, session) if event == "GOAL_CONFIRMED" else []
+        )
+        return {
+            "event": event,
+            "task_id": str(task.id),
+            "transitions": transitions,
             "task_status": task.status.value,
         }
 

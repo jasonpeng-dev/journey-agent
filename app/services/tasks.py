@@ -32,6 +32,7 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.contracts import (
     GoalResolutionResult,
+    ObjectiveContractError,
     ObjectiveResolutionStatus,
     ObjectiveScope,
 )
@@ -223,6 +224,52 @@ class TaskService:
         self._validate_task_scope(task, scope)
         return scope
 
+    def clarification_candidates(self, task: AgentTask) -> tuple[ObjectiveScope, ...]:
+        if task.objective_resolution_status != ObjectiveResolutionStatus.NEEDS_CLARIFICATION.value:
+            raise AppError(
+                "GOAL_CLARIFICATION_NOT_REQUIRED",
+                "The task is not waiting for goal clarification",
+                status_code=409,
+            )
+        metadata = task.objective_resolution_metadata or {}
+        raw_candidates = metadata.get("candidate_scopes")
+        if not isinstance(raw_candidates, list):
+            raise AppError(
+                "GOAL_CLARIFICATION_CORRUPT",
+                "The task clarification candidates are unavailable",
+                status_code=409,
+            )
+        candidates: list[ObjectiveScope] = []
+        for raw in raw_candidates:
+            if not isinstance(raw, dict):
+                raise AppError(
+                    "GOAL_CLARIFICATION_CORRUPT",
+                    "A task clarification candidate is invalid",
+                    status_code=409,
+                )
+            scenario_key = raw.get("scenario_key")
+            catalog_version = raw.get("catalog_version")
+            objective_keys = raw.get("objective_keys")
+            if (
+                not isinstance(scenario_key, str)
+                or not isinstance(catalog_version, str)
+                or not isinstance(objective_keys, list)
+                or not all(isinstance(key, str) for key in objective_keys)
+            ):
+                raise AppError(
+                    "GOAL_CLARIFICATION_CORRUPT",
+                    "A task clarification candidate is invalid",
+                    status_code=409,
+                )
+            scope = ObjectiveScope(
+                scenario_key=scenario_key,
+                catalog_version=catalog_version,
+                objective_keys=tuple(objective_keys),
+            )
+            self._validate_task_scope(task, scope)
+            candidates.append(scope)
+        return tuple(candidates)
+
     @staticmethod
     def _scope_payload(scope: ObjectiveScope) -> dict[str, object]:
         return {
@@ -255,7 +302,15 @@ class TaskService:
                 "The objective catalog version frozen by the task is unavailable",
                 status_code=409,
             )
-        catalog.scope(scope.objective_keys)
+        try:
+            catalog.scope(scope.objective_keys)
+        except ObjectiveContractError as exc:
+            raise AppError(
+                "OBJECTIVE_SCOPE_INVALID",
+                "The task objective scope is not valid for its catalog",
+                status_code=409,
+                details={"contract_code": exc.code},
+            ) from exc
 
     def get_task(self, task_id: UUID, *, lock: bool = False) -> AgentTask:
         query = select(AgentTask).where(AgentTask.id == task_id)

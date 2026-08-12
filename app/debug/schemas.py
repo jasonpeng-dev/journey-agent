@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictDebugRequest(BaseModel):
@@ -22,6 +22,18 @@ class StrategicCommandRequest(StrictDebugRequest):
 class StrategicDecisionRequest(StrictDebugRequest):
     session_id: UUID
     option_id: str = Field(min_length=1, max_length=80)
+
+
+class StrategicGoalClarificationRequest(StrictDebugRequest):
+    session_id: UUID
+    objective_keys: list[str] | None = Field(default=None, min_length=1, max_length=5)
+    clarification_text: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def exactly_one_clarification_input(self) -> StrategicGoalClarificationRequest:
+        if (self.objective_keys is None) == (self.clarification_text is None):
+            raise ValueError("exactly one of objective_keys or clarification_text is required")
+        return self
 
 
 class StrategicWorldEventRequest(StrictDebugRequest):

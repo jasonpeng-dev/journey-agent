@@ -10,6 +10,7 @@ from app.core.errors import AppError
 from app.debug.schemas import (
     StrategicCommandRequest,
     StrategicDecisionRequest,
+    StrategicGoalClarificationRequest,
     StrategicResetRequest,
     StrategicWorldEventRequest,
 )
@@ -74,6 +75,22 @@ async def resolve_strategic_decision(
         decision_id,
         payload.session_id,
         payload.option_id,
+    )
+
+
+@router.post("/tasks/{task_id}/goal-clarification")
+async def clarify_strategic_goal(
+    task_id: UUID,
+    payload: StrategicGoalClarificationRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    _require_debug_environment(settings)
+    return await StrategicDebugController(db, settings).clarify_goal(
+        task_id,
+        payload.session_id,
+        objective_keys=payload.objective_keys,
+        clarification_text=payload.clarification_text,
     )
 
 
