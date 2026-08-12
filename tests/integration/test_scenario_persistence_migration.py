@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -8,9 +9,10 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.infrastructure.db.models import ScenarioDraft
+from app.infrastructure.db.models import Player, ScenarioDraft
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.scenarios.starfire.scenario import STARFIRE_SCENARIO_DEFINITION
+from app.services.game_instances import GameInstanceService
 from app.services.scenarios import ScenarioService
 from app.services.seed import seed_scenario_definitions
 
@@ -53,6 +55,45 @@ def test_fresh_database_persists_and_loads_starfire_definition(
         draft = db.query(ScenarioDraft).one()
         loaded = ScenarioDefinitionRepository(db).load_draft(draft.scenario_id)
         assert loaded == STARFIRE_SCENARIO_DEFINITION
+
+    engine.dispose()
+
+
+def test_migrated_game_instance_binding_is_database_immutable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{(tmp_path / 'scenario-c4.db').as_posix()}"
+    _upgrade(monkeypatch, database_url, "head")
+    engine = create_engine(database_url)
+    assert "game_instances" in inspect(engine).get_table_names()
+    with Session(engine) as db:
+        seed_scenario_definitions(db)
+        scenario = ScenarioDefinitionRepository(db).find_scenario("starfire_command")
+        assert scenario is not None
+        version = (
+            ScenarioService(db)
+            .publish_draft(
+                scenario.id,
+                expected_revision=1,
+            )
+            .version
+        )
+        player = Player(name="migration-player")
+        db.add(player)
+        db.flush()
+        instance = GameInstanceService(db).create(
+            player_id=player.id,
+            scenario_version_id=version.id,
+        )
+        db.commit()
+
+        with pytest.raises(DBAPIError):
+            db.execute(
+                text("UPDATE game_instances SET scenario_version_id = :id WHERE id = :instance"),
+                {"id": uuid4(), "instance": instance.id},
+            )
+        db.rollback()
 
     engine.dispose()
 

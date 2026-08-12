@@ -6,6 +6,14 @@ class PlayerStatus(StrEnum):
     DISABLED = "DISABLED"
 
 
+class GameInstanceStatus(StrEnum):
+    PENDING_INITIALIZATION = "PENDING_INITIALIZATION"
+    ACTIVE = "ACTIVE"
+    SUSPENDED = "SUSPENDED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
 class NPCRole(StrEnum):
     STRATEGIST = "STRATEGIST"
     GENERAL = "GENERAL"

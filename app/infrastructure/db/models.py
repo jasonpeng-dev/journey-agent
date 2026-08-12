@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    inspect,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +26,7 @@ from app.domain.enums import (
     AgentStepStatus,
     AgentTaskStatus,
     DecisionStatus,
+    GameInstanceStatus,
     MemoryType,
     MessageRole,
     NodeStatus,
@@ -146,6 +148,46 @@ class Player(UUIDPrimaryKey, TimestampMixin, Base):
         Enum(PlayerStatus, native_enum=False), default=PlayerStatus.ACTIVE
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstance(UUIDPrimaryKey, TimestampMixin, Base):
+    """One game with a permanent Player and immutable ScenarioVersion binding."""
+
+    __tablename__ = "game_instances"
+    __table_args__ = (
+        CheckConstraint("runtime_revision >= 0", name="ck_game_instance_runtime_revision"),
+        Index("ix_game_instances_player_status", "player_id", "status"),
+    )
+
+    player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
+    scenario_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("scenario_versions.id", ondelete="RESTRICT")
+    )
+    status: Mapped[GameInstanceStatus] = mapped_column(
+        Enum(GameInstanceStatus, native_enum=False, length=30),
+        default=GameInstanceStatus.PENDING_INITIALIZATION,
+    )
+    current_node_key: Mapped[str | None] = mapped_column(String(80))
+    runtime_revision: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class GameInstanceBindingImmutableError(RuntimeError):
+    """Raised when ORM code attempts to change an Instance ownership binding."""
+
+
+@event.listens_for(GameInstance, "before_update")
+def _reject_game_instance_binding_drift(
+    _mapper: object, _connection: object, target: object
+) -> None:
+    state = inspect(target)
+    assert state is not None
+    if (
+        state.attrs.player_id.history.has_changes()
+        or state.attrs.scenario_version_id.history.has_changes()
+    ):
+        raise GameInstanceBindingImmutableError(
+            "GameInstance Player and ScenarioVersion bindings are immutable"
+        )
 
 
 class PlayerNodeState(TimestampMixin, Base):
