@@ -12,9 +12,11 @@ from app.domain.runtime_scope import (
     RuntimeScopeResolver,
     ScenarioVersionId,
 )
+from app.domain.scenario import BehaviorBundleRef, ScenarioDefinition
 
 __all__ = [
     "RUNTIME_OWNERSHIP",
+    "BehaviorBundleRef",
     "GameInstanceContext",
     "GameInstanceId",
     "PlayerId",
@@ -23,5 +25,6 @@ __all__ = [
     "RuntimeScope",
     "RuntimeScopeContractError",
     "RuntimeScopeResolver",
+    "ScenarioDefinition",
     "ScenarioVersionId",
 ]

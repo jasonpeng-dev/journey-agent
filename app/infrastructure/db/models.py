@@ -40,6 +40,51 @@ from app.domain.world import Visibility
 from app.infrastructure.db.base import Base, TimestampMixin, UUIDPrimaryKey, utcnow
 
 
+class Scenario(UUIDPrimaryKey, TimestampMixin, Base):
+    """Stable identity and lifecycle metadata for an authored Scenario."""
+
+    __tablename__ = "scenarios"
+
+    key: Mapped[str] = mapped_column(String(80), unique=True)
+    name: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class ScenarioDraft(TimestampMixin, Base):
+    """Mutable authoring document; publication behavior is added in Phase C2."""
+
+    __tablename__ = "scenario_drafts"
+
+    scenario_id: Mapped[UUID] = mapped_column(
+        ForeignKey("scenarios.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    definition_document: Mapped[dict[str, Any]] = mapped_column(JSON)
+    validation_status: Mapped[str] = mapped_column(String(30), default="UNVALIDATED")
+    validation_errors: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+
+
+class ScenarioVersion(UUIDPrimaryKey, Base):
+    """Published Scenario snapshot storage; immutability is enforced in Phase C3."""
+
+    __tablename__ = "scenario_versions"
+    __table_args__ = (
+        UniqueConstraint("scenario_id", "version_number"),
+        Index("ix_scenario_versions_scenario_number", "scenario_id", "version_number"),
+    )
+
+    scenario_id: Mapped[UUID] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"))
+    version_number: Mapped[int] = mapped_column(Integer)
+    schema_version: Mapped[int] = mapped_column(Integer)
+    snapshot_document: Mapped[dict[str, Any]] = mapped_column(JSON)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    behavior_bundle_key: Mapped[str] = mapped_column(String(100))
+    behavior_bundle_version: Mapped[str] = mapped_column(String(100))
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class World(UUIDPrimaryKey, TimestampMixin, Base):
     __tablename__ = "worlds"
 

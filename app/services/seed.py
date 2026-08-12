@@ -7,8 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.domain.enums import NPCRole
 from app.infrastructure.db.models import NPC, World, WorldNode
+from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.scenarios.starfire.definition import STARFIRE_WORLD
 from app.scenarios.starfire.persistence import persisted_node_specs
+from app.scenarios.starfire.scenario import STARFIRE_SCENARIO_DEFINITION
 from app.services.game import seed_id
 
 
@@ -124,3 +126,9 @@ def seed_demo_world(db: Session) -> World:
                 setattr(officer, field, value)
     db.flush()
     return world
+
+
+def seed_scenario_definitions(db: Session) -> None:
+    """Persist built-in authoring definitions on databases at the current schema head."""
+
+    ScenarioDefinitionRepository(db).persist_initial_draft(STARFIRE_SCENARIO_DEFINITION)
