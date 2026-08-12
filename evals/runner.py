@@ -46,14 +46,21 @@ def load_scenarios(path: Path | None = None) -> list[dict[str, Any]]:
 def run_evaluations() -> dict[str, object]:
     scenarios = load_scenarios()
     started = perf_counter()
-    workflow = asyncio.run(_run_mock_workflow())
+    workflow_goals = {
+        str(scenario.get("goal", _FULL_RECOVERY_GOAL))
+        for scenario in scenarios
+        if scenario["kind"] in {"workflow", "scoped_workflow"}
+    }
+    workflows = {goal: asyncio.run(_run_mock_workflow(goal)) for goal in sorted(workflow_goals)}
     results: list[dict[str, object]] = []
     for scenario in scenarios:
         case_started = perf_counter()
-        if scenario["kind"] == "workflow":
+        if scenario["kind"] in {"workflow", "scoped_workflow"}:
+            workflow = workflows[str(scenario.get("goal", _FULL_RECOVERY_GOAL))]
             passed, actual = _evaluate_workflow_assertion(
                 workflow,
                 str(scenario["assertion"]),
+                scenario,
             )
             expected = str(scenario["assertion"])
         else:
@@ -83,7 +90,10 @@ def run_evaluations() -> dict[str, object]:
     }
 
 
-async def _run_mock_workflow() -> dict[str, Any]:
+_FULL_RECOVERY_GOAL = "Full northern recovery"
+
+
+async def _run_mock_workflow(goal: str = _FULL_RECOVERY_GOAL) -> dict[str, Any]:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -111,7 +121,7 @@ async def _run_mock_workflow() -> dict[str, Any]:
         orchestrator = TaskOrchestrator(db, MockModelProvider(), settings)
         task, _run, _event = await orchestrator.start(
             conversation,
-            "修复星火前哨并重新打通北方商路。",
+            goal,
             "starfire_command",
         )
         approvals = 0
@@ -166,8 +176,10 @@ async def _run_mock_workflow() -> dict[str, Any]:
             .order_by(AgentRun.started_at)
         ).all()
         return {
+            "goal": goal,
             "task_status": task.status.value,
             "last_error_code": task.last_error_code,
+            "objective_scope": list(TaskService(db).require_frozen_scope(task).objective_keys),
             "plan_count": len(plans),
             "replan_reasons": [plan.replan_reason for plan in plans if plan.replan_reason],
             "officers": {officer.key for officer in officers},
@@ -188,11 +200,25 @@ async def _run_mock_workflow() -> dict[str, Any]:
                 for step in steps
                 if step.failure_code is not None
             ],
+            "selected_tools": sorted(
+                {
+                    str(step.selected_tool_name)
+                    for step in steps
+                    if step.selected_tool_name is not None
+                }
+            ),
         }
 
 
-def _evaluate_workflow_assertion(workflow: dict[str, Any], assertion: str) -> tuple[bool, str]:
+def _evaluate_workflow_assertion(
+    workflow: dict[str, Any],
+    assertion: str,
+    scenario: dict[str, Any],
+) -> tuple[bool, str]:
     world = workflow["world"]
+    expected_scope = [str(key) for key in scenario.get("expected_scope", [])]
+    forbidden_tools = {str(name) for name in scenario.get("forbidden_tools", [])}
+    selected_tools = set(workflow["selected_tools"])
     checks = {
         "task_succeeded": workflow["task_status"] == "SUCCEEDED",
         "replan_created": (
@@ -206,6 +232,11 @@ def _evaluate_workflow_assertion(workflow: dict[str, Any], assertion: str) -> tu
             and world.get("northern_trade_route_status") == "OPEN"
         ),
         "state_audit_recorded": workflow["state_audits"] > 0,
+        "scope_succeeded_without_extra_tools": (
+            workflow["task_status"] == "SUCCEEDED"
+            and workflow["objective_scope"] == expected_scope
+            and selected_tools.isdisjoint(forbidden_tools)
+        ),
     }
     passed = bool(checks.get(assertion, False))
     return passed, assertion if passed else json.dumps(workflow, ensure_ascii=False, default=list)

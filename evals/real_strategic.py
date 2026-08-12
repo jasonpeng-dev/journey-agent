@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
@@ -71,8 +72,9 @@ _LEGACY_TARGETS = frozenset({"valley_entrance", "ambush_valley"})
 class AuditedProvider:
     """Record non-secret planner payload invariants around a real provider."""
 
-    def __init__(self, provider: ModelProvider):
+    def __init__(self, provider: ModelProvider, settings: Settings):
         self._provider = provider
+        self._settings = settings
         self.name = provider.name
         self.planning_context_audits: list[dict[str, object]] = []
         self._call_index = 0
@@ -82,8 +84,70 @@ class AuditedProvider:
         messages: list[Message],
         tools: list[ToolDefinition],
     ) -> ModelResponse:
+        self._assert_payload_safe(messages, tools)
         self._audit_planning_context(messages, tools)
         return await self._provider.complete(messages, tools)
+
+    def _assert_payload_safe(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition],
+    ) -> None:
+        """Fail closed before the evaluation sends secrets or hidden initial truth."""
+        payload = json.dumps(
+            {
+                "messages": [message.model_dump(mode="json") for message in messages],
+                "tools": [tool.model_dump(mode="json") for tool in tools],
+            },
+            ensure_ascii=False,
+        )
+        forbidden_values = self._sensitive_local_values()
+        if any(value and value in payload for value in forbidden_values):
+            raise RuntimeError("Real evaluation payload safety check failed")
+
+        marker_message = next(
+            (
+                message.content
+                for message in messages
+                if message.content is not None and "PLANNER_REQUEST_JSON:" in message.content
+            ),
+            None,
+        )
+        if marker_message is None:
+            return
+        raw_request = marker_message.split("PLANNER_REQUEST_JSON:", 1)[1]
+        try:
+            request = json.loads(raw_request)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Real evaluation planner payload was not valid JSON") from exc
+        if request.get("kind") == "PLAN" and any(
+            token in raw_request for token in _INITIAL_HIDDEN_TOKENS
+        ):
+            raise RuntimeError("Real evaluation initial payload contained hidden world data")
+
+    def _sensitive_local_values(self) -> set[str]:
+        api_key = self._settings.model_api_key
+        values = {
+            api_key.get_secret_value() if api_key is not None else "",
+            self._settings.database_url,
+            str(Path.cwd()),
+            str(Path.home()),
+            Path.home().name,
+        }
+        sensitive_name_parts = (
+            "API_KEY",
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
+            "DATABASE_URL",
+            "CONNECTION_STRING",
+        )
+        values.update(
+            value
+            for name, value in os.environ.items()
+            if len(value) >= 8 and any(part in name.upper() for part in sensitive_name_parts)
+        )
+        return {value for value in values if len(value) >= 4}
 
     def _audit_planning_context(
         self,
@@ -215,7 +279,7 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
     started = perf_counter()
     with factory() as db:
         session = _seed_trial(db, attempt)
-        provider = AuditedProvider(build_provider(settings))
+        provider = AuditedProvider(build_provider(settings), settings)
         orchestrator = TaskOrchestrator(db, provider, settings)
         task, _initial_run, _event = await orchestrator.start(
             session,

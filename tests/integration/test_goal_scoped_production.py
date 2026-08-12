@@ -27,6 +27,11 @@ from fastapi.testclient import TestClient
             ["GATHER_VALLEY_INTELLIGENCE", "RESTORE_STARFIRE_OUTPOST"],
             {"start_trade_route_test"},
         ),
+        (
+            "Full northern recovery",
+            ["FULL_NORTHERN_RECOVERY"],
+            set(),
+        ),
     ],
 )
 def test_goal_scoped_workflows_stop_without_extra_objectives(

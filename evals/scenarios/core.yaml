@@ -28,6 +28,54 @@
   kind: workflow
   assertion: state_audit_recorded
 
+- name: intelligence_only_respects_frozen_scope
+  category: goal_scope
+  kind: scoped_workflow
+  goal: Gather intelligence about the Northern Valley
+  assertion: scope_succeeded_without_extra_tools
+  expected_scope: [GATHER_VALLEY_INTELLIGENCE]
+  forbidden_tools: [start_military_operation, start_outpost_repair, start_trade_route_test]
+
+- name: secure_valley_only_respects_frozen_scope
+  category: goal_scope
+  kind: scoped_workflow
+  goal: Secure the Northern Valley
+  assertion: scope_succeeded_without_extra_tools
+  expected_scope: [SECURE_NORTHERN_VALLEY]
+  forbidden_tools: [start_outpost_repair, start_trade_route_test]
+
+- name: restore_outpost_only_respects_frozen_scope
+  category: goal_scope
+  kind: scoped_workflow
+  goal: Restore Starfire Outpost
+  assertion: scope_succeeded_without_extra_tools
+  expected_scope: [RESTORE_STARFIRE_OUTPOST]
+  forbidden_tools: [start_trade_route_test]
+
+- name: open_trade_keeps_prerequisites_out_of_scope
+  category: goal_scope
+  kind: scoped_workflow
+  goal: Open the Northern Trade Route
+  assertion: scope_succeeded_without_extra_tools
+  expected_scope: [OPEN_NORTHERN_TRADE_ROUTE]
+  forbidden_tools: []
+
+- name: multi_objective_uses_and_scope_without_trade_expansion
+  category: goal_scope
+  kind: scoped_workflow
+  goal: Gather intelligence and restore Starfire Outpost
+  assertion: scope_succeeded_without_extra_tools
+  expected_scope: [GATHER_VALLEY_INTELLIGENCE, RESTORE_STARFIRE_OUTPOST]
+  forbidden_tools: [start_trade_route_test]
+
+- name: full_recovery_resolves_to_explicit_full_scope
+  category: goal_scope
+  kind: scoped_workflow
+  goal: Full northern recovery
+  assertion: scope_succeeded_without_extra_tools
+  expected_scope: [FULL_NORTHERN_RECOVERY]
+  forbidden_tools: []
+
 - name: unknown_tool_is_rejected
   category: plan_validation
   kind: plan_validation
