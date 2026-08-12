@@ -47,14 +47,19 @@ const labels = {
   ACTIVE: "执行中",
   SUCCEEDED: "已完成",
   FAILED: "失败",
-  BLOCKED: "受阻",
+  BLOCKED: "已阻止",
   SUPERSEDED: "已替换",
-  PENDING: "待执行",
+  PENDING: "等待中",
+  RUNNING: "执行中",
   IN_PROGRESS: "执行中",
   REQUIRES_PLAYER_DECISION: "等待主公决断",
   WAITING_FOR_PLAYER_ACTION: "等待玩家行动",
   WAITING_FOR_WORLD_EVENT: "等待世界结算",
   UNKNOWN: "未知",
+  KNOWN: "已知",
+  HIDDEN: "隐藏",
+  LOCKED: "锁定",
+  AVAILABLE: "可访问",
   INCOMPLETE: "未完成",
   PARTIAL: "部分掌握",
   COMPLETE: "已掌握",
@@ -99,9 +104,63 @@ const labels = {
   RECORDED: "已记录",
   SKIPPED: "已跳过",
   CANCELLED: "已取消",
+  CONFIRMED: "已确认",
+  FROZEN: "已冻结",
+  UNCONFIRMED: "未确认",
+  NEEDS_CLARIFICATION: "需要澄清",
+  UNSUPPORTED: "不支持",
+  SATISFIED: "已满足",
+  OBJECTIVE_SCOPE_SATISFIED: "当前任务目标已达成",
+  OUTSIDE_CURRENT_SCOPE: "当前目标范围之外",
   VICTORY: "胜利",
   DEFEAT: "失败",
   PARTIAL_SUCCESS: "部分成功",
+};
+
+const objectiveLabels = {
+  GATHER_VALLEY_INTELLIGENCE: "侦察北境山谷",
+  SECURE_NORTHERN_VALLEY: "确保北境山谷安全",
+  RESTORE_STARFIRE_OUTPOST: "修复星火驿站",
+  OPEN_NORTHERN_TRADE_ROUTE: "打通北方商路",
+  FULL_NORTHERN_RECOVERY: "恢复整个北境",
+};
+
+const planSourceLabels = {
+  MODEL_PLANNER: "模型规划",
+  DETERMINISTIC_RECOVERY_FALLBACK: "确定性恢复兜底",
+  MOCK_PLANNER: "模拟模型规划",
+  MANUAL: "人工创建",
+};
+
+const relationLabels = {
+  SUPPORTS: "支持",
+  REVEALS: "揭示",
+  UNLOCKS: "解锁",
+  ENABLES: "使可用",
+  BLOCKS: "阻碍",
+  CONNECTED_TO: "相连",
+};
+
+const failureLabels = {
+  ENCOUNTER_DEFEAT: "遭遇战失败",
+  VALLEY_NOT_SECURE: "山谷尚未安全",
+  ACCESS_DENIED: "访问被拒绝",
+  TARGET_NOT_KNOWN: "目标尚未知",
+  ENEMY_SUPPLY_ROUTE_UNKNOWN: "敌军补给线尚未知",
+  NPC_PERMISSION_DENIED: "部下权限不足",
+  AUTHORITY_LIMIT_EXCEEDED: "超过自主权限上限",
+  INTERACTION_NOT_SUPPORTED: "目标不支持该行动",
+  INTERACTION_TARGET_NOT_FOUND: "未找到行动目标",
+  EXPECTED_OUTCOME_NOT_MET: "未达到预期结果",
+  WORLD_OPERATION_DEFEAT: "世界行动失败",
+  TASK_GOAL_NOT_VERIFIED: "任务目标未通过验证",
+  PLAN_VALIDATION_FAILED: "计划校验失败",
+  PLANNING_FAILED: "规划失败",
+  REPLAN_FAILED: "重新规划失败",
+  PLAYER_DECISION_REJECTED: "玩家拒绝方案",
+  WORLD_STATE_CHANGED: "世界状态已变化",
+  REPLAN_LIMIT_REACHED: "已达到方案调整上限",
+  OBJECTIVE_SCOPE_SATISFIED: "当前任务目标已达成",
 };
 
 const toolLabels = {
@@ -123,11 +182,24 @@ const operationLabels = {
 };
 
 const targetLabels = {
+  capital_council: "都城议事厅",
+  north_village: "北境村落",
+  northern_valley: "北境山谷",
   valley_entrance: "山谷入口",
   ambush_valley: "伏击谷",
   enemy_north_supply_route: "敌军北方补给线",
   starfire_outpost: "星火前哨",
   northern_trade_route: "北方商路",
+};
+
+const factLabels = {
+  valley_intelligence: "山谷情报",
+  valley_security: "山谷安全",
+  ambush_status: "伏击状态",
+  village_support: "村落支援",
+  supply_status: "补给线状态",
+  outpost_status: "驿站状态",
+  trade_route_status: "商路状态",
 };
 
 const factDefinitions = [
@@ -142,15 +214,15 @@ const factDefinitions = [
 
 export function renderSnapshot(snapshot, flags) {
   ui.toggleHidden.textContent = flags.hidden
-    ? "隐藏 Observer 世界状态"
-    : "显示 Observer 世界状态";
+    ? "隐藏观察者视图"
+    : "显示观察者视图";
   renderHeader(snapshot);
   renderResources(snapshot.resources || {});
   renderWorldFacts(snapshot.known_world_state || {});
   renderOfficers(snapshot.officers || []);
   renderHiddenTruth(snapshot.observer_world_state, flags.hidden);
   renderTimeline(snapshot.timeline || []);
-  renderTask(snapshot.task, snapshot.plan_history || []);
+  renderTask(snapshot);
   renderWaiting(snapshot);
   renderDecision(snapshot.active_decision);
   renderTrace(snapshot.recent_traces || [], snapshot, flags.trace);
@@ -247,11 +319,62 @@ function renderOfficers(officers) {
 function renderHiddenTruth(truth, visible) {
   ui.hiddenTruthPanel.hidden = !visible;
   if (!visible) return;
-  ui.hiddenTruthContent.replaceChildren(
-    truth
-      ? jsonBlock(localizeObject(truth))
-      : el("p", "empty-copy", "服务端没有返回 Observer 世界状态。")
+  if (!truth) {
+    ui.hiddenTruthContent.replaceChildren(
+      el("p", "empty-copy", "服务端没有返回观察者世界状态。")
+    );
+    return;
+  }
+  const legend = el("div", "observer-legend");
+  legend.append(
+    dualBadge("已知 · 规划器可见", "KNOWN", "success"),
+    dualBadge("隐藏 · 仅观察者可见", "HIDDEN", "warning"),
+    el("span", "mini-chip", "真实状态 · 认知状态 · 访问状态")
   );
+  const nodes = el("div", "observer-node-list");
+  (truth.nodes || []).forEach((node) => {
+    const card = el("details", "observer-node");
+    const summary = el("summary");
+    summary.append(
+      labeledTechnicalValue("世界节点", targetName(node.key, node.name), node.key),
+      dualBadge(label(node.knowledge), node.knowledge, node.knowledge === "KNOWN" ? "success" : "warning"),
+      dualBadge(label(node.access), node.access, statusClass(node.access))
+    );
+    const body = el("div", "observer-facts");
+    (node.facts || []).forEach((fact) => {
+      const row = el("div", "observer-fact");
+      row.append(
+        labeledTechnicalValue("世界事实", factName(fact.key), fact.key),
+        labeledTechnicalValue("真实状态", label(fact.truth), fact.truth),
+        labeledTechnicalValue("认知状态", label(fact.knowledge), fact.knowledge)
+      );
+      if (fact.revealed_by) {
+        row.appendChild(
+          el("small", "", `揭示来源：世界行动 ${shortId(fact.revealed_by.operation_id)} · ${failureName(fact.revealed_by.failure_code)} · ${fact.revealed_by.failure_code || "—"}`)
+        );
+      }
+      body.appendChild(row);
+    });
+    card.append(summary, body);
+    nodes.appendChild(card);
+  });
+  const relations = el("details", "observer-relations");
+  relations.appendChild(el("summary", "", `世界关系 (${(truth.relations || []).length})`));
+  const relationList = el("div", "relation-list");
+  (truth.relations || []).forEach((relation) => {
+    const row = el("div", "relation-row");
+    row.append(
+      el("code", "", relation.source_node_key),
+      labeledTechnicalValue("关系", relationName(relation.relation_type), relation.relation_type),
+      el("code", "", relation.target_node_key),
+      dualBadge(relation.planner_visible ? "规划器可见" : "仅观察者可见", relation.planner_visible ? "PLANNER_VISIBLE" : "OBSERVER_ONLY", relation.planner_visible ? "success" : "warning")
+    );
+    relationList.appendChild(row);
+  });
+  relations.appendChild(relationList);
+  const raw = el("details", "nested-raw");
+  raw.append(el("summary", "", "观察者原始数据"), jsonBlock(localizeObject(truth)));
+  ui.hiddenTruthContent.replaceChildren(legend, nodes, relations, raw);
 }
 
 function renderTimeline(items) {
@@ -286,12 +409,14 @@ function renderTimeline(items) {
       body.append(meta, el("p", "timeline-content", translateText(item.content) || "状态已更新。"));
       const chips = el("div", "timeline-chips");
       if (item.plan_version) chips.appendChild(el("span", "mini-chip", `方案 v${item.plan_version}`));
+      if (item.source) chips.appendChild(dualBadge(planSourceName(item.source), item.source));
+      if (item.replan_reason) chips.appendChild(failureDisplay(item.replan_reason));
       if (item.step_sequence) chips.appendChild(el("span", "mini-chip", `步骤 ${item.step_sequence}`));
       if (item.status) {
-        chips.appendChild(el("span", `mini-chip ${statusClass(item.status)}`, label(item.status)));
+        chips.appendChild(dualBadge(label(item.status), item.status, statusClass(item.status)));
       }
       if (item.failure_code) {
-        chips.appendChild(el("code", "failure-chip", failureName(item.failure_code)));
+        chips.appendChild(failureDisplay(item.failure_code));
       }
       if (chips.childElementCount) body.appendChild(chips);
       if (item.result) {
@@ -309,21 +434,26 @@ function renderTimeline(items) {
   ui.timeline.scrollTop = ui.timeline.scrollHeight;
 }
 
-function renderTask(task, plans) {
+function renderTask(snapshot) {
+  const task = snapshot.task;
+  const plans = snapshot.plan_history || [];
   if (!task) {
     ui.planBadge.textContent = "方案 —";
     ui.taskSummary.replaceChildren(el("p", "empty-copy", "等待玩家下达第一道军令。"));
     ui.planHistory.replaceChildren(el("p", "empty-copy", "尚无行动方案。"));
     return;
   }
-  ui.planBadge.textContent = `方案 v${task.current_plan_version}`;
+  const activePlan = plans.find((plan) => plan.version === task.current_plan_version);
+  ui.planBadge.textContent = `方案 v${task.current_plan_version} · ${planSourceName(activePlan?.source)}`;
+  ui.planBadge.title = activePlan?.source || "UNKNOWN";
   const title = el("div", "task-title");
   title.append(
     el("span", `task-icon ${statusClass(task.status)}`, "令"),
     (() => {
       const copy = el("div");
       copy.append(
-        el("strong", "", translateText(task.goal_description)),
+        el("strong", "", translateText(task.raw_goal || task.goal_description)),
+        el("span", "", `玩家原始目标 · ${task.raw_goal || task.goal_description}`),
         el("span", "", `军令 ${shortId(task.id)}`)
       );
       return copy;
@@ -331,22 +461,47 @@ function renderTask(task, plans) {
   );
   const stats = el("div", "task-stats");
   [
-    ["状态", label(task.status)],
-    ["当前方案", `v${task.current_plan_version}`],
-    ["调整次数", String(task.replan_count)],
-    ["统筹者", officerName(task.owner_officer)],
-  ].forEach(([name, value]) => {
+    ["任务状态", label(task.status), task.status],
+    ["当前方案", `v${task.current_plan_version}`, null],
+    ["重规划次数", String(task.replan_count), null],
+    ["目标解析状态", label(task.objective_resolution?.status), task.objective_resolution?.status],
+    ["最近重规划原因", failureName(activePlan?.replan_reason || task.last_error_code), activePlan?.replan_reason || task.last_error_code],
+  ].forEach(([name, value, raw]) => {
     const stat = el("div");
     stat.append(el("span", "", name), el("strong", "", value));
+    if (raw) stat.appendChild(el("code", "technical-id", raw));
     stats.appendChild(stat);
   });
-  ui.taskSummary.replaceChildren(title, stats);
+  const scope = el("section", "scope-card");
+  const scopeHeader = el("div", "scope-header");
+  scopeHeader.append(
+    el("strong", "", "已冻结任务目标"),
+    dualBadge(task.objective_scope?.frozen ? "已冻结" : "未确认", task.objective_scope?.frozen ? "FROZEN" : "UNCONFIRMED", task.objective_scope?.frozen ? "success" : "warning")
+  );
+  const scopeKeys = el("div", "scope-keys");
+  (task.objective_scope?.objective_keys || []).forEach((key) => scopeKeys.appendChild(objectiveDisplay(key)));
+  scope.append(
+    scopeHeader,
+    scopeKeys,
+    el("small", "", `目标目录版本 ${task.objective_scope?.catalog_version || "—"} · 冻结来源 ${task.objective_scope?.freeze_source || "—"}`)
+  );
+  const evaluation = renderObjectiveEvaluation(snapshot.objective_evaluation);
+  const stop = renderEarlyStop(snapshot.early_stop);
+  ui.taskSummary.replaceChildren(title, stats, scope, evaluation, stop);
 
   if (!plans.length) {
     ui.planHistory.replaceChildren(el("p", "empty-copy", "规划尚未通过后端验证。"));
     return;
   }
+  const flow = el("div", "plan-flow");
+  plans.forEach((plan, index) => {
+    if (index) flow.appendChild(el("span", "plan-arrow", `→ ${failureName(plan.replan_reason) || "REPLAN"} →`));
+    const planNode = el("strong", "plan-flow-source", `v${plan.version} ${planSourceName(plan.source)}`);
+    planNode.appendChild(el("code", "technical-id", plan.source || "UNKNOWN"));
+    flow.appendChild(planNode);
+  });
   ui.planHistory.replaceChildren(
+    flow,
     ...[...plans].reverse().map((plan) => {
       const details = el("details", "plan-card");
       details.open = plan.version === task.current_plan_version;
@@ -358,22 +513,37 @@ function renderTask(task, plans) {
           const copy = el("div");
           copy.append(
             el("strong", "", `方案 v${plan.version}`),
-            el("span", "", officerName(plan.created_by_officer))
+            el("span", "", `${planSourceName(plan.source)} · ${plan.planner_model || "未记录模型"}`),
+            el("code", "technical-id", plan.source || "UNKNOWN")
           );
           return copy;
         })()
       );
-      summary.append(
-        version,
-        el("span", `plan-status ${statusClass(plan.status)}`, label(plan.status))
-      );
+      const planStatus = el("span", `plan-status ${statusClass(plan.status)}`, label(plan.status));
+      planStatus.title = plan.status;
+      summary.append(version, planStatus);
       const body = el("div", "plan-body");
       body.appendChild(el("p", "strategy-copy", translateText(plan.strategy_summary) || "—"));
+      const previousPlan = plans.find((candidate) => candidate.version === plan.version - 1);
+      if (previousPlan) {
+        const previousKeys = new Set((previousPlan.steps || []).map(stepComparisonKey));
+        const added = (plan.steps || []).filter((step) => !previousKeys.has(stepComparisonKey(step)));
+        body.appendChild(
+          keyValue(
+            `相对 v${previousPlan.version} 新增 ${added.length} 个步骤`,
+            added.map((step) => ({
+              sequence: step.sequence,
+              description: translateText(step.description),
+              tool: step.selected_tool_name,
+            }))
+          )
+        );
+      }
       if (plan.replan_reason) {
         const reason = el("div", "replan-reason");
         reason.append(
           el("span", "", "调整原因"),
-          el("code", "", failureName(plan.replan_reason))
+          failureDisplay(plan.replan_reason)
         );
         body.appendChild(reason);
       }
@@ -388,7 +558,7 @@ function renderTask(task, plans) {
       );
       body.appendChild(validation);
       const steps = el("div", "step-list");
-      (plan.steps || []).forEach((step) => steps.appendChild(renderStep(step)));
+      (plan.steps || []).forEach((step) => steps.appendChild(renderStep(step, snapshot.operation_wait_pairs || [], plan.version)));
       body.appendChild(steps);
       details.append(summary, body);
       return details;
@@ -396,7 +566,7 @@ function renderTask(task, plans) {
   );
 }
 
-function renderStep(step) {
+function renderStep(step, operationWaitPairs, planVersion) {
   const row = el("div", `step-row ${statusClass(step.status)}`);
   const sequence = el("span", "step-sequence", String(step.sequence).padStart(2, "0"));
   const body = el("div", "step-copy");
@@ -409,10 +579,116 @@ function renderStep(step) {
   );
   body.appendChild(meta);
   if (step.failure_code) {
-    body.appendChild(el("code", "failure-chip", failureName(step.failure_code)));
+    body.appendChild(failureDisplay(step.failure_code));
   }
-  row.append(sequence, body, el("span", "step-status", label(step.status)));
+  const skipReason = step.actual_result?.skip_reason;
+  if (skipReason) {
+    const skipped = el("div", "step-note skipped-note");
+    skipped.append(
+      el("strong", "", `已跳过 · ${label(skipReason)}`),
+      el("code", "technical-id", skipReason)
+    );
+    body.appendChild(skipped);
+  }
+  if (step.execution_type === "WAIT_FOR_WORLD_EVENT") {
+    const pair = operationWaitPairs.find(
+      (item) => item.plan_version === planVersion && item.wait_step_sequence === step.sequence
+    );
+    if (pair) {
+      const lifecycle = el("div", "wait-lifecycle");
+      lifecycle.append(
+        labeledTechnicalValue("世界行动", shortId(pair.operation_id), pair.operation_id),
+        dualBadge(operationLifecycleName(pair.operation_status), pair.operation_status, statusClass(pair.operation_status)),
+        el("span", "wait-arrow", "↓"),
+        labeledTechnicalValue("等待对应世界事件", label(pair.wait_status), pair.wait_status)
+      );
+      const result = el("details", "result-details");
+      result.append(el("summary", "", "行动 / 等待最终结果"), jsonBlock(localizeObject(pair)));
+      body.append(lifecycle, result);
+    } else {
+      body.appendChild(el("p", "step-note warning", "等待步骤没有对应的已持久化世界行动"));
+    }
+  }
+  const stepStatus = el("span", "step-status", label(step.status));
+  stepStatus.title = step.status;
+  row.append(sequence, body, stepStatus);
   return row;
+}
+
+function renderObjectiveEvaluation(evaluation) {
+  const section = el("section", "evaluation-card");
+  const header = el("div", "scope-header");
+  const evaluationStatus = evaluation?.scope_satisfied ? "SATISFIED" : "INCOMPLETE";
+  header.append(
+    el("strong", "", "后端目标完成检查"),
+    dualBadge(label(evaluationStatus), evaluationStatus, evaluation?.scope_satisfied ? "success" : "warning")
+  );
+  section.append(header, el("small", "", evaluation?.source || "等待任务目标冻结"));
+  (evaluation?.objectives || []).forEach((objective) => {
+    const item = el("details", "objective-item");
+    const summary = el("summary");
+    summary.append(
+      el("strong", "", `${objective.satisfied ? "✓" : "○"} ${objectiveName(objective.objective_key)}`),
+      el("code", "technical-id", objective.objective_key)
+    );
+    item.appendChild(summary);
+    const requirements = el("div", "requirement-list");
+    (objective.requirements || []).forEach((requirement) => {
+      requirements.appendChild(
+        (() => {
+          const row = el("div", `requirement-row ${requirement.satisfied ? "success" : "warning"}`);
+          row.append(
+            el("strong", "", `${factName(requirement.fact_key)}：${label(requirement.actual_value)}`),
+            el("small", "", `满足条件：${requirement.accepted_values.map(label).join(" / ")}`),
+            el("code", "technical-id", `${requirement.node_key}.${requirement.fact_key}`)
+          );
+          return row;
+        })()
+      );
+    });
+    item.appendChild(requirements);
+    section.appendChild(item);
+  });
+  if (evaluation?.outside_scope_state?.length) {
+    const outside = el("details", "objective-item outside-scope");
+    outside.appendChild(el("summary", "", "当前目标范围之外"));
+    const list = el("div", "requirement-list");
+    evaluation.outside_scope_state.forEach((fact) => {
+      list.appendChild(
+        (() => {
+          const row = el("div", "requirement-row");
+          row.append(
+            el("strong", "", `${targetName(fact.node_key)} · ${factName(fact.fact_key)}：${label(fact.actual_value)}`),
+            el("small", "", label(fact.scope_relation)),
+            el("code", "technical-id", `${fact.node_key}.${fact.fact_key}`)
+          );
+          return row;
+        })()
+      );
+    });
+    outside.appendChild(list);
+    section.appendChild(outside);
+  }
+  return section;
+}
+
+function renderEarlyStop(earlyStop) {
+  const section = el("section", `early-stop-card ${earlyStop?.triggered ? "triggered" : ""}`);
+  section.append(
+    el("strong", "", earlyStop?.triggered ? "已触发目标达成停止" : "尚未触发目标达成停止"),
+    el("span", "", earlyStop?.triggered ? `已跳过 ${earlyStop.skipped_future_step_count} 个后续步骤 · ${label(earlyStop.reason)}` : "当前没有因目标已满足而跳过的步骤"),
+    ...(earlyStop?.reason ? [el("code", "technical-id", earlyStop.reason)] : [])
+  );
+  return section;
+}
+
+function stepComparisonKey(step) {
+  return JSON.stringify([
+    step.execution_type,
+    step.action_intent,
+    step.selected_tool_name,
+    step.tool_arguments || {},
+  ]);
 }
 
 function renderWaiting(snapshot) {
@@ -641,6 +917,62 @@ function label(value) {
   return labels[String(value)] || String(value || "—").replaceAll("_", " ");
 }
 
+function objectiveName(key) {
+  return objectiveLabels[String(key)] || String(key || "未知目标");
+}
+
+function planSourceName(source) {
+  return planSourceLabels[String(source)] || String(source || "未知来源");
+}
+
+function relationName(type) {
+  return relationLabels[String(type)] || String(type || "未知关系");
+}
+
+function targetName(key, fallback = "") {
+  return targetLabels[String(key)] || fallback || String(key || "未知节点");
+}
+
+function factName(key) {
+  return factLabels[String(key)] || String(key || "未知事实");
+}
+
+function dualBadge(primary, raw, tone = "") {
+  const badge = el("span", `mini-chip dual-badge ${tone}`.trim());
+  badge.append(el("strong", "", primary));
+  if (raw) badge.appendChild(el("code", "technical-id", raw));
+  return badge;
+}
+
+function labeledTechnicalValue(name, primary, raw) {
+  const value = el("span", "labeled-technical-value");
+  value.append(el("small", "", name), el("strong", "", primary));
+  if (raw) value.appendChild(el("code", "technical-id", raw));
+  return value;
+}
+
+function failureDisplay(code) {
+  const display = el("span", "failure-chip failure-display");
+  display.append(el("strong", "", failureName(code)));
+  if (code) display.appendChild(el("code", "technical-id", code));
+  return display;
+}
+
+function objectiveDisplay(key) {
+  const display = el("span", "scope-key objective-display");
+  display.append(el("strong", "", objectiveName(key)), el("code", "technical-id", key));
+  return display;
+}
+
+function operationLifecycleName(status) {
+  return {
+    PENDING: "等待结算",
+    RESOLVED: "已经结算",
+    COMPLETED: "已经完成",
+    FAILED: "结算失败",
+  }[status] || label(status);
+}
+
 function factLabel(key, value) {
   if (key === "enemy_supply_route" && value === "ACTIVE") return "仍在运作";
   return label(value);
@@ -678,17 +1010,28 @@ function timelineKind(kind) {
   return {
     PLAYER_COMMAND: "玩家军令",
     STRATEGIST_REPORT: "军师回复",
-    PLAN_CREATED: "提出方案",
-    REPLAN: "调整方案",
-    OFFICER_ACTION: "行动汇报",
-    FINAL_REPORT: "最终汇报",
+    PLAN: "生成计划",
+    REPLAN: "重新规划",
+    TOOL_CALL: "工具调用",
+    WORLD_OPERATION: "世界行动",
+    WAIT_RESULT: "行动结算",
+    FAILURE: "执行失败",
+    KNOWLEDGE_REVEALED: "新情报揭示",
+    OBJECTIVE_EVALUATION: "目标完成检查",
+    EARLY_STOP: "范围内提前停止",
+    TASK_COMPLETED: "任务完成",
     DECISION_REQUEST: "请示主公",
-    WORLD_EVENT: "世界结算",
   }[kind] || String(kind || "记录").replaceAll("_", " ");
 }
 
 function markerText(kind, actor) {
-  if (kind === "WORLD_EVENT") return "世";
+  if (kind === "WORLD_OPERATION") return "世";
+  if (kind === "WAIT_RESULT") return "等";
+  if (kind === "FAILURE") return "败";
+  if (kind === "KNOWLEDGE_REVEALED") return "知";
+  if (kind === "OBJECTIVE_EVALUATION") return "验";
+  if (kind === "EARLY_STOP") return "止";
+  if (kind === "TASK_COMPLETED") return "成";
   if (kind === "PLAYER_COMMAND") return "主";
   if (kind === "DECISION_REQUEST") return "决";
   return officerName(actor, "录").slice(0, 1);
@@ -761,12 +1104,7 @@ function operationName(operation) {
 }
 
 function failureName(code) {
-  return {
-    ENCOUNTER_DEFEAT: "战斗失败（ENCOUNTER_DEFEAT）",
-    PLAYER_DECISION_REJECTED: "玩家拒绝方案（PLAYER_DECISION_REJECTED）",
-    WORLD_STATE_CHANGED: "世界状态已变化（WORLD_STATE_CHANGED）",
-    REPLAN_LIMIT_REACHED: "已达到方案调整上限（REPLAN_LIMIT_REACHED）",
-  }[code] || code || "—";
+  return failureLabels[code] || code || "无";
 }
 
 const textTranslations = {

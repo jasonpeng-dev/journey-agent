@@ -11,6 +11,7 @@ from app.core.errors import AppError
 from app.debug.snapshot_service import StrategicSnapshotService
 from app.infrastructure.db.models import AgentTask, ConversationSession
 from app.scenarios.starfire.fallback_plans import initial_strategic_starfire_plan
+from app.scenarios.starfire.objective_catalog import FULL_STARFIRE_SCOPE
 from app.services.game import GameService, seed_id
 from app.services.tasks import TaskService
 from app.tools.catalog import build_registry
@@ -25,10 +26,19 @@ def _planning_context(session: Session):  # type: ignore[no-untyped-def]
     )
     session.add(conversation)
     session.flush()
-    task = TaskService(session).create_task(
+    tasks = TaskService(session)
+    task = tasks.create_task(
         conversation,
         "修复星火前哨并重新打通北方商路。",
         "starfire_command",
+    )
+    tasks.resolve_and_freeze_scope(
+        task,
+        FULL_STARFIRE_SCOPE,
+        resolver_source="TEST",
+        resolver_version="v1",
+        confirmation_source="TEST",
+        freeze_source="TEST",
     )
     return game, player, conversation, task
 
@@ -203,7 +213,7 @@ def test_hidden_supply_target_is_rejected_before_discovery(session: Session) -> 
 
     assert caught.value.code == "INTERACTION_TARGET_HIDDEN"
 
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     military = next(
         step
         for step in proposal["steps"]

@@ -15,6 +15,7 @@ from app.infrastructure.db.models import (
     OfficerAppointment,
 )
 from app.scenarios.starfire.fallback_plans import initial_strategic_starfire_plan
+from app.scenarios.starfire.objective_catalog import FULL_STARFIRE_SCOPE
 from app.services.game import GameService, seed_id
 from app.services.tasks import TaskService
 from app.tools.catalog import build_registry
@@ -28,10 +29,19 @@ def _context(session: Session):  # type: ignore[no-untyped-def]
     )
     session.add(conversation)
     session.flush()
-    task = TaskService(session).create_task(
+    tasks = TaskService(session)
+    task = tasks.create_task(
         conversation,
         "修复星火前哨并重新打通北方商路。",
         "starfire_command",
+    )
+    tasks.resolve_and_freeze_scope(
+        task,
+        FULL_STARFIRE_SCOPE,
+        resolver_source="TEST",
+        resolver_version="v1",
+        confirmation_source="TEST",
+        freeze_source="TEST",
     )
     validator = PlanValidator(
         session,
@@ -52,7 +62,7 @@ def test_valid_strategic_plan_is_normalized_and_accepted(session: Session) -> No
         task=task,
         session=conversation,
         tool_name="create_task_plan",
-        arguments=initial_strategic_starfire_plan(task.id),
+        arguments=initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE),
     )
 
     assert result.status == "PASSED"
@@ -80,7 +90,7 @@ def test_plan_validation_builds_known_state_once_for_all_steps(
         task=task,
         session=conversation,
         tool_name="create_task_plan",
-        arguments=initial_strategic_starfire_plan(task.id),
+        arguments=initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE),
     )
 
     assert result.status == "PASSED"
@@ -89,7 +99,7 @@ def test_plan_validation_builds_known_state_once_for_all_steps(
 
 def test_new_starfire_plan_uses_canonical_explicit_targets(session: Session) -> None:
     _conversation, task, _validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     tool_arguments = {
         step["selected_tool_name"]: step["tool_arguments"]
         for step in proposal["steps"]
@@ -106,7 +116,7 @@ def test_legacy_plan_targets_validate_without_rewriting_raw_arguments(
     session: Session,
 ) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     recon = next(
         step for step in proposal["steps"] if step["selected_tool_name"] == "start_recon_operation"
     )
@@ -149,7 +159,7 @@ def test_legacy_plan_targets_validate_without_rewriting_raw_arguments(
 
 def test_legacy_plan_arguments_remain_raw_when_steps_are_persisted(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     repair = next(
         step for step in proposal["steps"] if step["selected_tool_name"] == "start_outpost_repair"
     )
@@ -194,7 +204,7 @@ def test_legacy_plan_arguments_remain_raw_when_steps_are_persisted(session: Sess
 
 def test_plan_validates_each_step_against_its_assigned_officer(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     military = next(
         step
         for step in proposal["steps"]
@@ -225,7 +235,7 @@ def test_plan_rejects_invalid_appointment_authority_policy(session: Session) -> 
         task=task,
         session=conversation,
         tool_name="create_task_plan",
-        arguments=initial_strategic_starfire_plan(task.id),
+        arguments=initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE),
     )
 
     assert "PLAN_AUTHORITY_POLICY_INVALID" in _codes(result)
@@ -233,7 +243,7 @@ def test_plan_rejects_invalid_appointment_authority_policy(session: Session) -> 
 
 def test_world_wait_must_immediately_follow_its_operation(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     wait = proposal["steps"].pop(1)
     proposal["steps"].insert(3, wait)
 
@@ -249,7 +259,7 @@ def test_world_wait_must_immediately_follow_its_operation(session: Session) -> N
 
 def test_world_wait_cannot_treat_defeat_as_success(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     military_index = next(
         index
         for index, step in enumerate(proposal["steps"])
@@ -271,7 +281,7 @@ def test_world_wait_cannot_treat_defeat_as_success(session: Session) -> None:
 
 def test_operation_expected_type_must_match_selected_tool(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     recon = next(
         step for step in proposal["steps"] if step["selected_tool_name"] == "start_recon_operation"
     )
@@ -319,6 +329,7 @@ def test_planning_context_exposes_only_strategic_tools_and_fixed_contracts(
     assert "target_key" in trade_properties
     assert "route_key" not in trade_properties
     assert "northern_trade_route" in tools["start_trade_route_test"]["description"]
+    assert "expected_outcome.village_support" in tools["negotiate_village_support"]["description"]
     canonical_facts = request["constraints"]["canonical_facts"]
     assert canonical_facts["northern_valley.valley_security"] == "UNSAFE"
     assert canonical_facts["starfire_outpost.outpost_status"] == "DAMAGED"
@@ -330,10 +341,9 @@ def test_planning_context_exposes_only_strategic_tools_and_fixed_contracts(
     assert "approved_resources" not in request
 
 
-def test_plan_requires_final_shen_ce_verification(session: Session) -> None:
+def test_plan_does_not_require_a_final_inspect_step(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = deepcopy(initial_strategic_starfire_plan(task.id))
-    proposal["steps"][-1]["assigned_officer_key"] = "han_lie"
+    proposal = deepcopy(initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE))
 
     result = validator.validate(
         task=task,
@@ -342,25 +352,24 @@ def test_plan_requires_final_shen_ce_verification(session: Session) -> None:
         arguments=proposal,
     )
 
-    assert "PLAN_FINAL_VERIFICATION_REQUIRED" in _codes(result)
+    assert result.passed
+    assert all(step["selected_tool_name"] != "inspect_command_state" for step in proposal["steps"])
 
 
-@pytest.mark.parametrize(
-    "missing_tool",
-    [
-        "start_military_operation",
-        "start_outpost_repair",
-        "start_trade_route_test",
-    ],
-)
-def test_initial_plan_requires_starfire_goal_coverage(
-    session: Session,
-    missing_tool: str,
-) -> None:
+def test_initial_plan_may_use_a_legal_short_horizon(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     proposal["steps"] = [
-        step for step in proposal["steps"] if step["selected_tool_name"] != missing_tool
+        {
+            "description": "Inspect only the currently known command state",
+            "execution_type": "TOOL",
+            "assigned_officer_key": "shen_ce",
+            "action_intent": "INSPECT_STATE",
+            "allowed_tool_names": ["inspect_command_state"],
+            "selected_tool_name": "inspect_command_state",
+            "tool_arguments": {},
+            "expected_outcome": {"starfire_outpost_status": "DAMAGED"},
+        }
     ]
 
     result = validator.validate(
@@ -370,12 +379,77 @@ def test_initial_plan_requires_starfire_goal_coverage(
         arguments=proposal,
     )
 
-    assert "PLAN_GOAL_COVERAGE_INCOMPLETE" in _codes(result)
+    assert result.passed
 
 
-def test_initial_plan_rejects_trade_before_repair(session: Session) -> None:
+def test_backend_materializes_semantic_adjacent_world_wait(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
+    assert all(
+        "source_step_sequence" not in step.get("resume_condition", {})
+        for step in proposal["steps"]
+        if step["execution_type"] == "WAIT_FOR_WORLD_EVENT"
+    )
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert result.passed
+    assert result.normalized_arguments is not None
+    waits = [
+        (index, step)
+        for index, step in enumerate(result.normalized_arguments["steps"], start=1)
+        if step["execution_type"] == "WAIT_FOR_WORLD_EVENT"
+    ]
+    assert all(
+        step["resume_condition"]["source_step_sequence"] == index - 1 for index, step in waits
+    )
+
+
+def test_explicit_invalid_world_wait_reference_is_not_rewritten(session: Session) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
+    wait = next(
+        step for step in proposal["steps"] if step["execution_type"] == "WAIT_FOR_WORLD_EVENT"
+    )
+    wait["resume_condition"]["source_step_sequence"] = 99
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert "PLAN_WORLD_EVENT_SOURCE_INVALID" in _codes(result)
+
+
+def test_legacy_explicit_adjacent_world_wait_reference_remains_valid(session: Session) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
+    for index, step in enumerate(proposal["steps"], start=1):
+        if step["execution_type"] == "WAIT_FOR_WORLD_EVENT":
+            step["resume_condition"]["source_step_sequence"] = index - 1
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert result.passed
+
+
+def test_policy_does_not_encode_trade_before_repair_as_a_plan_blueprint(
+    session: Session,
+) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     repair_index = next(
         index
         for index, step in enumerate(proposal["steps"])
@@ -398,12 +472,12 @@ def test_initial_plan_rejects_trade_before_repair(session: Session) -> None:
         arguments=proposal,
     )
 
-    assert "PLAN_STEP_ORDER_INVALID" in _codes(result)
+    assert result.passed
 
 
 def test_backend_controls_step_idempotency_keys(session: Session) -> None:
     conversation, task, validator = _context(session)
-    proposal = initial_strategic_starfire_plan(task.id)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     proposal["steps"][0]["tool_arguments"]["idempotency_key"] = "model-key-1234"
 
     result = validator.validate(

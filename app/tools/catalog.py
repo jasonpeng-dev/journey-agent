@@ -85,7 +85,11 @@ def build_registry() -> ToolRegistry:
         ),
         Tool(
             "negotiate_village_support",
-            "Offer bounded resources for approved village support.",
+            (
+                "Offer bounded resources for approved village support. In a plan, set "
+                "expected_outcome.village_support to requested_support when food_offer is "
+                "at least 20; otherwise set it to INTELLIGENCE."
+            ),
             VillageSupportArgs,
             negotiate_village_support,
             preflight=preflight_village_support,

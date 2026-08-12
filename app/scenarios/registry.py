@@ -7,6 +7,7 @@ from types import MappingProxyType
 from app.domain.world import WorldDefinition
 from app.scenarios.contracts import (
     ScenarioFallbackPlans,
+    ScenarioObjectiveCatalog,
     ScenarioObjectiveEvaluator,
     ScenarioPlanningPolicy,
 )
@@ -16,6 +17,7 @@ from app.scenarios.starfire.compatibility import (
 )
 from app.scenarios.starfire.definition import STARFIRE_WORLD
 from app.scenarios.starfire.fallback_plans import STARFIRE_FALLBACK_PLANS
+from app.scenarios.starfire.objective_catalog import STARFIRE_OBJECTIVE_CATALOG
 from app.scenarios.starfire.objectives import STARFIRE_OBJECTIVES
 from app.scenarios.starfire.planning_policy import STARFIRE_PLANNING_POLICY
 
@@ -37,6 +39,7 @@ class ScenarioBinding(ScenarioWorldBinding):
     """Bind a world to its small set of scenario-specific runtime policies."""
 
     planning_policy: ScenarioPlanningPolicy
+    objective_catalog: ScenarioObjectiveCatalog
     objective_evaluator: ScenarioObjectiveEvaluator
     fallback_plans: ScenarioFallbackPlans
 
@@ -46,6 +49,7 @@ STARFIRE_SCENARIO = ScenarioBinding(
     resolve_node_key=canonical_node_key,
     raw_target_supports_interaction=legacy_target_supports_interaction,
     planning_policy=STARFIRE_PLANNING_POLICY,
+    objective_catalog=STARFIRE_OBJECTIVE_CATALOG,
     objective_evaluator=STARFIRE_OBJECTIVES,
     fallback_plans=STARFIRE_FALLBACK_PLANS,
 )
@@ -62,3 +66,15 @@ def scenario_world(scenario_key: str) -> ScenarioWorldBinding | None:
 
 def scenario_binding(scenario_key: str) -> ScenarioBinding | None:
     return SCENARIOS.get(scenario_key)
+
+
+def scenario_objective_catalog(
+    scenario_key: str,
+    catalog_version: str,
+) -> ScenarioObjectiveCatalog | None:
+    """Resolve the exact catalog version frozen by a task; never silently upgrade it."""
+
+    scenario = scenario_binding(scenario_key)
+    if scenario is None or scenario.objective_catalog.catalog_version != catalog_version:
+        return None
+    return scenario.objective_catalog

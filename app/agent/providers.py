@@ -15,6 +15,7 @@ from app.agent.types import (
     ToolDefinition,
 )
 from app.core.config import Settings
+from app.scenarios.contracts import ObjectiveScope
 from app.scenarios.registry import scenario_binding
 
 
@@ -51,15 +52,31 @@ class MockModelProvider:
             scenario = scenario_binding(str(request["scenario_key"]))
             if scenario is None:
                 continue
+            raw_scope = request.get("objective_scope")
+            if not isinstance(raw_scope, dict):
+                continue
+            scope = ObjectiveScope(
+                scenario_key=str(raw_scope["scenario_key"]),
+                catalog_version=str(raw_scope["catalog_version"]),
+                objective_keys=tuple(str(key) for key in raw_scope["objective_keys"]),
+            )
             if request["kind"] == "REPLAN":
-                arguments = scenario.fallback_plans.recovery(
-                    task_id,
-                    int(request["next_plan_version"]),
-                    str(request["failure_code"]),
-                )
+                failure_code = str(request["failure_code"])
+                next_version = int(request["next_plan_version"])
+                if failure_code == "PLAN_EXHAUSTED_SCOPE_INCOMPLETE":
+                    arguments = scenario.fallback_plans.initial(task_id, scope)
+                    arguments["replan_reason"] = failure_code
+                    arguments["idempotency_key"] = f"task-replan-{task_id}-v{next_version}"
+                else:
+                    arguments = scenario.fallback_plans.recovery(
+                        task_id,
+                        next_version,
+                        failure_code,
+                        scope,
+                    )
                 tool_name = "replan_task"
             else:
-                arguments = scenario.fallback_plans.initial(task_id)
+                arguments = scenario.fallback_plans.initial(task_id, scope)
                 tool_name = "create_task_plan"
             if tool_name not in tool_names:
                 continue

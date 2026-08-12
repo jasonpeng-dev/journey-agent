@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.agent.authority import effective_authority_limits
+from app.agent.goal_resolution import StarfireGoalResolver
 from app.agent.planning import PlanValidationIssue, PlanValidator, build_planning_request
 from app.agent.providers import ProviderFailure, ProviderOutputFailure
 from app.agent.task_policy import (
@@ -18,6 +19,7 @@ from app.agent.task_policy import (
 )
 from app.agent.types import Message, ModelProvider, ToolCall, ToolContext, ToolResult
 from app.core.config import Settings
+from app.core.errors import AppError
 from app.domain.enums import (
     AgentStepStatus,
     AgentTaskStatus,
@@ -35,6 +37,7 @@ from app.infrastructure.db.models import (
     Memory,
     OfficerAppointment,
 )
+from app.scenarios.contracts import ObjectiveResolutionStatus
 from app.scenarios.registry import scenario_binding
 from app.services.game import GameService
 from app.services.tasks import TaskService
@@ -68,6 +71,13 @@ class TaskOrchestrator:
         self.db.commit()
         if self.tasks.current_plan(task) is not None:
             return task, None, "EXISTING_TASK"
+        resolution_event = self._ensure_goal_scope(task)
+        if resolution_event is not None:
+            self.db.commit()
+            return task, None, resolution_event
+        if self.tasks.complete_if_scope_satisfied(task):
+            self.db.commit()
+            return task, None, "TASK_SUCCEEDED"
         run, result = await self._generate_plan(session, task)
         return task, run, "PLANNED" if result.ok else "PLANNING_FAILED"
 
@@ -89,8 +99,23 @@ class TaskOrchestrator:
             return task, None, "REQUIRES_PLAYER_DECISION"
         plan = self.tasks.current_plan(task)
         if plan is None:
+            resolution_event = self._ensure_goal_scope(task)
+            if resolution_event is not None:
+                self.db.commit()
+                return task, None, resolution_event
+            if self.tasks.complete_if_scope_satisfied(task):
+                self.db.commit()
+                return task, None, "TASK_SUCCEEDED"
             self.db.commit()
             return await self._plan_missing_task(task, session)
+        next_step = self.tasks.next_step(plan.id)
+        has_unsettled_world_wait = (
+            next_step is not None
+            and next_step.execution_type == StepExecutionType.WAIT_FOR_WORLD_EVENT
+        )
+        if not has_unsettled_world_wait and self.tasks.complete_if_scope_satisfied(task, plan):
+            self.db.commit()
+            return task, None, "TASK_SUCCEEDED"
         failed = self.db.scalar(
             select(AgentStep)
             .where(
@@ -102,16 +127,21 @@ class TaskOrchestrator:
         if failed is not None:
             self.db.commit()
             return await self._replan(task, session, failed.failure_code or "RECOVERABLE_FAILURE")
-        step = self.tasks.next_step(plan.id)
+        step = next_step
         if step is None:
-            completed = self.tasks.finish_if_complete(task, plan)
             self.db.commit()
-            return task, None, "TASK_SUCCEEDED" if completed else "NO_EXECUTABLE_STEP"
+            return await self._replan(
+                task,
+                session,
+                "PLAN_EXHAUSTED_SCOPE_INCOMPLETE",
+            )
         if step.status == AgentStepStatus.REQUIRES_PLAYER_DECISION:
             self.db.commit()
             return task, None, "REQUIRES_PLAYER_DECISION"
         if step.execution_type != StepExecutionType.TOOL:
             outcome = self.tasks.evaluate_wait(task, step)
+            if outcome == "RESUMED" and self.tasks.complete_if_scope_satisfied(task, plan):
+                outcome = "TASK_SUCCEEDED"
             self.db.commit()
             run = self._record_wait_check(session, task, plan, step, outcome)
             if outcome == "REPLAN_REQUIRED":
@@ -138,9 +168,16 @@ class TaskOrchestrator:
         )
         plan = self.tasks.current_plan(task)
         assert plan is not None
-        if result.ok and self.tasks.next_step(plan.id) is None:
-            self.tasks.finish_if_complete(task, plan)
+        if result.ok:
+            completed = self.tasks.complete_if_scope_satisfied(task, plan)
+            exhausted = not completed and self.tasks.next_step(plan.id) is None
             self.db.commit()
+            if exhausted:
+                return await self._replan(
+                    task,
+                    session,
+                    "PLAN_EXHAUSTED_SCOPE_INCOMPLETE",
+                )
         if result.code == "PLAYER_APPROVAL_REQUIRED":
             return task, run, "REQUIRES_PLAYER_DECISION"
         return task, run, "STEP_SUCCEEDED" if result.ok else "STEP_FAILED"
@@ -151,12 +188,86 @@ class TaskOrchestrator:
         run, result = await self._generate_plan(session, task)
         return task, run, "PLANNED" if result.ok else "PLANNING_FAILED"
 
+    def clarify_goal(
+        self,
+        task: AgentTask,
+        *,
+        objective_keys: list[str] | None,
+        clarification_text: str | None,
+    ) -> str:
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        resolver = StarfireGoalResolver(scenario.objective_catalog)
+        if clarification_text is not None:
+            result = resolver.resolve(clarification_text)
+        elif objective_keys is not None:
+            result = resolver.confirm_candidate(
+                self.tasks.clarification_candidates(task),
+                objective_keys,
+            )
+        else:
+            raise AppError(
+                "GOAL_CLARIFICATION_INPUT_INVALID",
+                "Clarification text or one candidate scope is required",
+            )
+        self.tasks.record_goal_resolution(task, result)
+        if result.status == ObjectiveResolutionStatus.RESOLVED:
+            assert result.scope is not None
+            self.tasks.confirm_and_freeze_scope(
+                task,
+                result.scope,
+                confirmation_source="PLAYER_CLARIFICATION",
+                freeze_source="GOAL_RESOLUTION",
+            )
+            return "GOAL_CONFIRMED"
+        if result.status == ObjectiveResolutionStatus.NEEDS_CLARIFICATION:
+            return "GOAL_CLARIFICATION_REQUIRED"
+        return "GOAL_UNSUPPORTED"
+
+    def _ensure_goal_scope(self, task: AgentTask) -> str | None:
+        status = ObjectiveResolutionStatus(task.objective_resolution_status)
+        if status == ObjectiveResolutionStatus.CONFIRMED:
+            self.tasks.require_frozen_scope(task)
+            return None
+        if status == ObjectiveResolutionStatus.NEEDS_CLARIFICATION:
+            return "GOAL_CLARIFICATION_REQUIRED"
+        if status == ObjectiveResolutionStatus.UNSUPPORTED:
+            return "GOAL_UNSUPPORTED"
+        if status != ObjectiveResolutionStatus.UNRESOLVED:
+            raise AppError(
+                "OBJECTIVE_SCOPE_NOT_FROZEN",
+                "A resolved task must be confirmed before planning",
+                status_code=409,
+            )
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        result = StarfireGoalResolver(scenario.objective_catalog).resolve(task.goal_description)
+        self.tasks.record_goal_resolution(task, result)
+        if result.status == ObjectiveResolutionStatus.RESOLVED:
+            assert result.scope is not None
+            self.tasks.confirm_and_freeze_scope(
+                task,
+                result.scope,
+                confirmation_source="EXACT_GOAL",
+                freeze_source="GOAL_RESOLUTION",
+            )
+            return None
+        if result.status == ObjectiveResolutionStatus.NEEDS_CLARIFICATION:
+            return "GOAL_CLARIFICATION_REQUIRED"
+        return "GOAL_UNSUPPORTED"
+
     async def _replan(
         self,
         task: AgentTask,
         session: ConversationSession,
         reason: str,
     ) -> tuple[AgentTask, AgentRun | None, str]:
+        current_plan = self.tasks.current_plan(task)
+        if self.tasks.complete_if_scope_satisfied(task, current_plan):
+            self.db.commit()
+            return task, None, "TASK_SUCCEEDED"
         scenario = scenario_binding(task.scenario_key)
         if scenario is None:
             task.status = AgentTaskStatus.BLOCKED
@@ -185,6 +296,7 @@ class TaskOrchestrator:
         )
         if not result.ok and scenario.fallback_plans.supports_state_aware_recovery(reason):
             state = GameService(self.db).scenario_known_state(task.player_id)
+            scope = self.tasks.require_frozen_scope(task)
             task.status = AgentTaskStatus.ACTIVE
             task.last_error_code = reason
             self.db.commit()
@@ -196,6 +308,7 @@ class TaskOrchestrator:
                     task.current_plan_version + 1,
                     reason,
                     state,
+                    scope,
                 ),
                 tool_name="replan_task",
                 purpose="REPLAN",
@@ -477,9 +590,9 @@ class TaskOrchestrator:
                         content=(
                             "The prior plan proposal was rejected. Return one complete corrected "
                             "proposal through the required native tool call. Preserve valid "
-                            "fields, step count, and valid phase ordering; change only what "
-                            "the exact validation errors require. Continue to obey the initial "
-                            "scenario blueprint or replan guidance. For expected_outcome, "
+                            "fields and change only what the exact validation errors require. "
+                            "Continue to preserve the frozen objective scope and all safety "
+                            "guardrails. For expected_outcome, "
                             "copy required_expected_outcomes literal values exactly. "
                             "VALIDATION_ERRORS_JSON:"
                             f"{json.dumps(error_payload, ensure_ascii=False)}"

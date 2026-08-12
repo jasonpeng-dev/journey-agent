@@ -54,6 +54,9 @@ def test_strategic_snapshot_is_shen_ce_scoped_and_hides_truth_by_default(
     assert player_nodes["starfire_outpost"]["available_interactions"] == []
     assert snapshot["hidden_world_truth"] is None
     assert snapshot["task"] is None
+    assert snapshot["objective_evaluation"] is None
+    assert snapshot["operation_wait_pairs"] == []
+    assert snapshot["early_stop"] is None
     assert snapshot["capabilities"]["can_issue_command"] is True
 
     developer = _snapshot(client, session_id, hidden=True)
@@ -66,6 +69,13 @@ def test_strategic_snapshot_is_shen_ce_scoped_and_hides_truth_by_default(
         "knowledge": "HIDDEN",
     }
     assert observer_nodes["enemy_north_supply_route"]["knowledge"] == "HIDDEN"
+    relations = developer["observer_world_state"]["relations"]
+    assert any(
+        relation["source_node_key"] == "enemy_north_supply_route"
+        and relation["planner_visible"] is False
+        for relation in relations
+    )
+    assert any(relation["planner_visible"] is True for relation in relations)
 
 
 def test_strategic_facade_auto_drives_to_pauses_and_completion(
@@ -85,7 +95,7 @@ def test_strategic_facade_auto_drives_to_pauses_and_completion(
     command_snapshot = _snapshot(client, session_id)
     assert command_snapshot["task"]["goal_description"] == "修复星火前哨并重新打通北方商路。"
     initial_plan = command_snapshot["active_plan"]
-    assert "沈策" in initial_plan["strategy_summary"]
+    assert "韩烈" in initial_plan["strategy_summary"]
     assert all(
         any("\u4e00" <= character <= "\u9fff" for character in step["description"])
         for step in initial_plan["steps"]
@@ -130,10 +140,42 @@ def test_strategic_facade_auto_drives_to_pauses_and_completion(
     assert seen_replan is True
     assert seen_decision is True
     assert task["current_plan_version"] == 2
+    assert task["objective_scope"]["frozen"] is True
+    assert snapshot["objective_evaluation"]["source"] == ("BACKEND_SCOPED_OBJECTIVE_EVALUATOR")
+    assert snapshot["objective_evaluation"]["scope_satisfied"] is True
+    assert snapshot["operation_wait_pairs"]
+    assert all(pair["paired"] for pair in snapshot["operation_wait_pairs"])
+    assert all(
+        pair["wait_status"] in {"SUCCEEDED", "FAILED"} for pair in snapshot["operation_wait_pairs"]
+    )
     assert snapshot["known_world_state"]["starfire_outpost_status"] == "OPERATIONAL"
     assert snapshot["known_world_state"]["northern_trade_route_status"] == "OPEN"
-    assert any(item["kind"] == "FINAL_REPORT" for item in snapshot["timeline"])
+    assert not any(item["kind"] == "FINAL_REPORT" for item in snapshot["timeline"])
+    assert not any(
+        step["actual_result"] == {"skip_reason": "OBJECTIVE_SCOPE_SATISFIED"}
+        and step["execution_type"] == "WAIT_FOR_WORLD_EVENT"
+        for step in task["plans"][-1]["steps"]
+    )
     assert any(run["tools"] for run in snapshot["recent_traces"])
+    timeline_kinds = {item["kind"] for item in snapshot["timeline"]}
+    assert {
+        "PLAN",
+        "TOOL_CALL",
+        "WORLD_OPERATION",
+        "WAIT_RESULT",
+        "FAILURE",
+        "KNOWLEDGE_REVEALED",
+        "REPLAN",
+        "OBJECTIVE_EVALUATION",
+        "TASK_COMPLETED",
+    } <= timeline_kinds
+    observer = _snapshot(client, session_id, hidden=True)["observer_world_state"]
+    supply_node = next(
+        node for node in observer["nodes"] if node["key"] == "enemy_north_supply_route"
+    )
+    supply_fact = next(fact for fact in supply_node["facts"] if fact["key"] == "supply_status")
+    assert supply_fact["knowledge"] == "KNOWN"
+    assert supply_fact["revealed_by"]["failure_code"] == "ENCOUNTER_DEFEAT"
 
 
 def test_strategic_debug_facade_is_disabled_in_production(client: TestClient) -> None:

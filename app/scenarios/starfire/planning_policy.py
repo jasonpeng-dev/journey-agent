@@ -7,9 +7,11 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from app.scenarios.contracts import (
+    ObjectiveScope,
     ScenarioPlanIssue,
     ScenarioRuntimeState,
 )
+from app.scenarios.starfire.objective_catalog import STARFIRE_OBJECTIVE_CATALOG
 
 _EXECUTION_TOOLS = frozenset(
     {
@@ -76,43 +78,6 @@ _WORLD_OPERATION_SUCCESS_OUTCOMES: Mapping[str, tuple[str, ...]] = MappingProxyT
         "start_trade_route_test": ("COMPLETED",),
     }
 )
-_REPLAN_GUIDANCE = MappingProxyType(
-    {
-        "ENCOUNTER_DEFEAT": (
-            "The valley clearance failed and exposed the enemy supply route. Disrupt that "
-            "route, secure useful village support, then retry only the unfinished phases."
-        ),
-        "TRADE_SUPPORT_REQUIRED": (
-            "The trade test cannot start without village support. Acquire GUIDE or "
-            "SUPPLIES support first, then retry the trade test; do not repeat the "
-            "already completed military or construction operations."
-        ),
-        "WORLD_STATE_CHANGED": (
-            "A prerequisite changed before world resolution. Re-inspect current state "
-            "and rebuild only the invalidated suffix of the plan."
-        ),
-        "RESOURCE_INSUFFICIENT": (
-            "The requested action exceeds current resources. Re-inspect resources and "
-            "choose a cheaper authorized action or request player approval."
-        ),
-        "SUPPLY_INSUFFICIENT": (
-            "The proposed food offer is unaffordable. Re-inspect supplies and use a "
-            "lower offer within authority or request player approval."
-        ),
-        "SOLDIERS_UNAVAILABLE": (
-            "The requested force is unavailable. Re-inspect committed troops and "
-            "choose a smaller force or wait for the active operation to resolve."
-        ),
-        "ENEMY_SUPPLY_ROUTE_UNKNOWN": (
-            "The enemy route is not discovered yet. Add reconnaissance or another "
-            "information-gathering step before attempting disruption."
-        ),
-        "STARFIRE_OUTPOST_OFFLINE": (
-            "The outpost prerequisite is not satisfied. Repair or restore it before "
-            "retrying the dependent action."
-        ),
-    }
-)
 
 
 class StarfirePlanningPolicy:
@@ -146,6 +111,7 @@ class StarfirePlanningPolicy:
             "VALLEY_UNSAFE",
             "TRADE_SUPPORT_REQUIRED",
             "WORLD_STATE_CHANGED",
+            "PLAN_EXHAUSTED_SCOPE_INCOMPLETE",
         }
     )
 
@@ -157,32 +123,30 @@ class StarfirePlanningPolicy:
         *,
         is_replan: bool,
         state: ScenarioRuntimeState,
+        scope: ObjectiveScope,
     ) -> tuple[ScenarioPlanIssue, ...]:
+        del selected_tools, wait_count, is_replan, state
         issues: list[ScenarioPlanIssue] = []
-        required = {
-            "start_military_operation",
-            "start_outpost_repair",
-            "start_trade_route_test",
-        }
-        if is_replan:
-            required = {tool for tool in required if not self.effect_satisfied(tool, {}, state)}
-        for tool_name in sorted(required.difference(selected_tools)):
-            issues.append(
-                ScenarioPlanIssue(
-                    code="PLAN_GOAL_COVERAGE_INCOMPLETE",
-                    path="steps",
-                    message=f"The command plan cannot satisfy its goal without {tool_name}",
-                )
-            )
-        if not is_replan and wait_count < 3:
-            issues.append(
-                ScenarioPlanIssue(
-                    code="PLAN_GOAL_COVERAGE_INCOMPLETE",
-                    path="steps",
-                    message="Military, construction, and trade outcomes must be world-verified",
-                )
-            )
         for index, step in enumerate(steps):
+            terminal_effect = self._terminal_action_effect(step)
+            if terminal_effect is not None and terminal_effect not in self._in_scope_terminal_facts(
+                scope
+            ):
+                tool_name = str(step.get("selected_tool_name"))
+                node_key, fact_key = terminal_effect
+                issues.append(
+                    ScenarioPlanIssue(
+                        code="PLAN_TERMINAL_EFFECT_OUTSIDE_OBJECTIVE_SCOPE",
+                        path=f"steps.{index}.selected_tool_name",
+                        message=(
+                            f"{tool_name} pursues terminal effect {node_key}.{fact_key}, "
+                            "which is neither a terminal requirement nor a prerequisite "
+                            "of the frozen objective_scope. Remove this terminal action "
+                            "and its paired wait; keep only actions that support the "
+                            "current frozen scope."
+                        ),
+                    )
+                )
             if step.get("selected_tool_name") != "negotiate_village_support":
                 continue
             arguments = step.get("tool_arguments")
@@ -209,29 +173,6 @@ class StarfirePlanningPolicy:
                         ),
                     )
                 )
-        ordered = [
-            step.get("selected_tool_name")
-            if step.get("execution_type") == "TOOL"
-            else step.get("execution_type")
-            for step in steps
-        ]
-        for before, after in (
-            ("start_military_operation", "start_outpost_repair"),
-            ("start_outpost_repair", "start_trade_route_test"),
-        ):
-            if (
-                before in ordered
-                and after in ordered
-                and ordered.index(before) > ordered.index(after)
-            ):
-                issues.append(
-                    ScenarioPlanIssue(
-                        code="PLAN_STEP_ORDER_INVALID",
-                        path="steps",
-                        message=f"{before} must occur before {after}",
-                    )
-                )
-        issues.extend(self._validate_final_verification(steps))
         return tuple(issues)
 
     def effect_satisfied(
@@ -252,6 +193,8 @@ class StarfirePlanningPolicy:
             }
         if tool_name == "start_military_operation":
             if tool_arguments.get("mission_type") == "DISRUPT_SUPPLY":
+                if not state.fact_known("enemy_north_supply_route", "supply_status"):
+                    return False
                 return (
                     self._value(state, "enemy_north_supply_route", "supply_status") == "DISRUPTED"
                 )
@@ -270,164 +213,59 @@ class StarfirePlanningPolicy:
         kind: Literal["PLAN", "REPLAN"],
         reason: str | None,
         state: ScenarioRuntimeState,
+        scope: ObjectiveScope,
     ) -> Mapping[str, object]:
         canonical_facts = self._canonical_facts(state)
+        objective_facts, prerequisite_facts = self._scoped_terminal_fact_groups(scope)
         return {
             "canonical_facts": canonical_facts,
-            "strategic_initial_plan_blueprint": (
-                {
-                    "applies_when": "kind=PLAN and scenario_key=starfire_command",
-                    "verified_state_already_supplied": (
-                        "Do not add inspect_task_requirements or a redundant initial "
-                        "inspection step"
-                    ),
-                    "ordered_phases": [
-                        "start_recon_operation",
-                        "WAIT_FOR_WORLD_EVENT for reconnaissance",
-                        "negotiate_village_support for GUIDE or SUPPLIES",
-                        "start_military_operation to secure the valley",
-                        "WAIT_FOR_WORLD_EVENT for military resolution",
-                        "start_outpost_repair",
-                        "WAIT_FOR_WORLD_EVENT for construction",
-                        "start_trade_route_test",
-                        "WAIT_FOR_WORLD_EVENT for trade resolution",
-                        "inspect_command_state with action_intent=VERIFY_AND_REPORT",
-                    ],
-                    "exact_step_count": 10,
-                    "dependency_rules": [
-                        "Military valley clearance must occur before outpost repair",
-                        "Outpost repair must occur before the trade test",
-                        "GUIDE or SUPPLIES village support must exist before the trade test",
-                    ],
-                    "village_support_rule": (
-                        "food_offer below 20 always yields INTELLIGENCE; food_offer of "
-                        "20 or more yields the requested INTELLIGENCE, GUIDE, or SUPPLIES"
-                    ),
-                }
-                if kind == "PLAN"
-                else None
-            ),
-            "strategic_replan_blueprint": (
-                self._replan_blueprint(reason, state) if kind == "REPLAN" else None
-            ),
-            "required_final_step": {
-                "execution_type": "TOOL",
-                "assigned_officer_key": "shen_ce",
-                "action_intent": "VERIFY_AND_REPORT",
-                "allowed_tool_names": ["inspect_command_state"],
-                "selected_tool_name": "inspect_command_state",
-                "tool_arguments": {},
-                "expected_outcome": {
-                    "valley_security": "SAFE",
-                    "northern_trade_route_status": "OPEN",
-                },
-                "resume_condition": None,
+            "planning_kind": kind,
+            "failure_code": reason,
+            "guardrails": {
+                "scope_must_remain_frozen": True,
+                "use_only_known_targets": True,
+                "respect_tool_and_officer_authority": True,
+                "asynchronous_operations_require_adjacent_wait_steps": True,
+                "do_not_repeat_completed_effects": True,
+                "do_not_pursue_terminal_effects_outside_frozen_scope": True,
             },
+            "terminal_effect_scope": {
+                "objective_terminal_facts": sorted(
+                    self._format_ref(ref) for ref in objective_facts
+                ),
+                "prerequisite_terminal_facts": sorted(
+                    self._format_ref(ref) for ref in prerequisite_facts
+                ),
+                "rule": (
+                    "A terminal action is valid only when its terminal fact is an explicit "
+                    "objective terminal fact or a declared prerequisite terminal fact. "
+                    "Information gathering and supporting actions remain available when "
+                    "they help the frozen scope. Do not add later terminal outcomes."
+                ),
+            },
+            "final_verification": "BACKEND_SCOPED_OBJECTIVE_EVALUATOR",
         }
 
     def replan_guidance(self, reason: str | None) -> str | None:
-        return _REPLAN_GUIDANCE.get(reason) if reason is not None else None
-
-    def planner_instruction(self, kind: Literal["PLAN", "REPLAN"]) -> str:
-        if kind == "PLAN":
-            return (
-                " For the initial starfire_command plan, follow "
-                "constraints.strategic_initial_plan_blueprint exactly: use ten steps in "
-                "the listed phase order and do not add a redundant inspection step. "
-                "Write strategy_summary and every step description in concise Simplified Chinese."
-            )
+        if reason is None:
+            return None
         return (
-            " Follow constraints.strategic_replan_blueprint and write strategy_summary "
-            "and every step description in concise Simplified Chinese."
+            f"Use the structured failure {reason}, current known state, and completed effects "
+            "to choose a new legal strategy without changing objective_scope."
         )
 
-    @staticmethod
-    def _validate_final_verification(
-        steps: Sequence[Mapping[str, Any]],
-    ) -> tuple[ScenarioPlanIssue, ...]:
-        if not steps:
-            return ()
-        final = steps[-1]
-        if (
-            final.get("execution_type") != "TOOL"
-            or final.get("assigned_officer_key") != "shen_ce"
-            or final.get("selected_tool_name") != "inspect_command_state"
-            or final.get("action_intent") != "VERIFY_AND_REPORT"
-        ):
-            return (
-                ScenarioPlanIssue(
-                    code="PLAN_FINAL_VERIFICATION_REQUIRED",
-                    path=f"steps.{len(steps) - 1}",
-                    message=(
-                        "The final Step must assign Shen Ce a TOOL call to "
-                        "inspect_command_state with action_intent=VERIFY_AND_REPORT"
-                    ),
-                ),
-            )
-        issues = []
-        expected_outcome = final.get("expected_outcome")
-        expected_values = expected_outcome if isinstance(expected_outcome, Mapping) else {}
-        for key, expected in {
-            "valley_security": "SAFE",
-            "northern_trade_route_status": "OPEN",
-        }.items():
-            if expected_values.get(key) != expected:
-                issues.append(
-                    ScenarioPlanIssue(
-                        code="PLAN_FINAL_VERIFICATION_REQUIRED",
-                        path=f"steps.{len(steps) - 1}.expected_outcome.{key}",
-                        message=f"The final verification must expect {key}={expected}",
-                    )
-                )
-        return tuple(issues)
-
-    def _replan_blueprint(
-        self,
-        reason: str | None,
-        state: ScenarioRuntimeState,
-    ) -> dict[str, object]:
-        completed_effects = {
-            "reconnaissance": self.effect_satisfied("start_recon_operation", {}, state),
-            "village_trade_support": self.effect_satisfied("negotiate_village_support", {}, state),
-            "valley_secured": self.effect_satisfied("start_military_operation", {}, state),
-            "outpost_repaired": self.effect_satisfied("start_outpost_repair", {}, state),
-            "trade_route_open": self.effect_satisfied("start_trade_route_test", {}, state),
-        }
-        if reason == "ENCOUNTER_DEFEAT":
-            phases = [
-                "start_military_operation with mission_type=DISRUPT_SUPPLY",
-                "WAIT_FOR_WORLD_EVENT for supply disruption",
-                "start_military_operation with mission_type=CLEAR_VALLEY",
-                "WAIT_FOR_WORLD_EVENT for valley clearance",
-                "start_outpost_repair if the outpost is not already repaired",
-                "WAIT_FOR_WORLD_EVENT for construction when repair is included",
-                "start_trade_route_test if the trade route is not already open",
-                "WAIT_FOR_WORLD_EVENT for trade when testing is included",
-                "inspect_command_state with action_intent=VERIFY_AND_REPORT",
-            ]
-        elif reason == "TRADE_SUPPORT_REQUIRED":
-            phases = [
-                "negotiate_village_support for GUIDE or SUPPLIES",
-                "start_trade_route_test",
-                "WAIT_FOR_WORLD_EVENT for trade resolution",
-                "inspect_command_state with action_intent=VERIFY_AND_REPORT",
-            ]
-        else:
-            phases = [
-                "Use only allowed_tools whose effects are not already satisfied",
-                "Re-establish the failed prerequisite",
-                "Complete only the remaining goal suffix",
-                "inspect_command_state with action_intent=VERIFY_AND_REPORT",
-            ]
-        return {
-            "failure_code": reason,
-            "completed_effects_do_not_repeat": completed_effects,
-            "ordered_remaining_phases": phases,
-            "rule": (
-                "Do not include a phase whose completed_effects_do_not_repeat value is true; "
-                "every selected step tool must be present in allowed_tools"
-            ),
-        }
+    def planner_instruction(self, kind: Literal["PLAN", "REPLAN"]) -> str:
+        return (
+            f" This is a {kind.lower()} request. Choose a legal strategy from known state, "
+            "preserve objective_scope, and write strategy_summary and step descriptions in "
+            "concise Simplified Chinese. The request already contains the latest Known "
+            "World; do not add routine initial, post-operation, or final inspection steps. "
+            "Treat objective_scope as the complete set of requested terminal outcomes. "
+            "Do not describe or plan any later terminal outcome outside that scope; allowed "
+            "tools may still be used for information, support, or declared prerequisites. "
+            "Use inspect_command_state only when necessary observable information is "
+            "missing. Backend scoped objective evaluation owns final verification."
+        )
 
     @classmethod
     def _canonical_facts(cls, state: ScenarioRuntimeState) -> dict[str, str]:
@@ -445,6 +283,43 @@ class StarfirePlanningPolicy:
             for node_key, fact_key in refs
             if state.node_known(node_key) and state.fact_known(node_key, fact_key)
         }
+
+    @staticmethod
+    def _terminal_action_effect(step: Mapping[str, Any]) -> tuple[str, str] | None:
+        tool_name = step.get("selected_tool_name")
+        if tool_name == "start_outpost_repair":
+            return ("starfire_outpost", "outpost_status")
+        if tool_name == "start_trade_route_test":
+            return ("northern_trade_route", "trade_route_status")
+        if tool_name == "start_military_operation":
+            arguments = step.get("tool_arguments")
+            if isinstance(arguments, Mapping) and arguments.get("mission_type") == "CLEAR_VALLEY":
+                return ("northern_valley", "valley_security")
+        return None
+
+    @staticmethod
+    def _scoped_terminal_fact_groups(
+        scope: ObjectiveScope,
+    ) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+        objective_facts = {
+            (requirement.node_key, requirement.fact_key)
+            for requirement in STARFIRE_OBJECTIVE_CATALOG.verification_requirements(scope)
+        }
+        prerequisite_facts = {
+            (requirement.node_key, requirement.fact_key)
+            for prerequisite in STARFIRE_OBJECTIVE_CATALOG.prerequisites(scope)
+            for requirement in prerequisite.requirements
+        }
+        return objective_facts, prerequisite_facts
+
+    @classmethod
+    def _in_scope_terminal_facts(cls, scope: ObjectiveScope) -> set[tuple[str, str]]:
+        objective_facts, prerequisite_facts = cls._scoped_terminal_fact_groups(scope)
+        return objective_facts | prerequisite_facts
+
+    @staticmethod
+    def _format_ref(ref: tuple[str, str]) -> str:
+        return f"{ref[0]}.{ref[1]}"
 
     @staticmethod
     def _value(state: ScenarioRuntimeState, node_key: str, fact_key: str) -> str:
