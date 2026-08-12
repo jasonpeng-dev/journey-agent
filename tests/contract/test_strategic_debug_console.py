@@ -85,7 +85,7 @@ def test_strategic_facade_auto_drives_to_pauses_and_completion(
     command_snapshot = _snapshot(client, session_id)
     assert command_snapshot["task"]["goal_description"] == "修复星火前哨并重新打通北方商路。"
     initial_plan = command_snapshot["active_plan"]
-    assert "沈策" in initial_plan["strategy_summary"]
+    assert "韩烈" in initial_plan["strategy_summary"]
     assert all(
         any("\u4e00" <= character <= "\u9fff" for character in step["description"])
         for step in initial_plan["steps"]
@@ -133,11 +133,10 @@ def test_strategic_facade_auto_drives_to_pauses_and_completion(
     assert snapshot["known_world_state"]["starfire_outpost_status"] == "OPERATIONAL"
     assert snapshot["known_world_state"]["northern_trade_route_status"] == "OPEN"
     assert not any(item["kind"] == "FINAL_REPORT" for item in snapshot["timeline"])
-    assert any(
-        step["status"] == "SKIPPED"
-        and step["actual_result"] == {"skip_reason": "OBJECTIVE_SCOPE_SATISFIED"}
-        for plan in task["plans"]
-        for step in plan["steps"]
+    assert not any(
+        step["actual_result"] == {"skip_reason": "OBJECTIVE_SCOPE_SATISFIED"}
+        and step["execution_type"] == "WAIT_FOR_WORLD_EVENT"
+        for step in task["plans"][-1]["steps"]
     )
     assert any(run["tools"] for run in snapshot["recent_traces"])
 

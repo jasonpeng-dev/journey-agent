@@ -329,6 +329,7 @@ def test_planning_context_exposes_only_strategic_tools_and_fixed_contracts(
     assert "target_key" in trade_properties
     assert "route_key" not in trade_properties
     assert "northern_trade_route" in tools["start_trade_route_test"]["description"]
+    assert "expected_outcome.village_support" in tools["negotiate_village_support"]["description"]
     canonical_facts = request["constraints"]["canonical_facts"]
     assert canonical_facts["northern_valley.valley_security"] == "UNSAFE"
     assert canonical_facts["starfire_outpost.outpost_status"] == "DAMAGED"
@@ -340,10 +341,9 @@ def test_planning_context_exposes_only_strategic_tools_and_fixed_contracts(
     assert "approved_resources" not in request
 
 
-def test_plan_requires_final_shen_ce_verification(session: Session) -> None:
+def test_plan_does_not_require_a_final_inspect_step(session: Session) -> None:
     conversation, task, validator = _context(session)
     proposal = deepcopy(initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE))
-    proposal["steps"][-1]["assigned_officer_key"] = "han_lie"
 
     result = validator.validate(
         task=task,
@@ -352,13 +352,88 @@ def test_plan_requires_final_shen_ce_verification(session: Session) -> None:
         arguments=proposal,
     )
 
-    assert "PLAN_FINAL_VERIFICATION_REQUIRED" in _codes(result)
+    assert result.passed
+    assert all(step["selected_tool_name"] != "inspect_command_state" for step in proposal["steps"])
 
 
 def test_initial_plan_may_use_a_legal_short_horizon(session: Session) -> None:
     conversation, task, validator = _context(session)
     proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
-    proposal["steps"] = [proposal["steps"][-1]]
+    proposal["steps"] = [
+        {
+            "description": "Inspect only the currently known command state",
+            "execution_type": "TOOL",
+            "assigned_officer_key": "shen_ce",
+            "action_intent": "INSPECT_STATE",
+            "allowed_tool_names": ["inspect_command_state"],
+            "selected_tool_name": "inspect_command_state",
+            "tool_arguments": {},
+            "expected_outcome": {"starfire_outpost_status": "DAMAGED"},
+        }
+    ]
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert result.passed
+
+
+def test_backend_materializes_semantic_adjacent_world_wait(session: Session) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
+    assert all(
+        "source_step_sequence" not in step.get("resume_condition", {})
+        for step in proposal["steps"]
+        if step["execution_type"] == "WAIT_FOR_WORLD_EVENT"
+    )
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert result.passed
+    assert result.normalized_arguments is not None
+    waits = [
+        (index, step)
+        for index, step in enumerate(result.normalized_arguments["steps"], start=1)
+        if step["execution_type"] == "WAIT_FOR_WORLD_EVENT"
+    ]
+    assert all(
+        step["resume_condition"]["source_step_sequence"] == index - 1 for index, step in waits
+    )
+
+
+def test_explicit_invalid_world_wait_reference_is_not_rewritten(session: Session) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
+    wait = next(
+        step for step in proposal["steps"] if step["execution_type"] == "WAIT_FOR_WORLD_EVENT"
+    )
+    wait["resume_condition"]["source_step_sequence"] = 99
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert "PLAN_WORLD_EVENT_SOURCE_INVALID" in _codes(result)
+
+
+def test_legacy_explicit_adjacent_world_wait_reference_remains_valid(session: Session) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
+    for index, step in enumerate(proposal["steps"], start=1):
+        if step["execution_type"] == "WAIT_FOR_WORLD_EVENT":
+            step["resume_condition"]["source_step_sequence"] = index - 1
 
     result = validator.validate(
         task=task,

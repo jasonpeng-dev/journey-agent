@@ -16,18 +16,9 @@ def initial_strategic_starfire_plan(
         "task_id": str(task_id),
         "objective_scope": _scope_payload(scope),
         "strategy_summary": (
-            "沈策先核验领地资源与公开情报, 再由韩烈侦察并清剿山谷, "
-            "山谷安全后交由陆宁修复前哨并进行北方商路通行测试。"
+            "韩烈依据已知情报侦察并清剿山谷, 山谷安全后交由陆宁修复前哨并进行北方商路通行测试。"
         ),
         "steps": [
-            _tool_step(
-                "沈策核验领地资源和星火前哨公开情报",
-                "shen_ce",
-                "ASSESS_COMMAND",
-                "inspect_command_state",
-                {},
-                {"soldiers_total_min": 1},
-            ),
             _tool_step(
                 "韩烈在山谷入口发起谨慎侦察",
                 "han_lie",
@@ -44,7 +35,6 @@ def initial_strategic_starfire_plan(
             _world_wait(
                 "韩烈等待侦察结果由游戏世界结算",
                 "han_lie",
-                source_step_sequence=2,
                 success_outcomes=["PARTIAL_SUCCESS", "VICTORY"],
             ),
             _tool_step(
@@ -64,7 +54,6 @@ def initial_strategic_starfire_plan(
             _world_wait(
                 "韩烈等待伏击谷清剿行动结算",
                 "han_lie",
-                source_step_sequence=4,
                 success_outcomes=["VICTORY"],
             ),
             _tool_step(
@@ -83,7 +72,6 @@ def initial_strategic_starfire_plan(
             _world_wait(
                 "陆宁等待前哨建设完成",
                 "lu_ning",
-                source_step_sequence=6,
                 success_outcomes=["COMPLETED"],
             ),
             _tool_step(
@@ -97,19 +85,14 @@ def initial_strategic_starfire_plan(
             _world_wait(
                 "陆宁等待北方商路测试结算",
                 "lu_ning",
-                source_step_sequence=8,
                 success_outcomes=["COMPLETED"],
             ),
-            _scoped_report_step(scope),
         ],
         "idempotency_key": f"task-plan-{task_id}-v1",
     }
     stage = _scope_stage(scope)
-    last_operation_step = {1: 3, 2: 5, 3: 7, 4: 9}[stage]
-    plan["steps"] = [
-        *plan["steps"][:last_operation_step],
-        _scoped_report_step(scope),
-    ]
+    last_operation_step = {1: 2, 2: 4, 3: 6, 4: 8}[stage]
+    plan["steps"] = plan["steps"][:last_operation_step]
     return plan
 
 
@@ -152,10 +135,8 @@ def recovery_strategic_starfire_plan(
                 _world_wait(
                     "陆宁等待北方商路测试结算",
                     "lu_ning",
-                    source_step_sequence=2,
                     success_outcomes=["COMPLETED"],
                 ),
-                _scoped_report_step(scope),
             ],
             "idempotency_key": f"task-replan-{task_id}-v{next_version}",
         }
@@ -195,7 +176,6 @@ def recovery_strategic_starfire_plan(
             _world_wait(
                 "韩烈等待补给线破袭行动结算",
                 "han_lie",
-                source_step_sequence=2,
                 success_outcomes=["VICTORY"],
             ),
             _tool_step(
@@ -214,7 +194,6 @@ def recovery_strategic_starfire_plan(
             _world_wait(
                 "韩烈等待游戏世界确认山谷安全",
                 "han_lie",
-                source_step_sequence=4,
                 success_outcomes=["VICTORY"],
             ),
             _tool_step(
@@ -233,7 +212,6 @@ def recovery_strategic_starfire_plan(
             _world_wait(
                 "陆宁等待前哨建设完成",
                 "lu_ning",
-                source_step_sequence=6,
                 success_outcomes=["COMPLETED"],
             ),
             _tool_step(
@@ -247,10 +225,8 @@ def recovery_strategic_starfire_plan(
             _world_wait(
                 "陆宁等待北方商路重新开放",
                 "lu_ning",
-                source_step_sequence=8,
                 success_outcomes=["COMPLETED"],
             ),
-            _scoped_report_step(scope),
         ],
         "idempotency_key": f"task-replan-{task_id}-v{next_version}",
     }
@@ -304,7 +280,6 @@ def state_aware_strategic_recovery_plan(
             _world_wait(
                 "韩烈等待敌军补给线破袭结果",
                 "han_lie",
-                source_step_sequence=len(steps),
                 success_outcomes=["VICTORY"],
             )
         )
@@ -328,7 +303,6 @@ def state_aware_strategic_recovery_plan(
             _world_wait(
                 "韩烈等待游戏世界确认山谷安全",
                 "han_lie",
-                source_step_sequence=len(steps),
                 success_outcomes=["VICTORY"],
             )
         )
@@ -355,7 +329,6 @@ def state_aware_strategic_recovery_plan(
             _world_wait(
                 "陆宁等待星火前哨建设完成",
                 "lu_ning",
-                source_step_sequence=len(steps),
                 success_outcomes=["COMPLETED"],
             )
         )
@@ -374,11 +347,9 @@ def state_aware_strategic_recovery_plan(
             _world_wait(
                 "陆宁等待北方商路测试结算",
                 "lu_ning",
-                source_step_sequence=len(steps),
                 success_outcomes=["COMPLETED"],
             )
         )
-    steps.append(_scoped_report_step(scope))
     return {
         "task_id": str(task_id),
         "objective_scope": _scope_payload(scope),
@@ -419,7 +390,6 @@ def _world_wait(
     description: str,
     officer_key: str,
     *,
-    source_step_sequence: int,
     success_outcomes: list[str],
 ) -> dict[str, Any]:
     return {
@@ -434,22 +404,9 @@ def _world_wait(
         "expected_outcome": {"operation_result_in": success_outcomes},
         "resume_condition": {
             "type": "WORLD_OPERATION",
-            "source_step_sequence": source_step_sequence,
             "success_outcomes": success_outcomes,
         },
     }
-
-
-def _scoped_report_step(scope: ObjectiveScope) -> dict[str, Any]:
-    return _tool_step(
-        "沈策按照冻结的任务目标核验终局状态并向主公汇报",
-        "shen_ce",
-        "VERIFY_AND_REPORT",
-        "inspect_command_state",
-        {},
-        _scope_expected_outcomes(scope),
-        constraints={"world_facts_must_be_verified": True},
-    )
 
 
 class StarfireFallbackPlans:
@@ -527,37 +484,15 @@ def _trim_recovery_plan(plan: dict[str, Any], scope: ObjectiveScope) -> dict[str
             included_sequences.add(sequence)
             continue
         condition = step.get("resume_condition")
-        source = condition.get("source_step_sequence") if isinstance(condition, dict) else None
-        if source in included_sequences:
-            copied = dict(step)
-            copied_condition = dict(condition)
-            copied_condition["source_step_sequence"] = len(kept)
-            copied["resume_condition"] = copied_condition
-            kept.append(copied)
-    if not kept or kept[-1].get("action_intent") != "VERIFY_AND_REPORT":
-        kept.append(_scoped_report_step(scope))
+        if (
+            isinstance(condition, dict)
+            and condition.get("type") == "WORLD_OPERATION"
+            and sequence - 1 in included_sequences
+        ):
+            kept.append(step)
+            included_sequences.add(sequence)
     plan["steps"] = kept
     return plan
-
-
-def _scope_expected_outcomes(scope: ObjectiveScope) -> dict[str, str]:
-    keys = set(scope.objective_keys)
-    if StarfireObjectiveKey.FULL_NORTHERN_RECOVERY.value in keys:
-        return {
-            "valley_security": "SAFE",
-            "starfire_outpost_status": "OPERATIONAL",
-            "northern_trade_route_status": "OPEN",
-        }
-    expected: dict[str, str] = {}
-    if StarfireObjectiveKey.GATHER_VALLEY_INTELLIGENCE.value in keys:
-        expected["valley_intelligence"] = "PARTIAL"
-    if StarfireObjectiveKey.SECURE_NORTHERN_VALLEY.value in keys:
-        expected["valley_security"] = "SAFE"
-    if StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST.value in keys:
-        expected["starfire_outpost_status"] = "OPERATIONAL"
-    if StarfireObjectiveKey.OPEN_NORTHERN_TRADE_ROUTE.value in keys:
-        expected["northern_trade_route_status"] = "OPEN"
-    return expected
 
 
 STARFIRE_FALLBACK_PLANS = StarfireFallbackPlans()

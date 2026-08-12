@@ -8,11 +8,6 @@
   kind: workflow
   assertion: replan_created
 
-- name: plan_assigns_all_three_officers
-  category: workflow
-  kind: workflow
-  assertion: all_officers_assigned
-
 - name: authority_limit_creates_player_approval
   category: workflow
   kind: workflow
@@ -105,12 +100,6 @@
   kind: plan_validation
   mutation: model_idempotency_key
   expected_code: PLAN_IDEMPOTENCY_SERVER_CONTROLLED
-
-- name: final_strategist_verification_is_required
-  category: plan_validation
-  kind: plan_validation
-  mutation: missing_final_verification
-  expected_code: PLAN_FINAL_VERIFICATION_REQUIRED
 
 - name: operation_type_expectation_must_match_tool
   category: plan_validation

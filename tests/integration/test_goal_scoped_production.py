@@ -52,6 +52,7 @@ def test_goal_scoped_workflows_stop_without_extra_objectives(
         for step in plan["steps"]
         if step["selected_tool_name"] is not None
     }
+    assert "inspect_command_state" not in selected_tools
     assert selected_tools.isdisjoint(forbidden_tools)
     assert all(
         plan_scope == expected_scope
@@ -70,6 +71,11 @@ def test_open_trade_scope_keeps_prerequisites_out_of_objective_keys(
     assert task["objective_scope"]["objective_keys"] == ["OPEN_NORTHERN_TRADE_ROUTE"]
     assert final["known_world_state"]["starfire_outpost_status"] == "OPERATIONAL"
     assert final["known_world_state"]["northern_trade_route_status"] == "OPEN"
+    assert all(
+        step["selected_tool_name"] != "inspect_command_state"
+        for plan in task["plans"]
+        for step in plan["steps"]
+    )
 
 
 def _issue(client: TestClient, goal: str) -> tuple[str, str]:

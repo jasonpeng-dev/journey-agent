@@ -294,8 +294,6 @@ def _run_plan_validation_case(scenario: dict[str, Any]) -> tuple[bool, str]:
             proposal["steps"].insert(3, wait)
         elif mutation == "model_idempotency_key":
             operation["tool_arguments"]["idempotency_key"] = "model-owned-key"
-        elif mutation == "missing_final_verification":
-            proposal["steps"][-1]["action_intent"] = "REPORT_ONLY"
         elif mutation == "invalid_operation_type":
             operation["expected_outcome"]["operation_type"] = "MILITARY"
         elif mutation == "wrong_submission_tool":

@@ -11,9 +11,6 @@ from app.scenarios.contracts import (
     ScenarioPlanIssue,
     ScenarioRuntimeState,
 )
-from app.scenarios.starfire.objective_catalog import (
-    STARFIRE_OBJECTIVE_CATALOG,
-)
 
 _EXECUTION_TOOLS = frozenset(
     {
@@ -156,7 +153,6 @@ class StarfirePlanningPolicy:
                         ),
                     )
                 )
-        issues.extend(self._validate_final_verification(steps, scope))
         return tuple(issues)
 
     def effect_satisfied(
@@ -211,16 +207,7 @@ class StarfirePlanningPolicy:
                 "asynchronous_operations_require_adjacent_wait_steps": True,
                 "do_not_repeat_completed_effects": True,
             },
-            "required_final_step": {
-                "execution_type": "TOOL",
-                "assigned_officer_key": "shen_ce",
-                "action_intent": "VERIFY_AND_REPORT",
-                "allowed_tool_names": ["inspect_command_state"],
-                "selected_tool_name": "inspect_command_state",
-                "tool_arguments": {},
-                "expected_outcome": self._verification_expectations(scope),
-                "resume_condition": None,
-            },
+            "final_verification": "BACKEND_SCOPED_OBJECTIVE_EVALUATOR",
         }
 
     def replan_guidance(self, reason: str | None) -> str | None:
@@ -235,71 +222,11 @@ class StarfirePlanningPolicy:
         return (
             f" This is a {kind.lower()} request. Choose a legal strategy from known state, "
             "preserve objective_scope, and write strategy_summary and step descriptions in "
-            "concise Simplified Chinese."
+            "concise Simplified Chinese. The request already contains the latest Known "
+            "World; do not add routine initial, post-operation, or final inspection steps. "
+            "Use inspect_command_state only when necessary observable information is "
+            "missing. Backend scoped objective evaluation owns final verification."
         )
-
-    @staticmethod
-    def _validate_final_verification(
-        steps: Sequence[Mapping[str, Any]],
-        scope: ObjectiveScope,
-    ) -> tuple[ScenarioPlanIssue, ...]:
-        if not steps:
-            return ()
-        final = steps[-1]
-        if (
-            final.get("execution_type") != "TOOL"
-            or final.get("assigned_officer_key") != "shen_ce"
-            or final.get("selected_tool_name") != "inspect_command_state"
-            or final.get("action_intent") != "VERIFY_AND_REPORT"
-        ):
-            return (
-                ScenarioPlanIssue(
-                    code="PLAN_FINAL_VERIFICATION_REQUIRED",
-                    path=f"steps.{len(steps) - 1}",
-                    message=(
-                        "The final Step must assign Shen Ce a TOOL call to "
-                        "inspect_command_state with action_intent=VERIFY_AND_REPORT"
-                    ),
-                ),
-            )
-        issues = []
-        expected_outcome = final.get("expected_outcome")
-        expected_values = expected_outcome if isinstance(expected_outcome, Mapping) else {}
-        for key, accepted in StarfirePlanningPolicy._verification_accepted(scope).items():
-            if expected_values.get(key) not in accepted:
-                issues.append(
-                    ScenarioPlanIssue(
-                        code="PLAN_FINAL_VERIFICATION_REQUIRED",
-                        path=f"steps.{len(steps) - 1}.expected_outcome.{key}",
-                        message=(f"The final verification must expect {key} in {sorted(accepted)}"),
-                    )
-                )
-        return tuple(issues)
-
-    @staticmethod
-    def _verification_accepted(scope: ObjectiveScope) -> dict[str, frozenset[str]]:
-        field_by_fact = {
-            ("northern_valley", "valley_intelligence"): "valley_intelligence",
-            ("northern_valley", "valley_security"): "valley_security",
-            ("starfire_outpost", "outpost_status"): "starfire_outpost_status",
-            ("northern_trade_route", "trade_route_status"): ("northern_trade_route_status"),
-        }
-        return {
-            field_by_fact[(requirement.node_key, requirement.fact_key)]: (
-                requirement.accepted_values
-            )
-            for requirement in STARFIRE_OBJECTIVE_CATALOG.verification_requirements(scope)
-        }
-
-    @classmethod
-    def _verification_expectations(cls, scope: ObjectiveScope) -> dict[str, str]:
-        preferred = {
-            "valley_intelligence": "PARTIAL",
-            "valley_security": "SAFE",
-            "starfire_outpost_status": "OPERATIONAL",
-            "northern_trade_route_status": "OPEN",
-        }
-        return {field: preferred[field] for field in cls._verification_accepted(scope)}
 
     @classmethod
     def _canonical_facts(cls, state: ScenarioRuntimeState) -> dict[str, str]:

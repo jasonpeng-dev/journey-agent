@@ -17,7 +17,7 @@ from app.agent.providers import build_provider
 from app.agent.task_orchestrator import TaskOrchestrator
 from app.agent.types import Message, ModelProvider, ModelResponse, ToolDefinition
 from app.core.config import Settings
-from app.domain.enums import AgentTaskStatus
+from app.domain.enums import AgentStepStatus, AgentTaskStatus, WorldOperationStatus
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import (
     NPC,
@@ -25,6 +25,7 @@ from app.infrastructure.db.models import (
     AgentRun,
     AgentStep,
     ConversationSession,
+    WorldOperation,
 )
 from app.services.game import GameService, seed_id
 from app.services.seed import seed_demo_world
@@ -35,6 +36,7 @@ from app.services.tasks import TaskService
 class RealStrategicResult:
     attempt: int
     goal: str
+    objective_scope: list[str]
     passed: bool
     task_status: str
     initial_plan_source: str
@@ -57,9 +59,14 @@ class RealStrategicResult:
     plan_summaries: list[dict[str, object]]
     planning_context_audits: list[dict[str, object]]
     legacy_argument_uses: list[dict[str, object]]
+    scoped_evaluation_completed: bool
+    skipped_waits_due_to_scope: list[dict[str, object]]
+    skipped_inspects_due_to_scope: list[dict[str, object]]
+    settled_operation_wait_violations: list[dict[str, object]]
 
 
 GOAL = "修复星火前哨并重新打通北方商路。"
+RESTORE_ONLY_GOAL = "我要你帮我重建星火驿站"
 _INITIAL_HIDDEN_TOKENS = (
     "ambush_status",
     "enemy_north_supply_route",
@@ -246,10 +253,11 @@ def run_real_strategic_evaluations(
     settings: Settings,
     *,
     attempts: int = 1,
+    goal: str = GOAL,
 ) -> dict[str, object]:
     if settings.model_provider != "openai_compatible":
         raise ValueError("Real strategic evaluation requires MODEL_PROVIDER=openai_compatible")
-    results = [asyncio.run(_run_trial(settings, index + 1)) for index in range(attempts)]
+    results = [asyncio.run(_run_trial(settings, index + 1, goal=goal)) for index in range(attempts)]
     passed = sum(result.passed for result in results)
     return {
         "summary": {
@@ -268,7 +276,12 @@ def run_real_strategic_evaluations(
     }
 
 
-async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
+async def _run_trial(
+    settings: Settings,
+    attempt: int,
+    *,
+    goal: str = GOAL,
+) -> RealStrategicResult:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -283,7 +296,7 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
         orchestrator = TaskOrchestrator(db, provider, settings)
         task, _initial_run, _event = await orchestrator.start(
             session,
-            GOAL,
+            goal,
             "starfire_command",
             planning_mode="PROVIDER",
         )
@@ -406,18 +419,33 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
             None,
         )
         legacy_argument_uses = _legacy_argument_uses(plans, steps)
-        passed = bool(
+        scope = TaskService(db).require_frozen_scope(task)
+        scoped_evaluation_completed = TaskService(db).evaluate_scope(task).completed
+        skipped_waits_due_to_scope = _scope_skips(
+            steps,
+            execution_type="WAIT_FOR_WORLD_EVENT",
+        )
+        skipped_inspects_due_to_scope = _scope_skips(
+            steps,
+            selected_tool_name="inspect_command_state",
+        )
+        settled_operation_wait_violations = _settled_operation_wait_violations(
+            db,
+            task.id,
+            steps,
+        )
+        common_passed = bool(
             task.status == AgentTaskStatus.SUCCEEDED
             and plans
             and plans[0].source == "MODEL_PLANNER"
             and model_replan_created
             and task.replan_count >= 1
             and "ENCOUNTER_DEFEAT" in {plan.replan_reason for plan in plans}
-            and {"shen_ce", "han_lie", "lu_ning"}.issubset(officers)
-            and approvals >= 1
             and world.get("valley_security") == "SAFE"
             and world.get("starfire_outpost_status") in {"OPERATIONAL", "RESTORED"}
-            and world.get("northern_trade_route_status") == "OPEN"
+            and scoped_evaluation_completed
+            and settled_operation_wait_violations == []
+            and skipped_inspects_due_to_scope == []
             and initial_audit is not None
             and initial_audit.get("hidden_tokens_present") == []
             and initial_audit.get("supply_target_advertised") is False
@@ -438,10 +466,24 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
             and post_clear_audit is not None
             and legacy_argument_uses == []
         )
+        if goal == RESTORE_ONLY_GOAL:
+            passed = bool(
+                common_passed
+                and scope.objective_keys == ("RESTORE_STARFIRE_OUTPOST",)
+                and world.get("northern_trade_route_status") == "CLOSED"
+            )
+        else:
+            passed = bool(
+                common_passed
+                and {"shen_ce", "han_lie", "lu_ning"}.issubset(officers)
+                and approvals >= 1
+                and world.get("northern_trade_route_status") == "OPEN"
+            )
         final_plan = plans[-1] if plans else None
         return RealStrategicResult(
             attempt=attempt,
-            goal=GOAL,
+            goal=goal,
+            objective_scope=list(scope.objective_keys),
             passed=passed,
             task_status=task.status.value,
             initial_plan_source=plans[0].source if plans else "NOT_CREATED",
@@ -468,6 +510,10 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
             plan_summaries=_plan_summaries(db, plans, steps),
             planning_context_audits=context_audits,
             legacy_argument_uses=legacy_argument_uses,
+            scoped_evaluation_completed=scoped_evaluation_completed,
+            skipped_waits_due_to_scope=skipped_waits_due_to_scope,
+            skipped_inspects_due_to_scope=skipped_inspects_due_to_scope,
+            settled_operation_wait_violations=settled_operation_wait_violations,
         )
 
 
@@ -602,3 +648,68 @@ def _legacy_argument_uses(
                 }
             )
     return uses
+
+
+def _scope_skips(
+    steps: list[AgentStep],
+    *,
+    execution_type: str | None = None,
+    selected_tool_name: str | None = None,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "plan_id": str(step.plan_id),
+            "sequence": step.sequence,
+            "execution_type": step.execution_type.value,
+            "tool": step.selected_tool_name,
+        }
+        for step in steps
+        if (execution_type is None or step.execution_type.value == execution_type)
+        and (selected_tool_name is None or step.selected_tool_name == selected_tool_name)
+        and step.actual_result == {"skip_reason": "OBJECTIVE_SCOPE_SATISFIED"}
+    ]
+
+
+def _settled_operation_wait_violations(
+    db: Session,
+    task_id: UUID,
+    steps: list[AgentStep],
+) -> list[dict[str, object]]:
+    steps_by_source = {step.id: step for step in steps}
+    steps_by_position = {(step.plan_id, step.sequence): step for step in steps}
+    violations: list[dict[str, object]] = []
+    operations = db.scalars(
+        select(WorldOperation).where(
+            WorldOperation.task_id == task_id,
+            WorldOperation.status == WorldOperationStatus.RESOLVED,
+        )
+    ).all()
+    for operation in operations:
+        source = (
+            steps_by_source.get(operation.source_step_id)
+            if operation.source_step_id is not None
+            else None
+        )
+        wait = (
+            steps_by_position.get((source.plan_id, source.sequence + 1))
+            if source is not None
+            else None
+        )
+        result = operation.outcome.get("result") if isinstance(operation.outcome, dict) else None
+        success_outcomes = (
+            wait.resume_condition.get("success_outcomes", [])
+            if wait is not None and isinstance(wait.resume_condition, dict)
+            else []
+        )
+        if result in success_outcomes and (
+            wait is None or wait.status != AgentStepStatus.SUCCEEDED
+        ):
+            violations.append(
+                {
+                    "operation_id": str(operation.id),
+                    "source_step_id": str(operation.source_step_id),
+                    "wait_step_id": str(wait.id) if wait is not None else None,
+                    "wait_status": wait.status.value if wait is not None else "MISSING",
+                }
+            )
+    return violations

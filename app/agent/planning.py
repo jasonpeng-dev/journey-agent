@@ -128,6 +128,7 @@ class PlanValidator:
                 "The task scenario does not provide a planning policy",
             )
         policy = scenario.planning_policy
+        self._materialize_adjacent_world_wait_references(parsed.steps, policy)
         try:
             scope = TaskService(self.db).require_frozen_scope(task)
         except AppError as exc:
@@ -741,6 +742,27 @@ class PlanValidator:
                 )
 
     @staticmethod
+    def _materialize_adjacent_world_wait_references(
+        steps: list[Any],
+        policy: ScenarioPlanningPolicy,
+    ) -> None:
+        """Fill only an omitted, unambiguous adjacent operation reference."""
+        for index, step in enumerate(steps):
+            if index == 0 or step.execution_type != StepExecutionType.WAIT_FOR_WORLD_EVENT.value:
+                continue
+            condition = step.resume_condition
+            if not isinstance(condition, dict) or condition.get("type") != "WORLD_OPERATION":
+                continue
+            if "source_step_sequence" in condition:
+                continue
+            previous = steps[index - 1]
+            if (
+                previous.execution_type == StepExecutionType.TOOL.value
+                and previous.selected_tool_name in policy.operation_tools
+            ):
+                step.resume_condition = {**condition, "source_step_sequence": index}
+
+    @staticmethod
     def _rejected(code: str, path: str, message: str) -> PlanValidationResult:
         return PlanValidationResult(
             status="REJECTED",
@@ -1012,14 +1034,20 @@ def build_planning_request(
                     "expected_outcome": {"operation_result_in": ["SUPPORTED_SUCCESS_OUTCOME"]},
                     "resume_condition": {
                         "type": "WORLD_OPERATION",
-                        "source_step_sequence": "IMMEDIATELY_PREVIOUS_ONE_BASED_SEQUENCE",
                         "success_outcomes": ["SAME_SUPPORTED_SUCCESS_OUTCOME"],
                     },
                 },
             },
             "world_operation_pairing": (
                 "Every operation-start TOOL step must be followed immediately by exactly "
-                "one WAIT_FOR_WORLD_EVENT step that references its one-based sequence"
+                "one WAIT_FOR_WORLD_EVENT step. Omit source_step_sequence; the backend "
+                "materializes that structural reference after parsing."
+            ),
+            "inspect_guidance": (
+                "The request already contains the latest Known World. Do not inspect by "
+                "default, after a conclusive operation result, or for final objective "
+                "verification. Use inspect_command_state only when necessary observable "
+                "information is genuinely missing."
             ),
         },
     }

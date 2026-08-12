@@ -3,6 +3,8 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from evals.real_strategic import (
+    GOAL,
+    RESTORE_ONLY_GOAL,
     run_real_strategic_evaluations,
     write_real_strategic_report,
 )
@@ -21,6 +23,11 @@ def main() -> None:
         "--output", type=Path, default=Path("eval-results-real-strategic")
     )
     strategic_parser.add_argument("--attempts", type=int, default=1)
+    strategic_parser.add_argument(
+        "--profile",
+        choices=("full", "restore-only"),
+        default="full",
+    )
     args = parser.parse_args()
     if args.command == "eval" and args.eval_command == "run":
         report = run_evaluations()
@@ -31,6 +38,7 @@ def main() -> None:
         report = run_real_strategic_evaluations(
             get_settings(),
             attempts=args.attempts,
+            goal=RESTORE_ONLY_GOAL if args.profile == "restore-only" else GOAL,
         )
         write_real_strategic_report(report, args.output)
         summary = report["summary"]

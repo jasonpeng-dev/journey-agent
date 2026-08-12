@@ -31,12 +31,7 @@ def test_legal_short_horizon_plan_is_not_rejected_by_a_full_route_blueprint(
 ) -> None:
     conversation, task = _task_context(session, "只侦察北境山谷, 不执行清剿、修复或商路行动。")
     proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
-    proposal["steps"] = [
-        proposal["steps"][0],
-        proposal["steps"][1],
-        proposal["steps"][2],
-        proposal["steps"][-1],
-    ]
+    proposal["steps"] = proposal["steps"][:2]
 
     result = _validator(session).validate(
         task=task,
@@ -62,26 +57,21 @@ def test_restore_only_completion_currently_fails_while_trade_is_closed() -> None
     assert evaluation.details["northern_trade_route.trade_route_status"] == "CLOSED"
 
 
-def test_final_verification_is_derived_from_the_frozen_scope() -> None:
+def test_backend_final_verification_is_derived_from_the_frozen_scope() -> None:
     state = _state(
         valley_security="SAFE",
         outpost_status="DAMAGED",
         trade_route_status="OPEN",
     )
 
-    final_step = STARFIRE_PLANNING_POLICY.build_planning_constraints(
+    constraints = STARFIRE_PLANNING_POLICY.build_planning_constraints(
         "PLAN",
         None,
         state,
         FULL_STARFIRE_SCOPE,
-    )["required_final_step"]
-    assert isinstance(final_step, dict)
-    expected = final_step["expected_outcome"]
-    assert expected == {
-        "valley_security": "SAFE",
-        "starfire_outpost_status": "OPERATIONAL",
-        "northern_trade_route_status": "OPEN",
-    }
+    )
+    assert constraints["final_verification"] == "BACKEND_SCOPED_OBJECTIVE_EVALUATOR"
+    assert "required_final_step" not in constraints
     assert not STARFIRE_OBJECTIVES.evaluate(state).completed
 
 

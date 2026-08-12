@@ -22,7 +22,7 @@ from app.services.tasks import TaskService
 from app.tools.catalog import build_registry
 
 
-def test_planning_request_and_final_verification_share_frozen_scope(
+def test_planning_request_uses_frozen_scope_and_backend_verification(
     session: Session,
 ) -> None:
     conversation, task, scope = _frozen_task(
@@ -43,9 +43,8 @@ def test_planning_request_and_final_verification_share_frozen_scope(
     assert [item["key"] for item in request["objective_scope"]["objectives"]] == [
         "RESTORE_STARFIRE_OUTPOST"
     ]
-    assert request["constraints"]["required_final_step"]["expected_outcome"] == {
-        "starfire_outpost_status": "OPERATIONAL"
-    }
+    assert request["constraints"]["final_verification"] == ("BACKEND_SCOPED_OBJECTIVE_EVALUATOR")
+    assert "required_final_step" not in request["constraints"]
     prerequisite_keys = {item["key"] for item in request["objective_scope"]["prerequisites"]}
     assert prerequisite_keys == {"valley_security_required"}
     assert list(scope.objective_keys) == ["RESTORE_STARFIRE_OUTPOST"]

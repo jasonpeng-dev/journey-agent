@@ -108,7 +108,12 @@ class TaskOrchestrator:
                 return task, None, "TASK_SUCCEEDED"
             self.db.commit()
             return await self._plan_missing_task(task, session)
-        if self.tasks.complete_if_scope_satisfied(task, plan):
+        next_step = self.tasks.next_step(plan.id)
+        has_unsettled_world_wait = (
+            next_step is not None
+            and next_step.execution_type == StepExecutionType.WAIT_FOR_WORLD_EVENT
+        )
+        if not has_unsettled_world_wait and self.tasks.complete_if_scope_satisfied(task, plan):
             self.db.commit()
             return task, None, "TASK_SUCCEEDED"
         failed = self.db.scalar(
@@ -122,7 +127,7 @@ class TaskOrchestrator:
         if failed is not None:
             self.db.commit()
             return await self._replan(task, session, failed.failure_code or "RECOVERABLE_FAILURE")
-        step = self.tasks.next_step(plan.id)
+        step = next_step
         if step is None:
             self.db.commit()
             return await self._replan(
