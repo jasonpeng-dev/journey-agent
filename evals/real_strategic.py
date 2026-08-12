@@ -14,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.agent.providers import build_provider
 from app.agent.task_orchestrator import TaskOrchestrator
+from app.agent.types import Message, ModelProvider, ModelResponse, ToolDefinition
 from app.core.config import Settings
 from app.domain.enums import AgentTaskStatus
 from app.infrastructure.db.base import Base
@@ -52,9 +53,129 @@ class RealStrategicResult:
     final_world: dict[str, object]
     diagnostic: str | None
     validation_rounds: list[dict[str, object]]
+    plan_summaries: list[dict[str, object]]
+    planning_context_audits: list[dict[str, object]]
+    legacy_argument_uses: list[dict[str, object]]
 
 
 GOAL = "修复星火前哨并重新打通北方商路。"
+_INITIAL_HIDDEN_TOKENS = (
+    "ambush_status",
+    "enemy_north_supply_route",
+    "supply_status",
+)
+_LEGACY_ARGUMENT_KEYS = frozenset({"route_key"})
+_LEGACY_TARGETS = frozenset({"valley_entrance", "ambush_valley"})
+
+
+class AuditedProvider:
+    """Record non-secret planner payload invariants around a real provider."""
+
+    def __init__(self, provider: ModelProvider):
+        self._provider = provider
+        self.name = provider.name
+        self.planning_context_audits: list[dict[str, object]] = []
+        self._call_index = 0
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition],
+    ) -> ModelResponse:
+        self._audit_planning_context(messages, tools)
+        return await self._provider.complete(messages, tools)
+
+    def _audit_planning_context(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition],
+    ) -> None:
+        self._call_index += 1
+        provider_payload = json.dumps(
+            {
+                "messages": [message.model_dump(mode="json") for message in messages],
+                "tools": [tool.model_dump(mode="json") for tool in tools],
+            },
+            ensure_ascii=False,
+        )
+        marker_message = next(
+            (
+                message.content
+                for message in messages
+                if message.content is not None and "PLANNER_REQUEST_JSON:" in message.content
+            ),
+            None,
+        )
+        if marker_message is None:
+            audit = self._payload_audit("OFFICER", provider_payload)
+            audit["known_fact_values"] = self._officer_known_fact_values(messages)
+            self.planning_context_audits.append(audit)
+            return
+        raw_request = marker_message.split("PLANNER_REQUEST_JSON:", 1)[1]
+        try:
+            request = json.loads(raw_request)
+        except json.JSONDecodeError:
+            self.planning_context_audits.append({"kind": "INVALID", "request_json_valid": False})
+            return
+        kind = str(request.get("kind", "UNKNOWN"))
+        if any(item.get("kind") == kind for item in self.planning_context_audits):
+            return
+        constraints = request.get("constraints")
+        canonical = constraints.get("canonical_facts", {}) if isinstance(constraints, dict) else {}
+        audit = self._payload_audit(kind, provider_payload)
+        audit.update(
+            {
+                "request_json_valid": True,
+                "canonical_fact_keys": (
+                    sorted(str(key) for key in canonical) if isinstance(canonical, dict) else []
+                ),
+                "known_fact_values": (
+                    {str(key): str(value) for key, value in canonical.items()}
+                    if isinstance(canonical, dict)
+                    else {}
+                ),
+            }
+        )
+        self.planning_context_audits.append(audit)
+
+    def _payload_audit(self, kind: str, provider_payload: str) -> dict[str, object]:
+        return {
+            "call_index": self._call_index,
+            "kind": kind,
+            "hidden_tokens_present": [
+                token for token in _INITIAL_HIDDEN_TOKENS if token in provider_payload
+            ],
+            "supply_target_advertised": "enemy_north_supply_route" in provider_payload,
+            "legacy_targets_present": [
+                target for target in sorted(_LEGACY_TARGETS) if target in provider_payload
+            ],
+            "legacy_route_key_present": '"route_key"' in provider_payload,
+        }
+
+    @staticmethod
+    def _officer_known_fact_values(messages: list[Message]) -> dict[str, str]:
+        marker = "Verified player/agent knowledge (hidden truth is excluded): "
+        suffix = ". You are executing one assigned step"
+        content = next(
+            (
+                message.content
+                for message in messages
+                if message.content and marker in message.content
+            ),
+            None,
+        )
+        if content is None:
+            return {}
+        raw = content.split(marker, 1)[1].split(suffix, 1)[0]
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        world = state.get("world") if isinstance(state, dict) else None
+        if not isinstance(world, dict):
+            return {}
+        audited_keys = {"ambush_status", "enemy_supply_route", "valley_security"}
+        return {str(key): str(value) for key, value in world.items() if key in audited_keys}
 
 
 def run_real_strategic_evaluations(
@@ -94,7 +215,8 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
     started = perf_counter()
     with factory() as db:
         session = _seed_trial(db, attempt)
-        orchestrator = TaskOrchestrator(db, build_provider(settings), settings)
+        provider = AuditedProvider(build_provider(settings))
+        orchestrator = TaskOrchestrator(db, provider, settings)
         task, _initial_run, _event = await orchestrator.start(
             session,
             GOAL,
@@ -181,6 +303,45 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
         model_replan_created = any(
             plan.version > 1 and plan.source == "MODEL_PLANNER" for plan in plans
         )
+        context_audits = provider.planning_context_audits
+        initial_audit = next(
+            (item for item in context_audits if item.get("kind") == "PLAN"),
+            None,
+        )
+        replan_audit = next(
+            (item for item in context_audits if item.get("kind") == "REPLAN"),
+            None,
+        )
+        post_recon_audit = next(
+            (
+                item
+                for item in context_audits
+                if item.get("kind") == "OFFICER"
+                and _audit_fact_value(item, "ambush_status") == "ACTIVE"
+                and _audit_fact_value(item, "enemy_supply_route") is None
+            ),
+            None,
+        )
+        post_disrupt_audit = next(
+            (
+                item
+                for item in context_audits
+                if item.get("kind") == "OFFICER"
+                and _audit_fact_value(item, "enemy_supply_route") == "DISRUPTED"
+            ),
+            None,
+        )
+        post_clear_audit = next(
+            (
+                item
+                for item in context_audits
+                if item.get("kind") == "OFFICER"
+                and _audit_fact_value(item, "ambush_status") == "CLEARED"
+                and _audit_fact_value(item, "valley_security") == "SAFE"
+            ),
+            None,
+        )
+        legacy_argument_uses = _legacy_argument_uses(plans, steps)
         passed = bool(
             task.status == AgentTaskStatus.SUCCEEDED
             and plans
@@ -193,6 +354,25 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
             and world.get("valley_security") == "SAFE"
             and world.get("starfire_outpost_status") in {"OPERATIONAL", "RESTORED"}
             and world.get("northern_trade_route_status") == "OPEN"
+            and initial_audit is not None
+            and initial_audit.get("hidden_tokens_present") == []
+            and initial_audit.get("supply_target_advertised") is False
+            and initial_audit.get("legacy_targets_present") == []
+            and initial_audit.get("legacy_route_key_present") is False
+            and post_recon_audit is not None
+            and replan_audit is not None
+            and replan_audit.get("supply_target_advertised") is True
+            and _audit_fact_value(
+                replan_audit,
+                "enemy_north_supply_route.supply_status",
+            )
+            == "ACTIVE"
+            and _audit_token_set(replan_audit) == set(_INITIAL_HIDDEN_TOKENS)
+            and replan_audit.get("legacy_targets_present") == []
+            and replan_audit.get("legacy_route_key_present") is False
+            and post_disrupt_audit is not None
+            and post_clear_audit is not None
+            and legacy_argument_uses == []
         )
         final_plan = plans[-1] if plans else None
         return RealStrategicResult(
@@ -221,6 +401,9 @@ async def _run_trial(settings: Settings, attempt: int) -> RealStrategicResult:
             final_world={str(key): value for key, value in world.items()},
             diagnostic=diagnostic,
             validation_rounds=validation_rounds,
+            plan_summaries=_plan_summaries(db, plans, steps),
+            planning_context_audits=context_audits,
+            legacy_argument_uses=legacy_argument_uses,
         )
 
 
@@ -285,3 +468,73 @@ def _proposal_summary(value: object) -> dict[str, object] | None:
             f"steps.{index}" for index, step in enumerate(steps) if not isinstance(step, dict)
         ],
     }
+
+
+def _audit_token_set(audit: dict[str, object]) -> set[str]:
+    tokens = audit.get("hidden_tokens_present")
+    return {str(token) for token in tokens} if isinstance(tokens, list) else set()
+
+
+def _audit_fact_value(audit: dict[str, object], key: str) -> str | None:
+    values = audit.get("known_fact_values")
+    value = values.get(key) if isinstance(values, dict) else None
+    return str(value) if value is not None else None
+
+
+def _plan_summaries(
+    db: Session,
+    plans: list[AgentPlan],
+    steps: list[AgentStep],
+) -> list[dict[str, object]]:
+    result = []
+    for plan in plans:
+        plan_steps = [step for step in steps if step.plan_id == plan.id]
+        result.append(
+            {
+                "version": plan.version,
+                "source": plan.source,
+                "replan_reason": plan.replan_reason,
+                "strategy_summary": plan.strategy_summary,
+                "steps": [
+                    {
+                        "sequence": step.sequence,
+                        "officer": (
+                            officer.key
+                            if step.assigned_npc_id is not None
+                            and (officer := db.get(NPC, step.assigned_npc_id)) is not None
+                            else None
+                        ),
+                        "execution_type": step.execution_type.value,
+                        "tool": step.selected_tool_name,
+                        "target_key": step.tool_arguments.get("target_key"),
+                        "mission_type": step.tool_arguments.get("mission_type"),
+                        "status": step.status.value,
+                    }
+                    for step in plan_steps
+                ],
+            }
+        )
+    return result
+
+
+def _legacy_argument_uses(
+    plans: list[AgentPlan],
+    steps: list[AgentStep],
+) -> list[dict[str, object]]:
+    plan_versions = {plan.id: plan.version for plan in plans}
+    uses: list[dict[str, object]] = []
+    for step in steps:
+        arguments = step.tool_arguments
+        legacy_keys = sorted(key for key in arguments if key in _LEGACY_ARGUMENT_KEYS)
+        target = arguments.get("target_key")
+        legacy_target = target if isinstance(target, str) and target in _LEGACY_TARGETS else None
+        if legacy_keys or legacy_target is not None:
+            uses.append(
+                {
+                    "plan_version": plan_versions.get(step.plan_id),
+                    "step_sequence": step.sequence,
+                    "legacy_argument_keys": legacy_keys,
+                    "legacy_target": legacy_target,
+                }
+            )
+    return uses

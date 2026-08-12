@@ -200,6 +200,7 @@ class PlanValidator:
                 )
             self._validate_tool_step(
                 task=task,
+                scenario_state=scenario_state,
                 npc=step_npc,
                 tool_name=tool_name_for_step,
                 tool_arguments=step.tool_arguments,
@@ -316,6 +317,7 @@ class PlanValidator:
         self,
         *,
         task: AgentTask,
+        scenario_state: ScenarioRuntimeState,
         npc: NPC,
         tool_name: str,
         tool_arguments: dict[str, Any],
@@ -400,8 +402,7 @@ class PlanValidator:
                     )
                 )
             else:
-                known = GameService(self.db).scenario_known_state(task.player_id)
-                if not known.node_known(target.key):
+                if not scenario_state.node_known(target.key):
                     issues.append(
                         PlanValidationIssue(
                             code="PLAN_INTERACTION_TARGET_HIDDEN",
@@ -754,12 +755,12 @@ def build_planning_request(
         )
     }
     game = GameService(db)
-    verified_state = game.inspect_command_state(task.player_id)
+    scenario_state = game.scenario_known_state(task.player_id)
+    verified_state = game.inspect_command_state(task.player_id, known_state=scenario_state)
     scenario = scenario_binding(task.scenario_key)
     if scenario is None:
         raise ValueError(f"Scenario planning policy is not registered: {task.scenario_key}")
     policy = scenario.planning_policy
-    scenario_state = game.scenario_known_state(task.player_id)
     allowed_tools: list[dict[str, Any]] = []
     scenario_tools = policy.execution_tools
     for definition in registry.definitions(

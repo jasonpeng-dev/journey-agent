@@ -165,7 +165,12 @@ class GameService:
         self.db.flush()
         return fact
 
-    def inspect_command_state(self, player_id: UUID) -> dict[str, object]:
+    def inspect_command_state(
+        self,
+        player_id: UUID,
+        *,
+        known_state: StarfireKnowledgeState | None = None,
+    ) -> dict[str, object]:
         player = self.get_player(player_id)
         domain = self.db.get(PlayerDomainState, player_id)
         if domain is None:
@@ -182,7 +187,7 @@ class GameService:
             "morale": domain.morale,
             "version": domain.version,
         }
-        known = self.scenario_known_state(player_id)
+        known = known_state or self.scenario_known_state(player_id)
         world: dict[str, object] = {}
         for legacy_key, ref in LEGACY_FACT_REFS.items():
             if not known.fact_known(ref.node_key, ref.fact_key):
@@ -251,6 +256,7 @@ class GameService:
             "RECON_TARGET_INVALID",
             "The target cannot be reconnoitered",
         )
+        self._ensure_known_accessible_node(player_id, canonical_target)
         self._evaluate_rule(
             lambda: self.ruleset.validate_reconnaissance(canonical_target, approach)
         )
@@ -270,8 +276,7 @@ class GameService:
             mission_type,
             strategy,
         )
-        if mission_type == "DISRUPT_SUPPLY":
-            self._ensure_known_accessible_node(player_id, canonical_target)
+        self._ensure_known_accessible_node(player_id, canonical_target)
         state = self._starfire_rule_state(player_id)
         self._evaluate_rule(
             lambda: self.ruleset.validate_military_operation(
@@ -309,6 +314,7 @@ class GameService:
         repair_level: str = "TEMPORARY",
     ) -> None:
         canonical_target = canonical_node_key(target_key)
+        self._ensure_known_accessible_node(player_id, canonical_target)
         state = self._starfire_rule_state(player_id)
         self._evaluate_rule(
             lambda: self.ruleset.validate_repair(
@@ -327,6 +333,7 @@ class GameService:
         route_key: str = "northern_trade_route",
     ) -> None:
         canonical_target = canonical_node_key(route_key)
+        self._ensure_known_accessible_node(player_id, canonical_target)
         state = self._starfire_rule_state(player_id)
         self._evaluate_rule(lambda: self.ruleset.validate_trade_route(canonical_target, state))
 
@@ -348,6 +355,7 @@ class GameService:
             "RECON_TARGET_INVALID",
             "The target cannot be reconnoitered",
         )
+        self._ensure_known_accessible_node(player_id, canonical_target)
         self._evaluate_rule(
             lambda: self.ruleset.validate_reconnaissance(canonical_target, approach)
         )
@@ -380,8 +388,7 @@ class GameService:
             mission_type,
             strategy,
         )
-        if mission_type == "DISRUPT_SUPPLY":
-            self._ensure_known_accessible_node(player_id, canonical_target)
+        self._ensure_known_accessible_node(player_id, canonical_target)
         parameters = {
             "troop_count": troop_count,
             "mission_type": mission_type,
@@ -458,6 +465,7 @@ class GameService:
         idempotency_key: str,
     ) -> WorldOperation:
         canonical_target = canonical_node_key(target_key)
+        self._ensure_known_accessible_node(player_id, canonical_target)
         self._evaluate_rule(
             lambda: self.ruleset.validate_repair_parameters(
                 canonical_target,
@@ -516,6 +524,7 @@ class GameService:
         idempotency_key: str,
     ) -> WorldOperation:
         canonical_target = canonical_node_key(route_key)
+        self._ensure_known_accessible_node(player_id, canonical_target)
         self._evaluate_rule(lambda: self.ruleset.validate_trade_route_target(canonical_target))
         existing = self._matching_operation(
             player_id,
@@ -857,17 +866,6 @@ class GameService:
             return default, False
         status = fact.value.get("status")
         return (str(status), True) if status is not None else (default, False)
-
-    @staticmethod
-    def _initial_fact_value(node_key: str, fact_key: str) -> str:
-        node = STARFIRE_WORLD.node(node_key)
-        fact = node.fact(fact_key) if node is not None else None
-        if fact is None:
-            raise AppError(
-                "STARFIRE_DEFINITION_INVALID",
-                "A required Starfire fact definition is missing",
-            )
-        return str(fact.initial_value)
 
     def _apply_rule_updates(
         self,

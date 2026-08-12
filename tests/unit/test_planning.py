@@ -1,4 +1,5 @@
 from copy import deepcopy
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -6,7 +7,13 @@ from sqlalchemy.orm import Session
 
 from app.agent.planning import PlanValidator, build_planning_request
 from app.core.config import Settings
-from app.infrastructure.db.models import NPC, ConversationSession, OfficerAppointment
+from app.infrastructure.db.models import (
+    NPC,
+    AgentRun,
+    AgentStep,
+    ConversationSession,
+    OfficerAppointment,
+)
 from app.scenarios.starfire.fallback_plans import initial_strategic_starfire_plan
 from app.services.game import GameService, seed_id
 from app.services.tasks import TaskService
@@ -52,6 +59,32 @@ def test_valid_strategic_plan_is_normalized_and_accepted(session: Session) -> No
     assert result.normalized_arguments is not None
     assert result.normalized_arguments["task_id"] == str(task.id)
     assert result.normalized_arguments["idempotency_key"].endswith("-v1")
+
+
+def test_plan_validation_builds_known_state_once_for_all_steps(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversation, task, validator = _context(session)
+    original = GameService.scenario_known_state
+    calls = 0
+
+    def counted_known_state(game: GameService, player_id):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original(game, player_id)
+
+    monkeypatch.setattr(GameService, "scenario_known_state", counted_known_state)
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=initial_strategic_starfire_plan(task.id),
+    )
+
+    assert result.status == "PASSED"
+    assert calls == 1
 
 
 def test_new_starfire_plan_uses_canonical_explicit_targets(session: Session) -> None:
@@ -112,6 +145,51 @@ def test_legacy_plan_targets_validate_without_rewriting_raw_arguments(
     assert normalized["start_military_operation"]["target_key"] == "ambush_valley"
     assert "target_key" not in normalized["start_outpost_repair"]
     assert normalized["start_trade_route_test"] == {"route_key": "northern_trade_route"}
+
+
+def test_legacy_plan_arguments_remain_raw_when_steps_are_persisted(session: Session) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id)
+    repair = next(
+        step for step in proposal["steps"] if step["selected_tool_name"] == "start_outpost_repair"
+    )
+    trade = next(
+        step for step in proposal["steps"] if step["selected_tool_name"] == "start_trade_route_test"
+    )
+    repair["tool_arguments"].pop("target_key")
+    trade["tool_arguments"] = {"route_key": "northern_trade_route"}
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+    assert result.status == "PASSED"
+    assert result.normalized_arguments is not None
+    run = AgentRun(
+        request_id=uuid4(),
+        session_id=conversation.id,
+        model="unit-test",
+        input_message="legacy plan persistence",
+        max_rounds=1,
+    )
+    session.add(run)
+    session.flush()
+
+    plan = TaskService(session).create_plan(
+        task.id,
+        str(result.normalized_arguments["strategy_summary"]),
+        list(result.normalized_arguments["steps"]),
+        created_by_run_id=run.id,
+    )
+    persisted = {
+        step.selected_tool_name: step.tool_arguments
+        for step in session.scalars(select(AgentStep).where(AgentStep.plan_id == plan.id))
+        if step.selected_tool_name is not None
+    }
+
+    assert "target_key" not in persisted["start_outpost_repair"]
+    assert persisted["start_trade_route_test"] == {"route_key": "northern_trade_route"}
 
 
 def test_plan_validates_each_step_against_its_assigned_officer(session: Session) -> None:

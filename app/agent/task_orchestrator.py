@@ -219,7 +219,8 @@ class TaskOrchestrator:
             task.player_id,
             owner,
         )
-        knowledge = GameService(self.db).scenario_known_state(task.player_id)
+        game = GameService(self.db)
+        knowledge = game.scenario_known_state(task.player_id)
         definition = next(
             (
                 item
@@ -659,7 +660,12 @@ class TaskOrchestrator:
         )
         self.db.add(run)
         self.db.commit()
-        knowledge = GameService(self.db).scenario_known_state(task.player_id)
+        game = GameService(self.db)
+        knowledge = game.scenario_known_state(task.player_id)
+        verified_known_state = game.inspect_command_state(
+            task.player_id,
+            known_state=knowledge,
+        )
         definition = next(
             (
                 item
@@ -689,6 +695,8 @@ class TaskOrchestrator:
             f"{json.dumps(actor.doctrine, ensure_ascii=False)}. "
             f"Authority limits: {json.dumps(authority_limits, ensure_ascii=False)}. "
             f"Relevant memories: {[memory.content for memory in memories]}. "
+            "Verified player/agent knowledge (hidden truth is excluded): "
+            f"{json.dumps(verified_known_state, ensure_ascii=False)}. "
             "You are executing one assigned step in a structured command plan. "
             "Do not reveal chain-of-thought. "
             "Return exactly one native tool call. "

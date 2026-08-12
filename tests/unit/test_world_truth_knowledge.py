@@ -227,3 +227,26 @@ def test_hidden_supply_target_is_rejected_before_discovery(session: Session) -> 
         arguments=proposal,
     )
     assert "PLAN_INTERACTION_TARGET_HIDDEN" in {issue.code for issue in result.errors}
+
+
+@pytest.mark.parametrize(
+    "preflight",
+    [
+        lambda game, player_id: game.preflight_outpost_repair(
+            player_id=player_id,
+            food_commitment=20,
+            gold_commitment=15,
+        ),
+        lambda game, player_id: game.preflight_trade_route_test(player_id=player_id),
+    ],
+)
+def test_known_but_locked_targets_fail_closed(
+    session: Session,
+    preflight,  # type: ignore[no-untyped-def]
+) -> None:
+    game, player, _conversation, _task = _planning_context(session)
+
+    with pytest.raises(AppError) as caught:
+        preflight(game, player.id)
+
+    assert caught.value.code == "INTERACTION_TARGET_LOCKED"

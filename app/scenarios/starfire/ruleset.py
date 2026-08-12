@@ -409,7 +409,10 @@ class StarfireRuleset:
                 "facts_changed": ["starfire_outpost_status"],
             },
             fact_updates=(FactUpdate(target_key, "outpost_status", {"status": status}),),
-            unlock_node_keys=(target_key,),
+            unlock_node_keys=(
+                target_key,
+                *self._targets(target_key, RelationType.ENABLES, required=False),
+            ),
         )
 
     def validate_trade_route(self, target_key: str, state: StarfireRuleState) -> None:

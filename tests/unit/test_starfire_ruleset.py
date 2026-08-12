@@ -151,7 +151,10 @@ def test_repair_uses_unlock_relation_for_valley_prerequisite() -> None:
 
     assert (prepared.food_delta, prepared.gold_delta) == (-20, -15)
     assert resolved.payload["outpost_status"] == "OPERATIONAL"
-    assert resolved.unlock_node_keys == ("starfire_outpost",)
+    assert resolved.unlock_node_keys == (
+        "starfire_outpost",
+        "northern_trade_route",
+    )
 
 
 def test_trade_uses_enables_and_supports_relations() -> None:

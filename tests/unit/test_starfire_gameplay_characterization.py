@@ -178,6 +178,7 @@ def test_repair_characterization(session: Session) -> None:
     service = GameService(session)
     player = service.create_player("Repair Characterization Lord")
     service.set_world_fact(player.id, "valley_security", {"status": "SAFE"})
+    service.unlock_node(player.id, "starfire_outpost")
     operation = service.start_outpost_repair(
         player_id=player.id,
         officer_npc_id=seed_id("npc:lu_ning"),
@@ -203,6 +204,7 @@ def test_repair_characterization(session: Session) -> None:
     }
     assert service.get_world_fact(player.id, "starfire_outpost_status")["status"] == "OPERATIONAL"
     assert _node_status(session, player.id, "starfire_outpost") == NodeStatus.AVAILABLE
+    assert _node_status(session, player.id, "northern_trade_route") == NodeStatus.AVAILABLE
 
 
 def test_trade_route_characterization(session: Session) -> None:
@@ -211,6 +213,7 @@ def test_trade_route_characterization(session: Session) -> None:
     service.set_world_fact(player.id, "valley_security", {"status": "SAFE"})
     service.set_world_fact(player.id, "starfire_outpost_status", {"status": "OPERATIONAL"})
     service.set_world_fact(player.id, "village_support", {"status": "GUIDE"})
+    service.unlock_node(player.id, "northern_trade_route")
     operation = service.start_trade_route_test(
         player_id=player.id,
         officer_npc_id=seed_id("npc:lu_ning"),

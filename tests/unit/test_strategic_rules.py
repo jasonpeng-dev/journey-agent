@@ -190,6 +190,7 @@ def test_strategic_preflight_covers_resources_and_world_prerequisites(
     domain.food = 10
     player.gold = 10
     game.set_world_fact(player.id, "valley_security", {"status": "SAFE"})
+    game.unlock_node(player.id, "starfire_outpost")
 
     with pytest.raises(AppError) as food_error:
         game.preflight_village_support(player_id=player.id, food_offer=20)
@@ -203,6 +204,7 @@ def test_strategic_preflight_covers_resources_and_world_prerequisites(
         )
     assert repair_error.value.code == "RESOURCE_INSUFFICIENT"
 
+    game.unlock_node(player.id, "northern_trade_route")
     with pytest.raises(AppError) as trade_error:
         game.preflight_trade_route_test(player_id=player.id)
     assert trade_error.value.code == "STARFIRE_OUTPOST_OFFLINE"
@@ -393,6 +395,7 @@ def test_trade_resolution_rechecks_world_prerequisites(session: Session) -> None
         {"status": "OPERATIONAL"},
     )
     service.set_world_fact(player.id, "village_support", {"status": "GUIDE"})
+    service.unlock_node(player.id, "northern_trade_route")
     operation = service.start_trade_route_test(
         player_id=player.id,
         officer_npc_id=seed_id("npc:lu_ning"),
@@ -412,7 +415,7 @@ def test_trade_resolution_rechecks_world_prerequisites(session: Session) -> None
     route = next(
         state for node, state in service.list_nodes(player.id) if node.key == "northern_trade_route"
     )
-    assert route.status.value == "LOCKED"
+    assert route.status.value == "AVAILABLE"
 
 
 def test_player_action_wait_has_a_distinct_resume_state(session: Session) -> None:

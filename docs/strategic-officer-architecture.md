@@ -33,6 +33,19 @@ GameService 不是 Agent。它没有 Persona、Memory、Plan 或自主目标，�
 
 GameService 对世界状态提供两种明确投影：Ruleset 与 Objective 使用 authoritative Truth；Planner、Replan 和 Officer context 使用已过滤的 Knowledge。节点 Visibility、Fact Visibility 和节点 Access 分别持久化，任一层的变化都不会隐式改写另外两层。
 
+### Scenario Binding
+
+通用执行层通过 `ScenarioBinding` 读取场景能力。Starfire 的职责按以下边界拆分：
+
+- World Definition：Node、Fact、Relation、Resource、Interaction、初始 Visibility 与 Access。
+- Planning Policy：可规划工具、步骤契约、阶段顺序、动态目标与恢复提示。
+- Ruleset：纯确定性校验和结算结果，不直接写数据库。
+- Objective Evaluator：以完整 Truth 判断任务完成条件。
+- Persistence Adapter：Definition 与现有 SQLAlchemy 模型之间的映射。
+- Compatibility Adapter：只为历史 target、tool argument 和 flat fact 提供迁移期兼容。
+
+`app/scenarios/registry.py` 当前仍是内置场景的静态只读注册表。这里没有 Scenario Editor、Game Instance 或动态插件机制；这些不属于本阶段范围。
+
 ### TaskOrchestrator
 
 TaskOrchestrator 是应用层状态机，不扮演游戏角色。它负责：
@@ -55,6 +68,20 @@ TaskOrchestrator 是应用层状态机，不扮演游戏角色。它负责：
 Officer 必须同时满足：已任命、Role 允许、permission profile 允许、Authority policy 有效。缺少任一条件都不能执行。
 
 ## 4. Task / Plan / Step / Tool
+
+正式调用链为：
+
+```text
+Goal
+  → Planner + ScenarioPlanningPolicy
+  → PlanValidator
+  → TaskOrchestrator
+  → ToolExecutor
+  → GameService + Scenario Ruleset
+  → Truth / Knowledge persistence
+  → Replan（需要时）
+  → Scenario Objective Evaluator
+```
 
 - `AgentTask`：玩家下达的一条长期军令。
 - `AgentPlan`：沈策为当前军令提出的一版可执行方案。
@@ -147,7 +174,7 @@ Planning context 只包含：
 
 ## 10. 当前验证范围
 
-- 33 个战略专用自动化测试
+- 完整 Pytest 单元、契约和集成回归套件
 - 14 个确定性 Mock Evaluation 场景
 - DeepSeek OpenAI-compatible API 的真实 Planning 与端到端流程验证
 - Strategic Command Console 人工流程验证

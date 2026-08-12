@@ -23,18 +23,31 @@
 
 ```text
 玩家下达军令
-  → 沈策根据已知世界状态与部下权限生成 Plan
-  → 后端校验完整方案
-  → 韩烈 / 陆宁按分配的 Step 调用受限 Tool
-  → GameService 结算世界行动
-  → 失败或前置条件变化时 Replan
-  → 越权或高成本动作请求主公决策
-  → 沈策核验最终世界状态并汇报
+  → Planner + ScenarioPlanningPolicy 基于 Known World 生成 Plan
+  → PlanValidator 校验 Schema、角色、权限、动态目标和步骤契约
+  → TaskOrchestrator 按 Step 切换沈策 / 韩烈 / 陆宁
+  → ToolExecutor 重新校验参数、授权、当前 Knowledge / Access 与业务前置条件
+  → GameService + StarfireRuleset 确定性结算并更新 Truth / Knowledge
+  → 失败或执行时状态变化触发 Replan
+  → ScenarioObjectiveEvaluator 基于 Truth 判断目标是否完成
+  → 沈策汇报结果
 ```
 
 Mock 模式使用固定、可复现的模型输出，适合回归测试。DeepSeek 模式会真实生成 Plan 和 Replan，结果具有非确定性，但必须通过同一套 Schema、权限、状态和安全校验后才能执行。
 
 世界规则和 Objective 读取完整 Truth；Planner、Replan 和执行角色只读取 Known World。调试页默认展示玩家视图，开发者可显式打开只读 Observer 投影查看 Truth、Knowledge 与 Access，不能通过该视图修改世界。
+
+## Starfire 场景边界
+
+通用 Agent 主流程通过只读 `ScenarioBinding` 获取场景能力，不在 Planner、TaskOrchestrator 或 ToolExecutor 中维护 Starfire 节点白名单：
+
+- `definition.py`：纯 World Definition，声明 Node、Fact、Relation、Resource、Interaction 及初始 Visibility / Access。
+- `planning_policy.py`：规划阶段允许的工具、顺序约束、动态目标和恢复指导。
+- `ruleset.py`：无数据库写入的确定性前置条件与结算结果。
+- `objectives.py`：仅根据 authoritative Truth 判断场景目标。
+- `persistence.py`：将 World Definition 映射到当前持久化模型。
+- `compatibility.py`：旧节点名、旧参数和旧 flat facts 的有限兼容层；新 Plan 只使用 canonical target。
+- `registry.py`：把以上组件组合为 Scenario Binding。当前注册表仍是静态内置注册表，尚未引入 Scenario Editor 或 Game Instance。
 
 ## 技术栈
 
@@ -122,7 +135,7 @@ Get-Content -Encoding UTF8 -Raw app/web/render.js | node --input-type=module --c
 
 当前战略专用测试基线：
 
-- 33 个自动化测试
+- 完整 Pytest 自动化回归套件（单元、契约与集成测试）
 - 14 个 Mock Evaluation 场景
 - DeepSeek 真实 API 已验证模型 Planning、失败后 Replanning、跨角色执行、审批、世界结算与最终完成链路
 
@@ -135,9 +148,10 @@ app/
   agent/          规划、角色权限、Provider、TaskOrchestrator
   api/            健康检查
   debug/          Strategic Command Console API 与快照聚合
-  domain/         战略领域枚举
+  domain/         通用 World Domain 类型和值对象
   infrastructure/ 数据库与日志
-  services/       GameService、TaskService、战略种子数据
+  scenarios/      Starfire Definition、Policy、Ruleset、Objective 与兼容层
+  services/       GameService、TaskService、种子与运行时持久化服务
   tools/          Tool catalog、handler、executor、registry
   web/            当前中文调试页面
 docs/             当前战略部下架构说明
