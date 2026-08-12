@@ -355,23 +355,10 @@ def test_plan_requires_final_shen_ce_verification(session: Session) -> None:
     assert "PLAN_FINAL_VERIFICATION_REQUIRED" in _codes(result)
 
 
-@pytest.mark.parametrize(
-    "missing_tool",
-    [
-        "start_military_operation",
-        "start_outpost_repair",
-        "start_trade_route_test",
-    ],
-)
-def test_initial_plan_requires_starfire_goal_coverage(
-    session: Session,
-    missing_tool: str,
-) -> None:
+def test_initial_plan_may_use_a_legal_short_horizon(session: Session) -> None:
     conversation, task, validator = _context(session)
     proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
-    proposal["steps"] = [
-        step for step in proposal["steps"] if step["selected_tool_name"] != missing_tool
-    ]
+    proposal["steps"] = [proposal["steps"][-1]]
 
     result = validator.validate(
         task=task,
@@ -380,10 +367,12 @@ def test_initial_plan_requires_starfire_goal_coverage(
         arguments=proposal,
     )
 
-    assert "PLAN_GOAL_COVERAGE_INCOMPLETE" in _codes(result)
+    assert result.passed
 
 
-def test_initial_plan_rejects_trade_before_repair(session: Session) -> None:
+def test_policy_does_not_encode_trade_before_repair_as_a_plan_blueprint(
+    session: Session,
+) -> None:
     conversation, task, validator = _context(session)
     proposal = initial_strategic_starfire_plan(task.id, FULL_STARFIRE_SCOPE)
     repair_index = next(
@@ -408,7 +397,7 @@ def test_initial_plan_rejects_trade_before_repair(session: Session) -> None:
         arguments=proposal,
     )
 
-    assert "PLAN_STEP_ORDER_INVALID" in _codes(result)
+    assert result.passed
 
 
 def test_backend_controls_step_idempotency_keys(session: Session) -> None:

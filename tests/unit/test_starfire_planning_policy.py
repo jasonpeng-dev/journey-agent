@@ -61,7 +61,7 @@ def test_starfire_policy_uses_canonical_state_for_completed_effects() -> None:
     assert canonical["starfire_outpost.outpost_status"] == "OPERATIONAL"
 
 
-def test_starfire_policy_rejects_wrong_business_order() -> None:
+def test_starfire_policy_leaves_strategy_order_to_execution_rules() -> None:
     proposal = initial_strategic_starfire_plan(uuid4(), FULL_STARFIRE_SCOPE)
     steps = proposal["steps"]
     repair_index = next(
@@ -88,7 +88,7 @@ def test_starfire_policy_rejects_wrong_business_order() -> None:
         scope=FULL_STARFIRE_SCOPE,
     )
 
-    assert "PLAN_STEP_ORDER_INVALID" in {issue.code for issue in issues}
+    assert issues == ()
 
 
 def test_state_aware_fallback_uses_only_remaining_canonical_suffix() -> None:

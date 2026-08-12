@@ -26,7 +26,7 @@ from app.services.tasks import TaskService
 from app.tools.catalog import build_registry
 
 
-def test_recon_only_plan_is_currently_rejected_by_full_starfire_coverage(
+def test_legal_short_horizon_plan_is_not_rejected_by_a_full_route_blueprint(
     session: Session,
 ) -> None:
     conversation, task = _task_context(session, "只侦察北境山谷, 不执行清剿、修复或商路行动。")
@@ -45,7 +45,7 @@ def test_recon_only_plan_is_currently_rejected_by_full_starfire_coverage(
         arguments=proposal,
     )
 
-    assert "PLAN_GOAL_COVERAGE_INCOMPLETE" in {item.code for item in result.errors}
+    assert result.passed
 
 
 def test_restore_only_completion_currently_fails_while_trade_is_closed() -> None:

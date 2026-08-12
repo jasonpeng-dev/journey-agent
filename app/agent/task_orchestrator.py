@@ -577,9 +577,9 @@ class TaskOrchestrator:
                         content=(
                             "The prior plan proposal was rejected. Return one complete corrected "
                             "proposal through the required native tool call. Preserve valid "
-                            "fields, step count, and valid phase ordering; change only what "
-                            "the exact validation errors require. Continue to obey the initial "
-                            "scenario blueprint or replan guidance. For expected_outcome, "
+                            "fields and change only what the exact validation errors require. "
+                            "Continue to preserve the frozen objective scope and all safety "
+                            "guardrails. For expected_outcome, "
                             "copy required_expected_outcomes literal values exactly. "
                             "VALIDATION_ERRORS_JSON:"
                             f"{json.dumps(error_payload, ensure_ascii=False)}"
