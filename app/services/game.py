@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid5
@@ -27,7 +28,18 @@ from app.scenarios.starfire.compatibility import (
     canonical_node_key,
     initial_legacy_world_facts,
     initial_resource_values,
+    legacy_fact_key,
     legacy_target_supports_interaction,
+    project_legacy_supply_status,
+)
+from app.scenarios.starfire.definition import STARFIRE_WORLD
+from app.scenarios.starfire.ruleset import (
+    RuleOutcome,
+    StarfireFactState,
+    StarfireResources,
+    StarfireRuleset,
+    StarfireRuleState,
+    StarfireRuleViolation,
 )
 
 SEED_NAMESPACE = UUID("3e16a11d-9cf5-4981-af7a-152c28331300")
@@ -36,6 +48,7 @@ SEED_NAMESPACE = UUID("3e16a11d-9cf5-4981-af7a-152c28331300")
 class GameService:
     def __init__(self, db: Session):
         self.db = db
+        self.ruleset = StarfireRuleset()
 
     def get_player(self, player_id: UUID, *, lock: bool = False) -> Player:
         query = select(Player).where(Player.id == player_id)
@@ -172,7 +185,18 @@ class GameService:
         *,
         player_id: UUID,
         troop_count: int,
+        target_key: str,
+        approach: str,
     ) -> None:
+        canonical_target = self._canonical_interaction_target(
+            target_key,
+            "reconnaissance",
+            "RECON_TARGET_INVALID",
+            "The target cannot be reconnoitered",
+        )
+        self._evaluate_rule(
+            lambda: self.ruleset.validate_reconnaissance(canonical_target, approach)
+        )
         self._ensure_soldiers_available(player_id, troop_count, lock=False)
 
     def preflight_military_operation(
@@ -181,15 +205,23 @@ class GameService:
         player_id: UUID,
         troop_count: int,
         mission_type: str,
+        target_key: str,
+        strategy: str,
     ) -> None:
-        if mission_type == "DISRUPT_SUPPLY":
-            supply = self.get_world_fact(player_id, "enemy_supply_route").get("status")
-            if supply != "ACTIVE":
-                raise AppError(
-                    "ENEMY_SUPPLY_ROUTE_UNKNOWN",
-                    "The enemy supply route must be discovered before it can be disrupted",
-                    retryable=True,
-                )
+        canonical_target = self._validate_military_parameters(
+            target_key,
+            mission_type,
+            strategy,
+        )
+        state = self._starfire_rule_state(player_id)
+        self._evaluate_rule(
+            lambda: self.ruleset.validate_military_operation(
+                canonical_target,
+                mission_type,
+                strategy,
+                state,
+            )
+        )
         self._ensure_soldiers_available(player_id, troop_count, lock=False)
 
     def preflight_village_support(
@@ -197,13 +229,16 @@ class GameService:
         *,
         player_id: UUID,
         food_offer: int,
+        requested_support: str = "INTELLIGENCE",
     ) -> None:
-        if self._domain_state(player_id).food < food_offer:
-            raise AppError(
-                "SUPPLY_INSUFFICIENT",
-                "The domain does not have enough food for this offer",
-                retryable=True,
+        state = self._starfire_rule_state(player_id)
+        self._evaluate_rule(
+            lambda: self.ruleset.validate_village_support(
+                state,
+                food_offer,
+                requested_support,
             )
+        )
 
     def preflight_outpost_repair(
         self,
@@ -211,43 +246,30 @@ class GameService:
         player_id: UUID,
         food_commitment: int,
         gold_commitment: int,
+        target_key: str = "starfire_outpost",
+        repair_level: str = "TEMPORARY",
     ) -> None:
-        if self.get_world_fact(player_id, "valley_security").get("status") != "SAFE":
-            raise AppError(
-                "VALLEY_UNSAFE",
-                "The outpost cannot be repaired until the valley is safe",
-                retryable=True,
+        canonical_target = canonical_node_key(target_key)
+        state = self._starfire_rule_state(player_id)
+        self._evaluate_rule(
+            lambda: self.ruleset.validate_repair(
+                canonical_target,
+                repair_level,
+                food_commitment,
+                gold_commitment,
+                state,
             )
-        player = self.get_player(player_id)
-        domain = self._domain_state(player_id)
-        if domain.food < food_commitment or player.gold < gold_commitment:
-            raise AppError(
-                "RESOURCE_INSUFFICIENT",
-                "The domain lacks the resources required for repair",
-                retryable=True,
-            )
+        )
 
-    def preflight_trade_route_test(self, *, player_id: UUID) -> None:
-        if self.get_world_fact(player_id, "starfire_outpost_status").get("status") not in {
-            "OPERATIONAL",
-            "RESTORED",
-        }:
-            raise AppError(
-                "STARFIRE_OUTPOST_OFFLINE",
-                "The outpost must be operational before testing the trade route",
-                retryable=True,
-            )
-        if self.get_world_fact(player_id, "valley_security").get("status") != "SAFE":
-            raise AppError("VALLEY_UNSAFE", "The valley must be safe before testing trade")
-        if self.get_world_fact(player_id, "village_support").get("status") not in {
-            "GUIDE",
-            "SUPPLIES",
-        }:
-            raise AppError(
-                "TRADE_SUPPORT_REQUIRED",
-                "Village support or escort capacity is required for the trade test",
-                retryable=True,
-            )
+    def preflight_trade_route_test(
+        self,
+        *,
+        player_id: UUID,
+        route_key: str = "northern_trade_route",
+    ) -> None:
+        canonical_target = canonical_node_key(route_key)
+        state = self._starfire_rule_state(player_id)
+        self._evaluate_rule(lambda: self.ruleset.validate_trade_route(canonical_target, state))
 
     def start_recon_operation(
         self,
@@ -261,13 +283,15 @@ class GameService:
         approach: str,
         idempotency_key: str,
     ) -> WorldOperation:
-        canonical_target = canonical_node_key(target_key)
-        if canonical_target != "northern_valley" or not legacy_target_supports_interaction(
-            target_key, "reconnaissance"
-        ):
-            raise AppError("RECON_TARGET_INVALID", "The target cannot be reconnoitered")
-        if approach not in {"CAUTIOUS", "STANDARD", "AGGRESSIVE"}:
-            raise AppError("RECON_APPROACH_INVALID", "The reconnaissance approach is invalid")
+        canonical_target = self._canonical_interaction_target(
+            target_key,
+            "reconnaissance",
+            "RECON_TARGET_INVALID",
+            "The target cannot be reconnoitered",
+        )
+        self._evaluate_rule(
+            lambda: self.ruleset.validate_reconnaissance(canonical_target, approach)
+        )
         return self._start_strategic_operation(
             player_id=player_id,
             officer_npc_id=officer_npc_id,
@@ -292,24 +316,11 @@ class GameService:
         strategy: str,
         idempotency_key: str,
     ) -> WorldOperation:
-        allowed_missions = {"CLEAR_VALLEY", "DISRUPT_SUPPLY", "ESCORT", "DEFEND"}
-        if mission_type not in allowed_missions:
-            raise AppError("MILITARY_MISSION_INVALID", "The military mission is invalid")
-        required_interaction = (
-            "disrupt_supply" if mission_type == "DISRUPT_SUPPLY" else "clear_threat"
+        canonical_target = self._validate_military_parameters(
+            target_key,
+            mission_type,
+            strategy,
         )
-        canonical_target = canonical_node_key(target_key)
-        expected_target = (
-            "enemy_north_supply_route"
-            if required_interaction == "disrupt_supply"
-            else "northern_valley"
-        )
-        if canonical_target != expected_target or not legacy_target_supports_interaction(
-            target_key, required_interaction
-        ):
-            raise AppError("MILITARY_TARGET_INVALID", "The military target is invalid")
-        if strategy not in {"CAUTIOUS", "STANDARD", "AGGRESSIVE"}:
-            raise AppError("MILITARY_STRATEGY_INVALID", "The strategy is invalid")
         parameters = {
             "troop_count": troop_count,
             "mission_type": mission_type,
@@ -324,14 +335,15 @@ class GameService:
         )
         if existing is not None:
             return existing
-        if mission_type == "DISRUPT_SUPPLY":
-            supply = self.get_world_fact(player_id, "enemy_supply_route").get("status")
-            if supply != "ACTIVE":
-                raise AppError(
-                    "ENEMY_SUPPLY_ROUTE_UNKNOWN",
-                    "The enemy supply route must be discovered before it can be disrupted",
-                    retryable=True,
-                )
+        state = self._starfire_rule_state(player_id)
+        self._evaluate_rule(
+            lambda: self.ruleset.validate_military_operation(
+                canonical_target,
+                mission_type,
+                strategy,
+                state,
+            )
+        )
         return self._start_strategic_operation(
             player_id=player_id,
             officer_npc_id=officer_npc_id,
@@ -350,26 +362,23 @@ class GameService:
         food_offer: int,
         requested_support: str,
     ) -> dict[str, object]:
-        if requested_support not in {"INTELLIGENCE", "GUIDE", "SUPPLIES"}:
-            raise AppError("VILLAGE_SUPPORT_INVALID", "The requested village support is invalid")
         domain = self._domain_state(player_id, lock=True)
-        if domain.food < food_offer:
-            raise AppError(
-                "SUPPLY_INSUFFICIENT",
-                "The domain does not have enough food for this offer",
-                retryable=True,
+        player = self.get_player(player_id)
+        state = self._starfire_rule_state(player_id, player=player, domain=domain)
+        outcome = self._evaluate_rule(
+            lambda: self.ruleset.negotiate_village_support(
+                state,
+                food_offer,
+                requested_support,
             )
-        domain.food -= food_offer
-        domain.version += 1
-        support = requested_support if food_offer >= 20 else "INTELLIGENCE"
-        fact = self.set_world_fact(
-            player_id,
-            "village_support",
-            {"status": support, "food_offer": food_offer},
         )
+        domain.food += outcome.food_delta
+        domain.version += 1
+        facts = self._apply_rule_updates(player_id, outcome)
+        fact = next(iter(facts.values()))
         self.db.flush()
         return {
-            "village_support": support,
+            **dict(outcome.payload),
             "food_remaining": domain.food,
             "fact_version": fact.version,
         }
@@ -388,10 +397,12 @@ class GameService:
         idempotency_key: str,
     ) -> WorldOperation:
         canonical_target = canonical_node_key(target_key)
-        if canonical_target != "starfire_outpost":
-            raise AppError("REPAIR_TARGET_INVALID", "The repair target is invalid")
-        if repair_level not in {"TEMPORARY", "FULL"}:
-            raise AppError("REPAIR_LEVEL_INVALID", "The repair level is invalid")
+        self._evaluate_rule(
+            lambda: self.ruleset.validate_repair_parameters(
+                canonical_target,
+                repair_level,
+            )
+        )
         parameters = {
             "repair_level": repair_level,
             "food_commitment": food_commitment,
@@ -406,23 +417,21 @@ class GameService:
         )
         if existing is not None:
             return existing
-        if self.get_world_fact(player_id, "valley_security").get("status") != "SAFE":
-            raise AppError(
-                "VALLEY_UNSAFE",
-                "The outpost cannot be repaired until the valley is safe",
-                retryable=True,
-            )
         player = self.get_player(player_id, lock=True)
         domain = self._domain_state(player_id, lock=True)
-        if domain.food < food_commitment or player.gold < gold_commitment:
-            raise AppError(
-                "RESOURCE_INSUFFICIENT",
-                "The domain lacks the resources required for repair",
-                retryable=True,
+        state = self._starfire_rule_state(player_id, player=player, domain=domain)
+        outcome = self._evaluate_rule(
+            lambda: self.ruleset.prepare_repair(
+                canonical_target,
+                repair_level,
+                food_commitment,
+                gold_commitment,
+                state,
             )
-        domain.food -= food_commitment
+        )
+        domain.food += outcome.food_delta
         domain.version += 1
-        player.gold -= gold_commitment
+        player.gold += outcome.gold_delta
         player.version += 1
         return self._create_operation(
             player_id=player_id,
@@ -446,8 +455,7 @@ class GameService:
         idempotency_key: str,
     ) -> WorldOperation:
         canonical_target = canonical_node_key(route_key)
-        if canonical_target != "northern_trade_route":
-            raise AppError("TRADE_ROUTE_INVALID", "The trade route is unknown")
+        self._evaluate_rule(lambda: self.ruleset.validate_trade_route_target(canonical_target))
         existing = self._matching_operation(
             player_id,
             idempotency_key,
@@ -457,26 +465,8 @@ class GameService:
         )
         if existing is not None:
             return existing
-        if self.get_world_fact(player_id, "starfire_outpost_status").get("status") not in {
-            "OPERATIONAL",
-            "RESTORED",
-        }:
-            raise AppError(
-                "STARFIRE_OUTPOST_OFFLINE",
-                "The outpost must be operational before testing the trade route",
-                retryable=True,
-            )
-        if self.get_world_fact(player_id, "valley_security").get("status") != "SAFE":
-            raise AppError("VALLEY_UNSAFE", "The valley must be safe before testing trade")
-        if self.get_world_fact(player_id, "village_support").get("status") not in {
-            "GUIDE",
-            "SUPPLIES",
-        }:
-            raise AppError(
-                "TRADE_SUPPORT_REQUIRED",
-                "Village support or escort capacity is required for the trade test",
-                retryable=True,
-            )
+        state = self._starfire_rule_state(player_id)
+        self._evaluate_rule(lambda: self.ruleset.validate_trade_route(canonical_target, state))
         return self._start_strategic_operation(
             player_id=player_id,
             officer_npc_id=officer_npc_id,
@@ -643,123 +633,226 @@ class GameService:
         return domain
 
     def _resolve_reconnaissance(self, operation: WorldOperation) -> dict[str, Any]:
-        self._release_operation_troops(operation, casualties=0, morale_delta=0)
-        self.set_world_fact(
-            operation.player_id,
-            "valley_intelligence",
-            {"status": "PARTIAL", "operation_id": str(operation.id)},
+        outcome = self._evaluate_rule(
+            lambda: self.ruleset.resolve_reconnaissance(canonical_node_key(operation.target_key))
         )
-        self.unlock_node(operation.player_id, "ambush_valley")
-        return {
-            "result": "PARTIAL_SUCCESS",
-            "facts_discovered": ["valley_intelligence"],
-            "casualties": 0,
-        }
+        self._release_operation_troops(
+            operation,
+            casualties=outcome.casualties,
+            morale_delta=outcome.morale_delta,
+        )
+        self._apply_rule_updates(operation.player_id, outcome, operation_id=operation.id)
+        return dict(outcome.payload)
 
     def _resolve_military(self, operation: WorldOperation) -> dict[str, Any]:
         mission = str(operation.parameters.get("mission_type"))
-        support = self.get_world_fact(operation.player_id, "village_support").get("status")
-        if mission == "DISRUPT_SUPPLY":
-            casualties = 2 if support == "GUIDE" else 4
-            self._release_operation_troops(operation, casualties=casualties, morale_delta=3)
-            self.set_world_fact(
-                operation.player_id,
-                "enemy_supply_route",
-                {"status": "DISRUPTED", "operation_id": str(operation.id)},
+        state = self._starfire_rule_state(operation.player_id)
+        outcome = self._evaluate_rule(
+            lambda: self.ruleset.resolve_military_operation(
+                canonical_node_key(operation.target_key),
+                mission,
+                state,
             )
-            return {
-                "result": "VICTORY",
-                "mission_type": mission,
-                "casualties": casualties,
-                "facts_changed": ["enemy_supply_route"],
-            }
-        supply_status = self.get_world_fact(operation.player_id, "enemy_supply_route").get("status")
-        if mission == "CLEAR_VALLEY" and supply_status != "DISRUPTED":
-            casualties = 18
-            self._release_operation_troops(operation, casualties=casualties, morale_delta=-10)
-            self.set_world_fact(
-                operation.player_id,
-                "enemy_supply_route",
-                {"status": "ACTIVE", "operation_id": str(operation.id)},
-            )
-            self.set_world_fact(
-                operation.player_id,
-                "valley_intelligence",
-                {"status": "COMPLETE", "operation_id": str(operation.id)},
-            )
-            self.unlock_node(operation.player_id, "enemy_north_supply_route")
-            return {
-                "result": "DEFEAT",
-                "mission_type": mission,
-                "failure_code": "ENCOUNTER_DEFEAT",
-                "casualties": casualties,
-                "facts_discovered": ["enemy_supply_route"],
-            }
-        casualties = 3 if support == "GUIDE" else 6
-        self._release_operation_troops(operation, casualties=casualties, morale_delta=5)
-        self.set_world_fact(
-            operation.player_id,
-            "valley_security",
-            {"status": "SAFE", "operation_id": str(operation.id)},
         )
-        self.unlock_node(operation.player_id, "starfire_outpost")
-        return {
-            "result": "VICTORY",
-            "mission_type": mission,
-            "casualties": casualties,
-            "facts_changed": ["valley_security"],
-        }
+        self._release_operation_troops(
+            operation,
+            casualties=outcome.casualties,
+            morale_delta=outcome.morale_delta,
+        )
+        self._apply_rule_updates(operation.player_id, outcome, operation_id=operation.id)
+        return dict(outcome.payload)
 
     def _resolve_construction(self, operation: WorldOperation) -> dict[str, Any]:
-        if self.get_world_fact(operation.player_id, "valley_security").get("status") != "SAFE":
-            return {
-                "result": "FAILED",
-                "failure_code": "VALLEY_UNSAFE",
-                "facts_changed": [],
-            }
+        state = self._starfire_rule_state(operation.player_id)
         repair_level = str(operation.parameters.get("repair_level"))
-        status = "RESTORED" if repair_level == "FULL" else "OPERATIONAL"
-        self.set_world_fact(
-            operation.player_id,
-            "starfire_outpost_status",
-            {"status": status, "operation_id": str(operation.id)},
+        outcome = self._evaluate_rule(
+            lambda: self.ruleset.resolve_repair(
+                canonical_node_key(operation.target_key),
+                repair_level,
+                state,
+            )
         )
-        self.unlock_node(operation.player_id, "starfire_outpost")
-        return {
-            "result": "COMPLETED",
-            "outpost_status": status,
-            "facts_changed": ["starfire_outpost_status"],
-        }
+        self._apply_rule_updates(operation.player_id, outcome, operation_id=operation.id)
+        return dict(outcome.payload)
 
     def _resolve_trade_test(self, operation: WorldOperation) -> dict[str, Any]:
-        current = self.inspect_command_state(operation.player_id)
-        world = current["world"]
-        assert isinstance(world, dict)
-        invalidated = []
-        if world.get("valley_security") != "SAFE":
-            invalidated.append("valley_security")
-        if world.get("starfire_outpost_status") not in {"OPERATIONAL", "RESTORED"}:
-            invalidated.append("starfire_outpost_status")
-        if world.get("village_support") not in {"GUIDE", "SUPPLIES"}:
-            invalidated.append("village_support")
-        if invalidated:
-            return {
-                "result": "FAILED",
-                "failure_code": "WORLD_STATE_CHANGED",
-                "invalidated_prerequisites": invalidated,
-                "facts_changed": [],
-            }
-        self.set_world_fact(
-            operation.player_id,
-            "northern_trade_route_status",
-            {"status": "OPEN", "operation_id": str(operation.id)},
+        state = self._starfire_rule_state(operation.player_id)
+        outcome = self._evaluate_rule(
+            lambda: self.ruleset.resolve_trade_route_test(
+                canonical_node_key(operation.target_key),
+                state,
+            )
         )
-        self.unlock_node(operation.player_id, "northern_trade_route")
-        return {
-            "result": "COMPLETED",
-            "trade_route_status": "OPEN",
-            "facts_changed": ["northern_trade_route_status"],
+        self._apply_rule_updates(operation.player_id, outcome, operation_id=operation.id)
+        return dict(outcome.payload)
+
+    def _canonical_interaction_target(
+        self,
+        raw_target_key: str,
+        interaction_key: str,
+        error_code: str,
+        error_message: str,
+    ) -> str:
+        canonical_target = canonical_node_key(raw_target_key)
+        if not legacy_target_supports_interaction(raw_target_key, interaction_key):
+            raise AppError(error_code, error_message)
+        return canonical_target
+
+    def _validate_military_parameters(
+        self,
+        raw_target_key: str,
+        mission_type: str,
+        strategy: str,
+    ) -> str:
+        canonical_target = canonical_node_key(raw_target_key)
+        self._evaluate_rule(
+            lambda: self.ruleset.validate_military_parameters(
+                canonical_target,
+                mission_type,
+                strategy,
+            )
+        )
+        interaction = "disrupt_supply" if mission_type == "DISRUPT_SUPPLY" else "clear_threat"
+        if not legacy_target_supports_interaction(raw_target_key, interaction):
+            raise AppError("MILITARY_TARGET_INVALID", "The military target is invalid")
+        return canonical_target
+
+    def _starfire_rule_state(
+        self,
+        player_id: UUID,
+        *,
+        player: Player | None = None,
+        domain: PlayerDomainState | None = None,
+    ) -> StarfireRuleState:
+        current_player = player or self.get_player(player_id)
+        current_domain = domain or self._domain_state(player_id)
+        supply_status, _ = self._persisted_fact_status(
+            player_id,
+            "enemy_supply_route",
+            "UNKNOWN",
+        )
+        supply = project_legacy_supply_status(supply_status)
+        ambush_status, ambush_known = self._persisted_fact_status(
+            player_id,
+            "ambush_status",
+            self._initial_fact_value("northern_valley", "ambush_status"),
+        )
+        facts = {
+            ("north_village", "village_support"): StarfireFactState(
+                self._persisted_fact_status(
+                    player_id,
+                    "village_support",
+                    "NONE",
+                )[0]
+            ),
+            ("northern_valley", "valley_intelligence"): StarfireFactState(
+                self._persisted_fact_status(
+                    player_id,
+                    "valley_intelligence",
+                    "INCOMPLETE",
+                )[0]
+            ),
+            ("northern_valley", "valley_security"): StarfireFactState(
+                self._persisted_fact_status(
+                    player_id,
+                    "valley_security",
+                    "UNSAFE",
+                )[0]
+            ),
+            ("northern_valley", "ambush_status"): StarfireFactState(
+                ambush_status,
+                known=ambush_known,
+            ),
+            ("enemy_north_supply_route", "supply_status"): StarfireFactState(
+                supply.truth_status,
+                known=supply.known,
+            ),
+            ("starfire_outpost", "outpost_status"): StarfireFactState(
+                self._persisted_fact_status(
+                    player_id,
+                    "starfire_outpost_status",
+                    "DAMAGED",
+                )[0]
+            ),
+            ("northern_trade_route", "trade_route_status"): StarfireFactState(
+                self._persisted_fact_status(
+                    player_id,
+                    "northern_trade_route_status",
+                    "CLOSED",
+                )[0]
+            ),
         }
+        return StarfireRuleState(
+            facts=facts,
+            resources=StarfireResources(
+                soldiers_available=(
+                    current_domain.soldiers_total - current_domain.soldiers_committed
+                ),
+                food=current_domain.food,
+                gold=current_player.gold,
+                morale=current_domain.morale,
+            ),
+        )
+
+    def _persisted_fact_status(
+        self,
+        player_id: UUID,
+        legacy_key: str,
+        default: str,
+    ) -> tuple[str, bool]:
+        fact = self.db.get(PlayerWorldFact, (player_id, legacy_key))
+        if fact is None:
+            return default, False
+        status = fact.value.get("status")
+        return (str(status), True) if status is not None else (default, False)
+
+    @staticmethod
+    def _initial_fact_value(node_key: str, fact_key: str) -> str:
+        node = STARFIRE_WORLD.node(node_key)
+        fact = node.fact(fact_key) if node is not None else None
+        if fact is None:
+            raise AppError(
+                "STARFIRE_DEFINITION_INVALID",
+                "A required Starfire fact definition is missing",
+            )
+        return str(fact.initial_value)
+
+    def _apply_rule_updates(
+        self,
+        player_id: UUID,
+        outcome: RuleOutcome,
+        *,
+        operation_id: UUID | None = None,
+    ) -> dict[tuple[str, str], PlayerWorldFact]:
+        persisted: dict[tuple[str, str], PlayerWorldFact] = {}
+        for update in outcome.fact_updates:
+            key = legacy_fact_key(update.node_key, update.fact_key)
+            if key is None:
+                raise AppError(
+                    "STARFIRE_RULE_OUTCOME_INVALID",
+                    "A Starfire rule produced a fact without a persistence projection",
+                )
+            value = dict(update.value)
+            if operation_id is not None:
+                value["operation_id"] = str(operation_id)
+            persisted[(update.node_key, update.fact_key)] = self.set_world_fact(
+                player_id,
+                key,
+                value,
+            )
+        for node_key in outcome.unlock_node_keys:
+            self.unlock_node(player_id, node_key)
+        return persisted
+
+    def _evaluate_rule[T](self, evaluator: Callable[[], T]) -> T:
+        try:
+            return evaluator()
+        except StarfireRuleViolation as exc:
+            raise AppError(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+            ) from None
 
     def _release_operation_troops(
         self,

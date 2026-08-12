@@ -92,6 +92,8 @@ def preflight_recon_operation(db: Session, context: ToolContext, args: BaseModel
     GameService(db).preflight_recon_operation(
         player_id=context.player_id,
         troop_count=parsed.troop_count,
+        target_key=parsed.target_key,
+        approach=parsed.approach,
     )
 
 
@@ -117,6 +119,8 @@ def preflight_military_operation(db: Session, context: ToolContext, args: BaseMo
         player_id=context.player_id,
         troop_count=parsed.troop_count,
         mission_type=parsed.mission_type,
+        target_key=parsed.target_key,
+        strategy=parsed.strategy,
     )
 
 
@@ -142,6 +146,7 @@ def preflight_village_support(db: Session, context: ToolContext, args: BaseModel
     GameService(db).preflight_village_support(
         player_id=context.player_id,
         food_offer=parsed.food_offer,
+        requested_support=parsed.requested_support,
     )
 
 
@@ -156,10 +161,13 @@ def negotiate_village_support(db: Session, context: ToolContext, args: BaseModel
 
 def preflight_outpost_repair(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = OutpostRepairArgs.model_validate(args)
+    target = resolve_tool_interaction(context.scenario_key, REPAIR_INTERACTION, parsed)
     GameService(db).preflight_outpost_repair(
         player_id=context.player_id,
         food_commitment=parsed.food_commitment,
         gold_commitment=parsed.gold_commitment,
+        target_key=target.key,
+        repair_level=parsed.repair_level,
     )
 
 
@@ -181,8 +189,11 @@ def start_outpost_repair(db: Session, context: ToolContext, args: BaseModel) -> 
 
 
 def preflight_trade_route_test(db: Session, context: ToolContext, args: BaseModel) -> None:
-    TradeRouteTestArgs.model_validate(args)
-    GameService(db).preflight_trade_route_test(player_id=context.player_id)
+    parsed = TradeRouteTestArgs.model_validate(args)
+    GameService(db).preflight_trade_route_test(
+        player_id=context.player_id,
+        route_key=parsed.route_key,
+    )
 
 
 def start_trade_route_test(db: Session, context: ToolContext, args: BaseModel) -> dict[str, Any]:

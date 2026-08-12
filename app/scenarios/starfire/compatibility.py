@@ -71,6 +71,19 @@ def canonical_fact_ref(legacy_key: str) -> CanonicalFactRef | None:
     return LEGACY_FACT_REFS.get(legacy_key)
 
 
+def legacy_fact_key(node_key: str, fact_key: str) -> str | None:
+    """Find the current flat persistence key for one canonical Starfire fact."""
+
+    return next(
+        (
+            legacy_key
+            for legacy_key, ref in LEGACY_FACT_REFS.items()
+            if ref.node_key == node_key and ref.fact_key == fact_key
+        ),
+        None,
+    )
+
+
 def project_legacy_supply_status(status: str) -> LegacySupplyProjection:
     """Separate legacy UNKNOWN knowledge from the canonical supply truth."""
 
