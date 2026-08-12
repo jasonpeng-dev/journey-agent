@@ -4,6 +4,7 @@ from typing import Any
 from uuid import UUID
 
 from app.domain.enums import StepExecutionType
+from app.scenarios.contracts import ScenarioRuntimeState
 
 
 def initial_strategic_starfire_plan(task_id: UUID) -> dict[str, Any]:
@@ -243,11 +244,11 @@ def state_aware_strategic_recovery_plan(
     task_id: UUID,
     next_version: int,
     reason: str,
-    world: dict[str, Any],
+    state: ScenarioRuntimeState,
 ) -> dict[str, Any]:
     """Safe fallback when a model cannot produce a valid recovery suffix."""
     steps: list[dict[str, Any]] = []
-    support = world.get("village_support")
+    support = state.fact_value("north_village", "village_support")
     if support not in {"GUIDE", "SUPPLIES"}:
         steps.append(
             _tool_step(
@@ -260,7 +261,10 @@ def state_aware_strategic_recovery_plan(
                 constraints={"coercion_forbidden": True, "autonomous_food_limit": 30},
             )
         )
-    if reason == "ENCOUNTER_DEFEAT" and world.get("enemy_supply_route") == "ACTIVE":
+    if (
+        reason == "ENCOUNTER_DEFEAT"
+        and state.fact_value("enemy_north_supply_route", "supply_status") == "ACTIVE"
+    ):
         steps.append(
             _tool_step(
                 "韩烈先行切断敌军北方补给线",
@@ -284,7 +288,7 @@ def state_aware_strategic_recovery_plan(
                 success_outcomes=["VICTORY"],
             )
         )
-    if world.get("valley_security") != "SAFE":
+    if state.fact_value("northern_valley", "valley_security") != "SAFE":
         steps.append(
             _tool_step(
                 "敌军补给受阻后韩烈再次谨慎清剿山谷",
@@ -308,7 +312,10 @@ def state_aware_strategic_recovery_plan(
                 success_outcomes=["VICTORY"],
             )
         )
-    if world.get("starfire_outpost_status") not in {"OPERATIONAL", "RESTORED"}:
+    if state.fact_value("starfire_outpost", "outpost_status") not in {
+        "OPERATIONAL",
+        "RESTORED",
+    }:
         steps.append(
             _tool_step(
                 "陆宁在山谷安全后启动星火前哨完整修复",
@@ -332,7 +339,7 @@ def state_aware_strategic_recovery_plan(
                 success_outcomes=["COMPLETED"],
             )
         )
-    if world.get("northern_trade_route_status") != "OPEN":
+    if state.fact_value("northern_trade_route", "trade_route_status") != "OPEN":
         steps.append(
             _tool_step(
                 "陆宁重新测试北方商路通行状态",
@@ -442,3 +449,26 @@ def _strategic_report_step() -> dict[str, Any]:
         },
         constraints={"world_facts_must_be_verified": True},
     )
+
+
+class StarfireFallbackPlans:
+    def supports_state_aware_recovery(self, reason: str) -> bool:
+        return reason in {"ENCOUNTER_DEFEAT", "TRADE_SUPPORT_REQUIRED"}
+
+    def initial(self, task_id: UUID) -> dict[str, Any]:
+        return initial_strategic_starfire_plan(task_id)
+
+    def recovery(self, task_id: UUID, next_version: int, reason: str) -> dict[str, Any]:
+        return recovery_strategic_starfire_plan(task_id, next_version, reason)
+
+    def state_aware_recovery(
+        self,
+        task_id: UUID,
+        next_version: int,
+        reason: str,
+        state: ScenarioRuntimeState,
+    ) -> dict[str, Any]:
+        return state_aware_strategic_recovery_plan(task_id, next_version, reason, state)
+
+
+STARFIRE_FALLBACK_PLANS = StarfireFallbackPlans()

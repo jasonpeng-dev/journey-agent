@@ -1,12 +1,13 @@
 from copy import deepcopy
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.planning import PlanValidator, build_planning_request
-from app.agent.strategic_starfire_plans import initial_strategic_starfire_plan
 from app.core.config import Settings
 from app.infrastructure.db.models import NPC, ConversationSession, OfficerAppointment
+from app.scenarios.starfire.fallback_plans import initial_strategic_starfire_plan
 from app.services.game import GameService, seed_id
 from app.services.tasks import TaskService
 from app.tools.catalog import build_registry
@@ -240,6 +241,9 @@ def test_planning_context_exposes_only_strategic_tools_and_fixed_contracts(
     assert "target_key" in trade_properties
     assert "route_key" not in trade_properties
     assert "northern_trade_route" in tools["start_trade_route_test"]["description"]
+    canonical_facts = request["constraints"]["canonical_facts"]
+    assert canonical_facts["northern_valley.valley_security"] == "UNSAFE"
+    assert canonical_facts["starfire_outpost.outpost_status"] == "DAMAGED"
     assert {officer["key"] for officer in request["officers"]} == {
         "shen_ce",
         "han_lie",
@@ -261,6 +265,62 @@ def test_plan_requires_final_shen_ce_verification(session: Session) -> None:
     )
 
     assert "PLAN_FINAL_VERIFICATION_REQUIRED" in _codes(result)
+
+
+@pytest.mark.parametrize(
+    "missing_tool",
+    [
+        "start_military_operation",
+        "start_outpost_repair",
+        "start_trade_route_test",
+    ],
+)
+def test_initial_plan_requires_starfire_goal_coverage(
+    session: Session,
+    missing_tool: str,
+) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id)
+    proposal["steps"] = [
+        step for step in proposal["steps"] if step["selected_tool_name"] != missing_tool
+    ]
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert "PLAN_GOAL_COVERAGE_INCOMPLETE" in _codes(result)
+
+
+def test_initial_plan_rejects_trade_before_repair(session: Session) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id)
+    repair_index = next(
+        index
+        for index, step in enumerate(proposal["steps"])
+        if step["selected_tool_name"] == "start_outpost_repair"
+    )
+    trade_index = next(
+        index
+        for index, step in enumerate(proposal["steps"])
+        if step["selected_tool_name"] == "start_trade_route_test"
+    )
+    proposal["steps"][repair_index], proposal["steps"][trade_index] = (
+        proposal["steps"][trade_index],
+        proposal["steps"][repair_index],
+    )
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert "PLAN_STEP_ORDER_INVALID" in _codes(result)
 
 
 def test_backend_controls_step_idempotency_keys(session: Session) -> None:

@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.task_policy import PLANNING_MODES, TASK_EXECUTION_TOOLS
+from app.agent.task_policy import PLANNING_MODES
 from app.core.errors import AppError, NotFoundError
 from app.domain.enums import (
     AgentPlanStatus,
@@ -30,6 +30,7 @@ from app.infrastructure.db.models import (
     PlayerDecisionRequest,
     WorldOperation,
 )
+from app.scenarios.registry import scenario_binding
 from app.services.game import GameService
 
 TERMINAL_STEP_STATUSES = frozenset(
@@ -54,7 +55,8 @@ class TaskService:
         scenario_key: str,
         planning_mode: str = "PROVIDER",
     ) -> AgentTask:
-        if scenario_key != "starfire_command":
+        scenario = scenario_binding(scenario_key)
+        if scenario is None:
             raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
         if planning_mode not in PLANNING_MODES:
             raise AppError("PLANNING_MODE_INVALID", "The planning mode is not supported")
@@ -72,7 +74,7 @@ class TaskService:
         ):
             raise AppError(
                 "COMMAND_OWNER_INVALID",
-                "The strategic Starfire command must be owned by an appointed strategist",
+                "A strategic command must be owned by an appointed strategist",
                 status_code=403,
             )
         active = self.db.scalar(
@@ -163,6 +165,9 @@ class TaskService:
         validation_errors: list[dict[str, Any]] | None = None,
     ) -> AgentPlan:
         task = self.get_task(task_id, lock=True)
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
         if not steps or len(steps) > 12:
             raise AppError("PLAN_STEP_COUNT_INVALID", "A plan must contain 1 to 12 steps")
         old_plan = self.current_plan(task)
@@ -213,7 +218,10 @@ class TaskService:
             execution_type = StepExecutionType(str(spec["execution_type"]))
             tool_name = spec.get("selected_tool_name")
             if execution_type == StepExecutionType.TOOL:
-                if not isinstance(tool_name, str) or tool_name not in TASK_EXECUTION_TOOLS:
+                if (
+                    not isinstance(tool_name, str)
+                    or tool_name not in scenario.planning_policy.execution_tools
+                ):
                     raise AppError(
                         "PLAN_TOOL_NOT_ALLOWED",
                         "A plan selected an unsupported execution tool",
@@ -402,14 +410,12 @@ class TaskService:
         steps = self.plan_steps(plan.id)
         if not steps or any(step.status != AgentStepStatus.SUCCEEDED for step in steps):
             return False
-        state = GameService(self.db).inspect_command_state(task.player_id)
-        world = state["world"]
-        assert isinstance(world, dict)
-        if (
-            world.get("valley_security") != "SAFE"
-            or world.get("starfire_outpost_status") not in {"OPERATIONAL", "RESTORED"}
-            or world.get("northern_trade_route_status") != "OPEN"
-        ):
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
+        state = GameService(self.db).scenario_state(task.player_id)
+        objective = scenario.objective_evaluator.evaluate(state)
+        if not objective.completed:
             plan.status = AgentPlanStatus.FAILED
             task.status = AgentTaskStatus.BLOCKED
             task.last_error_code = "TASK_GOAL_NOT_VERIFIED"
@@ -425,12 +431,7 @@ class TaskService:
         source_event_id = f"strategic-task:{task.id}:completed"
         officer_ids = {step.assigned_npc_id for step in steps if step.assigned_npc_id is not None}
         officer_ids.add(task.owner_npc_id)
-        report = (
-            f"Command completed under Plan v{plan.version}: "
-            f"valley={world.get('valley_security')}, "
-            f"outpost={world.get('starfire_outpost_status')}, "
-            f"trade_route={world.get('northern_trade_route_status')}."
-        )
+        report = f"Command completed under Plan v{plan.version}: {objective.summary}."
         for officer_id in officer_ids:
             existing = self.db.scalar(
                 select(Memory).where(

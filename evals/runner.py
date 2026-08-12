@@ -15,7 +15,6 @@ from sqlalchemy.pool import StaticPool
 
 from app.agent.planning import PlanValidator
 from app.agent.providers import MockModelProvider
-from app.agent.strategic_starfire_plans import initial_strategic_starfire_plan
 from app.agent.task_orchestrator import TaskOrchestrator
 from app.core.config import Settings
 from app.domain.enums import AgentTaskStatus
@@ -28,6 +27,7 @@ from app.infrastructure.db.models import (
     ConversationSession,
     ToolExecution,
 )
+from app.scenarios.starfire.fallback_plans import initial_strategic_starfire_plan
 from app.services.game import GameService, seed_id
 from app.services.seed import seed_demo_world
 from app.services.tasks import TaskService

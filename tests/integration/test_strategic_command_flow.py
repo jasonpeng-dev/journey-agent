@@ -74,6 +74,14 @@ def test_strategic_command_switches_officers_replans_and_completes(
     assert isinstance(plans, list)
     assert len(plans) >= 2
     assert plans[-1]["status"] == "SUCCEEDED"
+    assert plans[-1]["replan_reason"] == "ENCOUNTER_DEFEAT"
+    replanned_tools = {
+        step["selected_tool_name"]
+        for step in plans[-1]["steps"]
+        if step["selected_tool_name"] is not None
+    }
+    assert "start_recon_operation" not in replanned_tools
+    assert "start_military_operation" in replanned_tools
 
     trace = final["recent_traces"]
     assert isinstance(trace, list)

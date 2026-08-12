@@ -12,15 +12,8 @@ from sqlalchemy.orm import Session
 from app.agent.authority import effective_authority_limits
 from app.agent.planning import PlanValidationIssue, PlanValidator, build_planning_request
 from app.agent.providers import ProviderFailure, ProviderOutputFailure
-from app.agent.strategic_starfire_plans import (
-    initial_strategic_starfire_plan,
-    recovery_strategic_starfire_plan,
-    state_aware_strategic_recovery_plan,
-)
 from app.agent.task_policy import (
-    IDEMPOTENT_TASK_TOOLS,
     PLAN_SECURITY_FAILURES,
-    RECOVERABLE_FAILURES,
     SECURITY_FAILURES,
 )
 from app.agent.types import Message, ModelProvider, ToolCall, ToolContext, ToolResult
@@ -42,6 +35,7 @@ from app.infrastructure.db.models import (
     Memory,
     OfficerAppointment,
 )
+from app.scenarios.registry import scenario_binding
 from app.services.game import GameService
 from app.services.tasks import TaskService
 from app.tools.catalog import build_registry
@@ -163,12 +157,18 @@ class TaskOrchestrator:
         session: ConversationSession,
         reason: str,
     ) -> tuple[AgentTask, AgentRun | None, str]:
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            task.status = AgentTaskStatus.BLOCKED
+            task.last_error_code = "TASK_SCENARIO_UNSUPPORTED"
+            self.db.commit()
+            return task, None, "BLOCKED"
         if reason in SECURITY_FAILURES:
             task.status = AgentTaskStatus.BLOCKED
             task.last_error_code = reason
             self.db.commit()
             return task, None, "BLOCKED"
-        if reason not in RECOVERABLE_FAILURES:
+        if reason not in scenario.planning_policy.recoverable_failures:
             task.status = AgentTaskStatus.BLOCKED
             task.last_error_code = "FAILURE_NOT_REPLANNABLE"
             self.db.commit()
@@ -183,20 +183,19 @@ class TaskOrchestrator:
             task,
             replan_reason=reason,
         )
-        if not result.ok and reason in {"ENCOUNTER_DEFEAT", "TRADE_SUPPORT_REQUIRED"}:
-            world = GameService(self.db).inspect_command_state(task.player_id)["world"]
-            assert isinstance(world, dict)
+        if not result.ok and scenario.fallback_plans.supports_state_aware_recovery(reason):
+            state = GameService(self.db).scenario_state(task.player_id)
             task.status = AgentTaskStatus.ACTIVE
             task.last_error_code = reason
             self.db.commit()
             run, result = self._submit_baseline_plan(
                 session,
                 task,
-                state_aware_strategic_recovery_plan(
+                scenario.fallback_plans.state_aware_recovery(
                     task.id,
                     task.current_plan_version + 1,
                     reason,
-                    world,
+                    state,
                 ),
                 tool_name="replan_task",
                 purpose="REPLAN",
@@ -260,23 +259,25 @@ class TaskOrchestrator:
         )
         request["next_plan_version"] = task.current_plan_version + 1
         request_json = json.dumps(request, ensure_ascii=False)
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            return run, self._finish_planning_failure(
+                run,
+                task,
+                "TASK_SCENARIO_UNSUPPORTED",
+                TerminationReason.INTERNAL_ERROR,
+            )
         replan_instruction = (
             " This is a replan: preserve every already succeeded step and do not "
             "repeat completed world operations or resource-consuming writes. "
             "Rebuild only the failed step's remaining suffix, following the supplied "
-            "replan_guidance, current verified_state, and "
-            "constraints.strategic_replan_blueprint. A step may select only a tool "
+            "replan_guidance, current verified_state, and supplied scenario constraints. "
+            "A step may select only a tool "
             "that is present in the current allowed_tools list."
             if replan_reason is not None
             else ""
         )
-        initial_plan_instruction = (
-            " For the initial starfire_command plan, follow "
-            "constraints.strategic_initial_plan_blueprint exactly: use ten steps in "
-            "the listed phase order and do not add a redundant inspection step."
-            if replan_reason is None and task.scenario_key == "starfire_command"
-            else ""
-        )
+        scenario_instruction = scenario.planning_policy.planner_instruction(purpose)
         messages = [
             Message(
                 role="system",
@@ -288,9 +289,7 @@ class TaskOrchestrator:
                     "a supported typed resume condition. Assign each strategic step to an "
                     "appointed officer. Do not include idempotency_key inside step "
                     "tool arguments. Do not execute game tools during planning. "
-                    f"{replan_instruction}{initial_plan_instruction} "
-                    "For starfire_command, write strategy_summary and every step "
-                    "description in concise Simplified Chinese. "
+                    f"{replan_instruction}{scenario_instruction} "
                     "For each TOOL step, expected_outcome is a deterministic contract, "
                     "not a prediction. Copy every literal in that tool's "
                     "required_expected_outcomes exactly. "
@@ -888,7 +887,10 @@ class TaskOrchestrator:
 
     def _resolved_arguments(self, task: AgentTask, step: AgentStep) -> dict[str, Any]:
         arguments = dict(step.tool_arguments)
-        if step.selected_tool_name in IDEMPOTENT_TASK_TOOLS:
+        scenario = scenario_binding(task.scenario_key)
+        if scenario is None:
+            raise ValueError(f"Scenario planning policy is not registered: {task.scenario_key}")
+        if step.selected_tool_name in scenario.planning_policy.idempotent_tools:
             arguments["idempotency_key"] = (
                 f"task-{task.id}-plan-{task.current_plan_version}-step-{step.sequence}"
             )
@@ -911,12 +913,3 @@ class TaskOrchestrator:
         self.db.commit()
         self.db.expire(step)
         return succeeded
-
-    @staticmethod
-    def _initial_plan(task: AgentTask) -> dict[str, Any]:
-        return initial_strategic_starfire_plan(task.id)
-
-    @staticmethod
-    def _recovery_plan(task: AgentTask, reason: str) -> dict[str, Any]:
-        next_version = task.current_plan_version + 1
-        return recovery_strategic_starfire_plan(task.id, next_version, reason)

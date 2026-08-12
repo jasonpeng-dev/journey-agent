@@ -7,10 +7,6 @@ from uuid import UUID
 
 import httpx
 
-from app.agent.strategic_starfire_plans import (
-    initial_strategic_starfire_plan,
-    recovery_strategic_starfire_plan,
-)
 from app.agent.types import (
     Message,
     MockStep,
@@ -19,6 +15,7 @@ from app.agent.types import (
     ToolDefinition,
 )
 from app.core.config import Settings
+from app.scenarios.registry import scenario_binding
 
 
 class ProviderFailure(Exception):
@@ -51,15 +48,18 @@ class MockModelProvider:
             raw = message.content.split("PLANNER_REQUEST_JSON:", 1)[1].strip()
             request = json.loads(raw)
             task_id = UUID(str(request["task_id"]))
+            scenario = scenario_binding(str(request["scenario_key"]))
+            if scenario is None:
+                continue
             if request["kind"] == "REPLAN":
-                arguments = recovery_strategic_starfire_plan(
+                arguments = scenario.fallback_plans.recovery(
                     task_id,
                     int(request["next_plan_version"]),
                     str(request["failure_code"]),
                 )
                 tool_name = "replan_task"
             else:
-                arguments = initial_strategic_starfire_plan(task_id)
+                arguments = scenario.fallback_plans.initial(task_id)
                 tool_name = "create_task_plan"
             if tool_name not in tool_names:
                 continue

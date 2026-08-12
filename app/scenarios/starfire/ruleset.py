@@ -41,6 +41,11 @@ class StarfireRuleState:
             )
         return state
 
+    def fact_value(self, node_key: str, fact_key: str) -> str:
+        """Expose the canonical value through the generic scenario-state contract."""
+
+        return self.fact(node_key, fact_key).value
+
 
 @dataclass(frozen=True, slots=True)
 class FactUpdate:

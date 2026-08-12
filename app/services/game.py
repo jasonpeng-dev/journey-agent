@@ -180,6 +180,11 @@ class GameService:
             **world,
         }
 
+    def scenario_state(self, player_id: UUID) -> StarfireRuleState:
+        """Return the canonical domain projection used by scenario policies."""
+
+        return self._starfire_rule_state(player_id)
+
     def preflight_recon_operation(
         self,
         *,
