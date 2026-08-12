@@ -402,12 +402,19 @@ class PlanValidator:
                             message=(f"{tool_name} must expect {key}={required_value}"),
                         )
                     )
-            expected_target = (
-                "starfire_outpost"
-                if tool_name == "start_outpost_repair"
-                else tool_arguments.get(
-                    "route_key" if tool_name == "start_trade_route_test" else "target_key"
-                )
+            requirement = tool.interaction_requirement
+            target_arguments = (
+                (requirement.target_argument,)
+                if requirement is not None and requirement.target_argument is not None
+                else ()
+            ) + (requirement.legacy_target_arguments if requirement is not None else ())
+            expected_target = next(
+                (
+                    tool_arguments[argument]
+                    for argument in target_arguments
+                    if argument in tool_arguments
+                ),
+                None,
             )
             if (
                 "target_key" in expected_outcome
@@ -863,7 +870,7 @@ def build_planning_request(
         verified_world = {}
     allowed_tools: list[dict[str, Any]] = []
     scenario_tools = STRATEGIC_TASK_EXECUTION_TOOLS
-    for definition in registry.definitions():
+    for definition in registry.definitions(task.scenario_key):
         if definition.name not in scenario_tools:
             continue
         if kind == "REPLAN" and _strategic_effect_already_satisfied(

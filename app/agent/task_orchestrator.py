@@ -221,7 +221,11 @@ class TaskOrchestrator:
             owner,
         )
         definition = next(
-            (item for item in self.registry.definitions() if item.name == tool_name),
+            (
+                item
+                for item in self.registry.definitions(task.scenario_key)
+                if item.name == tool_name
+            ),
             None,
         )
         run = AgentRun(
@@ -652,7 +656,11 @@ class TaskOrchestrator:
         self.db.add(run)
         self.db.commit()
         definition = next(
-            (item for item in self.registry.definitions() if item.name == tool_name),
+            (
+                item
+                for item in self.registry.definitions(task.scenario_key)
+                if item.name == tool_name
+            ),
             None,
         )
         if definition is None:

@@ -53,6 +53,66 @@ def test_valid_strategic_plan_is_normalized_and_accepted(session: Session) -> No
     assert result.normalized_arguments["idempotency_key"].endswith("-v1")
 
 
+def test_new_starfire_plan_uses_canonical_explicit_targets(session: Session) -> None:
+    _conversation, task, _validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id)
+    tool_arguments = {
+        step["selected_tool_name"]: step["tool_arguments"]
+        for step in proposal["steps"]
+        if step["selected_tool_name"]
+    }
+
+    assert tool_arguments["start_recon_operation"]["target_key"] == "northern_valley"
+    assert tool_arguments["start_military_operation"]["target_key"] == "northern_valley"
+    assert tool_arguments["start_outpost_repair"]["target_key"] == "starfire_outpost"
+    assert tool_arguments["start_trade_route_test"] == {"target_key": "northern_trade_route"}
+
+
+def test_legacy_plan_targets_validate_without_rewriting_raw_arguments(
+    session: Session,
+) -> None:
+    conversation, task, validator = _context(session)
+    proposal = initial_strategic_starfire_plan(task.id)
+    recon = next(
+        step for step in proposal["steps"] if step["selected_tool_name"] == "start_recon_operation"
+    )
+    military = next(
+        step
+        for step in proposal["steps"]
+        if step["selected_tool_name"] == "start_military_operation"
+    )
+    repair = next(
+        step for step in proposal["steps"] if step["selected_tool_name"] == "start_outpost_repair"
+    )
+    trade = next(
+        step for step in proposal["steps"] if step["selected_tool_name"] == "start_trade_route_test"
+    )
+    recon["tool_arguments"]["target_key"] = "valley_entrance"
+    military["tool_arguments"]["target_key"] = "ambush_valley"
+    repair["tool_arguments"].pop("target_key")
+    trade["tool_arguments"] = {"route_key": "northern_trade_route"}
+
+    result = validator.validate(
+        task=task,
+        session=conversation,
+        tool_name="create_task_plan",
+        arguments=proposal,
+    )
+
+    assert result.status == "PASSED"
+    assert result.normalized_arguments is not None
+    normalized_steps = result.normalized_arguments["steps"]
+    normalized = {
+        step["selected_tool_name"]: step["tool_arguments"]
+        for step in normalized_steps
+        if step["selected_tool_name"]
+    }
+    assert normalized["start_recon_operation"]["target_key"] == "valley_entrance"
+    assert normalized["start_military_operation"]["target_key"] == "ambush_valley"
+    assert "target_key" not in normalized["start_outpost_repair"]
+    assert normalized["start_trade_route_test"] == {"route_key": "northern_trade_route"}
+
+
 def test_plan_validates_each_step_against_its_assigned_officer(session: Session) -> None:
     conversation, task, validator = _context(session)
     proposal = initial_strategic_starfire_plan(task.id)
@@ -175,6 +235,11 @@ def test_planning_context_exposes_only_strategic_tools_and_fixed_contracts(
         "operation_type": "RECONNAISSANCE",
         "status": "PENDING",
     }
+    assert "target_key" in tools["start_outpost_repair"]["planning_parameters"]["required"]
+    trade_properties = tools["start_trade_route_test"]["planning_parameters"]["properties"]
+    assert "target_key" in trade_properties
+    assert "route_key" not in trade_properties
+    assert "northern_trade_route" in tools["start_trade_route_test"]["description"]
     assert {officer["key"] for officer in request["officers"]} == {
         "shen_ce",
         "han_lie",

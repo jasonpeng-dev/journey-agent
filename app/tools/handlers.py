@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, GetJsonSchemaHandler, model_validator
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 from sqlalchemy.orm import Session
 
 from app.agent.types import ToolContext
@@ -32,13 +34,13 @@ class IdempotentArgs(StrictArgs):
 
 
 class ReconOperationArgs(IdempotentArgs):
-    target_key: Literal["valley_entrance"]
+    target_key: str = Field(min_length=1, max_length=80)
     troop_count: int = Field(ge=1, le=300)
     approach: Literal["CAUTIOUS", "STANDARD", "AGGRESSIVE"]
 
 
 class MilitaryOperationArgs(IdempotentArgs):
-    target_key: Literal["ambush_valley", "enemy_north_supply_route"]
+    target_key: str = Field(min_length=1, max_length=80)
     troop_count: int = Field(ge=1, le=300)
     mission_type: Literal["CLEAR_VALLEY", "DISRUPT_SUPPLY", "ESCORT", "DEFEND"]
     strategy: Literal["CAUTIOUS", "STANDARD", "AGGRESSIVE"]
@@ -49,14 +51,67 @@ class VillageSupportArgs(IdempotentArgs):
     requested_support: Literal["INTELLIGENCE", "GUIDE", "SUPPLIES"]
 
 
-class OutpostRepairArgs(IdempotentArgs):
+class PreferredTargetArgs(IdempotentArgs):
+    """Expose target_key to new callers while accepting narrow legacy inputs."""
+
+    compatibility_input_fields: ClassVar[frozenset[str]] = frozenset()
+    target_key: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: CoreSchema,
+        handler: GetJsonSchemaHandler,
+    ) -> JsonSchemaValue:
+        schema = handler(core_schema)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for field_name in cls.compatibility_input_fields:
+                properties.pop(field_name, None)
+            target_schema = properties.get("target_key")
+            if isinstance(target_schema, dict):
+                variants = target_schema.get("anyOf")
+                if isinstance(variants, list):
+                    string_schema = next(
+                        (
+                            variant
+                            for variant in variants
+                            if isinstance(variant, dict) and variant.get("type") == "string"
+                        ),
+                        None,
+                    )
+                    if string_schema is not None:
+                        properties["target_key"] = {
+                            **string_schema,
+                            "title": target_schema.get("title", "Target Key"),
+                        }
+                properties["target_key"].pop("default", None)
+        required = [
+            field_name
+            for field_name in schema.get("required", [])
+            if field_name not in cls.compatibility_input_fields
+        ]
+        if "target_key" not in required:
+            required.append("target_key")
+        schema["required"] = required
+        return schema
+
+
+class OutpostRepairArgs(PreferredTargetArgs):
     repair_level: Literal["TEMPORARY", "FULL"]
     food_commitment: int = Field(ge=0, le=100)
     gold_commitment: int = Field(ge=0, le=80)
 
 
-class TradeRouteTestArgs(IdempotentArgs):
-    route_key: Literal["northern_trade_route"]
+class TradeRouteTestArgs(PreferredTargetArgs):
+    compatibility_input_fields: ClassVar[frozenset[str]] = frozenset({"route_key"})
+    route_key: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def require_target_input(self) -> TradeRouteTestArgs:
+        if self.target_key is None and self.route_key is None:
+            raise ValueError("target_key is required")
+        return self
 
 
 class PlanStepArgs(StrictArgs):
@@ -89,10 +144,11 @@ def inspect_command_state(db: Session, context: ToolContext, _args: BaseModel) -
 
 def preflight_recon_operation(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = ReconOperationArgs.model_validate(args)
+    target = resolve_tool_interaction(context.scenario_key, RECON_INTERACTION, parsed)
     GameService(db).preflight_recon_operation(
         player_id=context.player_id,
         troop_count=parsed.troop_count,
-        target_key=parsed.target_key,
+        target_key=target.key,
         approach=parsed.approach,
     )
 
@@ -115,11 +171,12 @@ def start_recon_operation(db: Session, context: ToolContext, args: BaseModel) ->
 
 def preflight_military_operation(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = MilitaryOperationArgs.model_validate(args)
+    target = resolve_tool_interaction(context.scenario_key, MILITARY_INTERACTION, parsed)
     GameService(db).preflight_military_operation(
         player_id=context.player_id,
         troop_count=parsed.troop_count,
         mission_type=parsed.mission_type,
-        target_key=parsed.target_key,
+        target_key=target.key,
         strategy=parsed.strategy,
     )
 
@@ -190,9 +247,10 @@ def start_outpost_repair(db: Session, context: ToolContext, args: BaseModel) -> 
 
 def preflight_trade_route_test(db: Session, context: ToolContext, args: BaseModel) -> None:
     parsed = TradeRouteTestArgs.model_validate(args)
+    target = resolve_tool_interaction(context.scenario_key, TRADE_ROUTE_INTERACTION, parsed)
     GameService(db).preflight_trade_route_test(
         player_id=context.player_id,
-        route_key=parsed.route_key,
+        route_key=target.key,
     )
 
 

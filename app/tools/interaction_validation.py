@@ -31,11 +31,13 @@ VILLAGE_SUPPORT_INTERACTION = InteractionRequirement(
     infer_unique_target=True,
 )
 REPAIR_INTERACTION = InteractionRequirement(
+    target_argument="target_key",
     interaction_key="repair",
     infer_unique_target=True,
 )
 TRADE_ROUTE_INTERACTION = InteractionRequirement(
-    target_argument="route_key",
+    target_argument="target_key",
+    legacy_target_arguments=("route_key",),
     interaction_key="test_trade_route",
 )
 
@@ -49,21 +51,76 @@ def resolve_tool_interaction(
 ) -> NodeDefinition:
     values = arguments.model_dump(mode="python") if isinstance(arguments, BaseModel) else arguments
     required_interaction = _required_interaction(requirement, values)
+    target_arguments = (
+        (requirement.target_argument,) if requirement.target_argument is not None else ()
+    ) + requirement.legacy_target_arguments
+    supplied_targets = [
+        (argument, values.get(argument))
+        for argument in target_arguments
+        if isinstance(values.get(argument), str) and values.get(argument)
+    ]
+    if supplied_targets:
+        resolved_targets = [
+            (
+                argument,
+                raw_target,
+                resolver.resolve_target(scenario_key, raw_target, required_interaction),
+            )
+            for argument, raw_target in supplied_targets
+            if isinstance(raw_target, str)
+        ]
+        canonical_keys = {node.key for _argument, _raw_target, node in resolved_targets}
+        if len(canonical_keys) != 1:
+            raise AppError(
+                "INTERACTION_TARGET_CONFLICT",
+                "The tool target arguments resolve to different scenario nodes",
+                details={
+                    "required_interaction": required_interaction,
+                    "targets": {
+                        argument: {"raw": raw_target, "canonical": node.key}
+                        for argument, raw_target, node in resolved_targets
+                    },
+                },
+            )
+        return resolved_targets[0][2]
     if requirement.infer_unique_target:
         return resolver.resolve_unique_target(scenario_key, required_interaction)
-    target_argument = requirement.target_argument
-    raw_target = values.get(target_argument) if target_argument is not None else None
-    if not isinstance(raw_target, str) or not raw_target:
-        raise AppError(
-            "INTERACTION_TARGET_MISSING",
-            "The tool did not provide a valid interaction target",
-            details={"target_argument": target_argument},
-        )
-    return resolver.resolve_target(
-        scenario_key,
-        raw_target,
-        required_interaction,
+    raise AppError(
+        "INTERACTION_TARGET_MISSING",
+        "The tool did not provide a valid interaction target",
+        details={"target_argument": requirement.target_argument},
     )
+
+
+def interaction_target_guidance(
+    scenario_key: str,
+    requirement: InteractionRequirement,
+    *,
+    resolver: InteractionTargetResolver = interaction_target_resolver,
+) -> str:
+    """Build model-facing canonical target guidance from WorldDefinition."""
+
+    if requirement.interaction_key is not None:
+        target_text = _interaction_targets_text(
+            scenario_key,
+            requirement.interaction_key,
+            resolver,
+        )
+    else:
+        target_text = "; ".join(
+            f"{operation} -> {_interaction_targets_text(scenario_key, interaction, resolver)}"
+            for operation, interaction in requirement.operation_interactions.items()
+        )
+    return f"Canonical targets from the current Scenario Definition: {target_text}."
+
+
+def _interaction_targets_text(
+    scenario_key: str,
+    interaction: str,
+    resolver: InteractionTargetResolver,
+) -> str:
+    targets = resolver.supported_target_keys(scenario_key, interaction)
+    return f"{interaction}: {', '.join(targets) or '(none)'}"
 
 
 def _required_interaction(

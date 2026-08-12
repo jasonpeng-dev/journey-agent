@@ -90,6 +90,19 @@ class InteractionTargetResolver:
             )
         return candidates[0]
 
+    def supported_target_keys(
+        self,
+        scenario_key: str,
+        required_interaction: str,
+    ) -> tuple[str, ...]:
+        """List canonical targets advertised by the scenario definition."""
+
+        scenario = self._scenario(scenario_key)
+        self._registered_interaction(scenario, required_interaction)
+        return tuple(
+            node.key for node in scenario.world.nodes if node.supports(required_interaction)
+        )
+
     def _scenario(self, scenario_key: str) -> ScenarioWorldBinding:
         scenario = self._scenarios.get(scenario_key)
         if scenario is None:

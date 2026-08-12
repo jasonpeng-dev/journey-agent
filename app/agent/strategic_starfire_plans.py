@@ -28,7 +28,7 @@ def initial_strategic_starfire_plan(task_id: UUID) -> dict[str, Any]:
                 "RECON_VALLEY",
                 "start_recon_operation",
                 {
-                    "target_key": "valley_entrance",
+                    "target_key": "northern_valley",
                     "troop_count": 60,
                     "approach": "CAUTIOUS",
                 },
@@ -47,7 +47,7 @@ def initial_strategic_starfire_plan(task_id: UUID) -> dict[str, Any]:
                 "CLEAR_VALLEY",
                 "start_military_operation",
                 {
-                    "target_key": "ambush_valley",
+                    "target_key": "northern_valley",
                     "troop_count": 180,
                     "mission_type": "CLEAR_VALLEY",
                     "strategy": "STANDARD",
@@ -67,6 +67,7 @@ def initial_strategic_starfire_plan(task_id: UUID) -> dict[str, Any]:
                 "REPAIR_OUTPOST",
                 "start_outpost_repair",
                 {
+                    "target_key": "starfire_outpost",
                     "repair_level": "TEMPORARY",
                     "food_commitment": 20,
                     "gold_commitment": 20,
@@ -84,7 +85,7 @@ def initial_strategic_starfire_plan(task_id: UUID) -> dict[str, Any]:
                 "lu_ning",
                 "TEST_TRADE_ROUTE",
                 "start_trade_route_test",
-                {"route_key": "northern_trade_route"},
+                {"target_key": "northern_trade_route"},
                 {"status": "PENDING", "operation_type": "TRADE_TEST"},
             ),
             _world_wait(
@@ -130,7 +131,7 @@ def recovery_strategic_starfire_plan(
                     "lu_ning",
                     "TEST_TRADE_ROUTE",
                     "start_trade_route_test",
-                    {"route_key": "northern_trade_route"},
+                    {"target_key": "northern_trade_route"},
                     {"status": "PENDING", "operation_type": "TRADE_TEST"},
                 ),
                 _world_wait(
@@ -186,7 +187,7 @@ def recovery_strategic_starfire_plan(
                 "CLEAR_VALLEY",
                 "start_military_operation",
                 {
-                    "target_key": "ambush_valley",
+                    "target_key": "northern_valley",
                     "troop_count": 160,
                     "mission_type": "CLEAR_VALLEY",
                     "strategy": "CAUTIOUS",
@@ -205,6 +206,7 @@ def recovery_strategic_starfire_plan(
                 "REPAIR_OUTPOST",
                 "start_outpost_repair",
                 {
+                    "target_key": "starfire_outpost",
                     "repair_level": "TEMPORARY",
                     "food_commitment": 20,
                     "gold_commitment": 20,
@@ -222,7 +224,7 @@ def recovery_strategic_starfire_plan(
                 "lu_ning",
                 "TEST_TRADE_ROUTE",
                 "start_trade_route_test",
-                {"route_key": "northern_trade_route"},
+                {"target_key": "northern_trade_route"},
                 {"status": "PENDING", "operation_type": "TRADE_TEST"},
             ),
             _world_wait(
@@ -290,7 +292,7 @@ def state_aware_strategic_recovery_plan(
                 "CLEAR_VALLEY",
                 "start_military_operation",
                 {
-                    "target_key": "ambush_valley",
+                    "target_key": "northern_valley",
                     "troop_count": 160,
                     "mission_type": "CLEAR_VALLEY",
                     "strategy": "CAUTIOUS",
@@ -314,6 +316,7 @@ def state_aware_strategic_recovery_plan(
                 "REPAIR_OUTPOST",
                 "start_outpost_repair",
                 {
+                    "target_key": "starfire_outpost",
                     "repair_level": "FULL",
                     "food_commitment": 30,
                     "gold_commitment": 30,
@@ -336,7 +339,7 @@ def state_aware_strategic_recovery_plan(
                 "lu_ning",
                 "TEST_TRADE_ROUTE",
                 "start_trade_route_test",
-                {"route_key": "northern_trade_route"},
+                {"target_key": "northern_trade_route"},
                 {"status": "PENDING", "operation_type": "TRADE_TEST"},
             )
         )

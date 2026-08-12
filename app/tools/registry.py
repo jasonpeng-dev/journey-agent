@@ -1,5 +1,6 @@
 from app.agent.types import ToolDefinition
 from app.tools.base import Tool
+from app.tools.interaction_validation import interaction_target_guidance
 
 
 class ToolRegistry:
@@ -14,12 +15,19 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def definitions(self) -> list[ToolDefinition]:
+    def definitions(self, scenario_key: str | None = None) -> list[ToolDefinition]:
         return [
             ToolDefinition(
                 name=tool.name,
-                description=tool.description,
+                description=self._description(tool, scenario_key),
                 parameters=tool.arguments_model.model_json_schema(),
             )
             for tool in self._tools.values()
         ]
+
+    @staticmethod
+    def _description(tool: Tool, scenario_key: str | None) -> str:
+        if scenario_key is None or tool.interaction_requirement is None:
+            return tool.description
+        guidance = interaction_target_guidance(scenario_key, tool.interaction_requirement)
+        return f"{tool.description} {guidance}"
