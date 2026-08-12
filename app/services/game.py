@@ -14,6 +14,7 @@ from app.domain.enums import (
     NPCRole,
     WorldOperationStatus,
 )
+from app.domain.world import AccessState, Visibility
 from app.infrastructure.db.models import (
     NPC,
     OfficerAppointment,
@@ -21,10 +22,13 @@ from app.infrastructure.db.models import (
     PlayerDomainState,
     PlayerNodeState,
     PlayerWorldFact,
+    PlayerWorldFactState,
     WorldNode,
     WorldOperation,
 )
 from app.scenarios.starfire.compatibility import (
+    LEGACY_FACT_REFS,
+    canonical_fact_ref,
     canonical_node_key,
     initial_legacy_world_facts,
     initial_resource_values,
@@ -36,6 +40,7 @@ from app.scenarios.starfire.definition import STARFIRE_WORLD
 from app.scenarios.starfire.ruleset import (
     RuleOutcome,
     StarfireFactState,
+    StarfireKnowledgeState,
     StarfireResources,
     StarfireRuleset,
     StarfireRuleState,
@@ -72,9 +77,32 @@ class GameService:
         self.db.add(player)
         self.db.flush()
         nodes = self.db.scalars(select(WorldNode)).all()
+        node_definitions = {node.key: node for node in STARFIRE_WORLD.nodes}
         for node in nodes:
             status = NodeStatus.ENTERED if node.id == start.id else node.default_status
-            self.db.add(PlayerNodeState(player_id=player.id, node_id=node.id, status=status))
+            definition = node_definitions.get(node.key)
+            visibility = (
+                definition.initial_visibility if definition is not None else Visibility.KNOWN
+            )
+            self.db.add(
+                PlayerNodeState(
+                    player_id=player.id,
+                    node_id=node.id,
+                    status=status,
+                    visibility=visibility,
+                )
+            )
+            if definition is not None:
+                for fact in definition.facts:
+                    self.db.add(
+                        PlayerWorldFactState(
+                            player_id=player.id,
+                            node_id=node.id,
+                            fact_key=fact.key,
+                            truth_value=fact.initial_value,
+                            visibility=fact.initial_visibility,
+                        )
+                    )
         for npc in self.db.scalars(select(NPC)).all():
             if npc.role in {NPCRole.STRATEGIST, NPCRole.GENERAL, NPCRole.STEWARD}:
                 self.db.add(OfficerAppointment(player_id=player.id, npc_id=npc.id, status="ACTIVE"))
@@ -133,6 +161,7 @@ class GameService:
         else:
             fact.value = value
             fact.version += 1
+        self._sync_legacy_fact_to_canonical(player_id, key, value)
         self.db.flush()
         return fact
 
@@ -153,26 +182,12 @@ class GameService:
             "morale": domain.morale,
             "version": domain.version,
         }
-        world = {
-            "valley_intelligence": self.get_world_fact(player_id, "valley_intelligence").get(
-                "status", "INCOMPLETE"
-            ),
-            "enemy_supply_route": self.get_world_fact(player_id, "enemy_supply_route").get(
-                "status", "UNKNOWN"
-            ),
-            "valley_security": self.get_world_fact(player_id, "valley_security").get(
-                "status", "UNSAFE"
-            ),
-            "village_support": self.get_world_fact(player_id, "village_support").get(
-                "status", "NONE"
-            ),
-            "starfire_outpost_status": self.get_world_fact(
-                player_id, "starfire_outpost_status"
-            ).get("status", "DAMAGED"),
-            "northern_trade_route_status": self.get_world_fact(
-                player_id, "northern_trade_route_status"
-            ).get("status", "CLOSED"),
-        }
+        known = self.scenario_known_state(player_id)
+        world: dict[str, object] = {}
+        for legacy_key, ref in LEGACY_FACT_REFS.items():
+            if not known.fact_known(ref.node_key, ref.fact_key):
+                continue
+            world[legacy_key] = known.fact_value(ref.node_key, ref.fact_key)
         return {
             "resources": resources,
             "world": world,
@@ -181,9 +196,46 @@ class GameService:
         }
 
     def scenario_state(self, player_id: UUID) -> StarfireRuleState:
-        """Return the canonical domain projection used by scenario policies."""
+        """Compatibility alias for authoritative scenario truth."""
+
+        return self.scenario_truth_state(player_id)
+
+    def scenario_truth_state(self, player_id: UUID) -> StarfireRuleState:
+        """Return authoritative canonical truth for rules and objectives."""
 
         return self._starfire_rule_state(player_id)
+
+    def scenario_known_state(self, player_id: UUID) -> StarfireKnowledgeState:
+        """Return a projection which physically excludes hidden nodes and fact values."""
+
+        player = self.get_player(player_id)
+        domain = self._domain_state(player_id)
+        rows = self.db.execute(
+            select(WorldNode, PlayerNodeState)
+            .join(PlayerNodeState, PlayerNodeState.node_id == WorldNode.id)
+            .where(
+                PlayerNodeState.player_id == player_id,
+                PlayerNodeState.visibility == Visibility.KNOWN,
+            )
+        ).all()
+        node_access = {node.key: self._access_state(node_state.status) for node, node_state in rows}
+        node_ids = {node.id for node, _node_state in rows}
+        fact_rows = self.db.scalars(
+            select(PlayerWorldFactState).where(
+                PlayerWorldFactState.player_id == player_id,
+                PlayerWorldFactState.node_id.in_(node_ids),
+                PlayerWorldFactState.visibility == Visibility.KNOWN,
+            )
+        ).all()
+        keys_by_id = {node.id: node.key for node, _node_state in rows}
+        return StarfireKnowledgeState(
+            facts={
+                (keys_by_id[fact.node_id], fact.fact_key): str(fact.truth_value)
+                for fact in fact_rows
+            },
+            node_access=node_access,
+            resources=self._resources(player, domain),
+        )
 
     def preflight_recon_operation(
         self,
@@ -218,6 +270,8 @@ class GameService:
             mission_type,
             strategy,
         )
+        if mission_type == "DISRUPT_SUPPLY":
+            self._ensure_known_accessible_node(player_id, canonical_target)
         state = self._starfire_rule_state(player_id)
         self._evaluate_rule(
             lambda: self.ruleset.validate_military_operation(
@@ -326,6 +380,8 @@ class GameService:
             mission_type,
             strategy,
         )
+        if mission_type == "DISRUPT_SUPPLY":
+            self._ensure_known_accessible_node(player_id, canonical_target)
         parameters = {
             "troop_count": troop_count,
             "mission_type": mission_type,
@@ -722,6 +778,22 @@ class GameService:
             raise AppError("MILITARY_TARGET_INVALID", "The military target is invalid")
         return canonical_target
 
+    def _ensure_known_accessible_node(self, player_id: UUID, node_key: str) -> None:
+        node = self.db.scalar(select(WorldNode).where(WorldNode.key == node_key))
+        state = self.db.get(PlayerNodeState, (player_id, node.id)) if node is not None else None
+        if state is None or state.visibility != Visibility.KNOWN:
+            raise AppError(
+                "INTERACTION_TARGET_HIDDEN",
+                "The interaction target has not been discovered",
+                retryable=True,
+            )
+        if state.status == NodeStatus.LOCKED:
+            raise AppError(
+                "INTERACTION_TARGET_LOCKED",
+                "The interaction target is not currently accessible",
+                retryable=True,
+            )
+
     def _starfire_rule_state(
         self,
         player_id: UUID,
@@ -731,73 +803,48 @@ class GameService:
     ) -> StarfireRuleState:
         current_player = player or self.get_player(player_id)
         current_domain = domain or self._domain_state(player_id)
-        supply_status, _ = self._persisted_fact_status(
-            player_id,
-            "enemy_supply_route",
-            "UNKNOWN",
-        )
-        supply = project_legacy_supply_status(supply_status)
-        ambush_status, ambush_known = self._persisted_fact_status(
-            player_id,
-            "ambush_status",
-            self._initial_fact_value("northern_valley", "ambush_status"),
-        )
+        rows = self.db.execute(
+            select(PlayerWorldFactState, WorldNode)
+            .join(WorldNode, WorldNode.id == PlayerWorldFactState.node_id)
+            .where(PlayerWorldFactState.player_id == player_id)
+        ).all()
         facts = {
-            ("north_village", "village_support"): StarfireFactState(
-                self._persisted_fact_status(
-                    player_id,
-                    "village_support",
-                    "NONE",
-                )[0]
-            ),
-            ("northern_valley", "valley_intelligence"): StarfireFactState(
-                self._persisted_fact_status(
-                    player_id,
-                    "valley_intelligence",
-                    "INCOMPLETE",
-                )[0]
-            ),
-            ("northern_valley", "valley_security"): StarfireFactState(
-                self._persisted_fact_status(
-                    player_id,
-                    "valley_security",
-                    "UNSAFE",
-                )[0]
-            ),
-            ("northern_valley", "ambush_status"): StarfireFactState(
-                ambush_status,
-                known=ambush_known,
-            ),
-            ("enemy_north_supply_route", "supply_status"): StarfireFactState(
-                supply.truth_status,
-                known=supply.known,
-            ),
-            ("starfire_outpost", "outpost_status"): StarfireFactState(
-                self._persisted_fact_status(
-                    player_id,
-                    "starfire_outpost_status",
-                    "DAMAGED",
-                )[0]
-            ),
-            ("northern_trade_route", "trade_route_status"): StarfireFactState(
-                self._persisted_fact_status(
-                    player_id,
-                    "northern_trade_route_status",
-                    "CLOSED",
-                )[0]
-            ),
+            (node.key, fact.fact_key): StarfireFactState(str(fact.truth_value))
+            for fact, node in rows
         }
+        if not facts:
+            facts = self._legacy_truth_fallback(player_id)
         return StarfireRuleState(
             facts=facts,
-            resources=StarfireResources(
-                soldiers_available=(
-                    current_domain.soldiers_total - current_domain.soldiers_committed
-                ),
-                food=current_domain.food,
-                gold=current_player.gold,
-                morale=current_domain.morale,
-            ),
+            resources=self._resources(current_player, current_domain),
         )
+
+    @staticmethod
+    def _resources(player: Player, domain: PlayerDomainState) -> StarfireResources:
+        return StarfireResources(
+            soldiers_available=domain.soldiers_total - domain.soldiers_committed,
+            food=domain.food,
+            gold=player.gold,
+            morale=domain.morale,
+        )
+
+    def _legacy_truth_fallback(self, player_id: UUID) -> dict[tuple[str, str], StarfireFactState]:
+        """Read old databases safely before the 0.7 migration has been applied."""
+
+        supply_status, _ = self._persisted_fact_status(player_id, "enemy_supply_route", "UNKNOWN")
+        supply = project_legacy_supply_status(supply_status)
+        facts: dict[tuple[str, str], StarfireFactState] = {}
+        for node in STARFIRE_WORLD.nodes:
+            for definition in node.facts:
+                legacy_key = legacy_fact_key(node.key, definition.key)
+                value = str(definition.initial_value)
+                if legacy_key is not None:
+                    value = self._persisted_fact_status(player_id, legacy_key, value)[0]
+                facts[(node.key, definition.key)] = StarfireFactState(value)
+        facts[("enemy_north_supply_route", "supply_status")] = StarfireFactState(
+            supply.truth_status
+        )
+        return facts
 
     def _persisted_fact_status(
         self,
@@ -831,23 +878,192 @@ class GameService:
     ) -> dict[tuple[str, str], PlayerWorldFact]:
         persisted: dict[tuple[str, str], PlayerWorldFact] = {}
         for update in outcome.fact_updates:
-            key = legacy_fact_key(update.node_key, update.fact_key)
-            if key is None:
+            truth_value = update.value.get("status")
+            if truth_value is None:
                 raise AppError(
                     "STARFIRE_RULE_OUTCOME_INVALID",
-                    "A Starfire rule produced a fact without a persistence projection",
+                    "A Starfire rule fact update is missing its canonical status value",
                 )
+            self._set_fact_truth(
+                player_id,
+                update.node_key,
+                update.fact_key,
+                truth_value,
+            )
+        for node_key in outcome.reveal_node_keys:
+            self._set_node_visibility(player_id, node_key, Visibility.KNOWN)
+        for node_key, fact_key in outcome.reveal_fact_refs:
+            self._set_fact_visibility(player_id, node_key, fact_key, Visibility.KNOWN)
+        updated_refs = {(update.node_key, update.fact_key) for update in outcome.fact_updates}
+        for update in outcome.fact_updates:
+            fact_state = self._fact_record(player_id, update.node_key, update.fact_key)
+            if fact_state.visibility != Visibility.KNOWN:
+                continue
             value = dict(update.value)
             if operation_id is not None:
                 value["operation_id"] = str(operation_id)
-            persisted[(update.node_key, update.fact_key)] = self.set_world_fact(
+            persisted[(update.node_key, update.fact_key)] = self._write_legacy_fact(
                 player_id,
-                key,
+                update.node_key,
+                update.fact_key,
                 value,
             )
+        for node_key, fact_key in outcome.reveal_fact_refs:
+            if (node_key, fact_key) not in updated_refs:
+                self._project_known_fact_to_legacy(player_id, node_key, fact_key)
         for node_key in outcome.unlock_node_keys:
             self.unlock_node(player_id, node_key)
         return persisted
+
+    def _sync_legacy_fact_to_canonical(
+        self,
+        player_id: UUID,
+        legacy_key: str,
+        value: dict[str, object],
+    ) -> None:
+        ref = canonical_fact_ref(legacy_key)
+        status = value.get("status")
+        if ref is None or status is None:
+            return
+        visibility = Visibility.KNOWN
+        truth_value: object = status
+        if legacy_key == "enemy_supply_route":
+            projection = project_legacy_supply_status(str(status))
+            truth_value = projection.truth_status
+            visibility = Visibility.KNOWN if projection.known else Visibility.HIDDEN
+            self._set_node_visibility(player_id, ref.node_key, visibility)
+            if projection.known:
+                self.unlock_node(player_id, ref.node_key)
+        self._set_fact_truth(
+            player_id,
+            ref.node_key,
+            ref.fact_key,
+            truth_value,
+            visibility=visibility,
+        )
+
+    def _fact_record(
+        self,
+        player_id: UUID,
+        node_key: str,
+        fact_key: str,
+    ) -> PlayerWorldFactState:
+        node = self.db.scalar(select(WorldNode).where(WorldNode.key == node_key))
+        if node is None:
+            raise NotFoundError("node", node_key)
+        fact = self.db.get(PlayerWorldFactState, (player_id, node.id, fact_key))
+        if fact is None:
+            definition = STARFIRE_WORLD.node(node_key)
+            initial = definition.fact(fact_key) if definition is not None else None
+            if initial is None:
+                raise AppError(
+                    "STARFIRE_DEFINITION_INVALID",
+                    "A required Starfire fact definition is missing",
+                )
+            fact = PlayerWorldFactState(
+                player_id=player_id,
+                node_id=node.id,
+                fact_key=fact_key,
+                truth_value=initial.initial_value,
+                visibility=initial.initial_visibility,
+            )
+            self.db.add(fact)
+            self.db.flush()
+        return fact
+
+    def _set_fact_truth(
+        self,
+        player_id: UUID,
+        node_key: str,
+        fact_key: str,
+        truth_value: object,
+        *,
+        visibility: Visibility | None = None,
+    ) -> PlayerWorldFactState:
+        fact = self._fact_record(player_id, node_key, fact_key)
+        changed = fact.truth_value != truth_value
+        if changed:
+            fact.truth_value = truth_value
+        if visibility is not None and fact.visibility != visibility:
+            fact.visibility = visibility
+            changed = True
+        if changed:
+            fact.version += 1
+        return fact
+
+    def _set_fact_visibility(
+        self,
+        player_id: UUID,
+        node_key: str,
+        fact_key: str,
+        visibility: Visibility,
+    ) -> PlayerWorldFactState:
+        fact = self._fact_record(player_id, node_key, fact_key)
+        if fact.visibility != visibility:
+            fact.visibility = visibility
+            fact.version += 1
+        return fact
+
+    def _set_node_visibility(
+        self,
+        player_id: UUID,
+        node_key: str,
+        visibility: Visibility,
+    ) -> PlayerNodeState:
+        node = self.db.scalar(select(WorldNode).where(WorldNode.key == node_key))
+        if node is None:
+            raise NotFoundError("node", node_key)
+        state = self.db.get(PlayerNodeState, (player_id, node.id))
+        if state is None:
+            raise NotFoundError("player_node", node.id)
+        if state.visibility != visibility:
+            state.visibility = visibility
+            state.version += 1
+        return state
+
+    def _project_known_fact_to_legacy(
+        self,
+        player_id: UUID,
+        node_key: str,
+        fact_key: str,
+    ) -> None:
+        legacy_key = legacy_fact_key(node_key, fact_key)
+        if legacy_key is None:
+            return
+        fact = self._fact_record(player_id, node_key, fact_key)
+        legacy = self.db.get(PlayerWorldFact, (player_id, legacy_key))
+        value = {"status": fact.truth_value}
+        if legacy is None:
+            self.db.add(PlayerWorldFact(player_id=player_id, key=legacy_key, value=value))
+        elif legacy.value.get("status") != fact.truth_value:
+            legacy.value = value
+            legacy.version += 1
+
+    def _write_legacy_fact(
+        self,
+        player_id: UUID,
+        node_key: str,
+        fact_key: str,
+        value: dict[str, object],
+    ) -> PlayerWorldFact:
+        legacy_key = legacy_fact_key(node_key, fact_key)
+        if legacy_key is None:
+            raise AppError(
+                "STARFIRE_RULE_OUTCOME_INVALID",
+                "A Starfire rule produced a fact without a persistence projection",
+            )
+        legacy = self.db.get(PlayerWorldFact, (player_id, legacy_key))
+        if legacy is None:
+            legacy = PlayerWorldFact(player_id=player_id, key=legacy_key, value=value)
+            self.db.add(legacy)
+        else:
+            legacy.value = value
+            legacy.version += 1
+        return legacy
+
+    @staticmethod
+    def _access_state(status: NodeStatus) -> AccessState:
+        return AccessState.LOCKED if status == NodeStatus.LOCKED else AccessState.AVAILABLE
 
     def _evaluate_rule[T](self, evaluator: Callable[[], T]) -> T:
         try:

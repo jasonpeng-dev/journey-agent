@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.agent.authority import authority_policy_errors, effective_authority_limits
 from app.core.config import Settings
 from app.core.errors import AppError, NotFoundError
-from app.domain.enums import AgentTaskStatus, SessionStatus
+from app.domain.enums import AgentTaskStatus, NodeStatus, SessionStatus
 from app.infrastructure.db.models import (
     NPC,
     AgentPlan,
@@ -22,10 +22,15 @@ from app.infrastructure.db.models import (
     OfficerAppointment,
     PlayerDecisionRequest,
     PlayerDomainState,
+    PlayerNodeState,
     PlayerWorldFact,
+    PlayerWorldFactState,
     ToolExecution,
+    WorldNode,
     WorldOperation,
 )
+from app.scenarios.starfire.definition import STARFIRE_WORLD
+from app.scenarios.starfire.ruleset import StarfireKnowledgeState
 from app.services.game import GameService, seed_id
 from app.services.tasks import TaskService
 
@@ -47,7 +52,8 @@ class StrategicSnapshotService:
         domain = self.db.get(PlayerDomainState, player.id)
         if domain is None:
             raise AppError("DOMAIN_STATE_NOT_INITIALIZED", "Strategic resources are missing")
-        command_state = GameService(self.db).inspect_command_state(player.id)
+        game = GameService(self.db)
+        command_state = game.inspect_command_state(player.id)
         resources = dict(cast(dict[str, object], command_state["resources"]))
         world = dict(cast(dict[str, object], command_state["world"]))
         task = self._latest_task(player.id)
@@ -56,6 +62,10 @@ class StrategicSnapshotService:
         messages = self._messages(session.id)
         officers = self._officers(player.id)
         known_world = self._known_world_state(player.id, world)
+        player_world = self._player_world_projection(game.scenario_known_state(player.id))
+        observer_world = (
+            self._observer_world_projection(player.id) if include_hidden_truth else None
+        )
         snapshot_version = (
             f"p{player.version}-d{domain.version}-t{task.version if task is not None else 0}"
         )
@@ -118,9 +128,9 @@ class StrategicSnapshotService:
             "officers": officers,
             "resources": resources,
             "known_world_state": known_world,
-            "hidden_world_truth": (
-                self._hidden_world_truth(world) if include_hidden_truth else None
-            ),
+            "player_world_state": player_world,
+            "observer_world_state": observer_world,
+            "hidden_world_truth": observer_world,
             "task": serialized_task,
             "active_plan": active_plan,
             "plan_history": plan_history,
@@ -217,11 +227,6 @@ class StrategicSnapshotService:
         player_id: UUID,
         world: dict[str, object],
     ) -> dict[str, object]:
-        intelligence = str(world.get("valley_intelligence", "INCOMPLETE"))
-        security = str(world.get("valley_security", "UNSAFE"))
-        ambush_status = "UNKNOWN"
-        if intelligence in {"PARTIAL", "COMPLETE"}:
-            ambush_status = "CLEARED" if security == "SAFE" else "DISCOVERED"
         facts = {
             fact.key: fact.value
             for fact in self.db.scalars(
@@ -229,36 +234,98 @@ class StrategicSnapshotService:
             ).all()
         }
         return {
+            **world,
             "village_relation": world.get("village_support", "NONE"),
-            "village_support": world.get("village_support", "NONE"),
-            "valley_intelligence": intelligence,
-            "valley_security": security,
-            "ambush_status": ambush_status,
-            "enemy_supply_route": world.get("enemy_supply_route", "UNKNOWN"),
-            "starfire_outpost_status": world.get("starfire_outpost_status", "DAMAGED"),
-            "northern_trade_route_status": world.get(
-                "northern_trade_route_status",
-                "CLOSED",
-            ),
             "fact_versions": {
                 key: value.get("operation_id")
                 for key, value in facts.items()
-                if isinstance(value, dict) and value.get("operation_id") is not None
+                if key in world
+                and isinstance(value, dict)
+                and value.get("operation_id") is not None
             },
         }
 
-    def _hidden_world_truth(self, world: dict[str, object]) -> dict[str, object]:
+    @staticmethod
+    def _player_world_projection(known: StarfireKnowledgeState) -> dict[str, object]:
+        facts = known.facts
+        node_access = known.node_access
+        nodes = []
+        for definition in STARFIRE_WORLD.nodes:
+            if definition.key not in node_access:
+                continue
+            nodes.append(
+                {
+                    "key": definition.key,
+                    "name": definition.name,
+                    "access": node_access[definition.key].value,
+                    "available_interactions": (
+                        [interaction.key for interaction in definition.interactions]
+                        if node_access[definition.key].value == "AVAILABLE"
+                        else []
+                    ),
+                    "facts": {
+                        fact.key: facts[(definition.key, fact.key)]
+                        for fact in definition.facts
+                        if (definition.key, fact.key) in facts
+                    },
+                }
+            )
         return {
-            "classification": "DEVELOPER_ONLY",
-            "ambush_status": ("CLEARED" if world.get("valley_security") == "SAFE" else "ACTIVE"),
-            "enemy_supply_route": (
-                "DISRUPTED" if world.get("enemy_supply_route") == "DISRUPTED" else "ACTIVE"
-            ),
+            "classification": "PLAYER_AGENT_KNOWLEDGE",
+            "nodes": nodes,
+        }
+
+    def _observer_world_projection(self, player_id: UUID) -> dict[str, object]:
+        rows = self.db.execute(
+            select(WorldNode, PlayerNodeState)
+            .join(PlayerNodeState, PlayerNodeState.node_id == WorldNode.id)
+            .where(PlayerNodeState.player_id == player_id)
+        ).all()
+        state_by_key = {node.key: state for node, state in rows}
+        node_ids = {node.id: node.key for node, _state in rows}
+        fact_rows = self.db.scalars(
+            select(PlayerWorldFactState).where(PlayerWorldFactState.player_id == player_id)
+        ).all()
+        facts: dict[str, list[dict[str, object]]] = {}
+        for fact in fact_rows:
+            node_key = node_ids.get(fact.node_id)
+            if node_key is None:
+                continue
+            facts.setdefault(node_key, []).append(
+                {
+                    "key": fact.fact_key,
+                    "truth": fact.truth_value,
+                    "knowledge": fact.visibility.value,
+                }
+            )
+        return {
+            "classification": "DEVELOPER_ONLY_READ_ONLY",
+            "nodes": [
+                {
+                    "key": definition.key,
+                    "name": definition.name,
+                    "truth": "EXISTS",
+                    "knowledge": state_by_key[definition.key].visibility.value,
+                    "access": self._node_access(state_by_key[definition.key].status),
+                    "supported_interactions": [
+                        interaction.key for interaction in definition.interactions
+                    ],
+                    "facts": sorted(
+                        facts.get(definition.key, []), key=lambda item: str(item["key"])
+                    ),
+                }
+                for definition in STARFIRE_WORLD.nodes
+                if definition.key in state_by_key
+            ],
             "resolution_rules": {
                 "first_clear_attempt": "DEFEAT_UNTIL_SUPPLY_DISRUPTED",
                 "world_outcomes": "DETERMINED_BY_GAME_SERVICE",
             },
         }
+
+    @staticmethod
+    def _node_access(status: NodeStatus) -> str:
+        return "LOCKED" if status == NodeStatus.LOCKED else "AVAILABLE"
 
     def _messages(self, session_id: UUID) -> list[dict[str, object]]:
         messages = list(

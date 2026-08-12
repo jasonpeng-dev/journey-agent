@@ -1,19 +1,22 @@
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, select
+from sqlalchemy import MetaData, Table, create_engine, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.domain.enums import NodeStatus, NodeType, NPCRole, WorldOperationStatus
+from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     NPC,
     Player,
     PlayerNodeState,
     PlayerWorldFact,
+    PlayerWorldFactState,
     World,
     WorldNode,
     WorldOperation,
@@ -117,30 +120,51 @@ def test_upgrade_merges_legacy_nodes_without_rewriting_history(
         )
         db.add_all([unknown_player, known_player, officer])
         db.flush()
+        legacy_node_states = Table(
+            "player_node_states",
+            MetaData(),
+            autoload_with=db.get_bind(),
+        )
+        now = datetime.now(UTC)
+        db.execute(
+            legacy_node_states.insert(),
+            [
+                {
+                    "player_id": unknown_player.id.hex,
+                    "node_id": entrance_id.hex,
+                    "status": NodeStatus.ENTERED.value,
+                    "version": 2,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "player_id": unknown_player.id.hex,
+                    "node_id": ambush_id.hex,
+                    "status": NodeStatus.AVAILABLE.value,
+                    "version": 4,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "player_id": known_player.id.hex,
+                    "node_id": entrance_id.hex,
+                    "status": NodeStatus.AVAILABLE.value,
+                    "version": 1,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "player_id": known_player.id.hex,
+                    "node_id": ambush_id.hex,
+                    "status": NodeStatus.LOCKED.value,
+                    "version": 1,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
         db.add_all(
             [
-                PlayerNodeState(
-                    player_id=unknown_player.id,
-                    node_id=entrance_id,
-                    status=NodeStatus.ENTERED,
-                    version=2,
-                ),
-                PlayerNodeState(
-                    player_id=unknown_player.id,
-                    node_id=ambush_id,
-                    status=NodeStatus.AVAILABLE,
-                    version=4,
-                ),
-                PlayerNodeState(
-                    player_id=known_player.id,
-                    node_id=entrance_id,
-                    status=NodeStatus.AVAILABLE,
-                ),
-                PlayerNodeState(
-                    player_id=known_player.id,
-                    node_id=ambush_id,
-                    status=NodeStatus.LOCKED,
-                ),
                 PlayerWorldFact(
                     player_id=unknown_player.id,
                     key="enemy_supply_route",
@@ -150,6 +174,31 @@ def test_upgrade_merges_legacy_nodes_without_rewriting_history(
                     player_id=known_player.id,
                     key="enemy_supply_route",
                     value={"status": "ACTIVE"},
+                ),
+                PlayerWorldFact(
+                    player_id=known_player.id,
+                    key="valley_intelligence",
+                    value={"status": "COMPLETE"},
+                ),
+                PlayerWorldFact(
+                    player_id=known_player.id,
+                    key="valley_security",
+                    value={"status": "SAFE"},
+                ),
+                PlayerWorldFact(
+                    player_id=known_player.id,
+                    key="village_support",
+                    value={"status": "GUIDE"},
+                ),
+                PlayerWorldFact(
+                    player_id=known_player.id,
+                    key="starfire_outpost_status",
+                    value={"status": "OPERATIONAL"},
+                ),
+                PlayerWorldFact(
+                    player_id=known_player.id,
+                    key="northern_trade_route_status",
+                    value={"status": "OPEN"},
                 ),
             ]
         )
@@ -206,6 +255,37 @@ def test_upgrade_merges_legacy_nodes_without_rewriting_history(
         assert legacy_fact is not None
         assert unknown_supply_state.status == NodeStatus.LOCKED
         assert known_supply_state.status == NodeStatus.AVAILABLE
+        assert unknown_supply_state.visibility == Visibility.HIDDEN
+        assert known_supply_state.visibility == Visibility.KNOWN
+        unknown_supply_fact = db.get(
+            PlayerWorldFactState,
+            (unknown_player_id, supply_route.id, "supply_status"),
+        )
+        known_supply_fact = db.get(
+            PlayerWorldFactState,
+            (known_player_id, supply_route.id, "supply_status"),
+        )
+        assert unknown_supply_fact is not None
+        assert known_supply_fact is not None
+        assert unknown_supply_fact.truth_value == "ACTIVE"
+        assert unknown_supply_fact.visibility == Visibility.HIDDEN
+        assert known_supply_fact.truth_value == "ACTIVE"
+        assert known_supply_fact.visibility == Visibility.KNOWN
+        migrated_facts = {
+            (node.key, fact.fact_key): fact
+            for fact, node in db.execute(
+                select(PlayerWorldFactState, WorldNode)
+                .join(WorldNode, WorldNode.id == PlayerWorldFactState.node_id)
+                .where(PlayerWorldFactState.player_id == known_player_id)
+            ).all()
+        }
+        assert migrated_facts[("north_village", "village_support")].truth_value == "GUIDE"
+        assert migrated_facts[("northern_valley", "valley_intelligence")].truth_value == "COMPLETE"
+        assert migrated_facts[("northern_valley", "valley_security")].truth_value == "SAFE"
+        assert migrated_facts[("northern_valley", "ambush_status")].truth_value == "CLEARED"
+        assert migrated_facts[("northern_valley", "ambush_status")].visibility == Visibility.KNOWN
+        assert migrated_facts[("starfire_outpost", "outpost_status")].truth_value == "OPERATIONAL"
+        assert migrated_facts[("northern_trade_route", "trade_route_status")].truth_value == "OPEN"
         assert loaded_operation.target_key == "ambush_valley"
         assert legacy_fact.value == {"status": "UNKNOWN"}
     engine.dispose()
@@ -214,8 +294,14 @@ def test_upgrade_merges_legacy_nodes_without_rewriting_history(
     engine = create_engine(database_url)
     with Session(engine) as db:
         downgraded_keys = set(db.scalars(select(WorldNode.key)).all())
+        downgraded_supply = db.get(
+            PlayerWorldFact,
+            (unknown_player_id, "enemy_supply_route"),
+        )
 
     assert "valley_entrance" in downgraded_keys
     assert "ambush_valley" in downgraded_keys
     assert "northern_valley" not in downgraded_keys
     assert "enemy_north_supply_route" not in downgraded_keys
+    assert downgraded_supply is not None
+    assert downgraded_supply.value == {"status": "UNKNOWN"}

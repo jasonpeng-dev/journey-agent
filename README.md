@@ -13,6 +13,7 @@
 - Task、Plan、Step、审批、世界行动和执行 Trace 的数据库持久化
 - 行动失败或已验证世界状态变化后的安全 Replanning
 - GameService 确定性结算兵力、粮草、金币、士气、前哨和商路状态
+- World Truth 与玩家/Agent Knowledge 分层持久化；隐藏节点和事实不会进入模型上下文
 - ToolExecutor 对参数、角色、任命关系、权限、业务规则、事务、幂等和 Before/After 状态进行审计
 - 明亮中文 Strategic Command Console 调试页面
 
@@ -32,6 +33,8 @@
 ```
 
 Mock 模式使用固定、可复现的模型输出，适合回归测试。DeepSeek 模式会真实生成 Plan 和 Replan，结果具有非确定性，但必须通过同一套 Schema、权限、状态和安全校验后才能执行。
+
+世界规则和 Objective 读取完整 Truth；Planner、Replan 和执行角色只读取 Known World。调试页默认展示玩家视图，开发者可显式打开只读 Observer 投影查看 Truth、Knowledge 与 Access，不能通过该视图修改世界。
 
 ## 技术栈
 

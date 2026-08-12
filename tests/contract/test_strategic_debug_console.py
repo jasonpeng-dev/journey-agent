@@ -44,15 +44,28 @@ def test_strategic_snapshot_is_shen_ce_scoped_and_hides_truth_by_default(
         "han_lie",
         "lu_ning",
     }
-    assert snapshot["known_world_state"]["ambush_status"] == "UNKNOWN"
-    assert snapshot["known_world_state"]["enemy_supply_route"] == "UNKNOWN"
+    assert "ambush_status" not in snapshot["known_world_state"]
+    assert "enemy_supply_route" not in snapshot["known_world_state"]
+    player_nodes = {node["key"]: node for node in snapshot["player_world_state"]["nodes"]}
+    known_nodes = set(player_nodes)
+    assert "northern_valley" in known_nodes
+    assert "enemy_north_supply_route" not in known_nodes
+    assert "reconnaissance" in player_nodes["northern_valley"]["available_interactions"]
+    assert player_nodes["starfire_outpost"]["available_interactions"] == []
     assert snapshot["hidden_world_truth"] is None
     assert snapshot["task"] is None
     assert snapshot["capabilities"]["can_issue_command"] is True
 
     developer = _snapshot(client, session_id, hidden=True)
-    assert developer["hidden_world_truth"]["classification"] == "DEVELOPER_ONLY"
-    assert developer["hidden_world_truth"]["ambush_status"] == "ACTIVE"
+    assert developer["hidden_world_truth"]["classification"] == "DEVELOPER_ONLY_READ_ONLY"
+    observer_nodes = {node["key"]: node for node in developer["observer_world_state"]["nodes"]}
+    valley_facts = {fact["key"]: fact for fact in observer_nodes["northern_valley"]["facts"]}
+    assert valley_facts["ambush_status"] == {
+        "key": "ambush_status",
+        "truth": "ACTIVE",
+        "knowledge": "HIDDEN",
+    }
+    assert observer_nodes["enemy_north_supply_route"]["knowledge"] == "HIDDEN"
 
 
 def test_strategic_facade_auto_drives_to_pauses_and_completion(

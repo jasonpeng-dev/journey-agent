@@ -31,6 +31,8 @@ GameService 不是 Agent。它没有 Persona、Memory、Plan 或自主目标，�
 - 更新已验证世界事实与节点状态
 - 对重复结算和幂等键冲突 fail closed
 
+GameService 对世界状态提供两种明确投影：Ruleset 与 Objective 使用 authoritative Truth；Planner、Replan 和 Officer context 使用已过滤的 Knowledge。节点 Visibility、Fact Visibility 和节点 Access 分别持久化，任一层的变化都不会隐式改写另外两层。
+
 ### TaskOrchestrator
 
 TaskOrchestrator 是应用层状态机，不扮演游戏角色。它负责：
@@ -129,7 +131,7 @@ Planning context 只包含：
 - 固定 expected outcome 和 world-wait contract
 - 当前失败码及对应恢复指导
 
-已完成的战略阶段会从 Replan 可用工具中隐藏。隐藏世界真相只供开发环境审计，不进入模型规划上下文。
+已完成的战略阶段会从 Replan 可用工具中隐藏。动态 Tool target 也会先按当前节点 Knowledge 过滤；隐藏世界真相在构造模型 Context 前已经移除，只供开发环境的只读 Observer 投影审计。
 
 ## 9. 持久化与审计
 

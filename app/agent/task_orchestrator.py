@@ -184,7 +184,7 @@ class TaskOrchestrator:
             replan_reason=reason,
         )
         if not result.ok and scenario.fallback_plans.supports_state_aware_recovery(reason):
-            state = GameService(self.db).scenario_state(task.player_id)
+            state = GameService(self.db).scenario_known_state(task.player_id)
             task.status = AgentTaskStatus.ACTIVE
             task.last_error_code = reason
             self.db.commit()
@@ -219,10 +219,14 @@ class TaskOrchestrator:
             task.player_id,
             owner,
         )
+        knowledge = GameService(self.db).scenario_known_state(task.player_id)
         definition = next(
             (
                 item
-                for item in self.registry.definitions(task.scenario_key)
+                for item in self.registry.definitions(
+                    task.scenario_key,
+                    target_states=knowledge.known_target_states(),
+                )
                 if item.name == tool_name
             ),
             None,
@@ -271,7 +275,8 @@ class TaskOrchestrator:
             " This is a replan: preserve every already succeeded step and do not "
             "repeat completed world operations or resource-consuming writes. "
             "Rebuild only the failed step's remaining suffix, following the supplied "
-            "replan_guidance, current verified_state, and supplied scenario constraints. "
+            "replan_guidance, knowledge-filtered compatibility verified_state, and supplied "
+            "scenario constraints. "
             "A step may select only a tool "
             "that is present in the current allowed_tools list."
             if replan_reason is not None
@@ -654,10 +659,14 @@ class TaskOrchestrator:
         )
         self.db.add(run)
         self.db.commit()
+        knowledge = GameService(self.db).scenario_known_state(task.player_id)
         definition = next(
             (
                 item
-                for item in self.registry.definitions(task.scenario_key)
+                for item in self.registry.definitions(
+                    task.scenario_key,
+                    target_states=knowledge.known_target_states(),
+                )
                 if item.name == tool_name
             ),
             None,

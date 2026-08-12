@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from pydantic import BaseModel
 
 from app.core.errors import AppError
-from app.domain.world import NodeDefinition
+from app.domain.world import AccessState, NodeDefinition
 from app.services.interaction_targets import (
     InteractionTargetResolver,
     interaction_target_resolver,
@@ -97,30 +97,42 @@ def interaction_target_guidance(
     requirement: InteractionRequirement,
     *,
     resolver: InteractionTargetResolver = interaction_target_resolver,
+    target_states: Mapping[str, AccessState] | None = None,
 ) -> str:
-    """Build model-facing canonical target guidance from WorldDefinition."""
+    """Build model-facing target guidance, omitting nodes absent from knowledge."""
 
     if requirement.interaction_key is not None:
         target_text = _interaction_targets_text(
             scenario_key,
             requirement.interaction_key,
             resolver,
+            target_states,
         )
     else:
         target_text = "; ".join(
-            f"{operation} -> {_interaction_targets_text(scenario_key, interaction, resolver)}"
+            f"{operation} -> "
+            f"{_interaction_targets_text(scenario_key, interaction, resolver, target_states)}"
             for operation, interaction in requirement.operation_interactions.items()
         )
-    return f"Canonical targets from the current Scenario Definition: {target_text}."
+    return (
+        "Known canonical targets with current runtime access (execution rechecks access): "
+        f"{target_text}."
+    )
 
 
 def _interaction_targets_text(
     scenario_key: str,
     interaction: str,
     resolver: InteractionTargetResolver,
+    target_states: Mapping[str, AccessState] | None,
 ) -> str:
     targets = resolver.supported_target_keys(scenario_key, interaction)
-    return f"{interaction}: {', '.join(targets) or '(none)'}"
+    if target_states is not None:
+        targets = tuple(target for target in targets if target in target_states)
+        rendered = ", ".join(f"{target} [{target_states[target].value}]" for target in targets)
+    else:
+        rendered = ", ".join(targets)
+    return f"{interaction}: {rendered or '(none known)'}"
 
 
 def _required_interaction(

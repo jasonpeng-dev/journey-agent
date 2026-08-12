@@ -32,7 +32,7 @@ def test_reconnaissance_characterization(session: Session) -> None:
         "casualties": 0,
     }
     assert service.get_world_fact(player.id, "valley_intelligence")["status"] == "PARTIAL"
-    assert service.get_world_fact(player.id, "ambush_status") == {}
+    assert service.get_world_fact(player.id, "ambush_status")["status"] == "ACTIVE"
     assert domain is not None
     assert (domain.soldiers_total, domain.soldiers_committed, domain.morale) == (300, 0, 60)
 
@@ -168,7 +168,7 @@ def test_second_clear_threat_success_characterization(session: Session) -> None:
         "facts_changed": ["valley_security"],
     }
     assert service.get_world_fact(player.id, "valley_security")["status"] == "SAFE"
-    assert service.get_world_fact(player.id, "ambush_status") == {}
+    assert service.get_world_fact(player.id, "ambush_status")["status"] == "CLEARED"
     assert domain is not None
     assert (domain.soldiers_total, domain.soldiers_committed, domain.morale) == (297, 0, 65)
     assert _node_status(session, player.id, "starfire_outpost") == NodeStatus.AVAILABLE

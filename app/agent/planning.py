@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.authority import authority_policy_errors, effective_authority_limits
 from app.core.config import Settings
+from app.core.errors import AppError
 from app.domain.enums import AgentStepStatus, StepExecutionType
 from app.infrastructure.db.models import (
     NPC,
@@ -24,6 +25,7 @@ from app.scenarios.registry import scenario_binding
 from app.services.game import GameService
 from app.services.tasks import TaskService
 from app.tools.handlers import CreateTaskPlanArgs, ReplanTaskArgs
+from app.tools.interaction_validation import resolve_tool_interaction
 from app.tools.registry import ToolRegistry
 
 
@@ -120,7 +122,7 @@ class PlanValidator:
                 "The task scenario does not provide a planning policy",
             )
         policy = scenario.planning_policy
-        scenario_state = GameService(self.db).scenario_state(task.player_id)
+        scenario_state = GameService(self.db).scenario_known_state(task.player_id)
 
         wait_count = 0
         descriptions: set[str] = set()
@@ -197,6 +199,7 @@ class PlanValidator:
                     )
                 )
             self._validate_tool_step(
+                task=task,
                 npc=step_npc,
                 tool_name=tool_name_for_step,
                 tool_arguments=step.tool_arguments,
@@ -312,6 +315,7 @@ class PlanValidator:
     def _validate_tool_step(
         self,
         *,
+        task: AgentTask,
         npc: NPC,
         tool_name: str,
         tool_arguments: dict[str, Any],
@@ -366,8 +370,9 @@ class PlanValidator:
         final_arguments = dict(tool_arguments)
         if tool_name in policy.idempotent_tools:
             final_arguments["idempotency_key"] = "planner-validation-key"
+        validated_arguments: BaseModel | None = None
         try:
-            tool.arguments_model.model_validate(final_arguments)
+            validated_arguments = tool.arguments_model.model_validate(final_arguments)
         except ValidationError as exc:
             issues.extend(
                 PlanValidationIssue(
@@ -379,6 +384,31 @@ class PlanValidator:
                 )
                 for error in exc.errors()[:6]
             )
+        if validated_arguments is not None and tool.interaction_requirement is not None:
+            try:
+                target = resolve_tool_interaction(
+                    task.scenario_key,
+                    tool.interaction_requirement,
+                    validated_arguments,
+                )
+            except AppError as exc:
+                issues.append(
+                    PlanValidationIssue(
+                        code=exc.code,
+                        path=f"{path}.tool_arguments",
+                        message=exc.message,
+                    )
+                )
+            else:
+                known = GameService(self.db).scenario_known_state(task.player_id)
+                if not known.node_known(target.key):
+                    issues.append(
+                        PlanValidationIssue(
+                            code="PLAN_INTERACTION_TARGET_HIDDEN",
+                            path=f"{path}.tool_arguments",
+                            message="The interaction target is not known to the player or agent",
+                        )
+                    )
         allowed_outcomes = policy.expected_outcome_fields.get(tool_name, frozenset())
         if not expected_outcome:
             issues.append(
@@ -723,15 +753,19 @@ def build_planning_request(
             (appointments[officer.id].authority_overrides if officer.id in appointments else None),
         )
     }
-    verified_state = GameService(db).inspect_command_state(task.player_id)
+    game = GameService(db)
+    verified_state = game.inspect_command_state(task.player_id)
     scenario = scenario_binding(task.scenario_key)
     if scenario is None:
         raise ValueError(f"Scenario planning policy is not registered: {task.scenario_key}")
     policy = scenario.planning_policy
-    scenario_state = GameService(db).scenario_state(task.player_id)
+    scenario_state = game.scenario_known_state(task.player_id)
     allowed_tools: list[dict[str, Any]] = []
     scenario_tools = policy.execution_tools
-    for definition in registry.definitions(task.scenario_key):
+    for definition in registry.definitions(
+        task.scenario_key,
+        target_states=scenario_state.known_target_states(),
+    ):
         if definition.name not in scenario_tools:
             continue
         if kind == "REPLAN" and policy.effect_satisfied(definition.name, {}, scenario_state):
@@ -874,6 +908,7 @@ def build_planning_request(
             for officer in execution_officers
         ],
         "verified_state": verified_state,
+        "verified_state_projection": "KNOWLEDGE_FILTERED_COMPATIBILITY",
         "allowed_tools": allowed_tools,
         "prior_plans": prior_plans,
         "failure_code": replan_reason,

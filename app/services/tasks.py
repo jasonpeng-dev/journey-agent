@@ -413,7 +413,7 @@ class TaskService:
         scenario = scenario_binding(task.scenario_key)
         if scenario is None:
             raise AppError("TASK_SCENARIO_UNSUPPORTED", "The task scenario is not supported")
-        state = GameService(self.db).scenario_state(task.player_id)
+        state = GameService(self.db).scenario_truth_state(task.player_id)
         objective = scenario.objective_evaluator.evaluate(state)
         if not objective.completed:
             plan.status = AgentPlanStatus.FAILED

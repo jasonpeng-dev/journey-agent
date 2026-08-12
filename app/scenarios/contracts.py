@@ -12,6 +12,10 @@ from uuid import UUID
 class ScenarioRuntimeState(Protocol):
     def fact_value(self, node_key: str, fact_key: str) -> str: ...
 
+    def node_known(self, node_key: str) -> bool: ...
+
+    def fact_known(self, node_key: str, fact_key: str) -> bool: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ScenarioPlanIssue:

@@ -431,23 +431,19 @@ class StarfirePlanningPolicy:
 
     @classmethod
     def _canonical_facts(cls, state: ScenarioRuntimeState) -> dict[str, str]:
+        refs = (
+            ("north_village", "village_support"),
+            ("northern_valley", "valley_intelligence"),
+            ("northern_valley", "valley_security"),
+            ("northern_valley", "ambush_status"),
+            ("enemy_north_supply_route", "supply_status"),
+            ("starfire_outpost", "outpost_status"),
+            ("northern_trade_route", "trade_route_status"),
+        )
         return {
-            "north_village.village_support": cls._value(state, "north_village", "village_support"),
-            "northern_valley.valley_intelligence": cls._value(
-                state, "northern_valley", "valley_intelligence"
-            ),
-            "northern_valley.valley_security": cls._value(
-                state, "northern_valley", "valley_security"
-            ),
-            "enemy_north_supply_route.supply_status": cls._value(
-                state, "enemy_north_supply_route", "supply_status"
-            ),
-            "starfire_outpost.outpost_status": cls._value(
-                state, "starfire_outpost", "outpost_status"
-            ),
-            "northern_trade_route.trade_route_status": cls._value(
-                state, "northern_trade_route", "trade_route_status"
-            ),
+            f"{node_key}.{fact_key}": cls._value(state, node_key, fact_key)
+            for node_key, fact_key in refs
+            if state.node_known(node_key) and state.fact_known(node_key, fact_key)
         }
 
     @staticmethod

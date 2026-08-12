@@ -48,7 +48,7 @@ def test_active_supply_support_relation_drives_first_clear_defeat() -> None:
     outcome = ruleset.resolve_clear_threat(
         "northern_valley",
         "CLEAR_VALLEY",
-        _state(supply_status="ACTIVE", supply_known=False),
+        _state(supply_status="ACTIVE"),
     )
 
     assert outcome.payload["result"] == "DEFEAT"
@@ -213,7 +213,6 @@ def test_missing_trade_enable_relation_fails_closed() -> None:
 def _state(
     *,
     supply_status: str = "ACTIVE",
-    supply_known: bool = True,
     village_support: str = "NONE",
     valley_security: str = "UNSAFE",
     outpost_status: str = "DAMAGED",
@@ -226,14 +225,8 @@ def _state(
                 ("north_village", "village_support"): StarfireFactState(village_support),
                 ("northern_valley", "valley_intelligence"): StarfireFactState("INCOMPLETE"),
                 ("northern_valley", "valley_security"): StarfireFactState(valley_security),
-                ("northern_valley", "ambush_status"): StarfireFactState(
-                    "ACTIVE",
-                    known=False,
-                ),
-                ("enemy_north_supply_route", "supply_status"): StarfireFactState(
-                    supply_status,
-                    known=supply_known,
-                ),
+                ("northern_valley", "ambush_status"): StarfireFactState("ACTIVE"),
+                ("enemy_north_supply_route", "supply_status"): StarfireFactState(supply_status),
                 ("starfire_outpost", "outpost_status"): StarfireFactState(outpost_status),
                 ("northern_trade_route", "trade_route_status"): StarfireFactState("CLOSED"),
             }

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from app.domain.world import RelationType, WorldDefinition
+from app.domain.world import AccessState, RelationType, WorldDefinition
 from app.scenarios.starfire.definition import STARFIRE_WORLD
 
 type FactRef = tuple[str, str]
@@ -16,7 +16,6 @@ type FactRef = tuple[str, str]
 @dataclass(frozen=True, slots=True)
 class StarfireFactState:
     value: str
-    known: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +45,42 @@ class StarfireRuleState:
 
         return self.fact(node_key, fact_key).value
 
+    @staticmethod
+    def node_known(_node_key: str) -> bool:
+        """Authoritative truth states are complete when used by internal policies."""
+
+        return True
+
+    def fact_known(self, node_key: str, fact_key: str) -> bool:
+        return (node_key, fact_key) in self.facts
+
+
+@dataclass(frozen=True, slots=True)
+class StarfireKnowledgeState:
+    """Player/agent projection containing no hidden node or fact truth."""
+
+    facts: Mapping[FactRef, str]
+    node_access: Mapping[str, AccessState]
+    resources: StarfireResources
+
+    def fact_value(self, node_key: str, fact_key: str) -> str:
+        try:
+            return self.facts[(node_key, fact_key)]
+        except KeyError:
+            raise StarfireRuleViolation(
+                "STARFIRE_KNOWLEDGE_UNAVAILABLE",
+                "The requested fact is not known to the player or their agents",
+            ) from None
+
+    def node_known(self, node_key: str) -> bool:
+        return node_key in self.node_access
+
+    def fact_known(self, node_key: str, fact_key: str) -> bool:
+        return (node_key, fact_key) in self.facts
+
+    def known_target_states(self) -> Mapping[str, AccessState]:
+        return self.node_access
+
 
 @dataclass(frozen=True, slots=True)
 class FactUpdate:
@@ -62,6 +97,8 @@ class RuleOutcome:
     payload: Mapping[str, Any] = field(default_factory=dict)
     fact_updates: tuple[FactUpdate, ...] = ()
     unlock_node_keys: tuple[str, ...] = ()
+    reveal_node_keys: tuple[str, ...] = ()
+    reveal_fact_refs: tuple[FactRef, ...] = ()
     casualties: int = 0
     morale_delta: int = 0
     food_delta: int = 0
@@ -71,6 +108,8 @@ class RuleOutcome:
         object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
         object.__setattr__(self, "fact_updates", tuple(self.fact_updates))
         object.__setattr__(self, "unlock_node_keys", tuple(self.unlock_node_keys))
+        object.__setattr__(self, "reveal_node_keys", tuple(self.reveal_node_keys))
+        object.__setattr__(self, "reveal_fact_refs", tuple(self.reveal_fact_refs))
 
 
 class StarfireRuleViolation(Exception):
@@ -111,6 +150,7 @@ class StarfireRuleset:
             },
             fact_updates=(FactUpdate(target_key, "valley_intelligence", {"status": "PARTIAL"}),),
             unlock_node_keys=(target_key,),
+            reveal_fact_refs=((target_key, "ambush_status"),),
         )
 
     def validate_village_support(
@@ -162,10 +202,10 @@ class StarfireRuleset:
         self.validate_military_parameters(target_key, mission_type, strategy)
         if mission_type == "DISRUPT_SUPPLY":
             supply = state.fact(target_key, "supply_status")
-            if not supply.known or supply.value != "ACTIVE":
+            if supply.value != "ACTIVE":
                 raise StarfireRuleViolation(
-                    "ENEMY_SUPPLY_ROUTE_UNKNOWN",
-                    "The enemy supply route must be discovered before it can be disrupted",
+                    "ENEMY_SUPPLY_ROUTE_UNAVAILABLE",
+                    "The enemy supply route is not active",
                     retryable=True,
                 )
 
@@ -265,6 +305,8 @@ class StarfireRuleset:
                     FactUpdate(valley_key, "valley_intelligence", {"status": "COMPLETE"}),
                 ),
                 unlock_node_keys=reveal_targets,
+                reveal_node_keys=reveal_targets,
+                reveal_fact_refs=tuple((key, "supply_status") for key in reveal_targets),
                 casualties=18,
                 morale_delta=-10,
             )
@@ -277,7 +319,11 @@ class StarfireRuleset:
                 "casualties": casualties,
                 "facts_changed": ["valley_security"],
             },
-            fact_updates=(FactUpdate(valley_key, "valley_security", {"status": "SAFE"}),),
+            fact_updates=(
+                FactUpdate(valley_key, "valley_security", {"status": "SAFE"}),
+                FactUpdate(valley_key, "ambush_status", {"status": "CLEARED"}),
+            ),
+            reveal_fact_refs=((valley_key, "ambush_status"),),
             unlock_node_keys=self._targets(valley_key, RelationType.UNLOCKS, required=True),
             casualties=casualties,
             morale_delta=5,

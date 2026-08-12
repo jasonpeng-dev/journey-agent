@@ -41,6 +41,7 @@ LEGACY_FACT_REFS: Mapping[str, CanonicalFactRef] = MappingProxyType(
         "village_support": CanonicalFactRef("north_village", "village_support"),
         "valley_intelligence": CanonicalFactRef("northern_valley", "valley_intelligence"),
         "valley_security": CanonicalFactRef("northern_valley", "valley_security"),
+        "ambush_status": CanonicalFactRef("northern_valley", "ambush_status"),
         "enemy_supply_route": CanonicalFactRef(
             "enemy_north_supply_route",
             "supply_status",

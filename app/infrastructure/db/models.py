@@ -36,6 +36,7 @@ from app.domain.enums import (
     TerminationReason,
     WorldOperationStatus,
 )
+from app.domain.world import Visibility
 from app.infrastructure.db.base import Base, TimestampMixin, UUIDPrimaryKey, utcnow
 
 
@@ -89,6 +90,9 @@ class PlayerNodeState(TimestampMixin, Base):
         ForeignKey("world_nodes.id", ondelete="CASCADE"), primary_key=True
     )
     status: Mapped[NodeStatus] = mapped_column(Enum(NodeStatus, native_enum=False))
+    visibility: Mapped[Visibility] = mapped_column(
+        Enum(Visibility, native_enum=False), default=Visibility.KNOWN
+    )
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -148,6 +152,12 @@ class PlayerDomainState(TimestampMixin, Base):
 
 
 class PlayerWorldFact(TimestampMixin, Base):
+    """Legacy flat, player-visible compatibility projection.
+
+    Canonical truth and fact visibility live in ``PlayerWorldFactState``. This table
+    remains because historical tools and audit payloads still use the flat keys.
+    """
+
     __tablename__ = "player_world_facts"
 
     player_id: Mapped[UUID] = mapped_column(
@@ -155,6 +165,25 @@ class PlayerWorldFact(TimestampMixin, Base):
     )
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class PlayerWorldFactState(TimestampMixin, Base):
+    """Canonical per-player world truth with independent fact knowledge."""
+
+    __tablename__ = "player_world_fact_states"
+
+    player_id: Mapped[UUID] = mapped_column(
+        ForeignKey("players.id", ondelete="CASCADE"), primary_key=True
+    )
+    node_id: Mapped[UUID] = mapped_column(
+        ForeignKey("world_nodes.id", ondelete="CASCADE"), primary_key=True
+    )
+    fact_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    truth_value: Mapped[Any] = mapped_column(JSON)
+    visibility: Mapped[Visibility] = mapped_column(
+        Enum(Visibility, native_enum=False), default=Visibility.KNOWN
+    )
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 

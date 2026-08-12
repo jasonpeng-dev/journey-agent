@@ -141,12 +141,14 @@ const factDefinitions = [
 ];
 
 export function renderSnapshot(snapshot, flags) {
-  ui.toggleHidden.textContent = flags.hidden ? "隐藏世界真相" : "显示隐藏世界真相";
+  ui.toggleHidden.textContent = flags.hidden
+    ? "隐藏 Observer 世界状态"
+    : "显示 Observer 世界状态";
   renderHeader(snapshot);
   renderResources(snapshot.resources || {});
   renderWorldFacts(snapshot.known_world_state || {});
   renderOfficers(snapshot.officers || []);
-  renderHiddenTruth(snapshot.hidden_world_truth, flags.hidden);
+  renderHiddenTruth(snapshot.observer_world_state, flags.hidden);
   renderTimeline(snapshot.timeline || []);
   renderTask(snapshot.task, snapshot.plan_history || []);
   renderWaiting(snapshot);
@@ -195,7 +197,7 @@ function renderResources(resources) {
 
 function renderWorldFacts(facts) {
   ui.worldFacts.replaceChildren(
-    ...factDefinitions.map(([key, title, caption]) => {
+    ...factDefinitions.filter(([key]) => Object.hasOwn(facts, key)).map(([key, title, caption]) => {
       const row = el("div", "fact-row");
       const copy = el("div");
       copy.append(el("strong", "", title), el("span", "", caption));
@@ -248,7 +250,7 @@ function renderHiddenTruth(truth, visible) {
   ui.hiddenTruthContent.replaceChildren(
     truth
       ? jsonBlock(localizeObject(truth))
-      : el("p", "empty-copy", "服务端没有返回隐藏世界真相。")
+      : el("p", "empty-copy", "服务端没有返回 Observer 世界状态。")
   );
 }
 
