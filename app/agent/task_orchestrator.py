@@ -402,6 +402,12 @@ class TaskOrchestrator:
                     "For each TOOL step, expected_outcome is a deterministic contract, "
                     "not a prediction. Copy every literal in that tool's "
                     "required_expected_outcomes exactly. "
+                    "For each WAIT_FOR_WORLD_EVENT step, set "
+                    "expected_outcome.operation_result_in to exactly the preceding tool's "
+                    "world_wait_success_outcomes and set resume_condition.success_outcomes "
+                    "to that identical list. Never select a terminal-effect tool unless its "
+                    "effect is listed in planning_constraints.terminal_effect_scope for the "
+                    "frozen objective scope, even if the tool appears in allowed_tools. "
                     f"PLANNER_REQUEST_JSON:{request_json}"
                 ),
             )

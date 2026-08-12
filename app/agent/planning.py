@@ -28,6 +28,7 @@ from app.scenarios.contracts import (
     project_known_relation_payloads,
 )
 from app.scenarios.runtime_binding import (
+    VersionedScenarioBinding,
     interaction_resolver_for_task,
     runtime_scope_for_task,
     scenario_binding_for_task,
@@ -924,7 +925,7 @@ def build_planning_request(
         npc.authority_limits,
         (owner_appointment.authority_overrides if owner_appointment is not None else None),
     )
-    return {
+    request: dict[str, Any] = {
         "kind": kind,
         "submission_tool": "replan_task" if kind == "REPLAN" else "create_task_plan",
         "task_id": str(task.id),
@@ -1075,6 +1076,13 @@ def build_planning_request(
             ),
         },
     }
+    if task.game_instance_id is not None:
+        assert isinstance(scenario, VersionedScenarioBinding)
+        request["behavior_bundle"] = {
+            "key": scenario.snapshot.definition.behavior_bundle.key,
+            "version": scenario.snapshot.definition.behavior_bundle.version,
+        }
+    return request
 
 
 def _operation_wait_failed(

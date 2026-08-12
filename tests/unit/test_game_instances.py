@@ -102,6 +102,7 @@ def test_instance_binding_is_immutable_in_orm(session: Session) -> None:
     instance = GameInstanceService(session).create(
         player_id=player.id,
         scenario_version_id=version.id,
+        creation_key="game-instance-service-test",
     )
     session.commit()
     instance.scenario_version_id = uuid4()

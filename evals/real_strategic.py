@@ -25,9 +25,13 @@ from app.infrastructure.db.models import (
     AgentRun,
     AgentStep,
     ConversationSession,
+    Player,
     WorldOperation,
 )
-from app.services.game import GameService, seed_id
+from app.scenarios.bootstrap import require_builtin_starfire_version
+from app.scenarios.runtime_binding import runtime_scope_for_task
+from app.services.game import GameService
+from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.seed import seed_demo_world
 from app.services.tasks import TaskService
 
@@ -323,7 +327,9 @@ async def _run_trial(
             if task.status == AgentTaskStatus.WAITING_FOR_WORLD_EVENT:
                 operation = serialized["pending_world_event"]
                 if isinstance(operation, dict):
-                    GameService(db).resolve_world_operation(
+                    operation_scope = runtime_scope_for_task(db, task)
+                    assert operation_scope is not None
+                    GameService(db, operation_scope).resolve_world_operation(
                         UUID(str(operation["id"])),
                         f"deepseek-e2e-resolution-{attempt}-{index:02d}",
                     )
@@ -376,7 +382,9 @@ async def _run_trial(
             if isinstance(item, dict)
         ]
         diagnostic = _diagnostic(task.last_error_code, planning_runs)
-        world = GameService(db).inspect_command_state(task.player_id)["world"]
+        final_scope = runtime_scope_for_task(db, task)
+        assert final_scope is not None
+        world = GameService(db, final_scope).inspect_command_state(task.player_id)["world"]
         assert isinstance(world, dict)
         model_replan_created = any(
             plan.version > 1 and plan.source == "MODEL_PLANNER" for plan in plans
@@ -527,16 +535,18 @@ async def _run_trial(
 
 def _seed_trial(db: Session, attempt: int) -> ConversationSession:
     seed_demo_world(db)
-    player = GameService(db).create_player(f"DeepSeek Strategic {attempt}")
+    player = Player(name=f"DeepSeek Strategic {attempt}", level=2)
+    db.add(player)
+    db.flush()
+    version = require_builtin_starfire_version(db)
+    runtime = RuntimeInitializationService(db).create(
+        player_id=player.id,
+        scenario_version_id=version.id,
+        creation_key=f"real-strategic-{attempt}",
+    )
     player.level = 2
-    player.gold = 80
-    shen_ce = db.get(NPC, seed_id("npc:shen_ce"))
-    if shen_ce is None:
-        raise RuntimeError("Strategic officer content has not been seeded")
-    session = ConversationSession(player_id=player.id, npc_id=shen_ce.id)
-    db.add(session)
     db.commit()
-    return session
+    return runtime.session
 
 
 def _diagnostic(error_code: str | None, runs: list[AgentRun]) -> str | None:

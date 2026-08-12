@@ -9,8 +9,12 @@ from sqlalchemy import MetaData, Table, create_engine, insert, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.infrastructure.db.models import AgentTask, ConversationSession
+from app.domain.runtime_scope import GameInstanceId
+from app.infrastructure.db.models import AgentTask, ConversationSession, GameInstance, Player
+from app.scenarios.bootstrap import require_builtin_starfire_version
 from app.services.game import GameService, seed_id
+from app.services.runtime_initialization import RuntimeInitializationService
+from app.services.runtime_recovery import RuntimeRecoveryService
 from app.services.seed import seed_demo_world
 from app.services.tasks import TaskService
 
@@ -98,6 +102,14 @@ def test_scope_migration_backfills_only_preexisting_tasks(
 
         conversation = db.scalar(select(ConversationSession).limit(1))
         assert conversation is not None
+        assert legacy.game_instance_id is not None
+        assert conversation.game_instance_id == legacy.game_instance_id
+        instance = db.get(GameInstance, legacy.game_instance_id)
+        assert instance is not None
+        assert instance.creation_key == "legacy-default"
+        recovered = RuntimeRecoveryService(db).recover(GameInstanceId(instance.id))
+        assert recovered.scope.scenario_version_id == instance.scenario_version_id
+        assert {task.id for task in recovered.tasks} == {legacy.id}
         legacy.status = "SUCCEEDED"
         db.flush()
         fresh = TaskService(db).create_task(
@@ -120,13 +132,16 @@ def test_fresh_database_has_unresolved_task_default(
     engine = create_engine(database_url)
     with Session(engine) as db:
         seed_demo_world(db)
-        player = GameService(db).create_player("Fresh Task Player")
-        conversation = ConversationSession(
-            player_id=player.id,
-            npc_id=seed_id("npc:shen_ce"),
-        )
-        db.add(conversation)
+        player = Player(name="Fresh Task Player")
+        db.add(player)
         db.flush()
+        version = require_builtin_starfire_version(db)
+        runtime = RuntimeInitializationService(db).create(
+            player_id=player.id,
+            scenario_version_id=version.id,
+            creation_key="fresh-task-scope-test",
+        )
+        conversation = runtime.session
         task = TaskService(db).create_task(
             conversation,
             "A fresh ambiguous northern command",

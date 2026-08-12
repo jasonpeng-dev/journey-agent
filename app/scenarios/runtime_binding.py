@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import cast
 from uuid import UUID
 
+from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
@@ -99,13 +100,7 @@ def scenario_binding_for_task(
     task: AgentTask,
 ) -> ScenarioBinding | VersionedScenarioBinding:
     if task.game_instance_id is None:
-        legacy = scenario_binding(task.scenario_key)
-        if legacy is None:
-            raise ScenarioRuntimeBindingError(
-                "SCENARIO_RUNTIME_BEHAVIOR_UNAVAILABLE",
-                "The legacy Scenario behavior is unavailable",
-            )
-        return legacy
+        return _legacy_binding(db, task.scenario_key)
     return _versioned_binding(
         db,
         game_instance_id=task.game_instance_id,
@@ -116,6 +111,7 @@ def scenario_binding_for_task(
 
 def runtime_scope_for_task(db: Session, task: AgentTask) -> RuntimeScope | None:
     if task.game_instance_id is None:
+        _legacy_binding(db, task.scenario_key)
         return None
     scope = GameInstanceService(db).load(GameInstanceId(task.game_instance_id))
     if scope.player_id != task.player_id:
@@ -141,13 +137,7 @@ def scenario_binding_for_session(
     expected_scenario_key: str,
 ) -> ScenarioBinding | VersionedScenarioBinding:
     if session.game_instance_id is None:
-        legacy = scenario_binding(expected_scenario_key)
-        if legacy is None:
-            raise ScenarioRuntimeBindingError(
-                "SCENARIO_RUNTIME_BEHAVIOR_UNAVAILABLE",
-                "The legacy Scenario behavior is unavailable",
-            )
-        return legacy
+        return _legacy_binding(db, expected_scenario_key)
     return _versioned_binding(
         db,
         game_instance_id=session.game_instance_id,
@@ -192,6 +182,29 @@ def _versioned_binding(
         objective_evaluator=implementation.objective_evaluator,
         fallback_plans=implementation.fallback_plans,
     )
+
+
+def _legacy_binding(db: Session, scenario_key: str) -> ScenarioBinding:
+    """Compatibility only for a pre-C8 nullable database schema."""
+
+    bind = db.connection()
+    column = next(
+        item
+        for item in inspect(bind).get_columns("conversation_sessions")
+        if item["name"] == "game_instance_id"
+    )
+    if not column["nullable"]:
+        raise ScenarioRuntimeBindingError(
+            "RUNTIME_SCOPE_REQUIRED",
+            "The hardened runtime requires explicit GameInstance ownership",
+        )
+    legacy = scenario_binding(scenario_key)
+    if legacy is None:
+        raise ScenarioRuntimeBindingError(
+            "SCENARIO_RUNTIME_BEHAVIOR_UNAVAILABLE",
+            "The legacy Scenario behavior is unavailable",
+        )
+    return legacy
 
 
 __all__ = [

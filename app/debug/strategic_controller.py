@@ -10,14 +10,19 @@ from app.agent.task_orchestrator import TaskOrchestrator
 from app.core.config import Settings
 from app.core.errors import AppError, NotFoundError
 from app.domain.enums import AgentTaskStatus, MessageRole, SessionStatus, WorldOperationStatus
+from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import (
     NPC,
     AgentTask,
     ConversationMessage,
     ConversationSession,
+    Player,
     WorldOperation,
 )
+from app.scenarios.bootstrap import require_builtin_starfire_version
 from app.services.game import GameService, seed_id
+from app.services.game_instances import GameInstanceService
+from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.tasks import TaskService
 
 TERMINAL_TASK_STATUSES = {
@@ -40,24 +45,26 @@ class StrategicDebugController:
         self.tasks = TaskService(db, max_replans=settings.planner_max_replans)
 
     def reset(self) -> dict[str, object]:
-        player = GameService(self.db).create_player("Strategic Commander")
+        player = Player(name="Strategic Commander")
+        self.db.add(player)
+        self.db.flush()
         player.level = 2
-        player.gold = 80
-        shen_ce = self.db.get(NPC, seed_id("npc:shen_ce"))
-        if shen_ce is None:
-            raise AppError(
-                "WORLD_NOT_SEEDED",
-                "Strategic officer content has not been seeded",
-                status_code=503,
-            )
-        session = ConversationSession(player_id=player.id, npc_id=shen_ce.id)
-        self.db.add(session)
+        version = require_builtin_starfire_version(self.db)
+        runtime = RuntimeInitializationService(self.db).create(
+            player_id=player.id,
+            scenario_version_id=version.id,
+            creation_key=f"strategic-debug-{uuid4().hex}",
+        )
+        shen_ce = self.db.get(NPC, runtime.session.npc_id)
+        assert shen_ce is not None
         self.db.commit()
         return {
             "event": "STRATEGIC_SCENARIO_RESET",
             "scenario_key": "starfire_command",
             "player_id": str(player.id),
-            "session_id": str(session.id),
+            "game_instance_id": str(runtime.instance.id),
+            "scenario_version_id": str(version.id),
+            "session_id": str(runtime.session.id),
             "commanding_officer": _officer_ref(shen_ce),
         }
 
@@ -68,7 +75,7 @@ class StrategicDebugController:
         idempotency_key: str | None,
     ) -> dict[str, object]:
         session = self._strategic_session(session_id)
-        existing = self._latest_task(session.player_id)
+        existing = self._latest_task(self._instance_id(session))
         if existing is not None and existing.status not in TERMINAL_TASK_STATUSES:
             task = existing
             start_event = "EXISTING_TASK"
@@ -188,14 +195,21 @@ class StrategicDebugController:
         operation = self.db.get(WorldOperation, operation_id)
         if operation is None:
             raise NotFoundError("world_operation", operation_id)
-        if operation.task_id != task.id or operation.player_id != session.player_id:
+        if (
+            operation.task_id != task.id
+            or operation.player_id != session.player_id
+            or operation.game_instance_id != session.game_instance_id
+        ):
             raise AppError(
                 "WORLD_EVENT_SCOPE_INVALID",
                 "The world event does not belong to this strategic command",
                 status_code=403,
             )
         resolution_key = idempotency_key or f"strategic-resolve-{operation.id}"
-        operation = GameService(self.db).resolve_world_operation(operation.id, resolution_key)
+        scope = GameInstanceService(self.db).load(GameInstanceId(self._instance_id(session)))
+        operation = GameService(self.db, scope).resolve_world_operation(
+            operation.id, resolution_key
+        )
         self.db.commit()
         transitions = await self.drive_until_pause(task.id, session)
         return {
@@ -259,7 +273,24 @@ class StrategicDebugController:
                 "Strategic commands must be issued through Shen Ce",
                 status_code=403,
             )
+        if session.game_instance_id is None:
+            raise AppError(
+                "RUNTIME_SCOPE_REQUIRED",
+                "Strategic debug sessions require explicit GameInstance ownership",
+                status_code=409,
+            )
+        GameInstanceService(self.db).load(GameInstanceId(session.game_instance_id))
         return session
+
+    @staticmethod
+    def _instance_id(session: ConversationSession) -> UUID:
+        if session.game_instance_id is None:
+            raise AppError(
+                "RUNTIME_SCOPE_REQUIRED",
+                "Strategic debug sessions require explicit GameInstance ownership",
+                status_code=409,
+            )
+        return session.game_instance_id
 
     def _strategic_task(
         self,
@@ -269,6 +300,7 @@ class StrategicDebugController:
         task = self.tasks.get_task(task_id, lock=True)
         if (
             task.player_id != session.player_id
+            or task.game_instance_id != session.game_instance_id
             or task.scenario_key != "starfire_command"
             or task.owner_npc_id != seed_id("npc:shen_ce")
         ):
@@ -280,11 +312,11 @@ class StrategicDebugController:
         self.tasks.bind_session(task, session)
         return task
 
-    def _latest_task(self, player_id: UUID) -> AgentTask | None:
+    def _latest_task(self, game_instance_id: UUID) -> AgentTask | None:
         return self.db.scalar(
             select(AgentTask)
             .where(
-                AgentTask.player_id == player_id,
+                AgentTask.game_instance_id == game_instance_id,
                 AgentTask.scenario_key == "starfire_command",
             )
             .order_by(AgentTask.created_at.desc())

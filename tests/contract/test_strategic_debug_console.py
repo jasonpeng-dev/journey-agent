@@ -34,10 +34,14 @@ def test_strategic_snapshot_is_shen_ce_scoped_and_hides_truth_by_default(
 ) -> None:
     fixture = _reset(client)
     session_id = str(fixture["session_id"])
+    assert fixture["game_instance_id"]
+    assert fixture["scenario_version_id"]
 
     snapshot = _snapshot(client, session_id)
 
     assert snapshot["scenario"]["key"] == "starfire_command"
+    assert snapshot["game_instance_id"] == fixture["game_instance_id"]
+    assert snapshot["scenario"]["version_id"] == fixture["scenario_version_id"]
     assert snapshot["session"]["commanding_officer"]["key"] == "shen_ce"
     assert {officer["key"] for officer in snapshot["officers"]} == {
         "shen_ce",

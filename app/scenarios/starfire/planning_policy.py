@@ -125,9 +125,36 @@ class StarfirePlanningPolicy:
         state: ScenarioRuntimeState,
         scope: ObjectiveScope,
     ) -> tuple[ScenarioPlanIssue, ...]:
-        del selected_tools, wait_count, is_replan, state
+        del selected_tools, wait_count
         issues: list[ScenarioPlanIssue] = []
         for index, step in enumerate(steps):
+            arguments = step.get("tool_arguments")
+            tool_arguments = arguments if isinstance(arguments, Mapping) else {}
+            planned_countermeasure = any(
+                prior.get("selected_tool_name") == "start_military_operation"
+                and isinstance(prior.get("tool_arguments"), Mapping)
+                and prior["tool_arguments"].get("mission_type") == "DISRUPT_SUPPLY"
+                for prior in steps[:index]
+            )
+            if (
+                is_replan
+                and step.get("selected_tool_name") == "start_military_operation"
+                and tool_arguments.get("mission_type") == "CLEAR_VALLEY"
+                and state.fact_known("enemy_north_supply_route", "supply_status")
+                and self._value(state, "enemy_north_supply_route", "supply_status") == "ACTIVE"
+                and not planned_countermeasure
+            ):
+                issues.append(
+                    ScenarioPlanIssue(
+                        code="PLAN_KNOWN_COUNTERMEASURE_REQUIRED",
+                        path=f"steps.{index}.tool_arguments.mission_type",
+                        message=(
+                            "Known state proves CLEAR_VALLEY will fail while the enemy supply "
+                            "route remains ACTIVE. Disrupt the known supply target and wait for "
+                            "that operation before attempting CLEAR_VALLEY again."
+                        ),
+                    )
+                )
             terminal_effect = self._terminal_action_effect(step)
             if terminal_effect is not None and terminal_effect not in self._in_scope_terminal_facts(
                 scope
@@ -149,8 +176,6 @@ class StarfirePlanningPolicy:
                 )
             if step.get("selected_tool_name") != "negotiate_village_support":
                 continue
-            arguments = step.get("tool_arguments")
-            tool_arguments = arguments if isinstance(arguments, Mapping) else {}
             food_offer = tool_arguments.get("food_offer")
             requested_support = tool_arguments.get("requested_support")
             required_support = (

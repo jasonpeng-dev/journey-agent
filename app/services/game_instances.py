@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import ClassVar
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -55,7 +55,19 @@ class GameInstanceService:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def create(self, *, player_id: UUID, scenario_version_id: UUID) -> GameInstance:
+    def create(
+        self,
+        *,
+        player_id: UUID,
+        scenario_version_id: UUID,
+        creation_key: str | None = None,
+    ) -> GameInstance:
+        resolved_creation_key = creation_key or f"direct:{uuid4().hex}"
+        if not resolved_creation_key.strip():
+            raise GameInstanceError(
+                "GAME_INSTANCE_CREATION_KEY_REQUIRED",
+                "GameInstance creation requires a non-empty idempotency key",
+            )
         if self.db.get(Player, player_id) is None:
             raise GameInstanceError(
                 "GAME_INSTANCE_PLAYER_NOT_FOUND",
@@ -65,6 +77,7 @@ class GameInstanceService:
         instance = GameInstance(
             player_id=player_id,
             scenario_version_id=scenario_version_id,
+            creation_key=resolved_creation_key,
             status=GameInstanceStatus.PENDING_INITIALIZATION,
             runtime_revision=0,
         )

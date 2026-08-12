@@ -15,8 +15,10 @@ from app.agent.types import (
     ToolDefinition,
 )
 from app.core.config import Settings
+from app.domain.scenario import BehaviorBundleRef
 from app.scenarios.contracts import ObjectiveScope
 from app.scenarios.registry import scenario_binding
+from app.scenarios.runtime_binding import require_runtime_implementation
 
 
 class ProviderFailure(Exception):
@@ -49,9 +51,19 @@ class MockModelProvider:
             raw = message.content.split("PLANNER_REQUEST_JSON:", 1)[1].strip()
             request = json.loads(raw)
             task_id = UUID(str(request["task_id"]))
-            scenario = scenario_binding(str(request["scenario_key"]))
-            if scenario is None:
-                continue
+            raw_behavior = request.get("behavior_bundle")
+            if isinstance(raw_behavior, dict):
+                fallback_plans = require_runtime_implementation(
+                    BehaviorBundleRef(
+                        key=str(raw_behavior["key"]),
+                        version=str(raw_behavior["version"]),
+                    )
+                ).fallback_plans
+            else:
+                scenario = scenario_binding(str(request["scenario_key"]))
+                if scenario is None:
+                    continue
+                fallback_plans = scenario.fallback_plans
             raw_scope = request.get("objective_scope")
             if not isinstance(raw_scope, dict):
                 continue
@@ -64,11 +76,11 @@ class MockModelProvider:
                 failure_code = str(request["failure_code"])
                 next_version = int(request["next_plan_version"])
                 if failure_code == "PLAN_EXHAUSTED_SCOPE_INCOMPLETE":
-                    arguments = scenario.fallback_plans.initial(task_id, scope)
+                    arguments = fallback_plans.initial(task_id, scope)
                     arguments["replan_reason"] = failure_code
                     arguments["idempotency_key"] = f"task-replan-{task_id}-v{next_version}"
                 else:
-                    arguments = scenario.fallback_plans.recovery(
+                    arguments = fallback_plans.recovery(
                         task_id,
                         next_version,
                         failure_code,
@@ -76,7 +88,7 @@ class MockModelProvider:
                     )
                 tool_name = "replan_task"
             else:
-                arguments = scenario.fallback_plans.initial(task_id, scope)
+                arguments = fallback_plans.initial(task_id, scope)
                 tool_name = "create_task_plan"
             if tool_name not in tool_names:
                 continue

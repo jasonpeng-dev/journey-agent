@@ -192,6 +192,55 @@ def test_scope_constraints_expose_terminal_boundaries_without_tool_blueprint() -
     assert "start_trade_route_test" not in str(boundary)
 
 
+def test_replan_rejects_known_doomed_clear_until_supply_is_disrupted() -> None:
+    scope = STARFIRE_OBJECTIVE_CATALOG.scope([StarfireObjectiveKey.RESTORE_STARFIRE_OUTPOST])
+    active_supply = _state()
+    step = {
+        "selected_tool_name": "start_military_operation",
+        "tool_arguments": {"mission_type": "CLEAR_VALLEY"},
+    }
+
+    issues = STARFIRE_PLANNING_POLICY.validate_candidate_plan(
+        [step],
+        ["start_military_operation"],
+        0,
+        is_replan=True,
+        state=active_supply,
+        scope=scope,
+    )
+
+    assert any(issue.code == "PLAN_KNOWN_COUNTERMEASURE_REQUIRED" for issue in issues)
+    assert not any(
+        issue.code == "PLAN_KNOWN_COUNTERMEASURE_REQUIRED"
+        for issue in STARFIRE_PLANNING_POLICY.validate_candidate_plan(
+            [step],
+            ["start_military_operation"],
+            0,
+            is_replan=False,
+            state=active_supply,
+            scope=scope,
+        )
+    )
+    countermeasure_then_clear = [
+        {
+            "selected_tool_name": "start_military_operation",
+            "tool_arguments": {"mission_type": "DISRUPT_SUPPLY"},
+        },
+        step,
+    ]
+    assert not any(
+        issue.code == "PLAN_KNOWN_COUNTERMEASURE_REQUIRED"
+        for issue in STARFIRE_PLANNING_POLICY.validate_candidate_plan(
+            countermeasure_then_clear,
+            ["start_military_operation", "start_military_operation"],
+            0,
+            is_replan=True,
+            state=active_supply,
+            scope=scope,
+        )
+    )
+
+
 def test_state_aware_fallback_uses_only_remaining_canonical_suffix() -> None:
     proposal = STARFIRE_FALLBACK_PLANS.state_aware_recovery(
         uuid4(),

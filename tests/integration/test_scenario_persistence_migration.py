@@ -70,6 +70,12 @@ def test_migrated_game_instance_binding_is_database_immutable(
     assert "creation_key" in {
         column["name"] for column in inspect(engine).get_columns("game_instances")
     }
+    creation_key_column = next(
+        column
+        for column in inspect(engine).get_columns("game_instances")
+        if column["name"] == "creation_key"
+    )
+    assert creation_key_column["nullable"] is False
     runtime_tables = {
         "game_instance_node_states",
         "game_instance_fact_states",
@@ -90,7 +96,10 @@ def test_migrated_game_instance_binding_is_database_immutable(
             for column in inspect(engine).get_columns(table_name)
             if column["name"] == "game_instance_id"
         )
-        assert instance_column["nullable"] is True
+        assert instance_column["nullable"] is False
+    operation_indexes = {item["name"] for item in inspect(engine).get_indexes("world_operations")}
+    assert "uq_world_operations_instance_idempotency" in operation_indexes
+    assert "uq_world_operations_legacy_idempotency" not in operation_indexes
     with Session(engine) as db:
         seed_scenario_definitions(db)
         scenario = ScenarioDefinitionRepository(db).find_scenario("starfire_command")
@@ -109,6 +118,7 @@ def test_migrated_game_instance_binding_is_database_immutable(
         instance = GameInstanceService(db).create(
             player_id=player.id,
             scenario_version_id=version.id,
+            creation_key="migration-instance-test",
         )
         db.commit()
 
