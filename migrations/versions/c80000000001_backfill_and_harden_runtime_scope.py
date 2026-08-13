@@ -16,9 +16,9 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import sqlalchemy as sa
 from alembic import op
 
-from app.scenarios.documents import SCENARIO_DOCUMENT_SCHEMA_VERSION, ScenarioDefinitionDocument
+from app.scenarios.documents import SCENARIO_DOCUMENT_SCHEMA_VERSION
+from app.scenarios.builtin import STARFIRE_V2
 from app.scenarios.serialization import canonical_document, scenario_content_hash
-from app.scenarios.starfire.scenario import STARFIRE_SCENARIO_DEFINITION
 
 revision: str = "c80000000001"
 down_revision: str | None = "c60000000001"
@@ -84,9 +84,7 @@ def _bootstrap_legacy_starfire_version(bind: sa.Connection) -> UUID:
     scenarios = tables["scenarios"]
     drafts = tables["scenario_drafts"]
     versions = tables["scenario_versions"]
-    draft_payload = ScenarioDefinitionDocument.from_domain(STARFIRE_SCENARIO_DEFINITION).model_dump(
-        mode="json"
-    )
+    draft_payload = STARFIRE_V2.model_dump(mode="json")
     canonical = canonical_document(draft_payload).model_dump(mode="json")
     content_hash = scenario_content_hash(canonical)
     now = datetime.now(UTC)
@@ -101,7 +99,7 @@ def _bootstrap_legacy_starfire_version(bind: sa.Connection) -> UUID:
             scenarios.insert().values(
                 id=_db_uuid(bind, scenario_id),
                 key="starfire_command",
-                name=STARFIRE_SCENARIO_DEFINITION.world.name,
+                name=STARFIRE_V2.metadata.name,
                 status="PUBLISHED",
                 version=1,
                 current_published_version_id=None,
@@ -156,8 +154,8 @@ def _bootstrap_legacy_starfire_version(bind: sa.Connection) -> UUID:
                 schema_version=SCENARIO_DOCUMENT_SCHEMA_VERSION,
                 snapshot_document=canonical,
                 content_hash=content_hash,
-                behavior_bundle_key=canonical["behavior_bundle"]["key"],
-                behavior_bundle_version=canonical["behavior_bundle"]["version"],
+                behavior_bundle_key=canonical["engine_contract"]["key"],
+                behavior_bundle_version=canonical["engine_contract"]["version"],
                 published_at=now,
                 created_at=now,
             )

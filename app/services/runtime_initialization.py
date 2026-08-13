@@ -1,4 +1,4 @@
-"""Transactional, idempotent Runtime initialization from an exact ScenarioVersion."""
+"""Transactional, idempotent Runtime initialization from an exact v2 ScenarioVersion."""
 
 from __future__ import annotations
 
@@ -9,21 +9,17 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.domain.enums import GameInstanceStatus, NodeStatus, NPCRole
-from app.domain.world import AccessState, Visibility, WorldNodeType
+from app.domain.enums import GameInstanceStatus, NodeStatus
+from app.domain.world import AccessState
 from app.infrastructure.db.models import (
-    NPC,
     ConversationSession,
     GameInstance,
+    GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
-    GameInstanceOfficerAppointment,
     GameInstanceResourceState,
-    GameInstanceWorldFact,
     Player,
 )
-from app.scenarios.runtime_binding import require_runtime_implementation
-from app.scenarios.starfire.compatibility import legacy_fact_key
 from app.scenarios.versions import ScenarioVersionRepository
 
 
@@ -52,8 +48,6 @@ class RuntimeInitializationService:
         scenario_version_id: UUID,
         creation_key: str,
     ) -> InitializedRuntime:
-        """Create a complete runtime inside a savepoint owned by the caller transaction."""
-
         if not creation_key.strip():
             raise RuntimeInitializationError(
                 "RUNTIME_CREATION_KEY_REQUIRED",
@@ -89,26 +83,15 @@ class RuntimeInitializationService:
     ) -> InitializedRuntime:
         if self.db.get(Player, player_id) is None:
             raise RuntimeInitializationError(
-                "RUNTIME_PLAYER_NOT_FOUND",
-                "The Runtime Player does not exist",
+                "RUNTIME_PLAYER_NOT_FOUND", "The Runtime Player does not exist"
             )
-        snapshot = ScenarioVersionRepository(self.db).load(scenario_version_id)
-        definition = snapshot.definition
-        require_runtime_implementation(definition.behavior_bundle)
-        start_nodes = tuple(
-            node for node in definition.world.nodes if node.node_type == WorldNodeType.HEADQUARTERS
-        )
-        if len(start_nodes) != 1:
-            raise RuntimeInitializationError(
-                "RUNTIME_START_NODE_INVALID",
-                "A ScenarioVersion must define exactly one HEADQUARTERS start Node",
-            )
-        start = start_nodes[0]
+        definition = ScenarioVersionRepository(self.db).load(scenario_version_id).definition
+        start_key = definition.initialization.start_node_key
         instance = GameInstance(
             player_id=player_id,
             scenario_version_id=scenario_version_id,
             status=GameInstanceStatus.PENDING_INITIALIZATION,
-            current_node_key=start.key,
+            current_node_key=start_key,
             creation_key=creation_key,
             runtime_revision=0,
         )
@@ -117,7 +100,7 @@ class RuntimeInitializationService:
         for node in definition.world.nodes:
             status = (
                 NodeStatus.ENTERED
-                if node.key == start.key
+                if node.key == start_key
                 else (
                     NodeStatus.LOCKED
                     if node.initial_access == AccessState.LOCKED
@@ -142,15 +125,6 @@ class RuntimeInitializationService:
                         visibility=fact.initial_visibility,
                     )
                 )
-                legacy_key = legacy_fact_key(node.key, fact.key)
-                if legacy_key is not None and fact.initial_visibility == Visibility.KNOWN:
-                    self.db.add(
-                        GameInstanceWorldFact(
-                            game_instance_id=instance.id,
-                            key=legacy_key,
-                            value={"status": fact.initial_value},
-                        )
-                    )
         for resource in definition.world.resources:
             self.db.add(
                 GameInstanceResourceState(
@@ -160,38 +134,35 @@ class RuntimeInitializationService:
                     reserved_value=0,
                 )
             )
-        officers = self.db.scalars(
-            select(NPC).where(
-                NPC.enabled.is_(True),
-                NPC.role.in_([NPCRole.STRATEGIST, NPCRole.GENERAL, NPCRole.STEWARD]),
-            )
-        ).all()
-        strategist = next(
-            (officer for officer in officers if officer.role == NPCRole.STRATEGIST),
-            None,
-        )
-        if strategist is None:
-            raise RuntimeInitializationError(
-                "RUNTIME_STRATEGIST_UNAVAILABLE",
-                "Runtime initialization requires an enabled Strategist",
-            )
-        for officer in officers:
+        roles = {role.key: role for role in definition.actors.roles}
+        primary_key = definition.initialization.primary_actor_key
+        for actor in definition.actors.actor_profiles:
+            role = roles[actor.role_key]
             self.db.add(
-                GameInstanceOfficerAppointment(
+                GameInstanceActor(
                     game_instance_id=instance.id,
-                    npc_id=officer.id,
+                    actor_key=actor.key,
+                    role_key=actor.role_key,
+                    name=actor.name,
+                    persona=actor.persona,
+                    doctrine={item.key: item.value for item in actor.doctrine},
+                    current_node_key=actor.initial_node_key,
+                    allowed_action_keys=list(actor.allowed_action_keys),
+                    authority_policy=actor.authority_policy.model_dump(mode="json"),
+                    capabilities=[capability.value for capability in role.capabilities],
+                    is_primary=actor.key == primary_key,
                 )
             )
-        conversation = ConversationSession(
+        session = ConversationSession(
             player_id=player_id,
             game_instance_id=instance.id,
-            npc_id=strategist.id,
+            actor_key=primary_key,
         )
-        self.db.add(conversation)
+        self.db.add(session)
         instance.status = GameInstanceStatus.ACTIVE
         instance.runtime_revision = 1
         self.db.flush()
-        return InitializedRuntime(instance=instance, session=conversation, created=True)
+        return InitializedRuntime(instance=instance, session=session, created=True)
 
     def _existing(self, player_id: UUID, creation_key: str) -> GameInstance | None:
         return self.db.scalar(
@@ -201,11 +172,7 @@ class RuntimeInitializationService:
             )
         )
 
-    def _replay(
-        self,
-        instance: GameInstance,
-        requested_version_id: UUID,
-    ) -> InitializedRuntime:
+    def _replay(self, instance: GameInstance, requested_version_id: UUID) -> InitializedRuntime:
         if instance.scenario_version_id != requested_version_id:
             raise RuntimeInitializationError(
                 "RUNTIME_CREATION_KEY_REUSED",
@@ -216,54 +183,49 @@ class RuntimeInitializationService:
                 "RUNTIME_INITIALIZATION_INCOMPLETE",
                 "The idempotent GameInstance is not fully initialized",
             )
-        snapshot = ScenarioVersionRepository(self.db).load(instance.scenario_version_id)
-        require_runtime_implementation(snapshot.definition.behavior_bundle)
-        conversations = self.db.scalars(
+        definition = (
+            ScenarioVersionRepository(self.db).load(instance.scenario_version_id).definition
+        )
+        sessions = self.db.scalars(
             select(ConversationSession).where(ConversationSession.game_instance_id == instance.id)
         ).all()
-        expected_nodes = len(snapshot.definition.world.nodes)
-        expected_facts = sum(len(node.facts) for node in snapshot.definition.world.nodes)
-        expected_resources = len(snapshot.definition.world.resources)
-        actual_nodes = self.db.scalar(
-            select(func.count())
-            .select_from(GameInstanceNodeState)
-            .where(GameInstanceNodeState.game_instance_id == instance.id)
+        counts = tuple(
+            int(value or 0)
+            for value in (
+                self.db.scalar(
+                    select(func.count())
+                    .select_from(GameInstanceNodeState)
+                    .where(GameInstanceNodeState.game_instance_id == instance.id)
+                ),
+                self.db.scalar(
+                    select(func.count())
+                    .select_from(GameInstanceFactState)
+                    .where(GameInstanceFactState.game_instance_id == instance.id)
+                ),
+                self.db.scalar(
+                    select(func.count())
+                    .select_from(GameInstanceResourceState)
+                    .where(GameInstanceResourceState.game_instance_id == instance.id)
+                ),
+                self.db.scalar(
+                    select(func.count())
+                    .select_from(GameInstanceActor)
+                    .where(GameInstanceActor.game_instance_id == instance.id)
+                ),
+            )
         )
-        actual_facts = self.db.scalar(
-            select(func.count())
-            .select_from(GameInstanceFactState)
-            .where(GameInstanceFactState.game_instance_id == instance.id)
+        expected = (
+            len(definition.world.nodes),
+            sum(len(node.facts) for node in definition.world.nodes),
+            len(definition.world.resources),
+            len(definition.actors.actor_profiles),
         )
-        actual_resources = self.db.scalar(
-            select(func.count())
-            .select_from(GameInstanceResourceState)
-            .where(GameInstanceResourceState.game_instance_id == instance.id)
-        )
-        actual_officers = self.db.scalar(
-            select(func.count())
-            .select_from(GameInstanceOfficerAppointment)
-            .where(GameInstanceOfficerAppointment.game_instance_id == instance.id)
-        )
-        if (
-            len(conversations) != 1
-            or actual_nodes != expected_nodes
-            or actual_facts != expected_facts
-            or actual_resources != expected_resources
-            or not actual_officers
-        ):
+        if len(sessions) != 1 or counts != expected:
             raise RuntimeInitializationError(
                 "RUNTIME_INITIALIZATION_INCOMPLETE",
                 "The idempotent GameInstance runtime graph is incomplete",
             )
-        return InitializedRuntime(
-            instance=instance,
-            session=conversations[0],
-            created=False,
-        )
+        return InitializedRuntime(instance=instance, session=sessions[0], created=False)
 
 
-__all__ = [
-    "InitializedRuntime",
-    "RuntimeInitializationError",
-    "RuntimeInitializationService",
-]
+__all__ = ["InitializedRuntime", "RuntimeInitializationError", "RuntimeInitializationService"]

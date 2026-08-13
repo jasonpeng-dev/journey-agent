@@ -1,0 +1,470 @@
+schema_version: 2
+metadata:
+  key: starfire_command
+  name: Starfire Strategic Command
+  description: Recover the northern valley, outpost, and trade route.
+engine_contract:
+  key: declarative-rule-engine
+  version: "1"
+initialization:
+  start_node_key: capital_council
+  primary_actor_key: shen_ce
+world:
+  key: starfire_command
+  name: Starfire Strategic Command
+  node_types:
+    - {key: headquarters, name: Headquarters}
+    - {key: settlement, name: Settlement}
+    - {key: location, name: Location}
+    - {key: route, name: Route}
+    - {key: facility, name: Facility}
+  nodes:
+    - key: capital_council
+      name: Capital Council
+      description: Command headquarters.
+      node_type_key: headquarters
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: north_village
+      name: North Village
+      description: A source of intelligence, guides, and supplies.
+      node_type_key: settlement
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+      interaction_keys: [negotiate_support]
+      facts:
+        - key: village_support
+          name: Village Support
+          value_type: ENUM
+          initial_value: NONE
+          initial_visibility: KNOWN
+          allowed_values: [NONE, INTELLIGENCE, GUIDE, SUPPLIES]
+    - key: northern_valley
+      name: Northern Valley
+      description: A threatened route to the outpost.
+      node_type_key: location
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+      interaction_keys: [reconnaissance, clear_threat]
+      facts:
+        - key: valley_intelligence
+          name: Valley Intelligence
+          value_type: ENUM
+          initial_value: INCOMPLETE
+          initial_visibility: KNOWN
+          allowed_values: [INCOMPLETE, PARTIAL, COMPLETE]
+        - key: valley_security
+          name: Valley Security
+          value_type: ENUM
+          initial_value: UNSAFE
+          initial_visibility: KNOWN
+          allowed_values: [UNSAFE, SAFE]
+        - key: ambush_status
+          name: Ambush Status
+          value_type: ENUM
+          initial_value: ACTIVE
+          initial_visibility: HIDDEN
+          allowed_values: [ACTIVE, CLEARED]
+    - key: enemy_north_supply_route
+      name: Enemy North Supply Route
+      description: Hidden enemy logistics supporting the ambush.
+      node_type_key: route
+      initial_access: LOCKED
+      initial_visibility: HIDDEN
+      interaction_keys: [disrupt_supply]
+      facts:
+        - key: supply_status
+          name: Supply Status
+          value_type: ENUM
+          initial_value: ACTIVE
+          initial_visibility: HIDDEN
+          allowed_values: [ACTIVE, DISRUPTED]
+    - key: starfire_outpost
+      name: Starfire Outpost
+      description: A damaged northern facility.
+      node_type_key: facility
+      initial_access: LOCKED
+      initial_visibility: KNOWN
+      interaction_keys: [repair]
+      facts:
+        - key: outpost_status
+          name: Outpost Status
+          value_type: ENUM
+          initial_value: DAMAGED
+          initial_visibility: KNOWN
+          allowed_values: [DAMAGED, OPERATIONAL, RESTORED]
+    - key: northern_trade_route
+      name: Northern Trade Route
+      description: Trade route enabled by a safe valley and working outpost.
+      node_type_key: route
+      initial_access: LOCKED
+      initial_visibility: KNOWN
+      interaction_keys: [test_trade_route]
+      facts:
+        - key: trade_route_status
+          name: Trade Route Status
+          value_type: ENUM
+          initial_value: CLOSED
+          initial_visibility: KNOWN
+          allowed_values: [CLOSED, OPEN]
+  relations:
+    - {source_node_key: north_village, relation_type_key: supports, target_node_key: northern_valley}
+    - {source_node_key: north_village, relation_type_key: supports, target_node_key: northern_trade_route}
+    - {source_node_key: enemy_north_supply_route, relation_type_key: supports, target_node_key: northern_valley}
+    - {source_node_key: northern_valley, relation_type_key: reveals, target_node_key: enemy_north_supply_route}
+    - {source_node_key: northern_valley, relation_type_key: unlocks, target_node_key: starfire_outpost}
+    - {source_node_key: northern_valley, relation_type_key: enables, target_node_key: northern_trade_route}
+    - {source_node_key: starfire_outpost, relation_type_key: enables, target_node_key: northern_trade_route}
+  resources:
+    - {key: soldiers, name: Soldiers, initial_value: 300, minimum: 0}
+    - {key: food, name: Food, initial_value: 100, minimum: 0}
+    - {key: gold, name: Gold, initial_value: 80, minimum: 0}
+    - {key: morale, name: Morale, initial_value: 60, minimum: 0, maximum: 100}
+actors:
+  roles:
+    - key: strategist
+      name: Strategist
+      capabilities: [PLAN, EXECUTE_ACTION, INSPECT_STATE]
+    - key: general
+      name: General
+      capabilities: [EXECUTE_ACTION, INSPECT_STATE]
+    - key: steward
+      name: Steward
+      capabilities: [EXECUTE_ACTION, INSPECT_STATE]
+  actor_profiles:
+    - key: shen_ce
+      name: Shen Ce
+      role_key: strategist
+      persona: A cautious strategist who values intelligence and low casualties.
+      doctrine:
+        - {key: risk_preference, value: LOW}
+      initial_node_key: capital_council
+      allowed_action_keys: [recon_valley, clear_valley, disrupt_supply, negotiate_support, repair_outpost, test_trade_route]
+      authority_policy:
+        autonomous_limits:
+          - {parameter_key: troop_count, maximum: 200}
+          - {parameter_key: food_offer, maximum: 30}
+          - {parameter_key: food_commitment, maximum: 30}
+          - {parameter_key: gold_commitment, maximum: 40}
+    - key: han_lie
+      name: Han Lie
+      role_key: general
+      persona: A decisive field commander.
+      initial_node_key: capital_council
+      allowed_action_keys: [recon_valley, clear_valley, disrupt_supply]
+    - key: lu_ning
+      name: Lu Ning
+      role_key: steward
+      persona: A resource-conscious civil steward.
+      initial_node_key: capital_council
+      allowed_action_keys: [negotiate_support, repair_outpost, test_trade_route]
+interactions:
+  - {key: negotiate_support, name: Negotiate Support}
+  - {key: reconnaissance, name: Reconnaissance}
+  - {key: clear_threat, name: Clear Threat}
+  - {key: disrupt_supply, name: Disrupt Supply}
+  - {key: repair, name: Repair}
+  - {key: test_trade_route, name: Test Trade Route}
+actions:
+  - key: recon_valley
+    name: Recon Northern Valley
+    required_interaction_key: reconnaissance
+    execution_mode: ASYNC
+    parameters:
+      - {key: troop_count, name: Troop Count, value_type: INTEGER, required: false, minimum: 1, maximum: 300, default: 20}
+      - {key: approach, name: Approach, value_type: ENUM, required: false, allowed_values: [CAUTIOUS, STANDARD, AGGRESSIVE], default: CAUTIOUS}
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: PARTIAL_SUCCESS, name: Partial Success, success: true}
+    planning:
+      terminal_effects: [{node_key: northern_valley, fact_key: valley_intelligence}]
+      success_outcome_codes: [PARTIAL_SUCCESS]
+      wait_success_outcome_codes: [PARTIAL_SUCCESS]
+  - key: negotiate_support
+    name: Negotiate Village Support
+    required_interaction_key: negotiate_support
+    execution_mode: IMMEDIATE
+    parameters:
+      - {key: food_offer, name: Food Offer, value_type: INTEGER, required: false, minimum: 0, maximum: 100, default: 20}
+      - {key: requested_support, name: Requested Support, value_type: ENUM, required: false, allowed_values: [INTELLIGENCE, GUIDE, SUPPLIES], default: GUIDE}
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: SUPPORT_GAINED, name: Support Gained, success: true}
+    planning:
+      terminal_effects: [{node_key: north_village, fact_key: village_support}]
+      success_outcome_codes: [SUPPORT_GAINED]
+  - key: clear_valley
+    name: Clear Northern Valley
+    required_interaction_key: clear_threat
+    execution_mode: ASYNC
+    parameters:
+      - {key: troop_count, name: Troop Count, value_type: INTEGER, required: false, minimum: 1, maximum: 300, default: 80}
+      - {key: strategy, name: Strategy, value_type: ENUM, required: false, allowed_values: [CAUTIOUS, STANDARD, AGGRESSIVE], default: STANDARD}
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: VICTORY, name: Victory, success: true}
+      - {code: ENCOUNTER_DEFEAT, name: Encounter Defeat, success: false}
+    planning:
+      terminal_effects: [{node_key: northern_valley, fact_key: valley_security}]
+      success_outcome_codes: [VICTORY]
+      wait_success_outcome_codes: [VICTORY]
+  - key: disrupt_supply
+    name: Disrupt Enemy Supply
+    required_interaction_key: disrupt_supply
+    execution_mode: ASYNC
+    parameters:
+      - {key: troop_count, name: Troop Count, value_type: INTEGER, required: false, minimum: 1, maximum: 300, default: 30}
+      - {key: strategy, name: Strategy, value_type: ENUM, required: false, allowed_values: [CAUTIOUS, STANDARD, AGGRESSIVE], default: CAUTIOUS}
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: VICTORY, name: Victory, success: true}
+    planning:
+      supporting_effects: [{node_key: enemy_north_supply_route, fact_key: supply_status}]
+      success_outcome_codes: [VICTORY]
+      wait_success_outcome_codes: [VICTORY]
+  - key: repair_outpost
+    name: Repair Starfire Outpost
+    required_interaction_key: repair
+    execution_mode: ASYNC
+    parameters:
+      - {key: repair_level, name: Repair Level, value_type: ENUM, required: false, allowed_values: [TEMPORARY, FULL], default: FULL}
+      - {key: food_commitment, name: Food Commitment, value_type: INTEGER, required: false, minimum: 0, maximum: 100, default: 30}
+      - {key: gold_commitment, name: Gold Commitment, value_type: INTEGER, required: false, minimum: 0, maximum: 80, default: 40}
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: COMPLETED, name: Completed, success: true}
+      - {code: VALLEY_UNSAFE, name: Valley Unsafe, success: false}
+    planning:
+      terminal_effects: [{node_key: starfire_outpost, fact_key: outpost_status}]
+      success_outcome_codes: [COMPLETED]
+      wait_success_outcome_codes: [COMPLETED]
+  - key: test_trade_route
+    name: Test Northern Trade Route
+    required_interaction_key: test_trade_route
+    execution_mode: ASYNC
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: COMPLETED, name: Completed, success: true}
+      - {code: WORLD_STATE_CHANGED, name: World State Changed, success: false}
+    planning:
+      terminal_effects: [{node_key: northern_trade_route, fact_key: trade_route_status}]
+      success_outcome_codes: [COMPLETED]
+      wait_success_outcome_codes: [COMPLETED]
+rules:
+  - key: recon_partial_success
+    phase: RESOLVE
+    action_key: recon_valley
+    priority: 0
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: valley_intelligence, value: {source: LITERAL, literal: PARTIAL}}
+      - {kind: REVEAL_FACT, node: {kind: CURRENT_TARGET}, fact_key: ambush_status}
+      - {kind: EMIT_OUTCOME, outcome_code: PARTIAL_SUCCESS}
+  - key: support_full
+    phase: RESOLVE
+    action_key: negotiate_support
+    priority: 10
+    condition: {kind: PARAMETER_COMPARE, parameter_key: food_offer, operator: GTE, value: 20}
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: village_support, value: {source: PARAMETER, parameter_key: requested_support}}
+      - {kind: ADJUST_RESOURCE, resource_key: food, amount: {source: PARAMETER, parameter_key: food_offer, multiplier: -1}}
+      - {kind: EMIT_OUTCOME, outcome_code: SUPPORT_GAINED}
+  - key: support_intelligence_only
+    phase: RESOLVE
+    action_key: negotiate_support
+    priority: 0
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: village_support, value: {source: LITERAL, literal: INTELLIGENCE}}
+      - {kind: ADJUST_RESOURCE, resource_key: food, amount: {source: PARAMETER, parameter_key: food_offer, multiplier: -1}}
+      - {kind: EMIT_OUTCOME, outcome_code: SUPPORT_GAINED}
+  - key: clear_supported_ambush_defeat
+    phase: RESOLVE
+    action_key: clear_valley
+    priority: 100
+    condition:
+      kind: ALL
+      conditions:
+        - {kind: FACT_EQUALS, node: {kind: EXPLICIT, node_key: northern_valley}, fact_key: ambush_status, value: ACTIVE}
+        - {kind: FACT_EQUALS, node: {kind: EXPLICIT, node_key: enemy_north_supply_route}, fact_key: supply_status, value: ACTIVE}
+    effects:
+      - {kind: SET_FACT, node: {kind: EXPLICIT, node_key: northern_valley}, fact_key: valley_intelligence, value: {source: LITERAL, literal: COMPLETE}}
+      - {kind: REVEAL_NODE, node: {kind: EXPLICIT, node_key: enemy_north_supply_route}}
+      - {kind: SET_NODE_ACCESS, node: {kind: EXPLICIT, node_key: enemy_north_supply_route}, access: AVAILABLE}
+      - {kind: REVEAL_FACT, node: {kind: EXPLICIT, node_key: enemy_north_supply_route}, fact_key: supply_status}
+      - {kind: ADJUST_RESOURCE, resource_key: soldiers, amount: {source: LITERAL, literal: -18}}
+      - {kind: ADJUST_RESOURCE, resource_key: morale, amount: {source: LITERAL, literal: -10}}
+      - {kind: EMIT_FAILURE, failure_code: ENCOUNTER_DEFEAT, message: The active ambush is still supplied., retryable: true}
+  - key: clear_with_guide
+    phase: RESOLVE
+    action_key: clear_valley
+    priority: 20
+    condition: {kind: FACT_EQUALS, node: {kind: EXPLICIT, node_key: north_village}, fact_key: village_support, value: GUIDE}
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: valley_security, value: {source: LITERAL, literal: SAFE}}
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: ambush_status, value: {source: LITERAL, literal: CLEARED}}
+      - {kind: REVEAL_FACT, node: {kind: CURRENT_TARGET}, fact_key: ambush_status}
+      - {kind: SET_NODE_ACCESS, node: {kind: EXPLICIT, node_key: starfire_outpost}, access: AVAILABLE}
+      - {kind: ADJUST_RESOURCE, resource_key: soldiers, amount: {source: LITERAL, literal: -3}}
+      - {kind: ADJUST_RESOURCE, resource_key: morale, amount: {source: LITERAL, literal: 5}}
+      - {kind: EMIT_OUTCOME, outcome_code: VICTORY}
+  - key: clear_without_guide
+    phase: RESOLVE
+    action_key: clear_valley
+    priority: 0
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: valley_security, value: {source: LITERAL, literal: SAFE}}
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: ambush_status, value: {source: LITERAL, literal: CLEARED}}
+      - {kind: REVEAL_FACT, node: {kind: CURRENT_TARGET}, fact_key: ambush_status}
+      - {kind: SET_NODE_ACCESS, node: {kind: EXPLICIT, node_key: starfire_outpost}, access: AVAILABLE}
+      - {kind: ADJUST_RESOURCE, resource_key: soldiers, amount: {source: LITERAL, literal: -6}}
+      - {kind: ADJUST_RESOURCE, resource_key: morale, amount: {source: LITERAL, literal: 5}}
+      - {kind: EMIT_OUTCOME, outcome_code: VICTORY}
+  - key: disrupt_already_done
+    phase: PREFLIGHT
+    action_key: disrupt_supply
+    priority: 100
+    condition: {kind: FACT_EQUALS, node: {kind: CURRENT_TARGET}, fact_key: supply_status, value: DISRUPTED}
+    effects:
+      - {kind: EMIT_FAILURE, failure_code: ENEMY_SUPPLY_ROUTE_UNAVAILABLE, message: Supply route is already disrupted., retryable: true}
+  - key: disrupt_with_guide
+    phase: RESOLVE
+    action_key: disrupt_supply
+    priority: 20
+    condition: {kind: FACT_EQUALS, node: {kind: EXPLICIT, node_key: north_village}, fact_key: village_support, value: GUIDE}
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: supply_status, value: {source: LITERAL, literal: DISRUPTED}}
+      - {kind: ADJUST_RESOURCE, resource_key: soldiers, amount: {source: LITERAL, literal: -2}}
+      - {kind: ADJUST_RESOURCE, resource_key: morale, amount: {source: LITERAL, literal: 3}}
+      - {kind: EMIT_OUTCOME, outcome_code: VICTORY}
+  - key: disrupt_without_guide
+    phase: RESOLVE
+    action_key: disrupt_supply
+    priority: 0
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: supply_status, value: {source: LITERAL, literal: DISRUPTED}}
+      - {kind: ADJUST_RESOURCE, resource_key: soldiers, amount: {source: LITERAL, literal: -4}}
+      - {kind: ADJUST_RESOURCE, resource_key: morale, amount: {source: LITERAL, literal: 3}}
+      - {kind: EMIT_OUTCOME, outcome_code: VICTORY}
+  - key: repair_valley_unsafe
+    phase: PREFLIGHT
+    action_key: repair_outpost
+    priority: 100
+    condition: {kind: FACT_NOT_EQUALS, node: {kind: EXPLICIT, node_key: northern_valley}, fact_key: valley_security, value: SAFE}
+    effects:
+      - {kind: EMIT_FAILURE, failure_code: VALLEY_UNSAFE, message: The valley must be safe before repair., retryable: true}
+  - key: repair_full
+    phase: RESOLVE
+    action_key: repair_outpost
+    priority: 10
+    condition: {kind: PARAMETER_COMPARE, parameter_key: repair_level, operator: EQ, value: FULL}
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: outpost_status, value: {source: LITERAL, literal: RESTORED}}
+      - {kind: SET_NODE_ACCESS, node: {kind: EXPLICIT, node_key: northern_trade_route}, access: AVAILABLE}
+      - {kind: ADJUST_RESOURCE, resource_key: food, amount: {source: PARAMETER, parameter_key: food_commitment, multiplier: -1}}
+      - {kind: ADJUST_RESOURCE, resource_key: gold, amount: {source: PARAMETER, parameter_key: gold_commitment, multiplier: -1}}
+      - {kind: EMIT_OUTCOME, outcome_code: COMPLETED}
+  - key: repair_temporary
+    phase: RESOLVE
+    action_key: repair_outpost
+    priority: 0
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: outpost_status, value: {source: LITERAL, literal: OPERATIONAL}}
+      - {kind: SET_NODE_ACCESS, node: {kind: EXPLICIT, node_key: northern_trade_route}, access: AVAILABLE}
+      - {kind: ADJUST_RESOURCE, resource_key: food, amount: {source: PARAMETER, parameter_key: food_commitment, multiplier: -1}}
+      - {kind: ADJUST_RESOURCE, resource_key: gold, amount: {source: PARAMETER, parameter_key: gold_commitment, multiplier: -1}}
+      - {kind: EMIT_OUTCOME, outcome_code: COMPLETED}
+  - key: trade_outpost_offline
+    phase: PREFLIGHT
+    action_key: test_trade_route
+    priority: 100
+    condition: {kind: FACT_IN, node: {kind: EXPLICIT, node_key: starfire_outpost}, fact_key: outpost_status, values: [DAMAGED]}
+    effects:
+      - {kind: EMIT_FAILURE, failure_code: STARFIRE_OUTPOST_OFFLINE, message: Outpost must be operational., retryable: true}
+  - key: trade_valley_unsafe
+    phase: PREFLIGHT
+    action_key: test_trade_route
+    priority: 90
+    condition: {kind: FACT_NOT_EQUALS, node: {kind: EXPLICIT, node_key: northern_valley}, fact_key: valley_security, value: SAFE}
+    effects:
+      - {kind: EMIT_FAILURE, failure_code: VALLEY_UNSAFE, message: Valley must be safe., retryable: true}
+  - key: trade_support_missing
+    phase: PREFLIGHT
+    action_key: test_trade_route
+    priority: 80
+    condition: {kind: FACT_IN, node: {kind: EXPLICIT, node_key: north_village}, fact_key: village_support, values: [NONE, INTELLIGENCE]}
+    effects:
+      - {kind: EMIT_FAILURE, failure_code: TRADE_SUPPORT_REQUIRED, message: Village guides or supplies are required., retryable: true}
+  - key: trade_completed
+    phase: RESOLVE
+    action_key: test_trade_route
+    priority: 0
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: trade_route_status, value: {source: LITERAL, literal: OPEN}}
+      - {kind: SET_NODE_ACCESS, node: {kind: CURRENT_TARGET}, access: AVAILABLE}
+      - {kind: EMIT_OUTCOME, outcome_code: COMPLETED}
+objectives:
+  - key: gather_valley_intelligence
+    name: Gather Northern Valley Intelligence
+    description: Obtain actionable intelligence about the Northern Valley.
+    completion_requirements:
+      - {key: valley_intelligence_complete, node_key: northern_valley, fact_key: valley_intelligence, accepted_values: [PARTIAL, COMPLETE], description: Valley intelligence is actionable.}
+    goal_aliases: [gather valley intelligence, investigate the northern valley]
+  - key: secure_northern_valley
+    name: Secure Northern Valley
+    description: Reach a verified safe state in the Northern Valley.
+    completion_requirements:
+      - {key: northern_valley_safe, node_key: northern_valley, fact_key: valley_security, accepted_values: [SAFE], description: Northern Valley is safe.}
+    goal_aliases: [secure the northern valley, clear the valley]
+  - key: restore_starfire_outpost
+    name: Restore Starfire Outpost
+    description: Make Starfire Outpost operational or restored.
+    completion_requirements:
+      - {key: starfire_outpost_operational, node_key: starfire_outpost, fact_key: outpost_status, accepted_values: [OPERATIONAL, RESTORED], description: Outpost is operational.}
+    prerequisites:
+      - key: valley_security_required
+        description: Valley must be safe before outpost work.
+        requirements:
+          - {key: northern_valley_safe, node_key: northern_valley, fact_key: valley_security, accepted_values: [SAFE], description: Northern Valley is safe.}
+    goal_aliases: [restore the starfire outpost, repair the outpost]
+  - key: open_northern_trade_route
+    name: Open Northern Trade Route
+    description: Open the northern trade route.
+    completion_requirements:
+      - {key: northern_trade_route_open, node_key: northern_trade_route, fact_key: trade_route_status, accepted_values: [OPEN], description: Trade route is open.}
+    prerequisites:
+      - key: valley_security_required
+        description: Valley must be safe.
+        requirements:
+          - {key: northern_valley_safe, node_key: northern_valley, fact_key: valley_security, accepted_values: [SAFE], description: Northern Valley is safe.}
+      - key: outpost_operation_required
+        description: Outpost must operate.
+        requirements:
+          - {key: starfire_outpost_operational, node_key: starfire_outpost, fact_key: outpost_status, accepted_values: [OPERATIONAL, RESTORED], description: Outpost is operational.}
+      - key: trade_support_required
+        description: Village support is required.
+        requirements:
+          - {key: northern_trade_support_available, node_key: north_village, fact_key: village_support, accepted_values: [GUIDE, SUPPLIES], description: Guides or supplies are available.}
+    goal_aliases: [open the northern trade route, establish northern trade]
+  - key: full_northern_recovery
+    name: Full Northern Recovery
+    description: Secure the valley, restore the outpost, and open trade.
+    completion_requirements:
+      - {key: northern_valley_safe, node_key: northern_valley, fact_key: valley_security, accepted_values: [SAFE], description: Northern Valley is safe.}
+      - {key: starfire_outpost_operational, node_key: starfire_outpost, fact_key: outpost_status, accepted_values: [OPERATIONAL, RESTORED], description: Outpost is operational.}
+      - {key: northern_trade_route_open, node_key: northern_trade_route, fact_key: trade_route_status, accepted_values: [OPEN], description: Trade route is open.}
+    prerequisites:
+      - key: trade_support_required
+        description: Village support is required.
+        requirements:
+          - {key: northern_trade_support_available, node_key: north_village, fact_key: village_support, accepted_values: [GUIDE, SUPPLIES], description: Guides or supplies are available.}
+    subsumes: [secure_northern_valley, restore_starfire_outpost, open_northern_trade_route]
+    goal_aliases: [complete the northern recovery, recover the north]
+goal_resolution:
+  allow_llm_fallback: true
+  clarification_prompt: Which Starfire objective do you want to pursue?
+planning:
+  instructions:
+    - Use only known world state and exact-version actions.
+    - Resolve revealed logistics threats before retrying a defeated operation.
+  recovery_hints:
+    - {failure_code: ENCOUNTER_DEFEAT, hint: "Disrupt revealed enemy supply, then retry the valley."}
+    - {failure_code: TRADE_SUPPORT_REQUIRED, hint: "Negotiate guides or supplies, then retry trade."}

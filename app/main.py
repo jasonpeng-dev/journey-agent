@@ -1,34 +1,23 @@
 from __future__ import annotations
 
-from pathlib import Path
 from uuid import uuid4
 
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 
 from app.api.health import router as health_router
 from app.core.config import get_settings
 from app.core.errors import AppError
-from app.debug.routes import router as strategic_debug_router
 from app.infrastructure.logging import configure_logging
 
 configure_logging()
 log = structlog.get_logger()
 settings = get_settings()
-web_dir = Path(__file__).resolve().parent / "web"
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
-app.mount("/debug-assets", StaticFiles(directory=web_dir), name="debug-assets")
 app.include_router(health_router)
-app.include_router(strategic_debug_router)
-
-
-@app.get("/debug", include_in_schema=False)
-def debug_console() -> FileResponse:
-    return FileResponse(web_dir / "index.html")
 
 
 @app.middleware("http")

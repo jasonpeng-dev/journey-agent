@@ -1,0 +1,137 @@
+schema_version: 2
+metadata:
+  key: medical_emergency
+  name: Medical Emergency
+  description: Diagnose and stabilize a patient in a small clinic.
+engine_contract: {key: declarative-rule-engine, version: "1"}
+initialization: {start_node_key: triage_room, primary_actor_key: doctor_lee}
+world:
+  key: medical_emergency
+  name: Medical Emergency
+  node_types:
+    - {key: room, name: Room}
+    - {key: patient, name: Patient}
+    - {key: cabinet, name: Cabinet}
+  nodes:
+    - key: triage_room
+      name: Triage Room
+      description: The clinic's initial treatment room.
+      node_type_key: room
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: patient_one
+      name: Patient One
+      description: A patient requiring treatment.
+      node_type_key: patient
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+      interaction_keys: [diagnosable, treatable]
+      facts:
+        - {key: diagnosis, name: Diagnosis, value_type: ENUM, initial_value: UNKNOWN, initial_visibility: KNOWN, allowed_values: [UNKNOWN, INFECTION]}
+        - {key: stable, name: Stable, value_type: BOOLEAN, initial_value: false, initial_visibility: KNOWN}
+    - key: medicine_cabinet
+      name: Medicine Cabinet
+      description: Clinic medicine storage.
+      node_type_key: cabinet
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+      interaction_keys: [restockable]
+  relations:
+    - {source_node_key: triage_room, relation_type_key: contains, target_node_key: patient_one}
+    - {source_node_key: triage_room, relation_type_key: contains, target_node_key: medicine_cabinet}
+  resources:
+    - {key: medicine, name: Medicine, initial_value: 5, minimum: 0, maximum: 20, reservation_supported: true}
+actors:
+  roles:
+    - {key: physician, name: Physician, capabilities: [PLAN, EXECUTE_ACTION, INSPECT_STATE]}
+    - {key: nurse, name: Nurse, capabilities: [EXECUTE_ACTION, INSPECT_STATE]}
+  actor_profiles:
+    - key: doctor_lee
+      name: Doctor Lee
+      role_key: physician
+      persona: A careful emergency physician.
+      doctrine: [{key: treatment_priority, value: SAFETY}]
+      initial_node_key: triage_room
+      allowed_action_keys: [diagnose_patient, treat_patient]
+    - key: nurse_ana
+      name: Nurse Ana
+      role_key: nurse
+      persona: A precise clinical nurse.
+      initial_node_key: triage_room
+      allowed_action_keys: [treat_patient]
+interactions:
+  - {key: diagnosable, name: Diagnosable}
+  - {key: treatable, name: Treatable}
+  - {key: restockable, name: Restockable}
+actions:
+  - key: diagnose_patient
+    name: Diagnose Patient
+    required_interaction_key: diagnosable
+    execution_mode: IMMEDIATE
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes: [{code: DIAGNOSED, name: Diagnosed, success: true}]
+    planning:
+      terminal_effects: [{node_key: patient_one, fact_key: diagnosis}]
+      success_outcome_codes: [DIAGNOSED]
+  - key: treat_patient
+    name: Treat Patient
+    required_interaction_key: treatable
+    execution_mode: IMMEDIATE
+    parameters:
+      - {key: dosage, name: Dosage, value_type: INTEGER, required: false, minimum: 1, maximum: 5, default: 2}
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: STABILIZED, name: Stabilized, success: true}
+      - {code: DIAGNOSIS_REQUIRED, name: Diagnosis Required, success: false}
+    planning:
+      terminal_effects: [{node_key: patient_one, fact_key: stable}]
+      success_outcome_codes: [STABILIZED]
+rules:
+  - key: diagnosis_complete
+    phase: RESOLVE
+    action_key: diagnose_patient
+    priority: 0
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: diagnosis, value: {source: LITERAL, literal: INFECTION}}
+      - {kind: EMIT_OUTCOME, outcome_code: DIAGNOSED}
+  - key: treatment_needs_diagnosis
+    phase: PREFLIGHT
+    action_key: treat_patient
+    priority: 100
+    condition: {kind: FACT_EQUALS, node: {kind: CURRENT_TARGET}, fact_key: diagnosis, value: UNKNOWN}
+    effects:
+      - {kind: EMIT_FAILURE, failure_code: DIAGNOSIS_REQUIRED, message: Diagnose the patient before treatment., retryable: true}
+  - key: treatment_stabilizes
+    phase: RESOLVE
+    action_key: treat_patient
+    priority: 0
+    effects:
+      - {kind: SET_FACT, node: {kind: CURRENT_TARGET}, fact_key: stable, value: {source: LITERAL, literal: true}}
+      - {kind: ADJUST_RESOURCE, resource_key: medicine, amount: {source: PARAMETER, parameter_key: dosage, multiplier: -1}}
+      - {kind: WRITE_MEMORY_EVENT, memory_key: patient_stabilized, memory_content: Patient One was stabilized.}
+      - {kind: EMIT_OUTCOME, outcome_code: STABILIZED}
+objectives:
+  - key: diagnose_patient
+    name: Diagnose Patient
+    description: Determine Patient One's condition.
+    completion_requirements:
+      - {key: diagnosis_known, node_key: patient_one, fact_key: diagnosis, accepted_values: [INFECTION], description: Patient diagnosis is known.}
+    goal_aliases: [diagnose the patient, identify the illness]
+  - key: stabilize_patient
+    name: Stabilize Patient
+    description: Make Patient One stable.
+    completion_requirements:
+      - {key: patient_stable, node_key: patient_one, fact_key: stable, accepted_values: [true], description: Patient One is stable.}
+    prerequisites:
+      - key: diagnosis_required
+        description: Diagnosis must be known before treatment.
+        requirements:
+          - {key: diagnosis_known, node_key: patient_one, fact_key: diagnosis, accepted_values: [INFECTION], description: Patient diagnosis is known.}
+    goal_aliases: [stabilize the patient, treat patient one]
+goal_resolution:
+  allow_llm_fallback: true
+  clarification_prompt: Do you want diagnosis or stabilization?
+planning:
+  instructions: [Diagnose before treatment and conserve medicine.]
+  recovery_hints:
+    - {failure_code: DIAGNOSIS_REQUIRED, hint: Diagnose the target before retrying treatment.}
