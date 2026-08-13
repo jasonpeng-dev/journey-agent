@@ -142,11 +142,28 @@ class DeclarativeRuleEngine:
         state: DeclarativeRuleState,
         context: ActionRuleContext,
     ) -> GenericRuleOutcome:
+        preflight = self.evaluate_preflight(state, context)
+        if preflight is not None:
+            return preflight
+        return self.evaluate_resolution(state, context)
+
+    def evaluate_preflight(
+        self,
+        state: DeclarativeRuleState,
+        context: ActionRuleContext,
+    ) -> GenericRuleOutcome | None:
         action = self._action(context.action_key)
         self._validate_context(action, context)
-        preflight = self._select(RulePhase.PREFLIGHT, state, context, required=False)
-        if preflight is not None:
-            return self._outcome(preflight, state, context)
+        rule = self._select(RulePhase.PREFLIGHT, state, context, required=False)
+        return self._outcome(rule, state, context) if rule is not None else None
+
+    def evaluate_resolution(
+        self,
+        state: DeclarativeRuleState,
+        context: ActionRuleContext,
+    ) -> GenericRuleOutcome:
+        action = self._action(context.action_key)
+        self._validate_context(action, context)
         resolve = self._select(RulePhase.RESOLVE, state, context, required=True)
         assert resolve is not None
         return self._outcome(resolve, state, context)

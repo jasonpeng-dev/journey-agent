@@ -93,6 +93,38 @@ class GenericGameService:
         self.db.flush()
         return AppliedRuleResult(outcome=outcome, runtime_revision=instance.runtime_revision)
 
+    def preflight(
+        self,
+        *,
+        actor_key: str,
+        action_key: str,
+        target_node_key: str,
+        parameters: dict[str, StrictScalar],
+    ) -> GenericRuleOutcome | None:
+        definition = self._definition()
+        actor = self._actor(actor_key)
+        action = next((item for item in definition.actions if item.key == action_key), None)
+        if action is None or action_key not in actor.allowed_action_keys:
+            raise GenericGameError(
+                "ACTION_NOT_AUTHORIZED",
+                "The exact Version Actor is not authorized for this Action",
+            )
+        target = definition.world.node(target_node_key)
+        if target is None or action.required_interaction_key not in target.interaction_keys:
+            raise GenericGameError(
+                "ACTION_TARGET_INVALID",
+                "The target does not support the Action's required Interaction",
+            )
+        return DeclarativeRuleEngine(definition).evaluate_preflight(
+            self._locked_state(definition, lock=False),
+            ActionRuleContext(
+                action_key=action_key,
+                target_node_key=target_node_key,
+                parameters=parameters,
+                actor_key=actor_key,
+            ),
+        )
+
     def state(self) -> DeclarativeRuleState:
         return self._locked_state(self._definition(), lock=False)
 

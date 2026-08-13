@@ -708,7 +708,10 @@ class WorldOperation(UUIDPrimaryKey, TimestampMixin, Base):
     source_step_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("agent_steps.id", ondelete="SET NULL"), index=True
     )
-    officer_npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
+    officer_npc_id: Mapped[UUID | None] = mapped_column(ForeignKey("npcs.id"))
+    actor_key: Mapped[str | None] = mapped_column(String(80))
+    action_key: Mapped[str | None] = mapped_column(String(80))
+    execution_mode: Mapped[str | None] = mapped_column(String(20))
     operation_type: Mapped[str] = mapped_column(String(50))
     target_key: Mapped[str] = mapped_column(String(100))
     status: Mapped[WorldOperationStatus] = mapped_column(
