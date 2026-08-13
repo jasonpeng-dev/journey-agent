@@ -11,6 +11,7 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.scenarios.serialization import canonical_document, scenario_content_hash
 from app.scenarios.validation import (
@@ -18,6 +19,7 @@ from app.scenarios.validation import (
     ScenarioValidationIssue,
     ScenarioValidationResult,
 )
+from app.scenarios.versions import ScenarioVersionError, ScenarioVersionRepository
 
 
 class ScenarioLifecycleError(ValueError):
@@ -29,7 +31,7 @@ class ScenarioLifecycleError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ScenarioPublishResult:
-    status: Literal["PUBLISHED", "NO_CHANGES"]
+    status: Literal["PUBLISHED"]
     version: ScenarioVersion
 
 
@@ -42,6 +44,84 @@ class ScenarioService:
         self.db = db
         self.validator = validator or ScenarioDefinitionValidator()
 
+    def list_scenarios(self, *, include_archived: bool = False) -> tuple[Scenario, ...]:
+        query = select(Scenario)
+        if not include_archived:
+            query = query.where(Scenario.status != "ARCHIVED")
+        return tuple(self.db.scalars(query.order_by(Scenario.updated_at.desc(), Scenario.key)))
+
+    def get_scenario(self, scenario_id: UUID) -> Scenario:
+        return self._scenario(scenario_id, lock=False)
+
+    def get_draft(self, scenario_id: UUID) -> ScenarioDraft:
+        self._scenario(scenario_id, lock=False)
+        return self._draft(scenario_id, lock=False)
+
+    def list_versions(self, scenario_id: UUID) -> tuple[ScenarioVersion, ...]:
+        self._scenario(scenario_id, lock=False)
+        return tuple(
+            self.db.scalars(
+                select(ScenarioVersion)
+                .where(ScenarioVersion.scenario_id == scenario_id)
+                .order_by(ScenarioVersion.version_number.desc())
+            )
+        )
+
+    def get_version(self, scenario_id: UUID, version_id: UUID) -> ScenarioVersion:
+        self._scenario(scenario_id, lock=False)
+        try:
+            snapshot = ScenarioVersionRepository(self.db).load(version_id)
+        except ScenarioVersionError as exc:
+            raise ScenarioLifecycleError(exc.code, exc.message) from exc
+        if snapshot.scenario_id != scenario_id:
+            raise ScenarioLifecycleError(
+                "SCENARIO_VERSION_NOT_FOUND",
+                "The ScenarioVersion does not belong to this Scenario",
+            )
+        version = self.db.get(ScenarioVersion, version_id)
+        assert version is not None
+        return version
+
+    def create_blank(self, *, key: str, name: str) -> Scenario:
+        return self._create(
+            key=key,
+            name=name,
+            definition_document=_blank_document(key=key, name=name),
+        )
+
+    def create_from_definition(
+        self,
+        *,
+        key: str,
+        name: str,
+        definition: ScenarioDefinitionV2,
+    ) -> Scenario:
+        document = definition.model_dump(mode="json")
+        document["metadata"]["key"] = key
+        document["metadata"]["name"] = name
+        document["world"]["key"] = key
+        document["world"]["name"] = name
+        return self._create(key=key, name=name, definition_document=document)
+
+    def clone_version(self, *, key: str, name: str, version_id: UUID) -> Scenario:
+        version = self.db.get(ScenarioVersion, version_id)
+        if version is None:
+            raise ScenarioLifecycleError(
+                "SCENARIO_VERSION_NOT_FOUND",
+                "The source ScenarioVersion does not exist",
+            )
+        document = deepcopy(version.snapshot_document)
+        document["metadata"]["key"] = key
+        document["metadata"]["name"] = name
+        document["world"]["key"] = key
+        document["world"]["name"] = name
+        return self._create(
+            key=key,
+            name=name,
+            definition_document=document,
+            base_scenario_version_id=version.id,
+        )
+
     def replace_draft(
         self,
         scenario_id: UUID,
@@ -50,6 +130,10 @@ class ScenarioService:
         definition_document: dict[str, Any],
     ) -> ScenarioDraft:
         """Optimistically replace a Draft without requiring it to be publishable."""
+
+        scenario = self._scenario(scenario_id, lock=False)
+        self._require_mutable(scenario)
+        _require_scenario_identity(definition_document, scenario.key)
 
         changed = self.db.execute(
             update(ScenarioDraft)
@@ -75,10 +159,27 @@ class ScenarioService:
         draft = self.db.get(ScenarioDraft, scenario_id)
         assert draft is not None
         self.db.refresh(draft)
+        metadata = definition_document.get("metadata")
+        if isinstance(metadata, dict):
+            draft_name = metadata.get("name")
+            if isinstance(draft_name, str) and draft_name.strip():
+                scenario.name = draft_name
         return draft
 
-    def validate_draft(self, scenario_id: UUID) -> ScenarioValidationResult:
+    def validate_draft(
+        self,
+        scenario_id: UUID,
+        *,
+        expected_revision: int | None = None,
+    ) -> ScenarioValidationResult:
+        scenario = self._scenario(scenario_id, lock=False)
+        self._require_mutable(scenario)
         draft = self._draft(scenario_id, lock=False)
+        if expected_revision is not None and draft.revision != expected_revision:
+            raise ScenarioLifecycleError(
+                "SCENARIO_DRAFT_CONFLICT",
+                "The Scenario Draft revision changed before validation",
+            )
         result = self._validate_record(draft)
         self.db.flush()
         return result
@@ -100,6 +201,7 @@ class ScenarioService:
                 "SCENARIO_NOT_FOUND",
                 "The Scenario does not exist",
             )
+        self._require_mutable(scenario)
         draft = self._draft(scenario_id, lock=True)
         if draft.revision != expected_revision:
             raise ScenarioLifecycleError(
@@ -113,6 +215,12 @@ class ScenarioService:
                 "SCENARIO_DRAFT_INVALID",
                 "The Scenario Draft did not pass publication validation",
             )
+        assert validation.definition is not None
+        if validation.definition.metadata.key != scenario.key:
+            raise ScenarioLifecycleError(
+                "SCENARIO_KEY_IMMUTABLE",
+                "The Draft Scenario key cannot differ from its stable Scenario identity",
+            )
         content_hash = scenario_content_hash(draft.definition_document)
         if expected_content_hash is not None and expected_content_hash != content_hash:
             raise ScenarioLifecycleError(
@@ -125,8 +233,10 @@ class ScenarioService:
             else None
         )
         if current is not None and current.content_hash == content_hash:
-            draft.base_scenario_version_id = current.id
-            return ScenarioPublishResult(status="NO_CHANGES", version=current)
+            raise ScenarioLifecycleError(
+                "SCENARIO_PUBLISH_NO_CHANGES",
+                "The Draft has no semantic changes from the current published Version",
+            )
 
         latest_number = self.db.scalar(
             select(ScenarioVersion.version_number)
@@ -154,6 +264,63 @@ class ScenarioService:
         self.db.flush()
         return ScenarioPublishResult(status="PUBLISHED", version=version)
 
+    def restore_version(
+        self,
+        scenario_id: UUID,
+        *,
+        version_id: UUID,
+        expected_revision: int,
+    ) -> ScenarioDraft:
+        scenario = self._scenario(scenario_id, lock=False)
+        self._require_mutable(scenario)
+        version = self.get_version(scenario_id, version_id)
+        draft = self.replace_draft(
+            scenario_id,
+            expected_revision=expected_revision,
+            definition_document=version.snapshot_document,
+        )
+        draft.base_scenario_version_id = version.id
+        self.db.flush()
+        return draft
+
+    def archive(self, scenario_id: UUID) -> Scenario:
+        scenario = self._scenario(scenario_id, lock=True)
+        if scenario.status != "ARCHIVED":
+            scenario.status = "ARCHIVED"
+            scenario.version += 1
+            self.db.flush()
+        return scenario
+
+    def _create(
+        self,
+        *,
+        key: str,
+        name: str,
+        definition_document: dict[str, Any],
+        base_scenario_version_id: UUID | None = None,
+    ) -> Scenario:
+        existing = self.db.scalar(select(Scenario.id).where(Scenario.key == key))
+        if existing is not None:
+            raise ScenarioLifecycleError(
+                "SCENARIO_KEY_CONFLICT",
+                "The Scenario key is already in use",
+            )
+        scenario = Scenario(key=key, name=name, status="DRAFT")
+        self.db.add(scenario)
+        self.db.flush()
+        self.db.add(
+            ScenarioDraft(
+                scenario_id=scenario.id,
+                revision=1,
+                definition_document=deepcopy(definition_document),
+                validation_status="UNVALIDATED",
+                validation_errors=[],
+                base_scenario_version_id=base_scenario_version_id,
+            )
+        )
+        self.db.flush()
+        return scenario
+
     def _validate_record(self, draft: ScenarioDraft) -> ScenarioValidationResult:
         result = self.validator.validate(draft.definition_document)
         draft.validation_status = "PASSED" if result.passed else "FAILED"
@@ -175,6 +342,23 @@ class ScenarioService:
             )
         return draft
 
+    def _scenario(self, scenario_id: UUID, *, lock: bool) -> Scenario:
+        query = select(Scenario).where(Scenario.id == scenario_id)
+        if lock:
+            query = query.with_for_update()
+        scenario = self.db.scalar(query)
+        if scenario is None:
+            raise ScenarioLifecycleError("SCENARIO_NOT_FOUND", "The Scenario does not exist")
+        return scenario
+
+    @staticmethod
+    def _require_mutable(scenario: Scenario) -> None:
+        if scenario.status == "ARCHIVED":
+            raise ScenarioLifecycleError(
+                "SCENARIO_ARCHIVED",
+                "An archived Scenario cannot be modified",
+            )
+
 
 def _issue_payload(issue: ScenarioValidationIssue) -> dict[str, str]:
     return {
@@ -182,6 +366,45 @@ def _issue_payload(issue: ScenarioValidationIssue) -> dict[str, str]:
         "path": issue.path,
         "message": issue.message,
     }
+
+
+def _blank_document(*, key: str, name: str) -> dict[str, Any]:
+    """Return an intentionally incomplete but Editor-shaped v2 Draft."""
+
+    return {
+        "schema_version": 2,
+        "metadata": {"key": key, "name": name, "description": ""},
+        "engine_contract": {"key": "declarative-rule-engine", "version": "1"},
+        "initialization": {"start_node_key": "", "primary_actor_key": ""},
+        "world": {
+            "key": key,
+            "name": name,
+            "node_types": [],
+            "nodes": [],
+            "relations": [],
+            "resources": [],
+        },
+        "actors": {"roles": [], "actor_profiles": []},
+        "interactions": [],
+        "actions": [],
+        "rules": [],
+        "objectives": [],
+        "goal_resolution": {
+            "allow_llm_fallback": True,
+            "clarification_prompt": "Please clarify the intended objective.",
+        },
+        "planning": {"instructions": [], "recovery_hints": []},
+    }
+
+
+def _require_scenario_identity(document: dict[str, Any], scenario_key: str) -> None:
+    for section in ("metadata", "world"):
+        value = document.get(section)
+        if isinstance(value, dict) and "key" in value and value["key"] != scenario_key:
+            raise ScenarioLifecycleError(
+                "SCENARIO_KEY_IMMUTABLE",
+                "The Draft Scenario key cannot differ from its stable Scenario identity",
+            )
 
 
 __all__ = ["ScenarioLifecycleError", "ScenarioPublishResult", "ScenarioService"]
