@@ -1,4 +1,4 @@
-import type { Draft, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
+import type { Draft, GameHistory, GameSummary, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -65,4 +65,11 @@ export const api = {
         object_key: objectKey,
       }),
     }),
+  games: (archived = false) => request<GameSummary[]>(`/api/v1/games?archived=${archived}`),
+  game: (id: string) => request<GameSummary>(`/api/v1/games/${id}`),
+  gameHistory: (id: string) => request<GameHistory>(`/api/v1/games/${id}/history`),
+  createGame: (versionId: string, idempotencyKey: string) => request<GameSummary>("/api/v1/games", {
+    method: "POST", body: JSON.stringify({ scenario_version_id: versionId, idempotency_key: idempotencyKey }),
+  }),
+  archiveGame: (id: string) => request<GameSummary>(`/api/v1/games/${id}/archive`, { method: "POST" }),
 };

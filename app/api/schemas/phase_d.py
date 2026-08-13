@@ -48,6 +48,7 @@ class PublicGameStatus(StrEnum):
     ACTIVE = "ACTIVE"
     SUSPENDED = "SUSPENDED"
     ARCHIVED = "ARCHIVED"
+    COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
 

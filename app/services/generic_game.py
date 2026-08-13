@@ -30,6 +30,7 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
+from app.services.game_lifecycle import require_scope_writable
 
 
 class GenericGameError(ValueError):
@@ -62,6 +63,7 @@ class GenericGameService:
         operation_status: str | None = None,
         approval_granted: bool = False,
     ) -> AppliedRuleResult:
+        require_scope_writable(self.db, self.scope.game_instance_id)
         definition = self._definition()
         actor = self._actor(actor_key)
         if not actor_binding_matches(definition, actor):

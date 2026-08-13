@@ -39,6 +39,7 @@ class GameInstanceService:
                 GameInstanceStatus.SUSPENDED,
                 GameInstanceStatus.COMPLETED,
                 GameInstanceStatus.FAILED,
+                GameInstanceStatus.ARCHIVED,
             }
         ),
         GameInstanceStatus.SUSPENDED: frozenset(
@@ -46,10 +47,12 @@ class GameInstanceService:
                 GameInstanceStatus.ACTIVE,
                 GameInstanceStatus.COMPLETED,
                 GameInstanceStatus.FAILED,
+                GameInstanceStatus.ARCHIVED,
             }
         ),
         GameInstanceStatus.COMPLETED: frozenset(),
         GameInstanceStatus.FAILED: frozenset(),
+        GameInstanceStatus.ARCHIVED: frozenset(),
     }
 
     def __init__(self, db: Session) -> None:

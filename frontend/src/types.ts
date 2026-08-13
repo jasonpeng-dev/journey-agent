@@ -38,3 +38,15 @@ export type ScenarioVersion = {
 };
 
 export type ScenarioExample = { key: string; name: string; description: string; maturity: string };
+
+export type GameSummary = {
+  id: string; scenario_id: string; scenario_version_id: string; scenario_version_number: number;
+  scenario_content_hash: string; status: "ACTIVE" | "SUSPENDED" | "ARCHIVED" | "FAILED" | "COMPLETED";
+  active_task_id: string | null; created_at: string; updated_at: string;
+};
+
+export type GameHistory = {
+  tasks: Array<{ id: string; goal: string; status: string }>;
+  operations: Array<{ id: string; action_key: string; status: string; outcome: unknown }>;
+  decisions: Array<{ id: string; action_key: string; status: string }>;
+};

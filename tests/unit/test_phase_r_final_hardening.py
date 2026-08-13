@@ -254,6 +254,10 @@ def test_provider_goal_and_plan_are_structured_exact_version_and_validated(
     assert provider.plan_request.objective_keys == ("stabilize_patient",)
     assert "patient_one.stable" in provider.plan_request.known_world["facts"]
     assert task.status == AgentTaskStatus.ACTIVE
+    # Phase D permits only one non-terminal Task per GameInstance. Complete this
+    # task before exercising a second provider proposal in the same Runtime.
+    task.status = AgentTaskStatus.SUCCEEDED
+    session.flush()
 
     bad = FakeProvider(
         selected=("stabilize_patient",),

@@ -20,6 +20,7 @@ from app.domain.scenario_v2 import (
 )
 from app.infrastructure.db.models import ActionDecisionRequest, GameInstanceActor, WorldOperation
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.game_lifecycle import require_scope_writable
 from app.services.generic_game import AppliedRuleResult, GenericGameService
 
 
@@ -62,6 +63,7 @@ class GenericActionService:
         source_step_id: UUID | None = None,
         decision_id: UUID | None = None,
     ) -> ActionExecutionResult:
+        require_scope_writable(self.db, self.scope.game_instance_id)
         if not idempotency_key.strip():
             raise GenericActionError(
                 "ACTION_IDEMPOTENCY_KEY_REQUIRED",
@@ -175,6 +177,7 @@ class GenericActionService:
         *,
         resolution_key: str,
     ) -> ActionExecutionResult:
+        require_scope_writable(self.db, self.scope.game_instance_id)
         operation = self.db.scalar(
             select(WorldOperation)
             .where(
@@ -223,6 +226,7 @@ class GenericActionService:
         return action
 
     def decide(self, decision_id: UUID, *, approve: bool) -> ActionDecisionRequest:
+        require_scope_writable(self.db, self.scope.game_instance_id)
         decision = self.db.scalar(
             select(ActionDecisionRequest)
             .where(

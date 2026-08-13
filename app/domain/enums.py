@@ -12,6 +12,7 @@ class GameInstanceStatus(StrEnum):
     SUSPENDED = "SUSPENDED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    ARCHIVED = "ARCHIVED"
 
 
 class NPCRole(StrEnum):
@@ -75,6 +76,7 @@ class AgentTaskStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
+    ABORTED = "ABORTED"
 
 
 class AgentPlanStatus(StrEnum):
@@ -113,8 +115,10 @@ class DecisionStatus(StrEnum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     CONSUMED = "CONSUMED"
+    CANCELLED = "CANCELLED"
 
 
 class WorldOperationStatus(StrEnum):
     PENDING = "PENDING"
     RESOLVED = "RESOLVED"
+    CANCELLED = "CANCELLED"

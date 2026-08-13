@@ -313,6 +313,19 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_agent_tasks_player_status", "player_id", "status"),
         Index("ix_agent_tasks_instance_status", "game_instance_id", "status"),
+        Index(
+            "uq_agent_tasks_instance_active",
+            "game_instance_id",
+            unique=True,
+            sqlite_where=text(
+                "status IN ('ACTIVE','REQUIRES_PLAYER_DECISION',"
+                "'WAITING_FOR_PLAYER_ACTION','WAITING_FOR_WORLD_EVENT')"
+            ),
+            postgresql_where=text(
+                "status IN ('ACTIVE','REQUIRES_PLAYER_DECISION',"
+                "'WAITING_FOR_PLAYER_ACTION','WAITING_FOR_WORLD_EVENT')"
+            ),
+        ),
     )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))

@@ -49,6 +49,7 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
+from app.services.game_lifecycle import require_scope_writable
 from app.services.generic_actions import (
     GenericActionError,
     GenericActionService,
@@ -56,6 +57,13 @@ from app.services.generic_actions import (
 )
 
 ObjectiveSelector = Callable[[str, tuple[ObjectiveDefinitionV2, ...]], str | None]
+
+_NON_TERMINAL_TASK_STATUSES = (
+    AgentTaskStatus.ACTIVE,
+    AgentTaskStatus.REQUIRES_PLAYER_DECISION,
+    AgentTaskStatus.WAITING_FOR_PLAYER_ACTION,
+    AgentTaskStatus.WAITING_FOR_WORLD_EVENT,
+)
 
 
 class GenericAgentError(ValueError):
@@ -166,6 +174,18 @@ class GenericAgentService:
         self.goal_resolver = goal_resolver or GenericGoalResolver(provider=provider)
 
     def create_task(self, session: ConversationSession, goal: str) -> AgentTask:
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        existing = self.db.scalar(
+            select(AgentTask).where(
+                AgentTask.game_instance_id == self.scope.game_instance_id,
+                AgentTask.status.in_(_NON_TERMINAL_TASK_STATUSES),
+            )
+        )
+        if existing is not None:
+            raise GenericAgentError(
+                "AGENT_TASK_ALREADY_ACTIVE",
+                "A GameInstance may have only one active Task",
+            )
         definition = self._definition()
         if session.game_instance_id != self.scope.game_instance_id or not session.actor_key:
             raise GenericAgentError(
@@ -209,6 +229,7 @@ class GenericAgentService:
         return task
 
     def plan(self, task: AgentTask, *, reason: str | None = None) -> AgentPlan:
+        require_scope_writable(self.db, self.scope.game_instance_id)
         definition = self._definition()
         self._task_scope(task)
         objectives = self._objectives(task, definition)
@@ -282,6 +303,7 @@ class GenericAgentService:
         return plan
 
     def execute_next(self, task: AgentTask) -> AgentStep | None:
+        require_scope_writable(self.db, self.scope.game_instance_id)
         self._task_scope(task)
         if self.evaluate(task).completed:
             self._complete_task(task)
