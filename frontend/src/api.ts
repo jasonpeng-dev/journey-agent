@@ -1,4 +1,4 @@
-import type { Draft, GameHistory, GameSummary, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
+import type { Draft, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -65,11 +65,15 @@ export const api = {
         object_key: objectKey,
       }),
     }),
-  games: (archived = false) => request<GameSummary[]>(`/api/v1/games?archived=${archived}`),
+  games: (archived = false) => request<GameSummary[]>(`/api/v1/games?status=${archived ? "archived" : "active"}`),
   game: (id: string) => request<GameSummary>(`/api/v1/games/${id}`),
   gameHistory: (id: string) => request<GameHistory>(`/api/v1/games/${id}/history`),
   createGame: (versionId: string, idempotencyKey: string) => request<GameSummary>("/api/v1/games", {
     method: "POST", body: JSON.stringify({ scenario_version_id: versionId, idempotency_key: idempotencyKey }),
   }),
   archiveGame: (id: string) => request<GameSummary>(`/api/v1/games/${id}/archive`, { method: "POST" }),
+  playState: (id: string) => request<PlayerGameState>(`/api/v1/games/${id}/play`),
+  submitGoal: (id: string, goal: string, idempotencyKey: string) => request<GoalSubmission>(`/api/v1/games/${id}/goals`, { method: "POST", body: JSON.stringify({ goal, idempotency_key: idempotencyKey }) }),
+  continueGame: (id: string) => request<PlayerGameState>(`/api/v1/games/${id}/continue`, { method: "POST" }),
+  abandonTask: (id: string, taskId: string) => request<{ task_id: string; status: string }>(`/api/v1/games/${id}/tasks/${taskId}/abandon`, { method: "POST" }),
 };

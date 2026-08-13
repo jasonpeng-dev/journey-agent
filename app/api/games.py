@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Any, Never
+from typing import Any, Literal, Never
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.schemas.phase_d import GameSummaryResponse, NewGameRequest, PublicGameStatus
+from app.agent.generic import GenericAgentError
+from app.api.schemas.phase_d import (
+    GameSummaryResponse,
+    GoalSubmissionRequest,
+    GoalSubmissionResponse,
+    GoalSubmissionStatus,
+    NewGameRequest,
+    PlayerGameStateResponse,
+    PublicGameStatus,
+)
 from app.core.errors import AppError
 from app.domain.enums import AgentTaskStatus
+from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentTask,
@@ -20,7 +30,11 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.infrastructure.db.session import get_db
+from app.services.game_instances import GameInstanceError
 from app.services.game_lifecycle import GameLifecycleError, GameLifecycleService
+from app.services.generic_actions import GenericActionError
+from app.services.play import PlayError, PlayOrchestrator
+from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationError
 
 router = APIRouter(prefix="/api/v1/games", tags=["games"])
@@ -35,9 +49,13 @@ _ACTIVE_TASK_STATUSES = (
 
 @router.get("", response_model=list[GameSummaryResponse])
 def list_games(
-    archived: bool = Query(default=False), db: Session = Depends(get_db)
+    game_status: Literal["active", "archived"] = Query(default="active", alias="status"),
+    db: Session = Depends(get_db),
 ) -> list[GameSummaryResponse]:
-    return [_summary(db, game) for game in GameLifecycleService(db).list(archived=archived)]
+    return [
+        game_summary(db, game)
+        for game in GameLifecycleService(db).list(archived=game_status == "archived")
+    ]
 
 
 @router.post("", response_model=GameSummaryResponse, status_code=status.HTTP_201_CREATED)
@@ -48,7 +66,7 @@ def create_game(request: NewGameRequest, db: Session = Depends(get_db)) -> GameS
             idempotency_key=request.idempotency_key,
         )
         db.commit()
-        return _summary(db, runtime.instance)
+        return game_summary(db, runtime.instance)
     except (GameLifecycleError, RuntimeInitializationError) as exc:
         db.rollback()
         _raise_http(exc)
@@ -57,8 +75,69 @@ def create_game(request: NewGameRequest, db: Session = Depends(get_db)) -> GameS
 @router.get("/{game_instance_id}", response_model=GameSummaryResponse)
 def get_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> GameSummaryResponse:
     try:
-        return _summary(db, GameLifecycleService(db).get(game_instance_id))
-    except GameLifecycleError as exc:
+        return game_summary(db, GameLifecycleService(db).get(game_instance_id))
+    except (GameInstanceError, GameLifecycleError) as exc:
+        _raise_http(exc)
+
+
+@router.get("/{game_instance_id}/play", response_model=PlayerGameStateResponse)
+def get_play_state(
+    game_instance_id: UUID, db: Session = Depends(get_db)
+) -> PlayerGameStateResponse:
+    try:
+        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+    except (GameInstanceError, GameLifecycleError) as exc:
+        _raise_http(exc)
+
+
+@router.post("/{game_instance_id}/goals", response_model=GoalSubmissionResponse)
+def submit_goal(
+    game_instance_id: UUID,
+    request: GoalSubmissionRequest,
+    db: Session = Depends(get_db),
+) -> GoalSubmissionResponse:
+    try:
+        submission = PlayOrchestrator(db, GameInstanceId(game_instance_id)).submit_goal(
+            request.goal, idempotency_key=request.idempotency_key
+        )
+        if submission.task is None:
+            db.rollback()
+            status_value = GoalSubmissionStatus(submission.resolution.status)
+            return GoalSubmissionResponse(
+                status=status_value,
+                clarification_prompt=submission.resolution.clarification_prompt,
+                candidate_objective_names=list(submission.resolution.candidate_keys),
+                explanation="Goal must map to an Objective in this exact ScenarioVersion",
+            )
+        db.commit()
+        state = PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+        assert state.current_task is not None
+        return GoalSubmissionResponse(status=GoalSubmissionStatus.ACCEPTED, task=state.current_task)
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
+@router.post("/{game_instance_id}/continue", response_model=PlayerGameStateResponse)
+def continue_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> PlayerGameStateResponse:
+    try:
+        PlayOrchestrator(db, GameInstanceId(game_instance_id)).continue_current()
+        db.commit()
+        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        PlayError,
+    ) as exc:
+        db.rollback()
         _raise_http(exc)
 
 
@@ -67,7 +146,7 @@ def archive_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> GameS
     try:
         game = GameLifecycleService(db).archive(game_instance_id)
         db.commit()
-        return _summary(db, game)
+        return game_summary(db, game)
     except GameLifecycleError as exc:
         db.rollback()
         _raise_http(exc)
@@ -130,7 +209,7 @@ def game_history(
     }
 
 
-def _summary(db: Session, game: GameInstance) -> GameSummaryResponse:
+def game_summary(db: Session, game: GameInstance) -> GameSummaryResponse:
     version = db.get(ScenarioVersion, game.scenario_version_id)
     assert version is not None
     active_task = db.scalar(
@@ -152,9 +231,18 @@ def _summary(db: Session, game: GameInstance) -> GameSummaryResponse:
     )
 
 
-def _raise_http(exc: GameLifecycleError | RuntimeInitializationError) -> Never:
+def _raise_http(
+    exc: (
+        GameInstanceError
+        | GameLifecycleError
+        | GenericActionError
+        | GenericAgentError
+        | PlayError
+        | RuntimeInitializationError
+    ),
+) -> Never:
     status_code = 404 if exc.code.endswith("NOT_FOUND") else 409
     raise AppError(exc.code, exc.message, status_code=status_code) from exc
 
 
-__all__ = ["router"]
+__all__ = ["game_summary", "router"]

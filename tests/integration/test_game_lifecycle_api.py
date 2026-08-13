@@ -87,7 +87,7 @@ def test_abandon_cancels_unsettled_operation_and_archive_is_read_only(
     assert archived.status_code == 200
     assert archived.json()["status"] == "ARCHIVED"
     assert client.post(f"/api/v1/games/{game.id}/archive").status_code == 200
-    assert client.get("/api/v1/games?archived=true").json()[0]["id"] == str(game.id)
+    assert client.get("/api/v1/games?status=archived").json()[0]["id"] == str(game.id)
     with pytest.raises(GameLifecycleError, match="Only an active GameInstance"):
         GenericGameService(session, scope).execute(
             actor_key="han_lie",

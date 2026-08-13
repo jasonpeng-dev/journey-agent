@@ -313,6 +313,11 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_agent_tasks_player_status", "player_id", "status"),
         Index("ix_agent_tasks_instance_status", "game_instance_id", "status"),
+        UniqueConstraint(
+            "game_instance_id",
+            "submission_idempotency_key",
+            name="uq_agent_tasks_instance_submission_key",
+        ),
         Index(
             "uq_agent_tasks_instance_active",
             "game_instance_id",
@@ -337,6 +342,7 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     origin_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     last_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     goal_description: Mapped[str] = mapped_column(Text)
+    submission_idempotency_key: Mapped[str | None] = mapped_column(String(160))
     scenario_key: Mapped[str] = mapped_column(String(100))
     objective_resolution_status: Mapped[str] = mapped_column(String(30), default="UNRESOLVED")
     objective_scope_keys: Mapped[list[str] | None] = mapped_column(JSON)
