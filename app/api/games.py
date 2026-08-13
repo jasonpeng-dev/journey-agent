@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentError
 from app.api.schemas.phase_d import (
+    ApprovalDecisionRequest,
     GameSummaryResponse,
     GoalSubmissionRequest,
     GoalSubmissionResponse,
@@ -141,6 +142,32 @@ def continue_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> Play
         _raise_http(exc)
 
 
+@router.post(
+    "/{game_instance_id}/approvals/{decision_id}/approve",
+    response_model=PlayerGameStateResponse,
+)
+def approve_action(
+    game_instance_id: UUID,
+    decision_id: UUID,
+    request: ApprovalDecisionRequest,
+    db: Session = Depends(get_db),
+) -> PlayerGameStateResponse:
+    return _decide_action(db, game_instance_id, decision_id, request, approve=True)
+
+
+@router.post(
+    "/{game_instance_id}/approvals/{decision_id}/reject",
+    response_model=PlayerGameStateResponse,
+)
+def reject_action(
+    game_instance_id: UUID,
+    decision_id: UUID,
+    request: ApprovalDecisionRequest,
+    db: Session = Depends(get_db),
+) -> PlayerGameStateResponse:
+    return _decide_action(db, game_instance_id, decision_id, request, approve=False)
+
+
 @router.post("/{game_instance_id}/archive", response_model=GameSummaryResponse)
 def archive_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> GameSummaryResponse:
     try:
@@ -229,6 +256,33 @@ def game_summary(db: Session, game: GameInstance) -> GameSummaryResponse:
         created_at=game.created_at,
         updated_at=game.updated_at,
     )
+
+
+def _decide_action(
+    db: Session,
+    game_instance_id: UUID,
+    decision_id: UUID,
+    request: ApprovalDecisionRequest,
+    *,
+    approve: bool,
+) -> PlayerGameStateResponse:
+    try:
+        PlayOrchestrator(db, GameInstanceId(game_instance_id)).decide(
+            decision_id,
+            approve=approve,
+            expected_task_version=request.expected_task_version,
+        )
+        db.commit()
+        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc)
 
 
 def _raise_http(

@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.developer import router as developer_router
 from app.api.games import router as games_router
 from app.api.health import router as health_router
 from app.api.scenarios import router as scenarios_router
@@ -24,6 +25,7 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 app.include_router(health_router)
 app.include_router(scenarios_router)
 app.include_router(games_router)
+app.include_router(developer_router)
 
 
 @app.middleware("http")

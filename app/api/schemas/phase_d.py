@@ -255,6 +255,7 @@ class PublicPlanResponse(ApiModel):
 
 class PublicTaskResponse(ApiModel):
     id: UUID
+    version: int = Field(ge=1)
     goal: str
     status: PublicTaskStatus
     objective_names: list[str]

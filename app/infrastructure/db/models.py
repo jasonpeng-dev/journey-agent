@@ -343,6 +343,7 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     last_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     goal_description: Mapped[str] = mapped_column(Text)
     submission_idempotency_key: Mapped[str | None] = mapped_column(String(160))
+    rejected_proposal_signatures: Mapped[list[str]] = mapped_column(JSON, default=list)
     scenario_key: Mapped[str] = mapped_column(String(100))
     objective_resolution_status: Mapped[str] = mapped_column(String(30), default="UNRESOLVED")
     objective_scope_keys: Mapped[list[str] | None] = mapped_column(JSON)

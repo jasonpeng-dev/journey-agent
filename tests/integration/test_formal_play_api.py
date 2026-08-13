@@ -26,6 +26,16 @@ def test_starfire_formal_play_auto_settles_and_never_exposes_hidden_truth(
     assert initial.status_code == 200
     assert "supply_status" not in initial.text
     assert "truth_value" not in initial.text
+    denied = client.get(f"/api/v1/developer/games/{game_id}/snapshot")
+    assert denied.status_code == 403
+    developer = client.get(
+        f"/api/v1/developer/games/{game_id}/snapshot",
+        headers={"x-developer-token": "test-developer"},
+    )
+    assert developer.status_code == 200
+    hidden_key = "enemy_north_supply_route.supply_status"
+    assert hidden_key in developer.json()["truth"]["facts"]
+    assert hidden_key not in developer.json()["knowledge"]["facts"]
 
     goal_key = str(uuid4())
     goal = client.post(
@@ -73,6 +83,27 @@ def test_medical_uses_same_play_api_and_game_remains_active_after_goal(
     )
     assert second.status_code == 200
     assert second.json()["task"]["status"] == "COMPLETED"
+
+
+def test_starfire_failure_updates_knowledge_and_replans_in_formal_play(
+    client: TestClient,
+) -> None:
+    scenario = next(
+        item for item in client.get("/api/v1/scenarios").json() if item["key"] == "starfire_command"
+    )
+    game_id = _new_game(client, scenario["current_published_version_id"])
+    response = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "secure the northern valley", "idempotency_key": str(uuid4())},
+    )
+    assert response.status_code == 200, response.text
+    task = response.json()["task"]
+    assert task["status"] == "COMPLETED"
+    assert task["plan"]["updated"] is True
+    state = client.get(f"/api/v1/games/{game_id}/play").json()
+    knowledge = {item["fact_key"]: item["value"] for item in state["known_facts"]}
+    assert knowledge["ambush_status"] == "CLEARED"
+    assert knowledge["valley_security"] == "SAFE"
 
 
 def test_unsupported_goal_does_not_create_a_task(client: TestClient) -> None:

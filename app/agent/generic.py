@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -160,6 +162,8 @@ class GenericGoalResolver:
 class GenericAgentService:
     """A compact persistent Agent loop driven only by exact v2 Version data."""
 
+    MAX_REPLANS = 5
+
     def __init__(
         self,
         db: Session,
@@ -230,6 +234,11 @@ class GenericAgentService:
 
     def plan(self, task: AgentTask, *, reason: str | None = None) -> AgentPlan:
         require_scope_writable(self.db, self.scope.game_instance_id)
+        if reason is not None and task.replan_count >= self.MAX_REPLANS:
+            raise GenericAgentError(
+                "GENERIC_REPLAN_LIMIT",
+                "The Task reached the generic replan safety limit",
+            )
         definition = self._definition()
         self._task_scope(task)
         objectives = self._objectives(task, definition)
@@ -246,6 +255,7 @@ class GenericAgentService:
         steps = self._candidate_steps(
             definition,
             objectives,
+            task=task,
             reason=reason,
             plan_version=next_version,
         )
@@ -453,6 +463,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         objectives: tuple[ObjectiveDefinitionV2, ...],
         *,
+        task: AgentTask,
         reason: str | None,
         plan_version: int,
     ) -> list[dict[str, object]]:
@@ -510,6 +521,10 @@ class GenericAgentService:
                     f"{action.key}"
                 )[:160],
             }
+            if proposal_signature(actor.actor_key, action.key, target_key, parameters) in set(
+                task.rejected_proposal_signatures
+            ):
+                continue
             candidates.append(
                 {
                     "description": f"Execute {action.name}",
@@ -646,6 +661,13 @@ class GenericAgentService:
         )
         result: list[dict[str, object]] = []
         for index, proposed in enumerate(proposal.steps, start=1):
+            if proposal_signature(
+                proposed.actor_key,
+                proposed.action_key,
+                proposed.target_key,
+                proposed.parameters,
+            ) in set(task.rejected_proposal_signatures):
+                continue
             result.extend(
                 self._validated_proposed_step(
                     definition, proposed, objectives, plan_version, index, reason
@@ -828,10 +850,26 @@ def _normalize(value: str) -> str:
     return " ".join(value.casefold().replace("_", " ").split())
 
 
+def proposal_signature(
+    actor_key: str,
+    action_key: str,
+    target_key: str,
+    parameters: dict[str, StrictScalar],
+) -> str:
+    payload = json.dumps(
+        [actor_key, action_key, target_key, parameters],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 __all__ = [
     "GenericAgentError",
     "GenericAgentService",
     "GenericGoalResolution",
     "GenericGoalResolver",
     "GenericObjectiveEvaluation",
+    "proposal_signature",
 ]

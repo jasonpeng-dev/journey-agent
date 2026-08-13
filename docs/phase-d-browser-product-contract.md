@@ -3,6 +3,10 @@
 Status: frozen at D0. This document defines the adapter and product contract for D1–D7.
 It does not replace the Phase R domain or application contracts.
 
+Implementation status: D0-D7 implemented on `feature/scenario-editor`. See
+`docs/phase-d-implementation.md` for the adapter map, safety bounds, verification matrix, and
+first-release limits.
+
 ## 1. Architectural boundary
 
 The governing rule remains:

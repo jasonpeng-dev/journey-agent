@@ -182,8 +182,9 @@ class PlayerProjectionService:
         objective_names = {item.key: item.name for item in definition.objectives}
         return PublicTaskResponse(
             id=task.id,
+            version=task.version,
             goal=task.goal_description,
-            status=_task_status(task.status),
+            status=_task_status(task.status, task.last_error_code),
             objective_names=[
                 objective_names[key]
                 for key in task.objective_scope_keys or ()
@@ -194,7 +195,13 @@ class PlayerProjectionService:
         )
 
 
-def _task_status(status: AgentTaskStatus) -> PublicTaskStatus:
+def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskStatus:
+    if status == AgentTaskStatus.BLOCKED:
+        return (
+            PublicTaskStatus.BLOCKED_BY_PLAYER_DECISION
+            if error_code == "BLOCKED_BY_PLAYER_DECISION"
+            else PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE
+        )
     return {
         AgentTaskStatus.ACTIVE: PublicTaskStatus.ACTIVE,
         AgentTaskStatus.WAITING_FOR_WORLD_EVENT: PublicTaskStatus.ACTIVE,
@@ -202,7 +209,6 @@ def _task_status(status: AgentTaskStatus) -> PublicTaskStatus:
         AgentTaskStatus.REQUIRES_PLAYER_DECISION: PublicTaskStatus.NEEDS_PLAYER_INPUT,
         AgentTaskStatus.SUCCEEDED: PublicTaskStatus.COMPLETED,
         AgentTaskStatus.FAILED: PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE,
-        AgentTaskStatus.BLOCKED: PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE,
         AgentTaskStatus.ABORTED: PublicTaskStatus.ABORTED,
     }[status]
 

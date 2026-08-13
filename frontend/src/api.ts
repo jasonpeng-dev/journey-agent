@@ -1,4 +1,4 @@
-import type { Draft, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
+import type { DeveloperSnapshot, Draft, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -76,4 +76,6 @@ export const api = {
   submitGoal: (id: string, goal: string, idempotencyKey: string) => request<GoalSubmission>(`/api/v1/games/${id}/goals`, { method: "POST", body: JSON.stringify({ goal, idempotency_key: idempotencyKey }) }),
   continueGame: (id: string) => request<PlayerGameState>(`/api/v1/games/${id}/continue`, { method: "POST" }),
   abandonTask: (id: string, taskId: string) => request<{ task_id: string; status: string }>(`/api/v1/games/${id}/tasks/${taskId}/abandon`, { method: "POST" }),
+  decideApproval: (id: string, decisionId: string, approve: boolean, taskVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/approvals/${decisionId}/${approve ? "approve" : "reject"}`, { method: "POST", body: JSON.stringify({ expected_task_version: taskVersion }) }),
+  developerSnapshot: (id: string, token: string) => request<DeveloperSnapshot>(`/api/v1/developer/games/${id}/snapshot`, { headers: { "x-developer-token": token } }),
 };

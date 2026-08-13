@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.generic import GenericAgentService, GenericGoalResolution, GenericGoalResolver
+from app.agent.generic import (
+    GenericAgentError,
+    GenericAgentService,
+    GenericGoalResolution,
+    GenericGoalResolver,
+    proposal_signature,
+)
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
     AgentTaskStatus,
+    DecisionStatus,
     WorldOperationStatus,
 )
 from app.domain.runtime_scope import GameInstanceId
+from app.domain.scenario_v2 import StrictScalar
 from app.infrastructure.db.models import (
+    ActionDecisionRequest,
     AgentPlan,
     AgentStep,
     AgentTask,
@@ -90,7 +101,17 @@ class PlayOrchestrator:
         )
         if conversation is None:
             raise PlayError("PLAY_SESSION_NOT_FOUND", "The Game has no playable Actor session")
-        task = self.agent.create_task(conversation, goal)
+        try:
+            task = self.agent.create_task(conversation, goal)
+        except GenericAgentError as exc:
+            if exc.code not in _UNREACHABLE_PLANNING_CODES:
+                raise
+            blocked_task = self._current_task()
+            if blocked_task is None:
+                raise
+            task = blocked_task
+            task.status = AgentTaskStatus.BLOCKED
+            task.last_error_code = "UNREACHABLE_IN_CURRENT_STATE"
         task.submission_idempotency_key = idempotency_key
         self.db.flush()
         self.advance_until_pause(task)
@@ -109,7 +130,15 @@ class PlayOrchestrator:
             if task.status in _PAUSE_OR_TERMINAL:
                 self._finalize_plan(task)
                 return task
-            self.agent.execute_next(task)
+            try:
+                self.agent.execute_next(task)
+            except GenericAgentError as exc:
+                if exc.code not in _UNREACHABLE_PLANNING_CODES:
+                    raise
+                task.status = AgentTaskStatus.BLOCKED
+                task.last_error_code = "UNREACHABLE_IN_CURRENT_STATE"
+                self.db.flush()
+                return task
             if task.status == AgentTaskStatus.WAITING_FOR_WORLD_EVENT:
                 operation = self.db.scalar(
                     select(WorldOperation)
@@ -128,6 +157,56 @@ class PlayOrchestrator:
                 task.status = AgentTaskStatus.ACTIVE
                 self.db.flush()
         raise PlayError("PLAY_TRANSITION_LIMIT", "Formal Play reached its safety bound")
+
+    def decide(
+        self,
+        decision_id: UUID,
+        *,
+        approve: bool,
+        expected_task_version: int,
+    ) -> AgentTask:
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        decision = self.db.scalar(
+            select(ActionDecisionRequest).where(
+                ActionDecisionRequest.id == decision_id,
+                ActionDecisionRequest.game_instance_id == self.scope.game_instance_id,
+                ActionDecisionRequest.status == DecisionStatus.PENDING,
+            )
+        )
+        if decision is None or decision.task_id is None:
+            raise PlayError("ACTION_DECISION_INVALID", "Approval is absent or not pending")
+        task = self.db.get(AgentTask, decision.task_id)
+        if task is None or task.version != expected_task_version:
+            raise PlayError("AGENT_TASK_CONFLICT", "The Task changed before this decision")
+        GenericActionService(self.db, self.scope).decide(decision.id, approve=approve)
+        task.version += 1
+        task.status = AgentTaskStatus.ACTIVE
+        if approve:
+            return self.advance_until_pause(task)
+        signature = proposal_signature(
+            decision.actor_key,
+            decision.action_key,
+            decision.target_key,
+            cast(dict[str, StrictScalar], decision.parameters),
+        )
+        task.rejected_proposal_signatures = [
+            *task.rejected_proposal_signatures,
+            signature,
+        ]
+        step = self.db.get(AgentStep, decision.source_step_id) if decision.source_step_id else None
+        if step is not None:
+            step.status = AgentStepStatus.FAILED
+            step.failure_code = "PLAYER_REJECTED"
+        try:
+            self.agent.plan(task, reason="PLAYER_REJECTED")
+        except GenericAgentError as exc:
+            if exc.code not in _UNREACHABLE_PLANNING_CODES:
+                raise
+            task.status = AgentTaskStatus.BLOCKED
+            task.last_error_code = "BLOCKED_BY_PLAYER_DECISION"
+            self.db.flush()
+            return task
+        return self.advance_until_pause(task)
 
     def _finalize_plan(self, task: AgentTask) -> None:
         if task.status != AgentTaskStatus.SUCCEEDED:
@@ -181,5 +260,11 @@ _PAUSE_OR_TERMINAL = (
     AgentTaskStatus.BLOCKED,
     AgentTaskStatus.ABORTED,
 )
+_UNREACHABLE_PLANNING_CODES = {
+    "GENERIC_PLAN_NOT_FOUND",
+    "GENERIC_PLAN_PARAMETER_REQUIRED",
+    "GENERIC_PROVIDER_PLAN_INVALID",
+    "GENERIC_REPLAN_LIMIT",
+}
 
 __all__ = ["GoalSubmission", "PlayError", "PlayOrchestrator"]
