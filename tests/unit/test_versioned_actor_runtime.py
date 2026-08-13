@@ -4,11 +4,7 @@ from sqlalchemy.orm import Session
 from app.domain.enums import GameInstanceStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
-from app.infrastructure.db.models import (
-    NPC,
-    GameInstanceActor,
-    Player,
-)
+from app.infrastructure.db.models import GameInstanceActor, Player
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
@@ -19,8 +15,6 @@ from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
 def test_v2_runtime_materializes_exact_version_actors_without_npc_seed(
     session: Session,
 ) -> None:
-    for npc in session.scalars(select(NPC)).all():
-        npc.enabled = False
     definition = ScenarioDefinitionV2.model_validate(_medical_scenario_document())
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
@@ -36,7 +30,6 @@ def test_v2_runtime_materializes_exact_version_actors_without_npc_seed(
 
     assert runtime.instance.status == GameInstanceStatus.ACTIVE
     assert runtime.instance.current_node_key == "triage_room"
-    assert runtime.session.npc_id is None
     assert runtime.session.actor_key == "doctor_lee"
     actors = session.scalars(
         select(GameInstanceActor).where(GameInstanceActor.game_instance_id == runtime.instance.id)

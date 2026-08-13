@@ -671,17 +671,6 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     planning: PlanningDefinitionV2 = Field(default_factory=PlanningDefinitionV2)
 
     @property
-    def behavior_bundle(self):  # type: ignore[no-untyped-def]
-        """Compatibility name until BehaviorBundle becomes EngineContract in R2+."""
-
-        from app.domain.scenario import BehaviorBundleRef
-
-        return BehaviorBundleRef(
-            key=self.engine_contract.key,
-            version=self.engine_contract.version,
-        )
-
-    @property
     def objective_catalog_version(self) -> str:
         return f"scenario-v2:{self.metadata.key}"
 

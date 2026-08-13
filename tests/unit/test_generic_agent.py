@@ -101,7 +101,7 @@ def test_generic_agent_completes_goal_plan_action_and_backend_objective(
     assert (
         task.objective_catalog_version == f"scenario-version:{runtime.instance.scenario_version_id}"
     )
-    assert task.owner_npc_id is None
+    assert task.owner_actor_key == "doctor_lee"
     assert task.owner_actor_key == "doctor_lee"
 
 

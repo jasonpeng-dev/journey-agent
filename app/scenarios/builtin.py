@@ -26,6 +26,7 @@ def load_builtin_scenario(filename: str) -> ScenarioDefinitionV2:
 
 
 STARFIRE_V2 = load_builtin_scenario("starfire_v2.yaml")
+MEDICAL_EMERGENCY_V2 = load_builtin_scenario("medical_emergency_v2.yaml")
 
 
 def require_builtin_v2_version(
@@ -63,4 +64,9 @@ def require_builtin_v2_version(
     ).version
 
 
-__all__ = ["STARFIRE_V2", "load_builtin_scenario", "require_builtin_v2_version"]
+__all__ = [
+    "MEDICAL_EMERGENCY_V2",
+    "STARFIRE_V2",
+    "load_builtin_scenario",
+    "require_builtin_v2_version",
+]

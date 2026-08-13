@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.domain.scenario import ScenarioVersionSnapshot
-from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import ScenarioVersion
 from app.scenarios.documents import (
     SUPPORTED_SCENARIO_DOCUMENT_SCHEMA_VERSIONS,
@@ -67,8 +66,8 @@ class ScenarioVersionRepository:
                 "The persisted ScenarioVersion snapshot failed integrity verification",
             )
         if (
-            document.behavior_bundle.key != record.behavior_bundle_key
-            or document.behavior_bundle.version != record.behavior_bundle_version
+            document.engine_contract.key != record.engine_contract_key
+            or document.engine_contract.version != record.engine_contract_version
         ):
             raise ScenarioVersionError(
                 "SCENARIO_VERSION_BEHAVIOR_MISMATCH",
@@ -81,9 +80,7 @@ class ScenarioVersionRepository:
             schema_version=record.schema_version,
             content_hash=record.content_hash,
             published_at=record.published_at,
-            definition=(
-                document if isinstance(document, ScenarioDefinitionV2) else document.to_domain()
-            ),
+            definition=document,
         )
 
 

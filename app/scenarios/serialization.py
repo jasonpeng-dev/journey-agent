@@ -7,50 +7,13 @@ import json
 from typing import Any
 
 from app.domain.scenario_v2 import ScenarioDefinitionV2
-from app.scenarios.documents import (
-    ScenarioDefinitionDocument,
-    ScenarioDefinitionDocumentAny,
-    parse_scenario_document,
-)
+from app.scenarios.documents import parse_scenario_document
 
 
-def canonical_document(document: dict[str, Any]) -> ScenarioDefinitionDocumentAny:
+def canonical_document(document: dict[str, Any]) -> ScenarioDefinitionV2:
     """Validate and normalize ordering without changing Scenario semantics."""
 
-    parsed = parse_scenario_document(document)
-    if isinstance(parsed, ScenarioDefinitionDocument):
-        return _canonical_v1(parsed)
-    return _canonical_v2(parsed)
-
-
-def _canonical_v1(parsed: ScenarioDefinitionDocument) -> ScenarioDefinitionDocument:
-    normalized = ScenarioDefinitionDocument.from_domain(parsed.to_domain()).model_dump(mode="json")
-    world = normalized["world"]
-    world["interactions"].sort(key=lambda item: item["key"])
-    world["nodes"].sort(key=lambda item: item["key"])
-    for node in world["nodes"]:
-        node["interaction_keys"].sort()
-        node["facts"].sort(key=lambda item: item["key"])
-        for fact in node["facts"]:
-            if fact["value_type"] == "ENUM":
-                fact["allowed_values"].sort(key=_scalar_sort_key)
-    world["relations"].sort(
-        key=lambda item: (
-            item["source_node_key"],
-            item["relation_type"],
-            item["target_node_key"],
-        )
-    )
-    world["resources"].sort(key=lambda item: item["key"])
-    objectives = normalized["objective_catalog"]["definitions"]
-    objectives.sort(key=lambda item: item["key"])
-    for objective in objectives:
-        objective["completion_requirements"].sort(key=lambda item: item["key"])
-        objective["prerequisites"].sort(key=lambda item: item["key"])
-        objective["subsumes"].sort()
-        for prerequisite in objective["prerequisites"]:
-            prerequisite["requirements"].sort(key=lambda item: item["key"])
-    return ScenarioDefinitionDocument.model_validate(normalized)
+    return _canonical_v2(parse_scenario_document(document))
 
 
 def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:

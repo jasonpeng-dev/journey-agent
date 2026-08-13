@@ -141,8 +141,8 @@ class ScenarioService:
             schema_version=canonical.schema_version,
             snapshot_document=canonical.model_dump(mode="json"),
             content_hash=content_hash,
-            behavior_bundle_key=canonical.behavior_bundle.key,
-            behavior_bundle_version=canonical.behavior_bundle.version,
+            engine_contract_key=canonical.engine_contract.key,
+            engine_contract_version=canonical.engine_contract.version,
             published_at=datetime.now(UTC),
         )
         self.db.add(version)

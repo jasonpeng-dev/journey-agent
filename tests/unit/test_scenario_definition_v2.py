@@ -5,19 +5,10 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.domain.scenario import ScenarioDefinition
 from app.domain.scenario_v2 import ScenarioDefinitionV2
-from app.scenarios.documents import (
-    ScenarioDefinitionDocument,
-    parse_scenario_document,
-)
+from app.scenarios.documents import parse_scenario_document
 from app.scenarios.persistence import ScenarioDefinitionRepository
-from app.scenarios.runtime_binding import (
-    ScenarioRuntimeBindingError,
-    require_v1_runtime_definition,
-)
 from app.scenarios.serialization import canonical_document, scenario_content_hash
-from app.scenarios.starfire.scenario import STARFIRE_SCENARIO_DEFINITION
 from app.scenarios.validation import ScenarioDefinitionValidator
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.scenarios import ScenarioService
@@ -235,28 +226,8 @@ def test_v2_validation_fails_closed_for_references_and_engine_contract(
     assert code in {issue.code for issue in result.issues}
 
 
-def test_v1_decoder_remains_available_without_rewriting_snapshot() -> None:
-    document = ScenarioDefinitionDocument.from_domain(STARFIRE_SCENARIO_DEFINITION).model_dump(
-        mode="json"
-    )
-
-    parsed = parse_scenario_document(document)
-
-    assert isinstance(parsed, ScenarioDefinitionDocument)
-    assert parsed.model_dump(mode="json") == document
-
-
-def test_v2_draft_publishes_and_loads_beside_v1(session: Session) -> None:
+def test_v2_draft_publishes_and_loads_exact_snapshot(session: Session) -> None:
     repository = ScenarioDefinitionRepository(session)
-    starfire = repository.persist_initial_draft(STARFIRE_SCENARIO_DEFINITION)
-    starfire_version = (
-        ScenarioService(session)
-        .publish_draft(
-            starfire.id,
-            expected_revision=1,
-        )
-        .version
-    )
     medical_definition = ScenarioDefinitionV2.model_validate(_medical_scenario_document())
     medical = repository.persist_initial_draft(medical_definition)
     medical_version = (
@@ -267,20 +238,15 @@ def test_v2_draft_publishes_and_loads_beside_v1(session: Session) -> None:
         )
         .version
     )
-    original_v1_document = deepcopy(starfire_version.snapshot_document)
-
-    loaded_v1 = ScenarioVersionRepository(session).load(starfire_version.id)
     loaded_v2 = ScenarioVersionRepository(session).load(medical_version.id)
 
-    assert starfire_version.schema_version == 1
     assert medical_version.schema_version == 2
-    assert isinstance(loaded_v1.definition, ScenarioDefinition)
     assert isinstance(loaded_v2.definition, ScenarioDefinitionV2)
     assert loaded_v2.definition.metadata.key == "medical_emergency"
-    assert medical_version.behavior_bundle_key == "declarative-rule-engine"
-    assert medical_version.behavior_bundle_version == "1"
-    session.refresh(starfire_version)
-    assert starfire_version.snapshot_document == original_v1_document
-    with pytest.raises(ScenarioRuntimeBindingError) as unsupported_runtime:
-        require_v1_runtime_definition(loaded_v2)
-    assert unsupported_runtime.value.code == "SCENARIO_RUNTIME_SCHEMA_UNSUPPORTED"
+    assert medical_version.engine_contract_key == "declarative-rule-engine"
+    assert medical_version.engine_contract_version == "1"
+
+
+def test_v1_documents_fail_closed() -> None:
+    with pytest.raises(ValueError, match="v2 is required"):
+        parse_scenario_document({"schema_version": 1})

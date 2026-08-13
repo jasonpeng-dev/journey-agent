@@ -133,7 +133,6 @@ class GenericAgentService:
         task = AgentTask(
             player_id=self.scope.player_id,
             game_instance_id=self.scope.game_instance_id,
-            owner_npc_id=None,
             owner_actor_key=session.actor_key,
             origin_session_id=session.id,
             last_session_id=session.id,
@@ -190,7 +189,6 @@ class GenericAgentService:
             strategy_summary="Execute exact-Version actions for the frozen objective scope",
             replan_reason=reason,
             supersedes_plan_id=old_plan.id if old_plan else None,
-            created_by_npc_id=None,
             created_by_actor_key=actor.actor_key,
             source="GENERIC",
             planner_model=None,
@@ -206,7 +204,6 @@ class GenericAgentService:
                     sequence=sequence,
                     description=candidate["description"],
                     execution_type=candidate["execution_type"],
-                    assigned_npc_id=None,
                     assigned_actor_key=actor.actor_key,
                     action_intent=candidate["action_intent"],
                     constraints={"scenario_version_id": str(self.scope.scenario_version_id)},

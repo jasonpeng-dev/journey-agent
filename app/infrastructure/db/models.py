@@ -26,18 +26,12 @@ from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
     AgentTaskStatus,
-    DecisionStatus,
     GameInstanceStatus,
-    MemoryType,
     MessageRole,
     NodeStatus,
-    NodeType,
-    NPCRole,
     PlayerStatus,
-    RunStatus,
     SessionStatus,
     StepExecutionType,
-    TerminationReason,
     WorldOperationStatus,
 )
 from app.domain.world import Visibility
@@ -95,8 +89,8 @@ class ScenarioVersion(UUIDPrimaryKey, Base):
     schema_version: Mapped[int] = mapped_column(Integer)
     snapshot_document: Mapped[dict[str, Any]] = mapped_column(JSON)
     content_hash: Mapped[str] = mapped_column(String(64))
-    behavior_bundle_key: Mapped[str] = mapped_column(String(100))
-    behavior_bundle_version: Mapped[str] = mapped_column(String(100))
+    engine_contract_key: Mapped[str] = mapped_column(String(100))
+    engine_contract_version: Mapped[str] = mapped_column(String(100))
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -111,29 +105,6 @@ def _reject_scenario_version_mutation(*_args: object) -> None:
     raise ScenarioVersionImmutableError("Published ScenarioVersion rows are immutable")
 
 
-class World(UUIDPrimaryKey, TimestampMixin, Base):
-    __tablename__ = "worlds"
-
-    key: Mapped[str] = mapped_column(String(80), unique=True)
-    name: Mapped[str] = mapped_column(String(160))
-    chapter: Mapped[int] = mapped_column(Integer, default=1)
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class WorldNode(UUIDPrimaryKey, TimestampMixin, Base):
-    __tablename__ = "world_nodes"
-    __table_args__ = (UniqueConstraint("world_id", "key"),)
-
-    world_id: Mapped[UUID] = mapped_column(ForeignKey("worlds.id", ondelete="CASCADE"))
-    key: Mapped[str] = mapped_column(String(80))
-    name: Mapped[str] = mapped_column(String(160))
-    description: Mapped[str] = mapped_column(Text)
-    type: Mapped[NodeType] = mapped_column(Enum(NodeType, native_enum=False))
-    default_status: Mapped[NodeStatus] = mapped_column(Enum(NodeStatus, native_enum=False))
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
 class Player(UUIDPrimaryKey, TimestampMixin, Base):
     __tablename__ = "players"
     __table_args__ = (
@@ -144,7 +115,6 @@ class Player(UUIDPrimaryKey, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(100))
     level: Mapped[int] = mapped_column(Integer, default=1)
     gold: Mapped[int] = mapped_column(Integer, default=0)
-    current_node_id: Mapped[UUID | None] = mapped_column(ForeignKey("world_nodes.id"))
     status: Mapped[PlayerStatus] = mapped_column(
         Enum(PlayerStatus, native_enum=False), default=PlayerStatus.ACTIVE
     )
@@ -177,7 +147,7 @@ class GameInstance(UUIDPrimaryKey, TimestampMixin, Base):
         default=GameInstanceStatus.PENDING_INITIALIZATION,
     )
     current_node_key: Mapped[str | None] = mapped_column(String(80))
-    creation_key: Mapped[str | None] = mapped_column(String(160))
+    creation_key: Mapped[str] = mapped_column(String(160))
     runtime_revision: Mapped[int] = mapped_column(Integer, default=0)
 
 
@@ -308,153 +278,15 @@ class GameInstanceMemoryEvent(UUIDPrimaryKey, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
-class GameInstanceWorldFact(TimestampMixin, Base):
-    """Instance-owned compatibility projection for existing flat fact consumers."""
-
-    __tablename__ = "game_instance_world_facts"
-
-    game_instance_id: Mapped[UUID] = mapped_column(
-        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
-    )
-    key: Mapped[str] = mapped_column(String(100), primary_key=True)
-    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class GameInstanceOfficerAppointment(TimestampMixin, Base):
-    """Instance-owned officer assignment; NPC identity remains global definition data."""
-
-    __tablename__ = "game_instance_officer_appointments"
-
-    game_instance_id: Mapped[UUID] = mapped_column(
-        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
-    )
-    npc_id: Mapped[UUID] = mapped_column(
-        ForeignKey("npcs.id", ondelete="CASCADE"), primary_key=True
-    )
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
-    authority_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class PlayerNodeState(TimestampMixin, Base):
-    __tablename__ = "player_node_states"
-
-    player_id: Mapped[UUID] = mapped_column(
-        ForeignKey("players.id", ondelete="CASCADE"), primary_key=True
-    )
-    node_id: Mapped[UUID] = mapped_column(
-        ForeignKey("world_nodes.id", ondelete="CASCADE"), primary_key=True
-    )
-    status: Mapped[NodeStatus] = mapped_column(Enum(NodeStatus, native_enum=False))
-    visibility: Mapped[Visibility] = mapped_column(
-        Enum(Visibility, native_enum=False), default=Visibility.KNOWN
-    )
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class NPC(UUIDPrimaryKey, Base):
-    __tablename__ = "npcs"
-
-    key: Mapped[str] = mapped_column(String(80), unique=True)
-    name: Mapped[str] = mapped_column(String(120))
-    persona: Mapped[str] = mapped_column(Text)
-    doctrine: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    authority_limits: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    profile_version: Mapped[int] = mapped_column(Integer, default=1)
-    current_node_id: Mapped[UUID] = mapped_column(ForeignKey("world_nodes.id"))
-    role: Mapped[NPCRole] = mapped_column(Enum(NPCRole, native_enum=False))
-    permission_profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
-class OfficerAppointment(TimestampMixin, Base):
-    """Explicitly records that an NPC officer serves a player's domain."""
-
-    __tablename__ = "officer_appointments"
-
-    player_id: Mapped[UUID] = mapped_column(
-        ForeignKey("players.id", ondelete="CASCADE"), primary_key=True
-    )
-    npc_id: Mapped[UUID] = mapped_column(
-        ForeignKey("npcs.id", ondelete="CASCADE"), primary_key=True
-    )
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
-    authority_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class PlayerDomainState(TimestampMixin, Base):
-    """Small, deterministic resource ledger for the strategic demo."""
-
-    __tablename__ = "player_domain_states"
-    __table_args__ = (
-        CheckConstraint("soldiers_total >= 0", name="ck_domain_soldiers_total"),
-        CheckConstraint(
-            "soldiers_committed >= 0 AND soldiers_committed <= soldiers_total",
-            name="ck_domain_soldiers_committed",
-        ),
-        CheckConstraint("food >= 0", name="ck_domain_food"),
-        CheckConstraint("morale >= 0 AND morale <= 100", name="ck_domain_morale"),
-    )
-
-    player_id: Mapped[UUID] = mapped_column(
-        ForeignKey("players.id", ondelete="CASCADE"), primary_key=True
-    )
-    soldiers_total: Mapped[int] = mapped_column(Integer, default=300)
-    soldiers_committed: Mapped[int] = mapped_column(Integer, default=0)
-    food: Mapped[int] = mapped_column(Integer, default=100)
-    morale: Mapped[int] = mapped_column(Integer, default=60)
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class PlayerWorldFact(TimestampMixin, Base):
-    """Legacy flat, player-visible compatibility projection.
-
-    Canonical truth and fact visibility live in ``PlayerWorldFactState``. This table
-    remains because historical tools and audit payloads still use the flat keys.
-    """
-
-    __tablename__ = "player_world_facts"
-
-    player_id: Mapped[UUID] = mapped_column(
-        ForeignKey("players.id", ondelete="CASCADE"), primary_key=True
-    )
-    key: Mapped[str] = mapped_column(String(100), primary_key=True)
-    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
-class PlayerWorldFactState(TimestampMixin, Base):
-    """Canonical per-player world truth with independent fact knowledge."""
-
-    __tablename__ = "player_world_fact_states"
-
-    player_id: Mapped[UUID] = mapped_column(
-        ForeignKey("players.id", ondelete="CASCADE"), primary_key=True
-    )
-    node_id: Mapped[UUID] = mapped_column(
-        ForeignKey("world_nodes.id", ondelete="CASCADE"), primary_key=True
-    )
-    fact_key: Mapped[str] = mapped_column(String(80), primary_key=True)
-    truth_value: Mapped[Any] = mapped_column(JSON)
-    visibility: Mapped[Visibility] = mapped_column(
-        Enum(Visibility, native_enum=False), default=Visibility.KNOWN
-    )
-    version: Mapped[int] = mapped_column(Integer, default=1)
-
-
 class ConversationSession(UUIDPrimaryKey, TimestampMixin, Base):
     __tablename__ = "conversation_sessions"
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
-    game_instance_id: Mapped[UUID | None] = mapped_column(
+    game_instance_id: Mapped[UUID] = mapped_column(
         ForeignKey("game_instances.id", ondelete="CASCADE"),
         index=True,
-        server_default=text("NULL"),
     )
-    npc_id: Mapped[UUID | None] = mapped_column(ForeignKey("npcs.id"))
-    actor_key: Mapped[str | None] = mapped_column(String(80))
+    actor_key: Mapped[str] = mapped_column(String(80))
     status: Mapped[SessionStatus] = mapped_column(
         Enum(SessionStatus, native_enum=False), default=SessionStatus.ACTIVE
     )
@@ -475,70 +307,6 @@ class ConversationMessage(UUIDPrimaryKey, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
-class Memory(UUIDPrimaryKey, Base):
-    __tablename__ = "memories"
-    __table_args__ = (
-        Index("ix_memories_player_npc_importance", "player_id", "npc_id", "importance"),
-        Index(
-            "ix_memories_instance_npc_importance",
-            "game_instance_id",
-            "npc_id",
-            "importance",
-        ),
-    )
-
-    player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
-    game_instance_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("game_instances.id", ondelete="CASCADE"),
-        index=True,
-        server_default=text("NULL"),
-    )
-    npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
-    type: Mapped[MemoryType] = mapped_column(Enum(MemoryType, native_enum=False))
-    content: Mapped[str] = mapped_column(Text)
-    importance: Mapped[int] = mapped_column(Integer, default=5)
-    source_session_id: Mapped[UUID | None] = mapped_column(ForeignKey("conversation_sessions.id"))
-    source_event_id: Mapped[str | None] = mapped_column(String(160))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class AgentRun(UUIDPrimaryKey, Base):
-    __tablename__ = "agent_runs"
-    __table_args__ = (Index("ix_agent_runs_session_started", "session_id", "started_at"),)
-
-    request_id: Mapped[UUID]
-    session_id: Mapped[UUID] = mapped_column(
-        ForeignKey("conversation_sessions.id", ondelete="CASCADE")
-    )
-    status: Mapped[RunStatus] = mapped_column(
-        Enum(RunStatus, native_enum=False), default=RunStatus.RUNNING
-    )
-    model: Mapped[str] = mapped_column(String(100))
-    input_message: Mapped[str] = mapped_column(Text)
-    context_record_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    model_rounds: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    max_rounds: Mapped[int] = mapped_column(Integer)
-    actual_rounds: Mapped[int] = mapped_column(Integer, default=0)
-    token_usage: Mapped[int] = mapped_column(Integer, default=0)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    termination_reason: Mapped[TerminationReason | None] = mapped_column(
-        Enum(TerminationReason, native_enum=False)
-    )
-    task_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("agent_tasks.id", ondelete="SET NULL"), index=True
-    )
-    plan_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_plans.id", ondelete="SET NULL"))
-    step_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_steps.id", ondelete="SET NULL"))
-    actor_npc_id: Mapped[UUID | None] = mapped_column(ForeignKey("npcs.id", ondelete="SET NULL"))
-    officer_profile_version: Mapped[int | None] = mapped_column(Integer)
-    authority_policy_version: Mapped[int | None] = mapped_column(Integer)
-    purpose: Mapped[str] = mapped_column(String(30), default="CONVERSATION")
-    structured_output: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    validation_status: Mapped[str | None] = mapped_column(String(30))
-    validation_errors: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
-
-
 class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     __tablename__ = "agent_tasks"
     __table_args__ = (
@@ -547,13 +315,11 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
-    game_instance_id: Mapped[UUID | None] = mapped_column(
+    game_instance_id: Mapped[UUID] = mapped_column(
         ForeignKey("game_instances.id", ondelete="CASCADE"),
         index=True,
-        server_default=text("NULL"),
     )
-    owner_npc_id: Mapped[UUID | None] = mapped_column(ForeignKey("npcs.id"))
-    owner_actor_key: Mapped[str | None] = mapped_column(String(80))
+    owner_actor_key: Mapped[str] = mapped_column(String(80))
     origin_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     last_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     goal_description: Mapped[str] = mapped_column(Text)
@@ -601,10 +367,7 @@ class AgentPlan(UUIDPrimaryKey, Base):
     # Kept as an audit identifier without a foreign key to avoid a schema cycle:
     # plans are produced by runs, while step runs refer back to plans and steps.
     created_by_run_id: Mapped[UUID | None]
-    created_by_npc_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("npcs.id", ondelete="SET NULL")
-    )
-    created_by_actor_key: Mapped[str | None] = mapped_column(String(80))
+    created_by_actor_key: Mapped[str] = mapped_column(String(80))
     source: Mapped[str] = mapped_column(String(40), default="MANUAL")
     planner_model: Mapped[str | None] = mapped_column(String(100))
     validation_status: Mapped[str] = mapped_column(String(30), default="PASSED")
@@ -629,10 +392,7 @@ class AgentStep(UUIDPrimaryKey, Base):
         Enum(AgentStepStatus, native_enum=False, length=30),
         default=AgentStepStatus.PENDING,
     )
-    assigned_npc_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("npcs.id", ondelete="SET NULL"), index=True
-    )
-    assigned_actor_key: Mapped[str | None] = mapped_column(String(80))
+    assigned_actor_key: Mapped[str] = mapped_column(String(80), index=True)
     action_intent: Mapped[str | None] = mapped_column(String(100))
     constraints: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     allowed_tool_names: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -647,63 +407,24 @@ class AgentStep(UUIDPrimaryKey, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class ToolExecution(UUIDPrimaryKey, Base):
-    __tablename__ = "tool_executions"
-    __table_args__ = (
-        UniqueConstraint("agent_run_id", "tool_call_id"),
-        Index("ix_tool_execution_run_created", "agent_run_id", "created_at"),
-    )
-
-    agent_run_id: Mapped[UUID] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"))
-    step_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("agent_steps.id", ondelete="SET NULL"), index=True
-    )
-    tool_call_id: Mapped[str] = mapped_column(String(160))
-    tool_name: Mapped[str] = mapped_column(String(100))
-    arguments: Mapped[dict[str, Any]] = mapped_column(JSON)
-    validation_status: Mapped[str] = mapped_column(String(30))
-    authorization_status: Mapped[str] = mapped_column(String(30))
-    authority_details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    business_rule_status: Mapped[str] = mapped_column(String(30))
-    execution_status: Mapped[str] = mapped_column(String(30))
-    result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    error_code: Mapped[str | None] = mapped_column(String(100))
-    before_state: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    after_state: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
-    idempotency_key: Mapped[str | None] = mapped_column(String(160))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class WorldOperation(UUIDPrimaryKey, TimestampMixin, Base):
     """A deterministic, externally-resolved military, construction, or trade operation."""
 
     __tablename__ = "world_operations"
     __table_args__ = (
         Index(
-            "uq_world_operations_legacy_idempotency",
-            "player_id",
-            "idempotency_key",
-            unique=True,
-            sqlite_where=text("game_instance_id IS NULL"),
-            postgresql_where=text("game_instance_id IS NULL"),
-        ),
-        Index(
             "uq_world_operations_instance_idempotency",
             "game_instance_id",
             "idempotency_key",
             unique=True,
-            sqlite_where=text("game_instance_id IS NOT NULL"),
-            postgresql_where=text("game_instance_id IS NOT NULL"),
         ),
         Index("ix_world_operations_task_status", "task_id", "status"),
     )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
-    game_instance_id: Mapped[UUID | None] = mapped_column(
+    game_instance_id: Mapped[UUID] = mapped_column(
         ForeignKey("game_instances.id", ondelete="CASCADE"),
         index=True,
-        server_default=text("NULL"),
     )
     task_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("agent_tasks.id", ondelete="SET NULL"), index=True
@@ -711,11 +432,9 @@ class WorldOperation(UUIDPrimaryKey, TimestampMixin, Base):
     source_step_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("agent_steps.id", ondelete="SET NULL"), index=True
     )
-    officer_npc_id: Mapped[UUID | None] = mapped_column(ForeignKey("npcs.id"))
-    actor_key: Mapped[str | None] = mapped_column(String(80))
-    action_key: Mapped[str | None] = mapped_column(String(80))
-    execution_mode: Mapped[str | None] = mapped_column(String(20))
-    operation_type: Mapped[str] = mapped_column(String(50))
+    actor_key: Mapped[str] = mapped_column(String(80))
+    action_key: Mapped[str] = mapped_column(String(80))
+    execution_mode: Mapped[str] = mapped_column(String(20))
     target_key: Mapped[str] = mapped_column(String(100))
     status: Mapped[WorldOperationStatus] = mapped_column(
         Enum(WorldOperationStatus, native_enum=False),
@@ -726,32 +445,3 @@ class WorldOperation(UUIDPrimaryKey, TimestampMixin, Base):
     idempotency_key: Mapped[str] = mapped_column(String(160))
     resolution_key: Mapped[str | None] = mapped_column(String(160))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class PlayerDecisionRequest(UUIDPrimaryKey, TimestampMixin, Base):
-    """A scoped approval/choice request generated by an authority policy."""
-
-    __tablename__ = "player_decision_requests"
-    __table_args__ = (Index("ix_decisions_task_status", "task_id", "status"),)
-
-    player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
-    game_instance_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("game_instances.id", ondelete="CASCADE"),
-        index=True,
-        server_default=text("NULL"),
-    )
-    task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
-    step_id: Mapped[UUID] = mapped_column(ForeignKey("agent_steps.id", ondelete="CASCADE"))
-    requested_by_npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
-    status: Mapped[DecisionStatus] = mapped_column(
-        Enum(DecisionStatus, native_enum=False), default=DecisionStatus.PENDING
-    )
-    decision_kind: Mapped[str] = mapped_column(String(30), default="APPROVAL")
-    summary: Mapped[str] = mapped_column(Text)
-    options: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    action_tool_name: Mapped[str] = mapped_column(String(100))
-    action_arguments: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    policy_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    selected_option: Mapped[str | None] = mapped_column(String(80))
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
