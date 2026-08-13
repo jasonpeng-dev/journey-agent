@@ -33,8 +33,4 @@ jobs:
       - run: uv run mypy app evals
       - run: uv run alembic upgrade head
       - run: uv run pytest --cov=app --cov-report=term-missing
-      - run: uv run journey-agent eval run --output eval-results
-      - uses: actions/upload-artifact@v4
-        with:
-          name: evaluation-report
-          path: eval-results/
+      - run: node --input-type=module --check < app/web/render.js

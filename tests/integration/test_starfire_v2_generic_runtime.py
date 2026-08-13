@@ -2,7 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
-from app.domain.enums import AgentTaskStatus, NodeStatus, WorldOperationStatus
+from app.domain.enums import AgentStepStatus, AgentTaskStatus, NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
@@ -79,6 +79,7 @@ def test_starfire_v2_defeat_reveal_disrupt_and_second_clear(session: Session) ->
 
     assert defeat.applied is not None and defeat.applied.outcome.failure is not None
     assert defeat.applied.outcome.failure.code == "ENCOUNTER_DEFEAT"
+    assert defeat.applied.outcome.failure.retryable
     supply_node = session.get(
         GameInstanceNodeState,
         (runtime.instance.id, "enemy_north_supply_route"),
@@ -88,8 +89,10 @@ def test_starfire_v2_defeat_reveal_disrupt_and_second_clear(session: Session) ->
         (runtime.instance.id, "enemy_north_supply_route", "supply_status"),
     )
     assert supply_node is not None and supply_node.visibility.value == "KNOWN"
+    assert supply_node.status == NodeStatus.AVAILABLE
     assert supply_fact is not None and supply_fact.visibility.value == "KNOWN"
     assert _resources(session, runtime.instance.id)["soldiers"] == 282
+    assert _resources(session, runtime.instance.id)["morale"] == 50
 
     _run_action(
         session,
@@ -99,6 +102,8 @@ def test_starfire_v2_defeat_reveal_disrupt_and_second_clear(session: Session) ->
         parameters={"troop_count": 30, "strategy": "CAUTIOUS"},
         key="disrupt-no-guide",
     )
+    assert supply_fact.truth_value == "DISRUPTED"
+    assert _resources(session, runtime.instance.id)["soldiers"] == 278
     victory = _run_action(
         session,
         actions,
@@ -115,6 +120,18 @@ def test_starfire_v2_defeat_reveal_disrupt_and_second_clear(session: Session) ->
         (runtime.instance.id, "northern_valley", "valley_security"),
     )
     assert valley is not None and valley.truth_value == "SAFE"
+    ambush = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "northern_valley", "ambush_status"),
+    )
+    outpost_node = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "starfire_outpost"),
+    )
+    assert ambush is not None and ambush.truth_value == "CLEARED"
+    assert ambush.visibility == Visibility.KNOWN
+    assert outpost_node is not None and outpost_node.status == NodeStatus.AVAILABLE
+    assert _resources(session, runtime.instance.id)["morale"] == 58
 
 
 def test_starfire_v2_guide_reduces_both_military_losses(session: Session) -> None:
@@ -143,6 +160,8 @@ def test_starfire_v2_guide_reduces_both_military_losses(session: Session) -> Non
         parameters={"troop_count": 30, "strategy": "CAUTIOUS"},
         key="guided-disrupt",
     )
+    assert _resources(session, runtime.instance.id)["soldiers"] == 298
+    assert _resources(session, runtime.instance.id)["morale"] == 63
     _run_action(
         session,
         actions,
@@ -168,8 +187,13 @@ def test_starfire_v2_generic_agent_failure_knowledge_replan_completion(
     task = agent.create_task(runtime.session, "secure the northern valley")
     actions = GenericActionService(session, scope)
 
+    started = agent.execute_next(task)
+    assert started is not None and started.status == AgentStepStatus.SUCCEEDED
+    waiting = agent.execute_next(task)
+    assert waiting is not None and waiting.status == AgentStepStatus.WAITING_FOR_WORLD_EVENT
+    assert task.status == AgentTaskStatus.WAITING_FOR_WORLD_EVENT
+
     for index in range(20):
-        agent.execute_next(task)
         pending = session.scalar(
             select(WorldOperation)
             .where(
@@ -180,6 +204,7 @@ def test_starfire_v2_generic_agent_failure_knowledge_replan_completion(
         )
         if pending is not None:
             actions.resolve_operation(pending.id, resolution_key=f"event-{index}")
+        agent.execute_next(task)
         if task.status == AgentTaskStatus.SUCCEEDED:
             break
 
@@ -255,3 +280,67 @@ def test_starfire_v2_repair_and_trade_are_versioned_rules(session: Session) -> N
         "gold": 40,
         "morale": 60,
     }
+
+
+def test_async_resolution_rereads_latest_instance_truth(session: Session) -> None:
+    runtime, scope = _runtime(session, "starfire-v2-latest-truth")
+    actions = GenericActionService(session, scope)
+    started = actions.execute_action(
+        actor_key="han_lie",
+        action_key="clear_valley",
+        target_key="northern_valley",
+        parameters={"troop_count": 80, "strategy": "STANDARD"},
+        idempotency_key="latest-truth-clear",
+    )
+    assert started.operation.status == WorldOperationStatus.PENDING
+    supply = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "enemy_north_supply_route", "supply_status"),
+    )
+    assert supply is not None
+    supply.truth_value = "DISRUPTED"
+    resolved = actions.resolve_operation(started.operation.id, resolution_key="latest-event")
+
+    assert resolved.applied is not None
+    assert resolved.applied.outcome.failure is None
+    assert resolved.applied.outcome.outcome_code == "VICTORY"
+
+
+def test_same_player_same_version_instances_are_isolated(session: Session) -> None:
+    version = require_builtin_v2_version(session, STARFIRE_V2)
+    player = Player(name="same-player-same-version")
+    session.add(player)
+    session.flush()
+    initializer = RuntimeInitializationService(session)
+    first = initializer.create(
+        player_id=player.id,
+        scenario_version_id=version.id,
+        creation_key="same-version-a",
+    )
+    second = initializer.create(
+        player_id=player.id,
+        scenario_version_id=version.id,
+        creation_key="same-version-b",
+    )
+    first_scope = GameInstanceService(session).load(GameInstanceId(first.instance.id))
+    _run_action(
+        session,
+        GenericActionService(session, first_scope),
+        action="clear_valley",
+        target="northern_valley",
+        parameters={"troop_count": 80, "strategy": "STANDARD"},
+        key="same-operation-key",
+    )
+
+    first_resources = _resources(session, first.instance.id)
+    second_resources = _resources(session, second.instance.id)
+    assert first_resources["soldiers"] == 282
+    assert second_resources["soldiers"] == 300
+    first_supply = session.get(
+        GameInstanceNodeState, (first.instance.id, "enemy_north_supply_route")
+    )
+    second_supply = session.get(
+        GameInstanceNodeState, (second.instance.id, "enemy_north_supply_route")
+    )
+    assert first_supply is not None and first_supply.visibility == Visibility.KNOWN
+    assert second_supply is not None and second_supply.visibility == Visibility.HIDDEN

@@ -11,6 +11,7 @@ from app.domain.enums import GameInstanceStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
 from app.domain.scenario_v2 import NodeDefinitionV2, ResourceDefinitionV2
 from app.infrastructure.db.models import (
+    ActionDecisionRequest,
     AgentTask,
     ConversationSession,
     GameInstance,
@@ -41,6 +42,7 @@ class RecoveredRuntime:
     sessions: tuple[ConversationSession, ...]
     tasks: tuple[AgentTask, ...]
     pending_operations: tuple[WorldOperation, ...]
+    decisions: tuple[ActionDecisionRequest, ...]
 
 
 class RuntimeRecoveryService:
@@ -88,6 +90,13 @@ class RuntimeRecoveryService:
                 select(WorldOperation).where(WorldOperation.game_instance_id == game_instance_id)
             ).all()
         )
+        decisions = tuple(
+            self.db.scalars(
+                select(ActionDecisionRequest).where(
+                    ActionDecisionRequest.game_instance_id == game_instance_id
+                )
+            ).all()
+        )
         actor_keys = {actor.actor_key for actor in actors}
         session_ids = {session.id for session in sessions}
         task_ids = {task.id for task in tasks}
@@ -109,6 +118,12 @@ class RuntimeRecoveryService:
             for operation in operations
         ):
             self._corrupt("WorldOperation")
+        if any(
+            decision.player_id != scope.player_id
+            or (decision.task_id is not None and decision.task_id not in task_ids)
+            for decision in decisions
+        ):
+            self._corrupt("ActionDecisionRequest")
         self._verify_snapshot_state(
             instance,
             definition.world.nodes,
@@ -127,6 +142,7 @@ class RuntimeRecoveryService:
                 for operation in operations
                 if operation.status == WorldOperationStatus.PENDING
             ),
+            decisions=decisions,
         )
 
     def _verify_snapshot_state(

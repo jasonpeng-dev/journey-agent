@@ -149,6 +149,18 @@ def test_two_different_v2_games_run_isolated_and_recover_exact_versions(
             db, ScenarioDefinitionV2.model_validate(changed_payload)
         )
         assert later_version.id != starfire_version.id
+        pending = (
+            GenericActionService(db, starfire_scope)
+            .execute_action(
+                actor_key="han_lie",
+                action_key="recon_valley",
+                target_key="northern_valley",
+                parameters={"troop_count": 30, "approach": "CAUTIOUS"},
+                idempotency_key="restart-pending-operation",
+            )
+            .operation
+        )
+        assert pending.status == WorldOperationStatus.PENDING
         ids = {
             "player": player.id,
             "starfire_instance": starfire_runtime.instance.id,
@@ -157,6 +169,7 @@ def test_two_different_v2_games_run_isolated_and_recover_exact_versions(
             "medical_version": medical_version.id,
             "starfire_task": starfire_task.id,
             "medical_task": medical_task.id,
+            "pending": pending.id,
         }
         db.commit()
     engine.dispose()
@@ -181,12 +194,24 @@ def test_two_different_v2_games_run_isolated_and_recover_exact_versions(
         }
         assert {event.event_key for event in medical.generic_memories} == {"patient_stabilized"}
         assert starfire.generic_memories == ()
+        assert {operation.id for operation in starfire.pending_operations} == {ids["pending"]}
+        assert medical.pending_operations == ()
         assert db.get(AgentTask, ids["starfire_task"]).status == AgentTaskStatus.SUCCEEDED
         assert db.get(AgentTask, ids["medical_task"]).status == AgentTaskStatus.SUCCEEDED
         assert (
             GenericAgentService(db, starfire.scope)
             .evaluate(db.get(AgentTask, ids["starfire_task"]))
             .completed
+        )
+        GenericActionService(db, starfire.scope).resolve_operation(
+            ids["pending"], resolution_key="restart-recovery-event"
+        )
+        db.commit()
+        assert (
+            RuntimeRecoveryService(db)
+            .recover(GameInstanceId(ids["starfire_instance"]))
+            .pending_operations
+            == ()
         )
         assert (
             GenericAgentService(db, medical.scope)

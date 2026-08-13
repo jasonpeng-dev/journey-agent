@@ -709,6 +709,23 @@ def _validate_parameter_value(
             raise ValueError(f"Action parameter {field} is above maximum")
 
 
+def validate_action_parameters(
+    action: ActionDefinitionV2, parameters: dict[str, StrictScalar]
+) -> None:
+    """Validate one complete Action input without reading runtime state."""
+
+    definitions = {item.key: item for item in action.parameters}
+    unknown = set(parameters) - set(definitions)
+    if unknown:
+        raise ValueError("Action input contains unknown parameters")
+    for key, definition in definitions.items():
+        if key not in parameters:
+            if definition.required and definition.default is None:
+                raise ValueError(f"Action input is missing required parameter {key}")
+            continue
+        _validate_parameter_value(definition, parameters[key], field=key)
+
+
 def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     world = definition.world
     _require_unique((item.key for item in world.node_types), "World Node Type keys")

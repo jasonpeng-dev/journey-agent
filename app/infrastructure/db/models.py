@@ -26,6 +26,7 @@ from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
     AgentTaskStatus,
+    DecisionStatus,
     GameInstanceStatus,
     MessageRole,
     NodeStatus,
@@ -327,6 +328,7 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     objective_resolution_status: Mapped[str] = mapped_column(String(30), default="UNRESOLVED")
     objective_scope_keys: Mapped[list[str] | None] = mapped_column(JSON)
     objective_catalog_version: Mapped[str | None] = mapped_column(String(100))
+    objective_scope_hash: Mapped[str] = mapped_column(String(64))
     objective_resolver_source: Mapped[str | None] = mapped_column(String(100))
     objective_resolver_version: Mapped[str | None] = mapped_column(String(100))
     objective_resolution_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -345,6 +347,23 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     last_error_code: Mapped[str | None] = mapped_column(String(100))
     version: Mapped[int] = mapped_column(Integer, default=1)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ObjectiveScopeImmutableError(RuntimeError):
+    """Raised if persisted code attempts to drift a frozen Task objective scope."""
+
+
+@event.listens_for(AgentTask, "before_update")
+def _reject_frozen_objective_scope_drift(
+    _mapper: object, _connection: object, target: AgentTask
+) -> None:
+    state = inspect(target)
+    assert state is not None
+    if target.objective_frozen_at is not None and any(
+        state.attrs[name].history.has_changes()
+        for name in ("objective_scope_keys", "objective_catalog_version", "objective_scope_hash")
+    ):
+        raise ObjectiveScopeImmutableError("A frozen Task ObjectiveScope is immutable")
 
 
 class AgentPlan(UUIDPrimaryKey, Base):
@@ -445,3 +464,33 @@ class WorldOperation(UUIDPrimaryKey, TimestampMixin, Base):
     idempotency_key: Mapped[str] = mapped_column(String(160))
     resolution_key: Mapped[str | None] = mapped_column(String(160))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ActionDecisionRequest(UUIDPrimaryKey, TimestampMixin, Base):
+    """Instance-owned approval gate for one exact generic Action input."""
+
+    __tablename__ = "action_decision_requests"
+    __table_args__ = (
+        UniqueConstraint("game_instance_id", "idempotency_key"),
+        Index("ix_action_decisions_instance_status", "game_instance_id", "status"),
+    )
+
+    player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE")
+    )
+    task_id: Mapped[UUID | None] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
+    source_step_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_steps.id", ondelete="CASCADE")
+    )
+    actor_key: Mapped[str] = mapped_column(String(80))
+    action_key: Mapped[str] = mapped_column(String(80))
+    target_key: Mapped[str] = mapped_column(String(100))
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON)
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    status: Mapped[DecisionStatus] = mapped_column(
+        Enum(DecisionStatus, native_enum=False), default=DecisionStatus.PENDING
+    )
+    reason_code: Mapped[str] = mapped_column(String(100))
+    policy_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

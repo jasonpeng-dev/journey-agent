@@ -9,7 +9,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.domain.enums import WorldOperationStatus
+from app.agent.authority import actor_binding_matches, evaluate_authority
+from app.domain.enums import AuthorityOutcome, DecisionStatus, WorldOperationStatus
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
@@ -17,7 +18,7 @@ from app.domain.scenario_v2 import (
     ScenarioDefinitionV2,
     StrictScalar,
 )
-from app.infrastructure.db.models import WorldOperation
+from app.infrastructure.db.models import ActionDecisionRequest, GameInstanceActor, WorldOperation
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.generic_game import AppliedRuleResult, GenericGameService
 
@@ -28,6 +29,12 @@ class GenericActionError(ValueError):
         self.code = code
         self.message = message
         self.retryable = retryable
+
+
+class GenericApprovalRequired(GenericActionError):
+    def __init__(self, decision: ActionDecisionRequest) -> None:
+        super().__init__("ACTION_APPROVAL_REQUIRED", "The Action requires player approval")
+        self.decision = decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +60,7 @@ class GenericActionService:
         idempotency_key: str,
         task_id: UUID | None = None,
         source_step_id: UUID | None = None,
+        decision_id: UUID | None = None,
     ) -> ActionExecutionResult:
         if not idempotency_key.strip():
             raise GenericActionError(
@@ -78,11 +86,50 @@ class GenericActionService:
                 )
             return ActionExecutionResult(existing, None, True)
         action = self._action(action_key)
+        actor = self.db.get(GameInstanceActor, (self.scope.game_instance_id, actor_key))
+        if actor is None:
+            raise GenericActionError(
+                "RUNTIME_ACTOR_NOT_FOUND", "Actor is absent from this Instance"
+            )
+        definition = (
+            ScenarioVersionRepository(self.db).load(self.scope.scenario_version_id).definition
+        )
+        if not isinstance(definition, ScenarioDefinitionV2) or not actor_binding_matches(
+            definition, actor
+        ):
+            raise GenericActionError(
+                "RUNTIME_ACTOR_BINDING_INVALID",
+                "Actor authority does not match the exact ScenarioVersion",
+            )
+        authority = evaluate_authority(actor, action, parameters)
+        if authority.outcome == AuthorityOutcome.DENY:
+            raise GenericActionError(authority.reason_code, "Actor authority denied the Action")
+        approval_granted = False
+        if authority.outcome == AuthorityOutcome.REQUIRE_PLAYER_DECISION:
+            decision = self._decision(
+                decision_id=decision_id,
+                actor_key=actor_key,
+                action_key=action_key,
+                target_key=target_key,
+                parameters=parameters,
+                idempotency_key=idempotency_key,
+                task_id=task_id,
+                source_step_id=source_step_id,
+                reason_code=authority.reason_code,
+                details=authority.details,
+            )
+            if decision.status == DecisionStatus.REJECTED:
+                raise GenericActionError("ACTION_APPROVAL_REJECTED", "Player rejected the Action")
+            if decision.status != DecisionStatus.APPROVED:
+                raise GenericApprovalRequired(decision)
+            approval_granted = True
+            decision_id = decision.id
         preflight = self.game.preflight(
             actor_key=actor_key,
             action_key=action_key,
             target_node_key=target_key,
             parameters=parameters,
+            approval_granted=approval_granted,
         )
         if preflight is not None and preflight.failure is not None:
             raise GenericActionError(
@@ -105,6 +152,11 @@ class GenericActionService:
         )
         self.db.add(operation)
         self.db.flush()
+        if approval_granted:
+            assert decision_id is not None
+            approved = self.db.get(ActionDecisionRequest, decision_id)
+            assert approved is not None
+            approved.status = DecisionStatus.CONSUMED
         if action.execution_mode == ActionExecutionMode.ASYNC:
             return ActionExecutionResult(operation, None, False)
         applied = self.game.execute(
@@ -112,6 +164,7 @@ class GenericActionService:
             action_key=action_key,
             target_node_key=target_key,
             parameters=parameters,
+            approval_granted=approval_granted,
         )
         self._complete(operation, applied, resolution_key=idempotency_key)
         return ActionExecutionResult(operation, applied, False)
@@ -152,6 +205,7 @@ class GenericActionService:
             target_node_key=operation.target_key,
             parameters=operation.parameters,
             operation_status=operation.status.value,
+            approval_granted=True,
         )
         self._complete(operation, applied, resolution_key=resolution_key)
         return ActionExecutionResult(operation, applied, False)
@@ -167,6 +221,73 @@ class GenericActionService:
         if action is None:
             raise GenericActionError("ACTION_NOT_FOUND", "Action is absent from the exact Version")
         return action
+
+    def decide(self, decision_id: UUID, *, approve: bool) -> ActionDecisionRequest:
+        decision = self.db.scalar(
+            select(ActionDecisionRequest)
+            .where(
+                ActionDecisionRequest.id == decision_id,
+                ActionDecisionRequest.game_instance_id == self.scope.game_instance_id,
+            )
+            .with_for_update()
+        )
+        if decision is None or decision.status != DecisionStatus.PENDING:
+            raise GenericActionError("ACTION_DECISION_INVALID", "Decision is absent or not pending")
+        decision.status = DecisionStatus.APPROVED if approve else DecisionStatus.REJECTED
+        decision.decided_at = datetime.now(UTC)
+        self.db.flush()
+        return decision
+
+    def _decision(
+        self,
+        *,
+        decision_id: UUID | None,
+        actor_key: str,
+        action_key: str,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        idempotency_key: str,
+        task_id: UUID | None,
+        source_step_id: UUID | None,
+        reason_code: str,
+        details: dict[str, object],
+    ) -> ActionDecisionRequest:
+        decision = self.db.get(ActionDecisionRequest, decision_id) if decision_id else None
+        if decision is None:
+            decision = self.db.scalar(
+                select(ActionDecisionRequest).where(
+                    ActionDecisionRequest.game_instance_id == self.scope.game_instance_id,
+                    ActionDecisionRequest.idempotency_key == idempotency_key,
+                )
+            )
+        if decision is None:
+            decision = ActionDecisionRequest(
+                player_id=self.scope.player_id,
+                game_instance_id=self.scope.game_instance_id,
+                task_id=task_id,
+                source_step_id=source_step_id,
+                actor_key=actor_key,
+                action_key=action_key,
+                target_key=target_key,
+                parameters=parameters,
+                idempotency_key=idempotency_key,
+                reason_code=reason_code,
+                policy_details=details,
+            )
+            self.db.add(decision)
+            self.db.flush()
+        if (
+            decision.game_instance_id != self.scope.game_instance_id
+            or decision.player_id != self.scope.player_id
+            or decision.actor_key != actor_key
+            or decision.action_key != action_key
+            or decision.target_key != target_key
+            or decision.parameters != parameters
+        ):
+            raise GenericActionError(
+                "ACTION_DECISION_SCOPE_INVALID", "Decision input does not match"
+            )
+        return decision
 
     def _complete(
         self,
@@ -189,4 +310,9 @@ class GenericActionService:
         self.db.flush()
 
 
-__all__ = ["ActionExecutionResult", "GenericActionError", "GenericActionService"]
+__all__ = [
+    "ActionExecutionResult",
+    "GenericActionError",
+    "GenericActionService",
+    "GenericApprovalRequired",
+]

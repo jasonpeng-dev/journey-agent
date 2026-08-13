@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.domain.enums import NodeStatus
+from app.agent.authority import actor_binding_matches, evaluate_authority
+from app.domain.enums import AuthorityOutcome, NodeStatus
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import ScenarioDefinitionV2, StrictScalar
 from app.domain.world import AccessState, Visibility
@@ -59,15 +60,22 @@ class GenericGameService:
         target_node_key: str,
         parameters: dict[str, StrictScalar],
         operation_status: str | None = None,
+        approval_granted: bool = False,
     ) -> AppliedRuleResult:
         definition = self._definition()
         actor = self._actor(actor_key)
+        if not actor_binding_matches(definition, actor):
+            raise GenericGameError(
+                "RUNTIME_ACTOR_BINDING_INVALID",
+                "Runtime Actor authority drifted from the exact ScenarioVersion",
+            )
         action = next((item for item in definition.actions if item.key == action_key), None)
-        if action is None or action_key not in actor.allowed_action_keys:
+        if action is None:
             raise GenericGameError(
                 "ACTION_NOT_AUTHORIZED",
                 "The exact Version Actor is not authorized for this Action",
             )
+        self._require_authority(actor, action, parameters, approval_granted)
         target = definition.world.node(target_node_key)
         if target is None or action.required_interaction_key not in target.interaction_keys:
             raise GenericGameError(
@@ -112,15 +120,22 @@ class GenericGameService:
         action_key: str,
         target_node_key: str,
         parameters: dict[str, StrictScalar],
+        approval_granted: bool = False,
     ) -> GenericRuleOutcome | None:
         definition = self._definition()
         actor = self._actor(actor_key)
+        if not actor_binding_matches(definition, actor):
+            raise GenericGameError(
+                "RUNTIME_ACTOR_BINDING_INVALID",
+                "Runtime Actor authority drifted from the exact ScenarioVersion",
+            )
         action = next((item for item in definition.actions if item.key == action_key), None)
-        if action is None or action_key not in actor.allowed_action_keys:
+        if action is None:
             raise GenericGameError(
                 "ACTION_NOT_AUTHORIZED",
                 "The exact Version Actor is not authorized for this Action",
             )
+        self._require_authority(actor, action, parameters, approval_granted)
         target = definition.world.node(target_node_key)
         if target is None or action.required_interaction_key not in target.interaction_keys:
             raise GenericGameError(
@@ -174,6 +189,24 @@ class GenericGameService:
                 "RUNTIME_ACTOR_NOT_FOUND", "The active Actor does not belong to this Instance"
             )
         return actor
+
+    @staticmethod
+    def _require_authority(
+        actor: GameInstanceActor,
+        action: object,
+        parameters: dict[str, StrictScalar],
+        approval_granted: bool,
+    ) -> None:
+        from app.domain.scenario_v2 import ActionDefinitionV2
+
+        assert isinstance(action, ActionDefinitionV2)
+        decision = evaluate_authority(actor, action, parameters)
+        if decision.outcome == AuthorityOutcome.DENY:
+            raise GenericGameError(decision.reason_code, "Actor authority denied the Action")
+        if decision.outcome == AuthorityOutcome.REQUIRE_PLAYER_DECISION and not approval_granted:
+            raise GenericGameError(
+                decision.reason_code, "The Action requires an approved Instance decision"
+            )
 
     def _locked_state(
         self,
