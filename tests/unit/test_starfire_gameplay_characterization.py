@@ -107,11 +107,23 @@ def test_first_clear_threat_failure_characterization(session: Session) -> None:
     assert _node_status(session, player.id, "enemy_north_supply_route") == NodeStatus.AVAILABLE
 
 
-def test_disrupt_supply_characterization(session: Session) -> None:
+@pytest.mark.parametrize(
+    ("village_support", "casualties", "soldiers_remaining"),
+    [
+        ("GUIDE", 2, 298),
+        ("NONE", 4, 296),
+    ],
+)
+def test_disrupt_supply_characterization(
+    session: Session,
+    village_support: str,
+    casualties: int,
+    soldiers_remaining: int,
+) -> None:
     service = GameService(session)
-    player = service.create_player("Disrupt Characterization Lord")
+    player = service.create_player(f"Disrupt Characterization {village_support}")
     service.set_world_fact(player.id, "enemy_supply_route", {"status": "ACTIVE"})
-    service.set_world_fact(player.id, "village_support", {"status": "GUIDE"})
+    service.set_world_fact(player.id, "village_support", {"status": village_support})
     operation = service.start_military_operation(
         player_id=player.id,
         officer_npc_id=seed_id("npc:han_lie"),
@@ -121,21 +133,28 @@ def test_disrupt_supply_characterization(session: Session) -> None:
         troop_count=80,
         mission_type="DISRUPT_SUPPLY",
         strategy="CAUTIOUS",
-        idempotency_key="characterize-disrupt-0001",
+        idempotency_key=f"characterize-disrupt-{village_support.lower()}-0001",
     )
 
-    resolved = service.resolve_world_operation(operation.id, "characterize-disrupt-resolution")
+    resolved = service.resolve_world_operation(
+        operation.id,
+        f"characterize-disrupt-{village_support.lower()}-resolution",
+    )
     domain = session.get(PlayerDomainState, player.id)
 
     assert resolved.outcome == {
         "result": "VICTORY",
         "mission_type": "DISRUPT_SUPPLY",
-        "casualties": 2,
+        "casualties": casualties,
         "facts_changed": ["enemy_supply_route"],
     }
     assert service.get_world_fact(player.id, "enemy_supply_route")["status"] == "DISRUPTED"
     assert domain is not None
-    assert (domain.soldiers_total, domain.soldiers_committed, domain.morale) == (298, 0, 63)
+    assert (domain.soldiers_total, domain.soldiers_committed, domain.morale) == (
+        soldiers_remaining,
+        0,
+        63,
+    )
 
 
 def test_second_clear_threat_success_characterization(session: Session) -> None:
