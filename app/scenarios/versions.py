@@ -8,10 +8,11 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.domain.scenario import ScenarioVersionSnapshot
+from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import ScenarioVersion
 from app.scenarios.documents import (
-    SCENARIO_DOCUMENT_SCHEMA_VERSION,
-    ScenarioDefinitionDocument,
+    SUPPORTED_SCENARIO_DOCUMENT_SCHEMA_VERSIONS,
+    parse_scenario_document,
 )
 from app.scenarios.serialization import canonical_document, scenario_content_hash
 
@@ -36,19 +37,24 @@ class ScenarioVersionRepository:
                 "SCENARIO_VERSION_NOT_FOUND",
                 "The explicitly requested ScenarioVersion does not exist",
             )
-        if record.schema_version != SCENARIO_DOCUMENT_SCHEMA_VERSION:
+        if record.schema_version not in SUPPORTED_SCENARIO_DOCUMENT_SCHEMA_VERSIONS:
             raise ScenarioVersionError(
                 "SCENARIO_VERSION_SCHEMA_UNSUPPORTED",
                 "The ScenarioVersion snapshot schema is not supported",
             )
         try:
-            document = ScenarioDefinitionDocument.model_validate(record.snapshot_document)
+            document = parse_scenario_document(record.snapshot_document)
             canonical = canonical_document(record.snapshot_document)
         except (ValidationError, ValueError) as exc:
             raise ScenarioVersionError(
                 "SCENARIO_VERSION_SNAPSHOT_INVALID",
                 "The persisted ScenarioVersion snapshot is invalid",
             ) from exc
+        if document.schema_version != record.schema_version:
+            raise ScenarioVersionError(
+                "SCENARIO_VERSION_SCHEMA_MISMATCH",
+                "ScenarioVersion schema metadata does not match its snapshot",
+            )
         canonical_payload = canonical.model_dump(mode="json")
         if record.snapshot_document != canonical_payload:
             raise ScenarioVersionError(
@@ -75,7 +81,9 @@ class ScenarioVersionRepository:
             schema_version=record.schema_version,
             content_hash=record.content_hash,
             published_at=record.published_at,
-            definition=document.to_domain(),
+            definition=(
+                document if isinstance(document, ScenarioDefinitionV2) else document.to_domain()
+            ),
         )
 
 

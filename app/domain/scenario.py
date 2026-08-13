@@ -48,6 +48,11 @@ class ScenarioDefinition:
         return MappingProxyType({objective.key: objective for objective in self.objectives})
 
 
+from app.domain.scenario_v2 import ScenarioDefinitionV2  # noqa: E402
+
+type ScenarioDefinitionAny = ScenarioDefinition | ScenarioDefinitionV2
+
+
 @dataclass(frozen=True, slots=True)
 class ScenarioVersionSnapshot:
     """Verified immutable published definition addressed by its exact version ID."""
@@ -58,7 +63,7 @@ class ScenarioVersionSnapshot:
     schema_version: int
     content_hash: str
     published_at: datetime
-    definition: ScenarioDefinition
+    definition: ScenarioDefinitionAny
 
     def __post_init__(self) -> None:
         if self.version_number < 1 or self.schema_version < 1:
@@ -67,4 +72,9 @@ class ScenarioVersionSnapshot:
             raise ValueError("published Scenario content hash must be SHA-256")
 
 
-__all__ = ["BehaviorBundleRef", "ScenarioDefinition", "ScenarioVersionSnapshot"]
+__all__ = [
+    "BehaviorBundleRef",
+    "ScenarioDefinition",
+    "ScenarioDefinitionAny",
+    "ScenarioVersionSnapshot",
+]

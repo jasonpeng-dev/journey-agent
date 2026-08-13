@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from app.domain.scenario import BehaviorBundleRef, ScenarioDefinition
+from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.domain.world import (
     AccessState,
     FactDefinition,
@@ -27,6 +28,7 @@ from app.scenarios.contracts import (
 )
 
 SCENARIO_DOCUMENT_SCHEMA_VERSION = 1
+SUPPORTED_SCENARIO_DOCUMENT_SCHEMA_VERSIONS = frozenset({1, 2})
 type StrictFactValue = StrictStr | StrictInt | StrictBool
 
 
@@ -184,6 +186,22 @@ class ScenarioDefinitionDocument(ScenarioDocumentModel):
                 version=self.behavior_bundle.version,
             ),
         )
+
+
+type ScenarioDefinitionDocumentAny = ScenarioDefinitionDocument | ScenarioDefinitionV2
+
+
+def parse_scenario_document(document: dict[str, Any]) -> ScenarioDefinitionDocumentAny:
+    """Decode a persisted definition through its explicit schema version."""
+
+    schema_version = document.get("schema_version")
+    if type(schema_version) is not int:
+        raise ValueError("Scenario definition requires an integer schema_version")
+    if schema_version == 1:
+        return ScenarioDefinitionDocument.model_validate(document)
+    if schema_version == 2:
+        return ScenarioDefinitionV2.model_validate(document)
+    raise ValueError(f"Unsupported Scenario definition schema_version {schema_version}")
 
 
 def _world_document(world: WorldDefinition) -> WorldDocument:
@@ -344,5 +362,8 @@ def _objective_definition(objective: ObjectiveDocument) -> ObjectiveDefinition:
 
 __all__ = [
     "SCENARIO_DOCUMENT_SCHEMA_VERSION",
+    "SUPPORTED_SCENARIO_DOCUMENT_SCHEMA_VERSIONS",
     "ScenarioDefinitionDocument",
+    "ScenarioDefinitionDocumentAny",
+    "parse_scenario_document",
 ]

@@ -22,7 +22,10 @@ from app.infrastructure.db.models import (
     GameInstanceWorldFact,
     Player,
 )
-from app.scenarios.runtime_binding import require_runtime_implementation
+from app.scenarios.runtime_binding import (
+    require_runtime_implementation,
+    require_v1_runtime_definition,
+)
 from app.scenarios.starfire.compatibility import legacy_fact_key
 from app.scenarios.versions import ScenarioVersionRepository
 
@@ -93,7 +96,7 @@ class RuntimeInitializationService:
                 "The Runtime Player does not exist",
             )
         snapshot = ScenarioVersionRepository(self.db).load(scenario_version_id)
-        definition = snapshot.definition
+        definition = require_v1_runtime_definition(snapshot)
         require_runtime_implementation(definition.behavior_bundle)
         start_nodes = tuple(
             node for node in definition.world.nodes if node.node_type == WorldNodeType.HEADQUARTERS

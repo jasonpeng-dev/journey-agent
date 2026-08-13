@@ -10,7 +10,7 @@ from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
-from app.domain.scenario import BehaviorBundleRef, ScenarioVersionSnapshot
+from app.domain.scenario import BehaviorBundleRef, ScenarioDefinition, ScenarioVersionSnapshot
 from app.domain.world import WorldDefinition
 from app.infrastructure.db.models import AgentTask, ConversationSession
 from app.scenarios.contracts import (
@@ -95,6 +95,18 @@ def require_runtime_implementation(ref: BehaviorBundleRef) -> BehaviorRuntimeImp
     return implementation
 
 
+def require_v1_runtime_definition(snapshot: ScenarioVersionSnapshot) -> ScenarioDefinition:
+    """Keep v2 publishable/readable while Runtime migration proceeds in later R stages."""
+
+    definition = snapshot.definition
+    if not isinstance(definition, ScenarioDefinition):
+        raise ScenarioRuntimeBindingError(
+            "SCENARIO_RUNTIME_SCHEMA_UNSUPPORTED",
+            "This ScenarioVersion schema is not executable by the legacy Runtime",
+        )
+    return definition
+
+
 def scenario_binding_for_task(
     db: Session,
     task: AgentTask,
@@ -160,7 +172,7 @@ def _versioned_binding(
             "Runtime record Player does not match its GameInstance",
         )
     snapshot = ScenarioVersionRepository(db).load(scope.scenario_version_id)
-    definition = snapshot.definition
+    definition = require_v1_runtime_definition(snapshot)
     if definition.world.key != expected_scenario_key:
         raise ScenarioRuntimeBindingError(
             "SCENARIO_RUNTIME_SCENARIO_MISMATCH",
@@ -213,6 +225,7 @@ __all__ = [
     "VersionedScenarioBinding",
     "interaction_resolver_for_task",
     "require_runtime_implementation",
+    "require_v1_runtime_definition",
     "runtime_scope_for_task",
     "scenario_binding_for_session",
     "scenario_binding_for_task",

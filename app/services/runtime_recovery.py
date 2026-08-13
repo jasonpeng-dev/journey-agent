@@ -22,7 +22,10 @@ from app.infrastructure.db.models import (
     PlayerDecisionRequest,
     WorldOperation,
 )
-from app.scenarios.runtime_binding import require_runtime_implementation
+from app.scenarios.runtime_binding import (
+    require_runtime_implementation,
+    require_v1_runtime_definition,
+)
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
 
@@ -62,7 +65,8 @@ class RuntimeRecoveryService:
                 "Only active or suspended GameInstances can be recovered",
             )
         snapshot = ScenarioVersionRepository(self.db).load(scope.scenario_version_id)
-        require_runtime_implementation(snapshot.definition.behavior_bundle)
+        definition = require_v1_runtime_definition(snapshot)
+        require_runtime_implementation(definition.behavior_bundle)
         sessions = tuple(
             self.db.scalars(
                 select(ConversationSession).where(
@@ -120,9 +124,7 @@ class RuntimeRecoveryService:
             for decision in decisions
         ):
             self._corrupt("PlayerDecisionRequest")
-        self._verify_snapshot_state(
-            instance, snapshot.definition.world.nodes, snapshot.definition.world.resources
-        )
+        self._verify_snapshot_state(instance, definition.world.nodes, definition.world.resources)
         return RecoveredRuntime(
             scope=scope,
             instance=instance,

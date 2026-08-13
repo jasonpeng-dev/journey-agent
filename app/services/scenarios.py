@@ -12,7 +12,6 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
-from app.scenarios.documents import SCENARIO_DOCUMENT_SCHEMA_VERSION
 from app.scenarios.serialization import canonical_document, scenario_content_hash
 from app.scenarios.validation import (
     ScenarioDefinitionValidator,
@@ -139,7 +138,7 @@ class ScenarioService:
         version = ScenarioVersion(
             scenario_id=scenario.id,
             version_number=(latest_number or 0) + 1,
-            schema_version=SCENARIO_DOCUMENT_SCHEMA_VERSION,
+            schema_version=canonical.schema_version,
             snapshot_document=canonical.model_dump(mode="json"),
             content_hash=content_hash,
             behavior_bundle_key=canonical.behavior_bundle.key,

@@ -7,13 +7,14 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.domain.scenario import ScenarioDefinition
+from app.domain.scenario import ScenarioDefinition, ScenarioDefinitionAny
+from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.domain.world import FactValueType
 from app.scenarios.behavior_registry import (
     DEFAULT_BEHAVIOR_BUNDLES,
     BehaviorBundleRegistry,
 )
-from app.scenarios.documents import ScenarioDefinitionDocument
+from app.scenarios.documents import ScenarioDefinitionDocument, parse_scenario_document
 from app.tools.catalog import build_registry
 
 
@@ -26,7 +27,7 @@ class ScenarioValidationIssue:
 
 @dataclass(frozen=True, slots=True)
 class ScenarioValidationResult:
-    definition: ScenarioDefinition | None
+    definition: ScenarioDefinitionAny | None
     issues: tuple[ScenarioValidationIssue, ...]
 
     @property
@@ -43,7 +44,7 @@ class ScenarioDefinitionValidator:
 
     def validate(self, document: dict[str, Any]) -> ScenarioValidationResult:
         try:
-            parsed = ScenarioDefinitionDocument.model_validate(document)
+            parsed = parse_scenario_document(document)
         except ValidationError as exc:
             return ScenarioValidationResult(
                 definition=None,
@@ -56,6 +57,19 @@ class ScenarioDefinitionValidator:
                     for error in exc.errors()[:20]
                 ),
             )
+        except ValueError as exc:
+            return ScenarioValidationResult(
+                definition=None,
+                issues=(
+                    ScenarioValidationIssue(
+                        code="SCENARIO_DOCUMENT_SCHEMA_UNSUPPORTED",
+                        path="schema_version",
+                        message=str(exc),
+                    ),
+                ),
+            )
+        if isinstance(parsed, ScenarioDefinitionV2):
+            return self._validate_v2(parsed)
         reference_issues = _document_reference_issues(parsed)
         if reference_issues:
             return ScenarioValidationResult(definition=None, issues=tuple(reference_issues))
@@ -81,6 +95,24 @@ class ScenarioDefinitionValidator:
             definition=definition if not issues else None,
             issues=tuple(issues),
         )
+
+    @staticmethod
+    def _validate_v2(definition: ScenarioDefinitionV2) -> ScenarioValidationResult:
+        if (
+            definition.engine_contract.key,
+            definition.engine_contract.version,
+        ) != ("declarative-rule-engine", "1"):
+            return ScenarioValidationResult(
+                definition=None,
+                issues=(
+                    ScenarioValidationIssue(
+                        code="SCENARIO_ENGINE_CONTRACT_UNAVAILABLE",
+                        path="engine_contract",
+                        message="The exact generic engine contract is not supported",
+                    ),
+                ),
+            )
+        return ScenarioValidationResult(definition=definition, issues=())
 
     def _validate_behavior(
         self,
