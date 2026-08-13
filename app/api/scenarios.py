@@ -36,6 +36,7 @@ from app.api.schemas.phase_d import (
     ValidationSeverity,
 )
 from app.core.errors import AppError
+from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.infrastructure.db.session import get_db
 from app.scenarios.builtin import MEDICAL_EMERGENCY_V2, STARFIRE_V2
@@ -341,6 +342,13 @@ def list_examples() -> list[ScenarioExampleResponse]:
         )
         for key, (definition, maturity) in _EXAMPLES.items()
     ]
+
+
+@router.get("/scenario-definition-schema", response_model=dict[str, Any])
+def get_scenario_definition_schema() -> dict[str, Any]:
+    """Expose the closed v2 authoring vocabulary, never executable behavior."""
+
+    return ScenarioDefinitionV2.model_json_schema(mode="validation")
 
 
 def _draft_write(

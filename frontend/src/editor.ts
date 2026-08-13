@@ -52,3 +52,28 @@ export function updateObjectName(document: JsonObject, section: string, key: str
   if (target) target.value.name = name;
   return copy;
 }
+
+export function replaceObject(document: JsonObject, section: string, key: string, value: JsonObject): JsonObject {
+  const copy = structuredClone(document);
+  const target = sectionObjects(copy, section).find((item) => item.key === key);
+  if (target) Object.assign(target.value, structuredClone(value));
+  return copy;
+}
+
+export function updateSectionRoot(document: JsonObject, section: string, value: unknown): JsonObject {
+  const copy = structuredClone(document);
+  if (section === "overview") copy.metadata = value;
+  else if (section === "planning" && value && typeof value === "object") {
+    const record = value as JsonObject;
+    copy.goal_resolution = record.goal_resolution;
+    copy.planning = record.planning;
+  } else if (section === "initial-state") copy.initialization = value;
+  return copy;
+}
+
+export function sectionRoot(document: JsonObject, section: string): unknown {
+  if (section === "overview") return document.metadata ?? {};
+  if (section === "planning") return { goal_resolution: document.goal_resolution ?? {}, planning: document.planning ?? {} };
+  if (section === "initial-state") return document.initialization ?? {};
+  return null;
+}

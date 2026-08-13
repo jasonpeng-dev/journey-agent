@@ -39,5 +39,8 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .inspector input { width: 100%; margin-top: 5px; padding: 9px; border: 1px solid #c9c8c0; border-radius: 6px; }
 .inspector > a { display: block; padding: 6px 0; color: #23624e; }
 .button-row { display: flex; gap: 8px; }.button-row button { padding: 7px 10px; }.danger { color: #9d2929; }
+.small { margin: 3px; padding: 5px 8px; border: 1px solid #c8c7bf; border-radius: 5px; background: #faf9f4; font-size: 11px; cursor: pointer; }
+.add-object { text-transform: capitalize; }
+.structured-object { padding: 9px; border-left: 2px solid #d7e5de; }.structured-field { display: grid; grid-template-columns: minmax(110px, 150px) 1fr; align-items: start; gap: 9px; margin: 8px 0; font-size: 12px; font-weight: 700; text-transform: capitalize; }.structured-field input:not([type="checkbox"]), .structured-field select { width: 100%; padding: 7px; border: 1px solid #c9c8c0; border-radius: 5px; }.array-item { margin: 5px 0; padding: 6px; border: 1px solid #e2dfd6; border-radius: 6px; }.world-graph { width: 100%; min-height: 360px; }.world-graph line { stroke: #8aa498; stroke-width: 2; }.world-graph circle { fill: #e1eee8; stroke: #346853; stroke-width: 2; }.world-graph text { font-size: 10px; text-anchor: middle; dominant-baseline: middle; fill: #183b2f; }
 .muted { color: #738079; }.error { color: #a82d2d; }
 @media (max-width: 1050px) { .editor-columns { grid-template-columns: 210px 1fr; }.inspector { grid-column: 1 / -1; min-height: auto; } }

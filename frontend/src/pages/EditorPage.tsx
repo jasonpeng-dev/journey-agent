@@ -3,7 +3,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { api, ApiError } from "../api";
-import { sectionObjects, sections, updateObjectName } from "../editor";
+import { StructuredEditor } from "../components/StructuredEditor";
+import { WorldGraph } from "../components/WorldGraph";
+import { replaceObject, sectionObjects, sectionRoot, sections, updateObjectName, updateSectionRoot } from "../editor";
+import { addObject, kindsBySection } from "../templates";
 import type { Draft } from "../types";
 
 type SaveState = "Saved" | "Editing" | "Saving" | "Conflict" | "Error";
@@ -57,6 +60,17 @@ export function EditorPage() {
     setSaveState("Editing");
   };
 
+  const editDocument = (document: Record<string, unknown>) => {
+    setLocal({ ...local, definition_document: document });
+    setSaveState("Editing");
+  };
+
+  const createObject = (kind: string) => {
+    const added = addObject(local.definition_document, kind);
+    editDocument(added.document);
+    navigate(`/scenarios/${scenarioId}/edit/${section}/${added.key}`);
+  };
+
   const rename = async () => {
     if (!selected) return;
     const newKey = window.prompt("New stable key", selected.key)?.trim();
@@ -89,10 +103,16 @@ export function EditorPage() {
         <div className="editor-columns">
           <div className="object-list">
             <h3>Objects</h3>
+            {(kindsBySection[section] ?? []).map((kind) => <button className="small add-object" key={kind} onClick={() => createObject(kind)}>+ {kind.replaceAll("_", " ")}</button>)}
             {objects.length === 0 && <p className="muted">This section has no keyed objects yet.</p>}
             {objects.map((item) => <Link className={item.key === objectKey ? "selected" : ""} key={`${item.kind}:${item.key}`} to={`/scenarios/${scenarioId}/edit/${section}/${item.key}`}><span>{item.name}</span><code>{item.kind} · {item.key}</code></Link>)}
           </div>
-          <div className="canvas"><h3>Workspace</h3><p>Choose an object to inspect and edit. Structured builders arrive in D3.</p></div>
+          <div className="canvas"><h3>Workspace</h3>
+            {section === "world" && !selected && <WorldGraph document={local.definition_document} />}
+            {selected && <StructuredEditor value={selected.value} onChange={(value) => { if (value && typeof value === "object" && !Array.isArray(value)) editDocument(replaceObject(local.definition_document, section, selected.key, value as Record<string, unknown>)); }} />}
+            {!selected && sectionRoot(local.definition_document, section) !== null && <StructuredEditor value={sectionRoot(local.definition_document, section)} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} />}
+            {!selected && section !== "world" && sectionRoot(local.definition_document, section) === null && <p>Choose or create an object to edit its structured fields.</p>}
+          </div>
           <aside className="inspector">
             <h3>Inspector</h3>
             {!selected ? <p className="muted">No object selected.</p> : <>

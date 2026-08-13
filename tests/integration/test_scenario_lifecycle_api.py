@@ -1,6 +1,7 @@
 from copy import deepcopy
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -231,3 +232,49 @@ def test_reference_navigation_atomic_rename_and_guarded_delete(client: TestClien
     assert renamed.json()["definition_document"]["actions"][0]["required_interaction_key"] == (
         "diagnosis_capability"
     )
+
+
+@pytest.mark.parametrize("example_key", ["starfire_command", "medical_emergency"])
+def test_generic_editor_round_trip_remains_engine_parseable(
+    client: TestClient,
+    example_key: str,
+) -> None:
+    created = client.post(
+        "/api/v1/scenarios",
+        json={
+            "mode": "EXAMPLE",
+            "key": f"edited_{example_key}",
+            "name": f"Edited {example_key}",
+            "example_key": example_key,
+        },
+    )
+    assert created.status_code == 201
+    scenario_id = created.json()["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    document = draft["definition_document"]
+    document["actions"][0]["description"] = "Edited through the generic Action builder."
+    document["planning"]["instructions"].append("Prefer visible, accessible targets.")
+    document["objectives"][0]["description"] += " Edited through the Objective builder."
+
+    saved = client.put(
+        f"/api/v1/scenarios/{scenario_id}/draft",
+        json={"expected_revision": 1, "definition_document": document},
+    )
+    assert saved.status_code == 200
+    validation = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/validate",
+        json={"expected_revision": 2},
+    )
+    assert validation.status_code == 200
+    assert validation.json()["publish_ready"] is True
+
+
+def test_definition_schema_exposes_closed_condition_and_effect_vocabulary(
+    client: TestClient,
+) -> None:
+    response = client.get("/api/v1/scenario-definition-schema")
+    assert response.status_code == 200
+    encoded = response.text
+    assert all(kind in encoded for kind in ["ALL", "ANY", "NOT", "RELATION_EXISTS"])
+    assert all(kind in encoded for kind in ["SET_FACT", "ADJUST_RESOURCE", "EMIT_OUTCOME"])
+    assert "execute_action" not in encoded
