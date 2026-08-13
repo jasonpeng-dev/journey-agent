@@ -552,7 +552,8 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
         index=True,
         server_default=text("NULL"),
     )
-    owner_npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
+    owner_npc_id: Mapped[UUID | None] = mapped_column(ForeignKey("npcs.id"))
+    owner_actor_key: Mapped[str | None] = mapped_column(String(80))
     origin_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     last_session_id: Mapped[UUID] = mapped_column(ForeignKey("conversation_sessions.id"))
     goal_description: Mapped[str] = mapped_column(Text)
@@ -603,6 +604,7 @@ class AgentPlan(UUIDPrimaryKey, Base):
     created_by_npc_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("npcs.id", ondelete="SET NULL")
     )
+    created_by_actor_key: Mapped[str | None] = mapped_column(String(80))
     source: Mapped[str] = mapped_column(String(40), default="MANUAL")
     planner_model: Mapped[str | None] = mapped_column(String(100))
     validation_status: Mapped[str] = mapped_column(String(30), default="PASSED")
@@ -630,6 +632,7 @@ class AgentStep(UUIDPrimaryKey, Base):
     assigned_npc_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("npcs.id", ondelete="SET NULL"), index=True
     )
+    assigned_actor_key: Mapped[str | None] = mapped_column(String(80))
     action_intent: Mapped[str | None] = mapped_column(String(100))
     constraints: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     allowed_tool_names: Mapped[list[str]] = mapped_column(JSON, default=list)

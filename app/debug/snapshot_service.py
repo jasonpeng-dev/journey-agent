@@ -237,6 +237,17 @@ class StrategicSnapshotService:
             "role": officer.role.value,
         }
 
+    def _runtime_actor(
+        self,
+        officer_id: UUID | None,
+        actor_key: str | None,
+    ) -> dict[str, object] | None:
+        if officer_id is not None:
+            return self._officer(officer_id)
+        if actor_key is None:
+            return None
+        return {"id": actor_key, "key": actor_key, "name": actor_key, "role": "VERSIONED"}
+
     def _officers(self, game_instance_id: UUID | None, player_id: UUID) -> list[dict[str, object]]:
         appointment_type = (
             GameInstanceOfficerAppointment if game_instance_id is not None else OfficerAppointment
@@ -501,7 +512,10 @@ class StrategicSnapshotService:
                 {
                     "id": f"plan:{plan.id}",
                     "kind": "PLAN" if plan.version == 1 else "REPLAN",
-                    "actor": self._officer(plan.created_by_npc_id or task.owner_npc_id),
+                    "actor": self._runtime_actor(
+                        plan.created_by_npc_id or task.owner_npc_id,
+                        plan.created_by_actor_key or task.owner_actor_key,
+                    ),
                     "content": plan.strategy_summary,
                     "status": plan.status.value,
                     "plan_version": plan.version,
@@ -529,7 +543,10 @@ class StrategicSnapshotService:
                     {
                         "id": f"step:{step.id}",
                         "kind": kind,
-                        "actor": self._officer(step.assigned_npc_id or task.owner_npc_id),
+                        "actor": self._runtime_actor(
+                            step.assigned_npc_id or task.owner_npc_id,
+                            step.assigned_actor_key or task.owner_actor_key,
+                        ),
                         "content": step.description,
                         "status": step.status.value,
                         "plan_version": plan.version,
@@ -547,7 +564,10 @@ class StrategicSnapshotService:
                         {
                             "id": f"failure:{step.id}",
                             "kind": "FAILURE",
-                            "actor": self._officer(step.assigned_npc_id or task.owner_npc_id),
+                            "actor": self._runtime_actor(
+                                step.assigned_npc_id or task.owner_npc_id,
+                                step.assigned_actor_key or task.owner_actor_key,
+                            ),
                             "content": step.description,
                             "status": step.status.value,
                             "plan_version": plan.version,

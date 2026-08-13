@@ -731,7 +731,8 @@ class TaskService:
         source_event_id = f"strategic-task:{task.id}:completed"
         steps = self.plan_steps(plan.id) if plan is not None else []
         officer_ids = {step.assigned_npc_id for step in steps if step.assigned_npc_id is not None}
-        officer_ids.add(task.owner_npc_id)
+        if task.owner_npc_id is not None:
+            officer_ids.add(task.owner_npc_id)
         plan_label = f"Plan v{plan.version}" if plan is not None else "scope precheck"
         report = (
             f"Command completed under {plan_label}: {', '.join(evaluation.scope.objective_keys)}."
