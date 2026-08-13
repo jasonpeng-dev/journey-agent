@@ -290,6 +290,24 @@ class GameInstanceActor(TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class GameInstanceMemoryEvent(UUIDPrimaryKey, Base):
+    """Generic Instance/Actor memory emitted by a declarative Rule."""
+
+    __tablename__ = "game_instance_memory_events"
+    __table_args__ = (
+        Index("ix_instance_memory_actor_created", "game_instance_id", "actor_key", "created_at"),
+    )
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE")
+    )
+    actor_key: Mapped[str | None] = mapped_column(String(80))
+    event_key: Mapped[str] = mapped_column(String(80))
+    content: Mapped[str] = mapped_column(Text)
+    source_rule_key: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class GameInstanceWorldFact(TimestampMixin, Base):
     """Instance-owned compatibility projection for existing flat fact consumers."""
 
