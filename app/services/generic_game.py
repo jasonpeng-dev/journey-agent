@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.domain.enums import NodeStatus
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import ScenarioDefinitionV2, StrictScalar
-from app.domain.world import AccessState
+from app.domain.world import AccessState, Visibility
 from app.engine.rules import (
     ActionRuleContext,
     DeclarativeRuleEngine,
@@ -75,21 +75,33 @@ class GenericGameService:
                 "The target does not support the Action's required Interaction",
             )
         state = self._locked_state(definition)
-        outcome = DeclarativeRuleEngine(definition).evaluate(
-            state,
-            ActionRuleContext(
-                action_key=action_key,
-                target_node_key=target_node_key,
-                parameters=parameters,
-                actor_key=actor_key,
-                operation_status=operation_status,
-            ),
+        target_state = state.nodes[target_node_key]
+        if (
+            target_state.visibility != Visibility.KNOWN
+            or target_state.access != AccessState.AVAILABLE
+        ):
+            raise GenericGameError(
+                "ACTION_TARGET_UNAVAILABLE",
+                "The target is not known and accessible in this Instance",
+            )
+        context = ActionRuleContext(
+            action_key=action_key,
+            target_node_key=target_node_key,
+            parameters=parameters,
+            actor_key=actor_key,
+            operation_status=operation_status,
         )
-        if outcome.failure is None:
-            self._apply(definition, actor_key, outcome)
+        engine = DeclarativeRuleEngine(definition)
+        preflight = engine.evaluate_preflight(state, context)
+        if preflight is not None:
+            return AppliedRuleResult(
+                outcome=preflight,
+                runtime_revision=self._instance().runtime_revision,
+            )
+        outcome = engine.evaluate_resolution(state, context)
+        self._apply(definition, actor_key, outcome)
         instance = self._instance()
-        if outcome.failure is None:
-            instance.runtime_revision += 1
+        instance.runtime_revision += 1
         self.db.flush()
         return AppliedRuleResult(outcome=outcome, runtime_revision=instance.runtime_revision)
 
@@ -115,8 +127,18 @@ class GenericGameService:
                 "ACTION_TARGET_INVALID",
                 "The target does not support the Action's required Interaction",
             )
+        state = self._locked_state(definition, lock=False)
+        target_state = state.nodes[target_node_key]
+        if (
+            target_state.visibility != Visibility.KNOWN
+            or target_state.access != AccessState.AVAILABLE
+        ):
+            raise GenericGameError(
+                "ACTION_TARGET_UNAVAILABLE",
+                "The target is not known and accessible in this Instance",
+            )
         return DeclarativeRuleEngine(definition).evaluate_preflight(
-            self._locked_state(definition, lock=False),
+            state,
             ActionRuleContext(
                 action_key=action_key,
                 target_node_key=target_node_key,

@@ -170,7 +170,14 @@ class GenericAgentService:
         )
         if old_plan is not None:
             old_plan.status = AgentPlanStatus.SUPERSEDED
-        steps = self._candidate_steps(definition, objective, actor)
+        next_version = task.current_plan_version + 1
+        steps = self._candidate_steps(
+            definition,
+            objective,
+            actor,
+            reason=reason,
+            plan_version=next_version,
+        )
         if not steps and not self.evaluate(task).completed:
             raise GenericAgentError(
                 "GENERIC_PLAN_NOT_FOUND",
@@ -178,7 +185,7 @@ class GenericAgentService:
             )
         plan = AgentPlan(
             task_id=task.id,
-            version=task.current_plan_version + 1,
+            version=next_version,
             status=AgentPlanStatus.ACTIVE,
             strategy_summary="Execute exact-Version actions for the frozen objective scope",
             replan_reason=reason,
@@ -244,7 +251,8 @@ class GenericAgentService:
             .order_by(AgentStep.sequence)
         )
         if step is None:
-            raise GenericAgentError("GENERIC_PLAN_EXHAUSTED", "Plan ended before completion")
+            self.plan(task, reason="PLAN_EXHAUSTED")
+            return self.execute_next(task)
         if step.execution_type == StepExecutionType.WAIT_FOR_WORLD_EVENT:
             operation = self.db.scalar(
                 select(WorldOperation)
@@ -263,6 +271,17 @@ class GenericAgentService:
             step.actual_result = operation.outcome
             step.completed_at = datetime.now(UTC)
             task.status = AgentTaskStatus.ACTIVE
+            failure_payload = (
+                operation.outcome.get("failure") if isinstance(operation.outcome, dict) else None
+            )
+            if isinstance(failure_payload, dict) and failure_payload.get("code"):
+                failure_code = str(failure_payload["code"])
+                step.status = AgentStepStatus.FAILED
+                step.failure_code = failure_code
+                task.last_error_code = failure_code
+                self.plan(task, reason=failure_code)
+                self.db.flush()
+                return step
         else:
             step.status = AgentStepStatus.IN_PROGRESS
             step.attempts += 1
@@ -290,6 +309,14 @@ class GenericAgentService:
                 "status": result.operation.status.value,
                 "outcome": result.operation.outcome,
             }
+            if result.applied is not None and result.applied.outcome.failure is not None:
+                failure = result.applied.outcome.failure
+                step.status = AgentStepStatus.FAILED
+                step.failure_code = failure.code
+                task.last_error_code = failure.code
+                self.plan(task, reason=failure.code)
+                self.db.flush()
+                return step
             if result.operation.status == WorldOperationStatus.PENDING:
                 step.status = AgentStepStatus.SUCCEEDED
                 step.completed_at = datetime.now(UTC)
@@ -332,17 +359,44 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         objective: ObjectiveDefinitionV2,
         actor: GameInstanceActor,
+        *,
+        reason: str | None,
+        plan_version: int,
     ) -> list[dict[str, object]]:
         needed = [
+            (requirement.node_key, requirement.fact_key)
+            for prerequisite in objective.prerequisites
+            for requirement in prerequisite.requirements
+            if not self._known_requirement_satisfied(requirement)
+        ] + [
             (requirement.node_key, requirement.fact_key)
             for requirement in objective.completion_requirements
             if not self._known_requirement_satisfied(requirement)
         ]
-        actions = sorted(definition.actions, key=lambda item: item.key)
+        recovery_refs = {
+            (item.node_key, item.fact_key)
+            for action in definition.actions
+            for item in action.planning.supporting_effects
+        }
+        if reason is not None:
+            needed = [*sorted(recovery_refs), *needed]
+        actions = sorted(
+            definition.actions,
+            key=lambda item: (
+                0 if reason is not None and item.planning.supporting_effects else 1,
+                item.key,
+            ),
+        )
         candidates: list[dict[str, object]] = []
         covered: set[tuple[str, str]] = set()
         for action in actions:
-            effects = {(item.node_key, item.fact_key) for item in action.planning.terminal_effects}
+            effects = {
+                (item.node_key, item.fact_key)
+                for item in (
+                    *action.planning.terminal_effects,
+                    *action.planning.supporting_effects,
+                )
+            }
             matched = [item for item in needed if item in effects and item not in covered]
             if not matched or action.key not in actor.allowed_action_keys:
                 continue
@@ -355,7 +409,8 @@ class GenericAgentService:
                 "target_key": target_key,
                 "parameters": parameters,
                 "idempotency_key": (
-                    f"task-{objective.key}-plan-{self.scope.game_instance_id}-{action.key}"
+                    f"task-{objective.key}-plan-{plan_version}-{self.scope.game_instance_id}-"
+                    f"{action.key}"
                 )[:160],
             }
             candidates.append(
