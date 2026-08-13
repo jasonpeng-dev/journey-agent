@@ -11,7 +11,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.schemas.phase_d import (
+    DraftDeleteObjectRequest,
     DraftPublishRequest,
+    DraftRenameKeyRequest,
     DraftReplaceRequest,
     DraftResponse,
     DraftRestoreRequest,
@@ -19,6 +21,8 @@ from app.api.schemas.phase_d import (
     DraftValidationResponse,
     ReadinessCheckResponse,
     ReadinessLevel,
+    ReferenceEdgeResponse,
+    ReferenceIndexResponse,
     ScenarioCreateMode,
     ScenarioCreateRequest,
     ScenarioDetailResponse,
@@ -223,6 +227,72 @@ def restore_draft(
             scenario_id,
             version_id=request.version_id,
             expected_revision=request.expected_revision,
+        ),
+    )
+
+
+@router.get(
+    "/scenarios/{scenario_id}/draft/references",
+    response_model=ReferenceIndexResponse,
+)
+def get_references(scenario_id: UUID, db: Session = Depends(get_db)) -> ReferenceIndexResponse:
+    service = ScenarioService(db)
+    try:
+        draft = service.get_draft(scenario_id)
+        return ReferenceIndexResponse(
+            scenario_id=scenario_id,
+            revision=draft.revision,
+            references=[
+                ReferenceEdgeResponse(
+                    source={
+                        "object_kind": edge.source.object_kind,
+                        "object_key": edge.source.object_key,
+                        "field_path": edge.source.field_path,
+                    },
+                    target={
+                        "object_kind": edge.target.object_kind,
+                        "object_key": edge.target.object_key,
+                        "field_path": edge.target.field_path,
+                    },
+                )
+                for edge in service.references(scenario_id)
+            ],
+        )
+    except ScenarioLifecycleError as exc:
+        _raise_http(exc)
+
+
+@router.post("/scenarios/{scenario_id}/draft/rename-key", response_model=DraftResponse)
+def rename_draft_key(
+    scenario_id: UUID,
+    request: DraftRenameKeyRequest,
+    db: Session = Depends(get_db),
+) -> DraftResponse:
+    return _draft_write(
+        db,
+        lambda service: service.rename_draft_key(
+            scenario_id,
+            expected_revision=request.expected_revision,
+            object_kind=request.object_kind,
+            old_key=request.old_key,
+            new_key=request.new_key,
+        ),
+    )
+
+
+@router.post("/scenarios/{scenario_id}/draft/delete-object", response_model=DraftResponse)
+def delete_draft_object(
+    scenario_id: UUID,
+    request: DraftDeleteObjectRequest,
+    db: Session = Depends(get_db),
+) -> DraftResponse:
+    return _draft_write(
+        db,
+        lambda service: service.delete_draft_object(
+            scenario_id,
+            expected_revision=request.expected_revision,
+            object_kind=request.object_kind,
+            object_key=request.object_key,
         ),
     )
 

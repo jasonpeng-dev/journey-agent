@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import uuid4
 
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.health import router as health_router
 from app.api.scenarios import router as scenarios_router
@@ -63,3 +65,8 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
             }
         },
     )
+
+
+frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="browser-product")

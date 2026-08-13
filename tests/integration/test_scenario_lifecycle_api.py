@@ -192,3 +192,42 @@ def test_scenario_library_detail_identity_and_not_found_contract(
     assert missing.json()["error"]["code"] == "SCENARIO_NOT_FOUND"
 
     assert session.scalar(select(Scenario).where(Scenario.key == "library_case")) is not None
+
+
+def test_reference_navigation_atomic_rename_and_guarded_delete(client: TestClient) -> None:
+    created = _create_medical(client, key="reference_case")
+    scenario_id = created["id"]
+
+    references = client.get(f"/api/v1/scenarios/{scenario_id}/draft/references")
+    assert references.status_code == 200
+    assert any(
+        edge["target"]["object_kind"] == "interaction"
+        and edge["target"]["object_key"] == "diagnosable"
+        for edge in references.json()["references"]
+    )
+
+    blocked = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/delete-object",
+        json={
+            "expected_revision": 1,
+            "object_kind": "interaction",
+            "object_key": "diagnosable",
+        },
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "SCENARIO_OBJECT_REFERENCED"
+
+    renamed = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/rename-key",
+        json={
+            "expected_revision": 1,
+            "object_kind": "interaction",
+            "old_key": "diagnosable",
+            "new_key": "diagnosis_capability",
+        },
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["revision"] == 2
+    assert renamed.json()["definition_document"]["actions"][0]["required_interaction_key"] == (
+        "diagnosis_capability"
+    )

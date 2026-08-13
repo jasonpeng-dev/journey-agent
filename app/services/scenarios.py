@@ -13,6 +13,13 @@ from sqlalchemy.orm import Session
 
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
+from app.scenarios.authoring import (
+    DraftAuthoringError,
+    ReferenceEdge,
+    delete_object,
+    reference_index,
+    rename_key,
+)
 from app.scenarios.serialization import canonical_document, scenario_content_hash
 from app.scenarios.validation import (
     ScenarioDefinitionValidator,
@@ -290,6 +297,57 @@ class ScenarioService:
             scenario.version += 1
             self.db.flush()
         return scenario
+
+    def references(self, scenario_id: UUID) -> tuple[ReferenceEdge, ...]:
+        return reference_index(self.get_draft(scenario_id).definition_document)
+
+    def rename_draft_key(
+        self,
+        scenario_id: UUID,
+        *,
+        expected_revision: int,
+        object_kind: str,
+        old_key: str,
+        new_key: str,
+    ) -> ScenarioDraft:
+        draft = self.get_draft(scenario_id)
+        try:
+            changed = rename_key(
+                draft.definition_document,
+                object_kind=object_kind,
+                old_key=old_key,
+                new_key=new_key,
+            )
+        except DraftAuthoringError as exc:
+            raise ScenarioLifecycleError(exc.code, exc.message) from exc
+        return self.replace_draft(
+            scenario_id,
+            expected_revision=expected_revision,
+            definition_document=changed,
+        )
+
+    def delete_draft_object(
+        self,
+        scenario_id: UUID,
+        *,
+        expected_revision: int,
+        object_kind: str,
+        object_key: str,
+    ) -> ScenarioDraft:
+        draft = self.get_draft(scenario_id)
+        try:
+            changed = delete_object(
+                draft.definition_document,
+                object_kind=object_kind,
+                object_key=object_key,
+            )
+        except DraftAuthoringError as exc:
+            raise ScenarioLifecycleError(exc.code, exc.message) from exc
+        return self.replace_draft(
+            scenario_id,
+            expected_revision=expected_revision,
+            definition_document=changed,
+        )
 
     def _create(
         self,
