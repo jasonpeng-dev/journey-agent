@@ -29,6 +29,12 @@ may return Truth, ObjectiveScope, plans/steps, operations, decisions, rule outco
 The Game page contains formal Play and an opt-in embedded Developer View. Normal rendering never
 downloads Developer data.
 
+The Editor Validation section also provides Draft Preview/Test. The main database is read-only for
+this operation: a Draft is strictly parsed as `ScenarioDefinitionV2`, then published and executed
+only inside a request-scoped in-memory database using the existing Generic Runtime services. Invalid
+Drafts return diagnostics without starting a sandbox. The disposable Runtime is destroyed after the
+response and cannot create or mutate a formal GameInstance, Draft, or published Version.
+
 ## Safety bounds and lifecycle
 
 - One non-terminal Task per GameInstance is enforced in service code and a partial unique DB index.

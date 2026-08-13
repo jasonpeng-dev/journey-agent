@@ -18,6 +18,8 @@ from app.api.schemas.phase_d import (
     DraftResponse,
     DraftRestoreRequest,
     DraftRevisionRequest,
+    DraftSandboxRequest,
+    DraftSandboxResponse,
     DraftValidationResponse,
     ReadinessCheckResponse,
     ReadinessLevel,
@@ -41,6 +43,7 @@ from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersio
 from app.infrastructure.db.session import get_db
 from app.scenarios.builtin import MEDICAL_EMERGENCY_V2, STARFIRE_V2
 from app.scenarios.validation import ScenarioValidationIssue
+from app.services.draft_sandbox import DraftSandboxService
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
 
 router = APIRouter(prefix="/api/v1", tags=["scenarios"])
@@ -200,6 +203,48 @@ def validate_draft(
     except ScenarioLifecycleError as exc:
         db.rollback()
         _raise_http(exc)
+
+
+@router.post(
+    "/scenarios/{scenario_id}/draft/sandbox",
+    response_model=DraftSandboxResponse,
+)
+def test_draft_in_sandbox(
+    scenario_id: UUID,
+    request: DraftSandboxRequest,
+    db: Session = Depends(get_db),
+) -> DraftSandboxResponse:
+    """Strictly validate, then run in a disposable database isolated from formal Games."""
+
+    try:
+        result = DraftSandboxService(db).test(
+            scenario_id,
+            expected_revision=request.expected_revision,
+            goal=request.goal,
+        )
+    except ScenarioLifecycleError as exc:
+        _raise_http(exc)
+    issues = [_validation_issue(item) for item in result.issues]
+    if not result.started:
+        return DraftSandboxResponse(
+            scenario_id=result.scenario_id,
+            revision=result.revision,
+            sandbox_started=False,
+            issues=issues,
+        )
+    state = result.player_state
+    assert state is not None
+    return DraftSandboxResponse(
+        scenario_id=result.scenario_id,
+        revision=result.revision,
+        sandbox_started=True,
+        issues=issues,
+        goal_status=result.goal_status,
+        task=state.current_task,
+        visible_nodes=state.visible_nodes,
+        known_facts=state.known_facts,
+        resources=state.resources,
+    )
 
 
 @router.post("/scenarios/{scenario_id}/draft/publish", response_model=ScenarioPublishResponse)

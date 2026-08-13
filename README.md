@@ -22,6 +22,8 @@ Scenario Library → Current Draft → Validate → Publish immutable Version
 - Formal Play automatically advances generic operations until a durable pause.
 - Goal completion does not end the GameInstance; another Goal may be submitted.
 - Player APIs expose Knowledge only. Hidden Truth exists only on credential-gated Developer APIs.
+- Draft Preview/Test runs Generic Play in a disposable in-memory sandbox and never creates a formal
+  GameInstance or binds Runtime state to a mutable Draft.
 - Archive and abandon cancel unsettled work but never roll back applied world mutations.
 - Rejected proposals become Task-scoped backend constraints; hard limits prevent approval/replan
   loops.

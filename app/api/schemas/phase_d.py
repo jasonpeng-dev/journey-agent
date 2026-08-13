@@ -179,6 +179,10 @@ class DraftValidationResponse(ApiModel):
     publish_ready: bool
 
 
+class DraftSandboxRequest(DraftRevisionRequest):
+    goal: str | None = Field(default=None, min_length=1, max_length=4000)
+
+
 class ScenarioVersionSummaryResponse(ApiModel):
     id: UUID
     scenario_id: UUID
@@ -308,6 +312,18 @@ class PlayerGameStateResponse(ApiModel):
     pending_approval_id: UUID | None = None
 
 
+class DraftSandboxResponse(ApiModel):
+    scenario_id: UUID
+    revision: int = Field(ge=1)
+    sandbox_started: bool
+    issues: list[ValidationIssueResponse]
+    goal_status: str | None = None
+    task: PublicTaskResponse | None = None
+    visible_nodes: list[PublicNodeResponse] = Field(default_factory=list)
+    known_facts: list[PublicFactResponse] = Field(default_factory=list)
+    resources: list[PublicResourceResponse] = Field(default_factory=list)
+
+
 class DeveloperGameSnapshotResponse(ApiModel):
     """Internal response intentionally separate from PlayerGameStateResponse."""
 
@@ -338,6 +354,8 @@ __all__ = [
     "DraftResponse",
     "DraftRestoreRequest",
     "DraftRevisionRequest",
+    "DraftSandboxRequest",
+    "DraftSandboxResponse",
     "DraftValidationResponse",
     "GameSummaryResponse",
     "GoalSubmissionRequest",
