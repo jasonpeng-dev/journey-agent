@@ -9,11 +9,18 @@ from sqlalchemy.orm import Session
 
 from app.domain.enums import GameInstanceStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
+from app.domain.scenario import ScenarioDefinition
+from app.domain.scenario_v2 import (
+    NodeDefinitionV2,
+    ResourceDefinitionV2,
+    ScenarioDefinitionV2,
+)
 from app.domain.world import NodeDefinition, ResourceDefinition
 from app.infrastructure.db.models import (
     AgentTask,
     ConversationSession,
     GameInstance,
+    GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
     GameInstanceOfficerAppointment,
@@ -22,10 +29,7 @@ from app.infrastructure.db.models import (
     PlayerDecisionRequest,
     WorldOperation,
 )
-from app.scenarios.runtime_binding import (
-    require_runtime_implementation,
-    require_v1_runtime_definition,
-)
+from app.scenarios.runtime_binding import require_runtime_implementation
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
 
@@ -41,6 +45,7 @@ class RuntimeRecoveryError(ValueError):
 class RecoveredRuntime:
     scope: RuntimeScope
     instance: GameInstance
+    actors: tuple[GameInstanceActor, ...]
     sessions: tuple[ConversationSession, ...]
     tasks: tuple[AgentTask, ...]
     memories: tuple[Memory, ...]
@@ -65,8 +70,16 @@ class RuntimeRecoveryService:
                 "Only active or suspended GameInstances can be recovered",
             )
         snapshot = ScenarioVersionRepository(self.db).load(scope.scenario_version_id)
-        definition = require_v1_runtime_definition(snapshot)
-        require_runtime_implementation(definition.behavior_bundle)
+        definition = snapshot.definition
+        if isinstance(definition, ScenarioDefinition):
+            require_runtime_implementation(definition.behavior_bundle)
+        actors = tuple(
+            self.db.scalars(
+                select(GameInstanceActor).where(
+                    GameInstanceActor.game_instance_id == game_instance_id
+                )
+            ).all()
+        )
         sessions = tuple(
             self.db.scalars(
                 select(ConversationSession).where(
@@ -98,6 +111,13 @@ class RuntimeRecoveryService:
         session_ids = {session.id for session in sessions}
         if not sessions or any(session.player_id != scope.player_id for session in sessions):
             self._corrupt("ConversationSession")
+        if isinstance(definition, ScenarioDefinitionV2):
+            actor_keys = {actor.actor_key for actor in actors}
+            if any(
+                session.actor_key not in actor_keys or session.npc_id is not None
+                for session in sessions
+            ):
+                self._corrupt("ConversationSession Actor")
         if any(
             task.player_id != scope.player_id
             or task.origin_session_id not in session_ids
@@ -124,10 +144,20 @@ class RuntimeRecoveryService:
             for decision in decisions
         ):
             self._corrupt("PlayerDecisionRequest")
-        self._verify_snapshot_state(instance, definition.world.nodes, definition.world.resources)
+        self._verify_snapshot_state(
+            instance,
+            definition.world.nodes,
+            definition.world.resources,
+            expected_actor_keys=(
+                {actor.key for actor in definition.actors.actor_profiles}
+                if isinstance(definition, ScenarioDefinitionV2)
+                else None
+            ),
+        )
         return RecoveredRuntime(
             scope=scope,
             instance=instance,
+            actors=actors,
             sessions=sessions,
             tasks=tasks,
             memories=memories,
@@ -142,8 +172,10 @@ class RuntimeRecoveryService:
     def _verify_snapshot_state(
         self,
         instance: GameInstance,
-        nodes: tuple[NodeDefinition, ...],
-        resources: tuple[ResourceDefinition, ...],
+        nodes: tuple[NodeDefinition, ...] | tuple[NodeDefinitionV2, ...],
+        resources: tuple[ResourceDefinition, ...] | tuple[ResourceDefinitionV2, ...],
+        *,
+        expected_actor_keys: set[str] | None,
     ) -> None:
         node_rows = self.db.scalars(
             select(GameInstanceNodeState).where(
@@ -165,12 +197,19 @@ class RuntimeRecoveryService:
                 GameInstanceOfficerAppointment.game_instance_id == instance.id
             )
         ).all()
+        actor_rows = self.db.scalars(
+            select(GameInstanceActor).where(GameInstanceActor.game_instance_id == instance.id)
+        ).all()
         expected_facts = sum(len(node.facts) for node in nodes)
         if (
             len(node_rows) != len(nodes)
             or len(fact_rows) != expected_facts
             or len(resource_rows) != len(resources)
-            or not officer_rows
+            or (expected_actor_keys is None and not officer_rows)
+            or (
+                expected_actor_keys is not None
+                and {actor.actor_key for actor in actor_rows} != expected_actor_keys
+            )
         ):
             self._corrupt("initialized state")
 

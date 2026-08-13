@@ -536,7 +536,7 @@ class TaskOrchestrator:
                 result = ToolExecutor(self.db, self.registry).execute(
                     ToolContext(
                         player_id=session.player_id,
-                        npc_id=session.npc_id,
+                        npc_id=_legacy_session_npc_id(session),
                         session_id=session.id,
                         agent_run_id=run.id,
                         message_id=run.request_id,
@@ -658,7 +658,7 @@ class TaskOrchestrator:
         result = ToolExecutor(self.db, self.registry).execute(
             ToolContext(
                 player_id=session.player_id,
-                npc_id=session.npc_id,
+                npc_id=_legacy_session_npc_id(session),
                 session_id=session.id,
                 agent_run_id=run.id,
                 message_id=run.request_id,
@@ -1040,3 +1040,12 @@ class TaskOrchestrator:
         self.db.commit()
         self.db.expire(step)
         return succeeded
+
+
+def _legacy_session_npc_id(session: ConversationSession) -> UUID:
+    if session.npc_id is None:
+        raise AppError(
+            "GENERIC_ACTOR_RUNTIME_NOT_READY",
+            "Versioned Actor orchestration is introduced in R6",
+        )
+    return session.npc_id

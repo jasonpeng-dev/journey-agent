@@ -154,7 +154,10 @@ class StrategicSnapshotService:
                 "id": str(session.id),
                 "status": session.status.value,
                 "npc_id": str(session.npc_id),
-                "commanding_officer": self._officer(session.npc_id),
+                "actor_key": session.actor_key,
+                "commanding_officer": (
+                    self._officer(session.npc_id) if session.npc_id is not None else None
+                ),
             },
             "officers": officers,
             "resources": resources,

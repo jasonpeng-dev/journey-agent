@@ -259,6 +259,37 @@ class GameInstanceResourceState(TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class GameInstanceActor(TimestampMixin, Base):
+    """Instance-owned runtime actor materialized from the exact ScenarioVersion."""
+
+    __tablename__ = "game_instance_actors"
+    __table_args__ = (
+        Index(
+            "uq_game_instance_primary_actor",
+            "game_instance_id",
+            unique=True,
+            sqlite_where=text("is_primary = 1"),
+            postgresql_where=text("is_primary IS TRUE"),
+        ),
+    )
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    actor_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    role_key: Mapped[str] = mapped_column(String(80))
+    name: Mapped[str] = mapped_column(String(160))
+    persona: Mapped[str] = mapped_column(Text)
+    doctrine: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    current_node_key: Mapped[str] = mapped_column(String(80))
+    allowed_action_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    authority_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    capabilities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class GameInstanceWorldFact(TimestampMixin, Base):
     """Instance-owned compatibility projection for existing flat fact consumers."""
 
@@ -404,7 +435,8 @@ class ConversationSession(UUIDPrimaryKey, TimestampMixin, Base):
         index=True,
         server_default=text("NULL"),
     )
-    npc_id: Mapped[UUID] = mapped_column(ForeignKey("npcs.id"))
+    npc_id: Mapped[UUID | None] = mapped_column(ForeignKey("npcs.id"))
+    actor_key: Mapped[str | None] = mapped_column(String(80))
     status: Mapped[SessionStatus] = mapped_column(
         Enum(SessionStatus, native_enum=False), default=SessionStatus.ACTIVE
     )
