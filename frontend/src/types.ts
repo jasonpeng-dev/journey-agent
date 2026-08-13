@@ -25,3 +25,16 @@ export type Draft = {
 export type Locator = { object_kind: string; object_key: string | null; field_path: string | null };
 export type ReferenceEdge = { source: Locator; target: Locator };
 export type ReferenceIndex = { scenario_id: string; revision: number; references: ReferenceEdge[] };
+
+export type ValidationResult = {
+  scenario_id: string; revision: number; content_hash: string | null; publish_ready: boolean;
+  issues: Array<{ severity: "ERROR" | "WARNING"; code: string; path: string; message: string }>;
+  readiness: Array<{ level: string; passed: boolean; issue_codes: string[] }>;
+};
+
+export type ScenarioVersion = {
+  id: string; scenario_id: string; version_number: number; schema_version: 2;
+  content_hash: string; published_at: string; definition_document?: Record<string, unknown>;
+};
+
+export type ScenarioExample = { key: string; name: string; description: string; maturity: string };

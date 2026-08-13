@@ -278,3 +278,69 @@ def test_definition_schema_exposes_closed_condition_and_effect_vocabulary(
     assert all(kind in encoded for kind in ["ALL", "ANY", "NOT", "RELATION_EXISTS"])
     assert all(kind in encoded for kind in ["SET_FACT", "ADJUST_RESOURCE", "EMIT_OUTCOME"])
     assert "execute_action" not in encoded
+
+
+def test_examples_cover_authoring_maturity_levels(client: TestClient) -> None:
+    examples = client.get("/api/v1/scenario-examples")
+    assert examples.status_code == 200
+    maturity = {item["key"]: item["maturity"] for item in examples.json()}
+    assert maturity["structurally_valid"] == "STRUCTURALLY_VALID"
+    assert maturity["minimum_runnable"] == "MINIMUM_RUNNABLE"
+    assert maturity["minimum_playable"] == "MINIMUM_PLAYABLE"
+    assert maturity["feature_showcase"] == "PUBLISH_READY"
+
+
+def test_warning_does_not_block_publish_but_missing_playability_does(
+    client: TestClient,
+) -> None:
+    created = _create_medical(client, key="warning_case")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    document = draft["definition_document"]
+    extra = deepcopy(document["actions"][0])
+    extra["key"] = "unused_action"
+    extra["name"] = "Unused Action"
+    document["actions"].append(extra)
+    saved = client.put(
+        f"/api/v1/scenarios/{scenario_id}/draft",
+        json={"expected_revision": 1, "definition_document": document},
+    )
+    assert saved.status_code == 200
+    validation = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/validate",
+        json={"expected_revision": 2},
+    )
+    assert validation.status_code == 200
+    assert validation.json()["publish_ready"] is True
+    assert any(issue["severity"] == "WARNING" for issue in validation.json()["issues"])
+    published = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/publish",
+        json={
+            "expected_revision": 2,
+            "expected_content_hash": validation.json()["content_hash"],
+        },
+    )
+    assert published.status_code == 200
+
+    blocked = _create_medical(client, key="not_playable")
+    blocked_id = blocked["id"]
+    blocked_draft = client.get(f"/api/v1/scenarios/{blocked_id}/draft").json()
+    blocked_document = blocked_draft["definition_document"]
+    for action in blocked_document["actions"]:
+        action["planning"]["terminal_effects"] = []
+        action["planning"]["supporting_effects"] = []
+    saved_blocked = client.put(
+        f"/api/v1/scenarios/{blocked_id}/draft",
+        json={"expected_revision": 1, "definition_document": blocked_document},
+    )
+    assert saved_blocked.status_code == 200
+    invalid = client.post(
+        f"/api/v1/scenarios/{blocked_id}/draft/validate",
+        json={"expected_revision": 2},
+    )
+    assert invalid.json()["publish_ready"] is False
+    publish = client.post(
+        f"/api/v1/scenarios/{blocked_id}/draft/publish",
+        json={"expected_revision": 2},
+    )
+    assert publish.status_code == 409

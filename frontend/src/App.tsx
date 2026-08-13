@@ -3,6 +3,7 @@ import { Link, Navigate, Route, Routes } from "react-router-dom";
 import { EditorPage } from "./pages/EditorPage";
 import { ScenarioDetailPage } from "./pages/ScenarioDetailPage";
 import { ScenarioLibraryPage } from "./pages/ScenarioLibraryPage";
+import { NewScenarioPage } from "./pages/NewScenarioPage";
 
 export function App() {
   return (
@@ -16,6 +17,7 @@ export function App() {
       <Routes>
         <Route path="/" element={<Navigate replace to="/scenarios" />} />
         <Route path="/scenarios" element={<ScenarioLibraryPage />} />
+        <Route path="/scenarios/new" element={<NewScenarioPage />} />
         <Route path="/scenarios/:scenarioId" element={<ScenarioDetailPage />} />
         <Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} />
         <Route path="/scenarios/:scenarioId/edit/:section/:objectKey" element={<EditorPage />} />

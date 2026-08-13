@@ -7,7 +7,7 @@ export function ScenarioLibraryPage() {
   const scenarios = useQuery({ queryKey: ["scenarios"], queryFn: api.scenarios });
   return (
     <main className="page">
-      <div className="page-heading"><div><p className="eyebrow">Authoring</p><h1>Scenario Library</h1></div></div>
+      <div className="page-heading"><div><p className="eyebrow">Authoring</p><h1>Scenario Library</h1></div><Link className="primary-button" to="/scenarios/new">New Scenario</Link></div>
       {scenarios.isLoading && <p>Loading scenarios…</p>}
       {scenarios.error && <p className="error">Unable to load scenarios.</p>}
       <div className="card-grid">

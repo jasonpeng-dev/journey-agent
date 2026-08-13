@@ -46,6 +46,10 @@ from app.services.scenarios import ScenarioLifecycleError, ScenarioService
 router = APIRouter(prefix="/api/v1", tags=["scenarios"])
 
 _EXAMPLES = {
+    "structurally_valid": (MEDICAL_EMERGENCY_V2, ReadinessLevel.STRUCTURALLY_VALID),
+    "minimum_runnable": (MEDICAL_EMERGENCY_V2, ReadinessLevel.MINIMUM_RUNNABLE),
+    "minimum_playable": (MEDICAL_EMERGENCY_V2, ReadinessLevel.MINIMUM_PLAYABLE),
+    "feature_showcase": (STARFIRE_V2, ReadinessLevel.PUBLISH_READY),
     "medical_emergency": (
         MEDICAL_EMERGENCY_V2,
         ReadinessLevel.MINIMUM_PLAYABLE,
@@ -165,7 +169,9 @@ def validate_draft(
         draft = service.get_draft(scenario_id)
         db.commit()
         issues = [_validation_issue(item) for item in result.issues]
-        passed = result.passed
+        structural = result.definition is not None
+        runnable = structural
+        playable = result.passed
         return DraftValidationResponse(
             scenario_id=scenario_id,
             revision=draft.revision,
@@ -174,11 +180,22 @@ def validate_draft(
             readiness=[
                 ReadinessCheckResponse(
                     level=ReadinessLevel.STRUCTURALLY_VALID,
-                    passed=passed,
-                    issue_codes=[item.code for item in result.issues],
-                )
+                    passed=structural,
+                    issue_codes=[item.code for item in result.issues if not structural],
+                ),
+                ReadinessCheckResponse(level=ReadinessLevel.MINIMUM_RUNNABLE, passed=runnable),
+                ReadinessCheckResponse(
+                    level=ReadinessLevel.MINIMUM_PLAYABLE,
+                    passed=playable,
+                    issue_codes=[item.code for item in result.issues if item.severity == "ERROR"],
+                ),
+                ReadinessCheckResponse(
+                    level=ReadinessLevel.PUBLISH_READY,
+                    passed=result.passed,
+                    issue_codes=[item.code for item in result.issues if item.severity == "ERROR"],
+                ),
             ],
-            publish_ready=passed,
+            publish_ready=result.passed,
         )
     except ScenarioLifecycleError as exc:
         db.rollback()
@@ -209,9 +226,7 @@ def publish_draft(
         if exc.code == "SCENARIO_DRAFT_INVALID":
             draft = db.get(ScenarioDraft, scenario_id)
             if draft is not None:
-                details["issues"] = [
-                    {"severity": "ERROR", **item} for item in draft.validation_errors
-                ]
+                details["issues"] = [item for item in draft.validation_errors]
         db.rollback()
         _raise_http(exc, details=details)
 
@@ -404,7 +419,12 @@ def _draft_response(draft: ScenarioDraft) -> DraftResponse:
         definition_document=draft.definition_document,
         validation_status=draft.validation_status,
         validation_issues=[
-            ValidationIssueResponse(severity=ValidationSeverity.ERROR, **item)
+            ValidationIssueResponse(
+                severity=ValidationSeverity(item.get("severity", "ERROR")),
+                code=item["code"],
+                path=item["path"],
+                message=item["message"],
+            )
             for item in draft.validation_errors
         ],
         content_hash=draft.content_hash,
@@ -426,7 +446,7 @@ def _version_summary(version: ScenarioVersion) -> ScenarioVersionSummaryResponse
 
 def _validation_issue(issue: ScenarioValidationIssue) -> ValidationIssueResponse:
     return ValidationIssueResponse(
-        severity=ValidationSeverity.ERROR,
+        severity=ValidationSeverity(issue.severity),
         code=issue.code,
         path=issue.path,
         message=issue.message,

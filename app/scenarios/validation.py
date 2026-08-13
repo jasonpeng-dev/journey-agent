@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
@@ -16,6 +16,7 @@ class ScenarioValidationIssue:
     code: str
     path: str
     message: str
+    severity: Literal["ERROR", "WARNING"] = "ERROR"
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +26,9 @@ class ScenarioValidationResult:
 
     @property
     def passed(self) -> bool:
-        return self.definition is not None and not self.issues
+        return self.definition is not None and not any(
+            issue.severity == "ERROR" for issue in self.issues
+        )
 
 
 class ScenarioDefinitionValidator:
@@ -69,7 +72,69 @@ class ScenarioDefinitionValidator:
                     ),
                 ),
             )
-        return ScenarioValidationResult(definition=definition, issues=())
+        return ScenarioValidationResult(
+            definition=definition,
+            issues=_readiness_issues(definition),
+        )
+
+
+def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidationIssue, ...]:
+    issues: list[ScenarioValidationIssue] = []
+    if not definition.objectives:
+        issues.append(
+            ScenarioValidationIssue(
+                code="SCENARIO_OBJECTIVE_REQUIRED",
+                path="objectives",
+                message="A publishable Scenario needs at least one Objective",
+            )
+        )
+    if not definition.actions:
+        issues.append(
+            ScenarioValidationIssue(
+                code="SCENARIO_ACTION_REQUIRED",
+                path="actions",
+                message="A publishable Scenario needs at least one Action",
+            )
+        )
+    resolve_action_keys = {
+        rule.action_key for rule in definition.rules if rule.phase.value == "RESOLVE"
+    }
+    objective_facts = {
+        (requirement.node_key, requirement.fact_key)
+        for objective in definition.objectives
+        for requirement in objective.completion_requirements
+    }
+    projected_facts = {
+        (reference.node_key, reference.fact_key)
+        for action in definition.actions
+        if action.key in resolve_action_keys
+        for reference in (*action.planning.terminal_effects, *action.planning.supporting_effects)
+    }
+    if (
+        definition.actions
+        and definition.objectives
+        and not objective_facts.intersection(projected_facts)
+    ):
+        issues.append(
+            ScenarioValidationIssue(
+                code="SCENARIO_MINIMUM_PLAYABLE_REQUIRED",
+                path="actions",
+                message=(
+                    "No resolved Action planning projection advances an Objective requirement"
+                ),
+            )
+        )
+    for action in definition.actions:
+        if action.key not in resolve_action_keys:
+            issues.append(
+                ScenarioValidationIssue(
+                    code="SCENARIO_ACTION_WITHOUT_RESOLVE_RULE",
+                    path=f"actions.{action.key}",
+                    message=f"Action {action.key} has no RESOLVE Rule",
+                    severity="WARNING",
+                )
+            )
+    return tuple(issues)
 
 
 __all__ = [

@@ -1,4 +1,4 @@
-import type { Draft, ReferenceIndex, ScenarioSummary } from "./types";
+import type { Draft, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -35,6 +35,12 @@ export const api = {
   scenario: (id: string) => request<ScenarioSummary>(`/api/v1/scenarios/${id}`),
   draft: (id: string) => request<Draft>(`/api/v1/scenarios/${id}/draft`),
   references: (id: string) => request<ReferenceIndex>(`/api/v1/scenarios/${id}/draft/references`),
+  examples: () => request<ScenarioExample[]>("/api/v1/scenario-examples"),
+  createScenario: (payload: Record<string, unknown>) => request<ScenarioSummary>("/api/v1/scenarios", { method: "POST", body: JSON.stringify(payload) }),
+  validateDraft: (id: string, revision: number) => request<ValidationResult>(`/api/v1/scenarios/${id}/draft/validate`, { method: "POST", body: JSON.stringify({ expected_revision: revision }) }),
+  publishDraft: (id: string, revision: number, contentHash: string | null) => request<{ scenario: ScenarioSummary; version: ScenarioVersion }>(`/api/v1/scenarios/${id}/draft/publish`, { method: "POST", body: JSON.stringify({ expected_revision: revision, expected_content_hash: contentHash }) }),
+  versions: (id: string) => request<ScenarioVersion[]>(`/api/v1/scenarios/${id}/versions`),
+  restoreVersion: (id: string, revision: number, versionId: string) => request<Draft>(`/api/v1/scenarios/${id}/draft/restore`, { method: "POST", body: JSON.stringify({ expected_revision: revision, version_id: versionId }) }),
   saveDraft: (id: string, revision: number, document: Record<string, unknown>) =>
     request<Draft>(`/api/v1/scenarios/${id}/draft`, {
       method: "PUT",

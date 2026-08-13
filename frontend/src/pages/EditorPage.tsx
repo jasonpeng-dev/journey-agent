@@ -8,6 +8,7 @@ import { WorldGraph } from "../components/WorldGraph";
 import { replaceObject, sectionObjects, sectionRoot, sections, updateObjectName, updateSectionRoot } from "../editor";
 import { addObject, kindsBySection } from "../templates";
 import type { Draft } from "../types";
+import type { ValidationResult } from "../types";
 
 type SaveState = "Saved" | "Editing" | "Saving" | "Conflict" | "Error";
 
@@ -20,6 +21,7 @@ export function EditorPage() {
   const [local, setLocal] = useState<Draft | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("Saved");
   const [message, setMessage] = useState("");
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
 
   useEffect(() => { if (draftQuery.data && !local) setLocal(draftQuery.data); }, [draftQuery.data, local]);
 
@@ -91,6 +93,18 @@ export function EditorPage() {
     } catch (error) { setSaveState("Error"); setMessage(error instanceof Error ? error.message : "Delete failed"); }
   };
 
+  const validate = async () => {
+    if (saveState !== "Saved") { setMessage("Wait for the Draft to finish saving before validation."); return; }
+    try { setValidation(await api.validateDraft(scenarioId, local.revision)); setMessage(""); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Validation failed"); }
+  };
+
+  const publish = async () => {
+    if (!validation?.publish_ready) return;
+    try { await api.publishDraft(scenarioId, local.revision, validation.content_hash); setMessage("Published an immutable ScenarioVersion."); void queryClient.invalidateQueries({ queryKey: ["scenario", scenarioId] }); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Publish failed"); }
+  };
+
   return (
     <main className="editor-shell">
       <aside className="editor-nav">
@@ -111,7 +125,8 @@ export function EditorPage() {
             {section === "world" && !selected && <WorldGraph document={local.definition_document} />}
             {selected && <StructuredEditor value={selected.value} onChange={(value) => { if (value && typeof value === "object" && !Array.isArray(value)) editDocument(replaceObject(local.definition_document, section, selected.key, value as Record<string, unknown>)); }} />}
             {!selected && sectionRoot(local.definition_document, section) !== null && <StructuredEditor value={sectionRoot(local.definition_document, section)} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} />}
-            {!selected && section !== "world" && sectionRoot(local.definition_document, section) === null && <p>Choose or create an object to edit its structured fields.</p>}
+            {!selected && section === "validation" && <div className="validation-panel"><div className="button-row"><button onClick={() => void validate()}>Validate Current Draft</button><button disabled={!validation?.publish_ready} onClick={() => void publish()}>Publish immutable Version</button></div>{validation && <><h4>Runtime Readiness</h4>{validation.readiness.map((item) => <div className={`readiness ${item.passed ? "pass" : "fail"}`} key={item.level}>{item.passed ? "✓" : "×"} {item.level.replaceAll("_", " ")}</div>)}<h4>Issues</h4>{validation.issues.length === 0 ? <p>No issues.</p> : validation.issues.map((issue) => <article className={`issue ${issue.severity.toLowerCase()}`} key={`${issue.code}:${issue.path}`}><strong>{issue.severity} · {issue.code}</strong><p>{issue.message}</p><code>{issue.path}</code></article>)}</>}</div>}
+            {!selected && section !== "world" && section !== "validation" && sectionRoot(local.definition_document, section) === null && <p>Choose or create an object to edit its structured fields.</p>}
           </div>
           <aside className="inspector">
             <h3>Inspector</h3>

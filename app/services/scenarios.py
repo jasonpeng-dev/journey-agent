@@ -423,6 +423,7 @@ def _issue_payload(issue: ScenarioValidationIssue) -> dict[str, str]:
         "code": issue.code,
         "path": issue.path,
         "message": issue.message,
+        "severity": issue.severity,
     }
 
 
