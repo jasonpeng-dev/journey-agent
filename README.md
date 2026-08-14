@@ -20,6 +20,8 @@ Scenario Library → Current Draft → Validate → Publish immutable Version
 - Published versions and GameInstance version bindings are immutable.
 - A Scenario has exactly one mutable Current Draft; incomplete drafts may be saved.
 - Formal Play automatically advances generic operations until a durable pause.
+- The formal Game page uses the three-column command-console layout established by the Phase R
+  Debug UI while continuing to consume only Player-safe Phase D projections.
 - Goal completion does not end the GameInstance; another Goal may be submitted.
 - Player APIs expose Knowledge only. Hidden Truth exists only on credential-gated Developer APIs.
 - Draft Preview/Test runs Generic Play in a disposable in-memory sandbox and never creates a formal
@@ -27,6 +29,8 @@ Scenario Library → Current Draft → Validate → Publish immutable Version
 - Archive and abandon cancel unsettled work but never roll back applied world mutations.
 - Rejected proposals become Task-scoped backend constraints; hard limits prevent approval/replan
   loops.
+- Replanning does not repeat an already successful exact supporting proposal unless its declared
+  effects are required again by the still-unsatisfied Objective scope.
 
 ## Stack
 

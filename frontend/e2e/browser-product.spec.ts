@@ -16,9 +16,9 @@ test("published Scenario starts an exact-version Game and completes a Goal", asy
   await page.getByLabel("Published version").selectOption({ index: 1 });
   await page.getByRole("button", { name: "Create Game" }).click();
   await expect(page.getByRole("heading", { name: /Game/ })).toBeVisible();
-  await page.getByLabel("What do you want to achieve?").fill("gather valley intelligence");
+  await page.getByLabel("Issue a high-level Goal").fill("open the northern trade route");
   await page.getByRole("button", { name: "Start Goal" }).click();
-  await expect(page.getByText(/Gather Northern Valley Intelligence.*COMPLETED/)).toBeVisible();
+  await expect(page.getByText(/Open Northern Trade Route.*COMPLETED/)).toBeVisible();
   await expect(page.getByRole("heading", { name: "Current Plan" })).toBeVisible();
   await expect(page.getByText("Known World")).toBeVisible();
   await page.getByRole("button", { name: "End Game" }).click();

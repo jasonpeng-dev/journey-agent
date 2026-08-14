@@ -27,7 +27,9 @@ may return Truth, ObjectiveScope, plans/steps, operations, decisions, rule outco
 - `/games`, `/games/new`, `/games/{id}`
 
 The Game page contains formal Play and an opt-in embedded Developer View. Normal rendering never
-downloads Developer data.
+downloads Developer data. Its formal Play surface reuses the Phase R Debug console's visual
+language—Known Domain, Mission Report, and Current Plan columns—without restoring Debug-only manual
+settlement controls or its legacy data contract.
 
 The Editor Validation section also provides Draft Preview/Test. The main database is read-only for
 this operation: a Draft is strictly parsed as `ScenarioDefinitionV2`, then published and executed
@@ -41,6 +43,9 @@ response and cannot create or mutate a formal GameInstance, Draft, or published 
 - Formal Play has a 50-transition invocation bound and Generic planning has a five-replan bound.
 - An exact rejected `(actor, action, target, canonical parameters)` signature is persisted on the
   Task and enforced for deterministic and provider-produced plans.
+- A successfully resolved exact supporting proposal is not selected repeatedly by recovery replans;
+  it remains eligible when its declared effects are genuinely required by an unsatisfied Objective
+  requirement. This prevents bounded replans from being consumed by already-completed recovery work.
 - Candidate exhaustion after Reject becomes `BLOCKED_BY_PLAYER_DECISION`; other planning
   exhaustion becomes `UNREACHABLE_IN_CURRENT_STATE`.
 - Archived instances are read-only at application-service boundaries.

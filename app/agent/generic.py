@@ -467,7 +467,7 @@ class GenericAgentService:
         reason: str | None,
         plan_version: int,
     ) -> list[dict[str, object]]:
-        needed = [
+        objective_needed = [
             (requirement.node_key, requirement.fact_key)
             for objective in objectives
             for prerequisite in objective.prerequisites
@@ -479,6 +479,7 @@ class GenericAgentService:
             for requirement in objective.completion_requirements
             if not self._known_requirement_satisfied(requirement)
         ]
+        needed = list(objective_needed)
         recovery_refs = {
             (item.node_key, item.fact_key)
             for action in definition.actions
@@ -495,6 +496,8 @@ class GenericAgentService:
         )
         candidates: list[dict[str, object]] = []
         covered: set[tuple[str, str]] = set()
+        rejected_signatures = set(task.rejected_proposal_signatures)
+        successful_signatures = self._successful_proposal_signatures(task)
         for action in actions:
             effects = {
                 (item.node_key, item.fact_key)
@@ -521,8 +524,11 @@ class GenericAgentService:
                     f"{action.key}"
                 )[:160],
             }
-            if proposal_signature(actor.actor_key, action.key, target_key, parameters) in set(
-                task.rejected_proposal_signatures
+            signature = proposal_signature(actor.actor_key, action.key, target_key, parameters)
+            if signature in rejected_signatures:
+                continue
+            if signature in successful_signatures and not set(matched).intersection(
+                objective_needed
             ):
                 continue
             candidates.append(
@@ -660,14 +666,46 @@ class GenericAgentService:
             )
         )
         result: list[dict[str, object]] = []
+        rejected_signatures = set(task.rejected_proposal_signatures)
+        successful_signatures = self._successful_proposal_signatures(task)
+        objective_needed = {
+            (requirement.node_key, requirement.fact_key)
+            for objective in objectives
+            for prerequisite in objective.prerequisites
+            for requirement in prerequisite.requirements
+            if not self._known_requirement_satisfied(requirement)
+        } | {
+            (requirement.node_key, requirement.fact_key)
+            for objective in objectives
+            for requirement in objective.completion_requirements
+            if not self._known_requirement_satisfied(requirement)
+        }
         for index, proposed in enumerate(proposal.steps, start=1):
-            if proposal_signature(
+            signature = proposal_signature(
                 proposed.actor_key,
                 proposed.action_key,
                 proposed.target_key,
                 proposed.parameters,
-            ) in set(task.rejected_proposal_signatures):
+            )
+            if signature in rejected_signatures:
                 continue
+            if signature in successful_signatures:
+                action = next(
+                    (item for item in definition.actions if item.key == proposed.action_key), None
+                )
+                effects = (
+                    {
+                        (item.node_key, item.fact_key)
+                        for item in (
+                            *action.planning.terminal_effects,
+                            *action.planning.supporting_effects,
+                        )
+                    }
+                    if action is not None
+                    else set()
+                )
+                if not effects.intersection(objective_needed):
+                    continue
             result.extend(
                 self._validated_proposed_step(
                     definition, proposed, objectives, plan_version, index, reason
@@ -678,6 +716,29 @@ class GenericAgentService:
                 "GENERIC_PROVIDER_PLAN_INVALID", "Provider returned no valid steps"
             )
         return result
+
+    def _successful_proposal_signatures(self, task: AgentTask) -> set[str]:
+        operations = self.db.scalars(
+            select(WorldOperation).where(
+                WorldOperation.game_instance_id == self.scope.game_instance_id,
+                WorldOperation.task_id == task.id,
+                WorldOperation.status == WorldOperationStatus.RESOLVED,
+            )
+        )
+        signatures: set[str] = set()
+        for operation in operations:
+            outcome = operation.outcome
+            if not isinstance(outcome, dict) or outcome.get("failure") is not None:
+                continue
+            signatures.add(
+                proposal_signature(
+                    operation.actor_key,
+                    operation.action_key,
+                    operation.target_key,
+                    dict(operation.parameters),
+                )
+            )
+        return signatures
 
     def _validated_proposed_step(
         self,

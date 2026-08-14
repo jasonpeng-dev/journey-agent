@@ -106,6 +106,30 @@ def test_starfire_failure_updates_knowledge_and_replans_in_formal_play(
     assert knowledge["valley_security"] == "SAFE"
 
 
+def test_starfire_trade_goal_completes_prerequisites_in_one_task(client: TestClient) -> None:
+    scenario = next(
+        item for item in client.get("/api/v1/scenarios").json() if item["key"] == "starfire_command"
+    )
+    game_id = _new_game(client, scenario["current_published_version_id"])
+
+    response = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "open the northern trade route", "idempotency_key": str(uuid4())},
+    )
+
+    assert response.status_code == 200, response.text
+    task = response.json()["task"]
+    assert task["status"] == "COMPLETED"
+    assert task["plan"]["updated"] is True
+    state = client.get(f"/api/v1/games/{game_id}/play").json()
+    knowledge = {item["fact_key"]: item["value"] for item in state["known_facts"]}
+    assert knowledge["supply_status"] == "DISRUPTED"
+    assert knowledge["valley_security"] == "SAFE"
+    assert knowledge["village_support"] == "GUIDE"
+    assert knowledge["outpost_status"] == "RESTORED"
+    assert knowledge["trade_route_status"] == "OPEN"
+
+
 def test_unsupported_goal_does_not_create_a_task(client: TestClient) -> None:
     scenario = next(
         item for item in client.get("/api/v1/scenarios").json() if item["key"] == "starfire_command"
