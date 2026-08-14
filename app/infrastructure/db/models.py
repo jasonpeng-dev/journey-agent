@@ -369,6 +369,24 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class PlayerExecutionCheckpoint(TimestampMixin, Base):
+    """Phase D presentation pacing, deliberately separate from AgentTask state."""
+
+    __tablename__ = "player_execution_checkpoints"
+
+    task_id: Mapped[UUID] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), primary_key=True
+    )
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), index=True
+    )
+    phase: Mapped[str] = mapped_column(String(40))
+    last_action_step_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_steps.id", ondelete="SET NULL"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class ObjectiveScopeImmutableError(RuntimeError):
     """Raised if persisted code attempts to drift a frozen Task objective scope."""
 
@@ -476,7 +494,7 @@ class WorldOperation(UUIDPrimaryKey, TimestampMixin, Base):
     execution_mode: Mapped[str] = mapped_column(String(20))
     target_key: Mapped[str] = mapped_column(String(100))
     status: Mapped[WorldOperationStatus] = mapped_column(
-        Enum(WorldOperationStatus, native_enum=False),
+        Enum(WorldOperationStatus, native_enum=False, length=9),
         default=WorldOperationStatus.PENDING,
     )
     parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -509,7 +527,8 @@ class ActionDecisionRequest(UUIDPrimaryKey, TimestampMixin, Base):
     parameters: Mapped[dict[str, Any]] = mapped_column(JSON)
     idempotency_key: Mapped[str] = mapped_column(String(160))
     status: Mapped[DecisionStatus] = mapped_column(
-        Enum(DecisionStatus, native_enum=False), default=DecisionStatus.PENDING
+        Enum(DecisionStatus, native_enum=False, length=30),
+        default=DecisionStatus.PENDING,
     )
     reason_code: Mapped[str] = mapped_column(String(100))
     policy_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

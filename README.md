@@ -13,13 +13,19 @@ Rule, approval, and persistence services run both Starfire and Medical scenarios
 
 ```text
 Scenario Library → Current Draft → Validate → Publish immutable Version
-                 → New Game (exact Version) → Goal → Plan → Execute
+                 → New Game (exact Version) → Goal → Briefing → Execute one action cycle → Debrief
                  → Approval / Replan → Completed or Blocked → Archive
 ```
 
 - Published versions and GameInstance version bindings are immutable.
 - A Scenario has exactly one mutable Current Draft; incomplete drafts may be saved.
-- Formal Play automatically advances generic operations until a durable pause.
+- Formal Play pauses before each player-visible Action and after each meaningful Action cycle. A
+  normal acknowledgement controls presentation pacing only; it is not gameplay Approval.
+- Formal Play separates immutable ObjectiveScope from player presentation: the left column shows
+  Knowledge-only world state, the middle shows an append-only safe Mission Log and a physically
+  separate current checkpoint, and the right shows every persisted AgentPlan as Plan History.
+- Replan never overwrites player history: superseded Plans remain frozen, failed actions stay red,
+  and their unexecuted actions appear cancelled while the new persisted Plan is added below.
 - The formal Game page uses the three-column command-console layout established by the Phase R
   Debug UI while continuing to consume only Player-safe Phase D projections.
 - Goal completion does not end the GameInstance; another Goal may be submitted.
@@ -27,10 +33,18 @@ Scenario Library → Current Draft → Validate → Publish immutable Version
 - Draft Preview/Test runs Generic Play in a disposable in-memory sandbox and never creates a formal
   GameInstance or binds Runtime state to a mutable Draft.
 - Archive and abandon cancel unsettled work but never roll back applied world mutations.
+- ACTIVE and archived Games can be permanently deleted in one authoritative backend transaction;
+  instance runtime rows are removed without deleting the ScenarioVersion or any sibling Game.
 - Rejected proposals become Task-scoped backend constraints; hard limits prevent approval/replan
   loops.
 - Replanning does not repeat an already successful exact supporting proposal unless its declared
   effects are required again by the still-unsatisfied Objective scope.
+- Model-backed planning shows a complete current strategy: known future steps may appear before they
+  are executable, while the backend rechecks full runtime legality immediately before each Action.
+- Model-backed planning receives the generic, entity-once PlanningContext V1 (Goal, Knowledge,
+  Actions, Actors, Targets, previous execution, and authored planning hints). The provider chooses
+  bindings and order; the former Actor x Action x Target candidate catalog is compatibility-only and
+  is not sent in the canonical provider payload.
 
 ## Stack
 
@@ -84,6 +98,7 @@ Browser E2E expects the backend at `127.0.0.1:8000` with an upgraded, seeded dat
 
 - [Phase D browser contract](docs/phase-d-browser-product-contract.md)
 - [Phase D implementation and API/page inventory](docs/phase-d-implementation.md)
+- [PlanningContext V1 provider contract](docs/planning-context-v1.md)
 - [Runtime scope and exact-version contract](docs/phase-c-runtime-scope-contract.md)
 - [Architecture v2](docs/Journey_Agent_Architecture_V2_R0.md)
 

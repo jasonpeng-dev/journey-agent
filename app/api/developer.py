@@ -109,6 +109,7 @@ def developer_snapshot(
             "replans": item.replan_count,
             "rejected_proposals": item.rejected_proposal_signatures,
             "last_error_code": item.last_error_code,
+            "provider_calls": (item.objective_resolution_metadata or {}).get("provider_calls", []),
         }
         for item in tasks
     ]

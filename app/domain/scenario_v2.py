@@ -712,18 +712,41 @@ def _validate_parameter_value(
 def validate_action_parameters(
     action: ActionDefinitionV2, parameters: dict[str, StrictScalar]
 ) -> None:
-    """Validate one complete Action input without reading runtime state."""
+    """Validate one Action input without reading runtime state.
+
+    Callers that need to persist or execute the input should use
+    :func:`normalize_action_parameters` so declared defaults are materialized
+    before the value crosses an application boundary.
+    """
+
+    normalize_action_parameters(action, parameters)
+
+
+def normalize_action_parameters(
+    action: ActionDefinitionV2, parameters: dict[str, StrictScalar]
+) -> dict[str, StrictScalar]:
+    """Merge Action defaults and strictly validate one canonical input.
+
+    Scenario authors declare the parameter schema, including defaults.  A
+    missing optional value therefore has one canonical representation in the
+    runtime: the declared default is present in the normalized mapping.  The
+    function never mutates the caller's dictionary.
+    """
 
     definitions = {item.key: item for item in action.parameters}
     unknown = set(parameters) - set(definitions)
     if unknown:
         raise ValueError("Action input contains unknown parameters")
+    normalized: dict[str, StrictScalar] = dict(parameters)
     for key, definition in definitions.items():
         if key not in parameters:
             if definition.required and definition.default is None:
                 raise ValueError(f"Action input is missing required parameter {key}")
-            continue
-        _validate_parameter_value(definition, parameters[key], field=key)
+            if definition.default is not None:
+                normalized[key] = definition.default
+        if key in normalized:
+            _validate_parameter_value(definition, normalized[key], field=key)
+    return normalized
 
 
 def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:

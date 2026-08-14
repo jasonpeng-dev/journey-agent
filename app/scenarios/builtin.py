@@ -40,6 +40,9 @@ def require_builtin_v2_version(
     scenario = ScenarioDefinitionRepository(db).find_scenario(definition.metadata.key)
     if scenario is None:
         scenario = ScenarioDefinitionRepository(db).persist_initial_draft(definition)
+    elif scenario.name != definition.metadata.name:
+        scenario.name = definition.metadata.name
+        db.flush()
     existing = db.scalar(
         select(ScenarioVersion).where(
             ScenarioVersion.scenario_id == scenario.id,

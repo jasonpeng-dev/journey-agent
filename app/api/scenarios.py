@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.agent.provider import GenericProviderError
 from app.api.schemas.phase_d import (
     DraftDeleteObjectRequest,
     DraftPublishRequest,
@@ -37,6 +38,7 @@ from app.api.schemas.phase_d import (
     ValidationIssueResponse,
     ValidationSeverity,
 )
+from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
@@ -49,17 +51,13 @@ from app.services.scenarios import ScenarioLifecycleError, ScenarioService
 router = APIRouter(prefix="/api/v1", tags=["scenarios"])
 
 _EXAMPLES = {
-    "structurally_valid": (MEDICAL_EMERGENCY_V2, ReadinessLevel.STRUCTURALLY_VALID),
-    "minimum_runnable": (MEDICAL_EMERGENCY_V2, ReadinessLevel.MINIMUM_RUNNABLE),
-    "minimum_playable": (MEDICAL_EMERGENCY_V2, ReadinessLevel.MINIMUM_PLAYABLE),
-    "feature_showcase": (STARFIRE_V2, ReadinessLevel.PUBLISH_READY),
     "medical_emergency": (
         MEDICAL_EMERGENCY_V2,
-        ReadinessLevel.MINIMUM_PLAYABLE,
+        ReadinessLevel.PUBLISH_READY,
     ),
     "starfire_command": (
         STARFIRE_V2,
-        ReadinessLevel.MINIMUM_PLAYABLE,
+        ReadinessLevel.PUBLISH_READY,
     ),
 }
 
@@ -213,17 +211,21 @@ def test_draft_in_sandbox(
     scenario_id: UUID,
     request: DraftSandboxRequest,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> DraftSandboxResponse:
     """Strictly validate, then run in a disposable database isolated from formal Games."""
 
     try:
-        result = DraftSandboxService(db).test(
+        result = DraftSandboxService(db, settings).test(
             scenario_id,
             expected_revision=request.expected_revision,
             goal=request.goal,
         )
     except ScenarioLifecycleError as exc:
         _raise_http(exc)
+    except GenericProviderError as exc:
+        status_code = 504 if exc.code == "MODEL_PROVIDER_TIMEOUT" else 502
+        raise AppError(exc.code, exc.message, status_code=status_code) from exc
     issues = [_validation_issue(item) for item in result.issues]
     if not result.started:
         return DraftSandboxResponse(

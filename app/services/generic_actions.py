@@ -17,15 +17,28 @@ from app.domain.scenario_v2 import (
     ActionExecutionMode,
     ScenarioDefinitionV2,
     StrictScalar,
+    normalize_action_parameters,
 )
-from app.infrastructure.db.models import ActionDecisionRequest, GameInstanceActor, WorldOperation
+from app.engine.rules import GenericRuleOutcome, RuleEngineError, RuleFailure
+from app.infrastructure.db.models import (
+    ActionDecisionRequest,
+    GameInstance,
+    GameInstanceActor,
+    WorldOperation,
+)
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_lifecycle import require_scope_writable
-from app.services.generic_game import AppliedRuleResult, GenericGameService
+from app.services.generic_game import AppliedRuleResult, GenericGameError, GenericGameService
 
 
 class GenericActionError(ValueError):
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
@@ -69,6 +82,11 @@ class GenericActionService:
                 "ACTION_IDEMPOTENCY_KEY_REQUIRED",
                 "Action execution requires an Instance-scoped idempotency key",
             )
+        action = self._action(action_key)
+        try:
+            parameters = normalize_action_parameters(action, parameters)
+        except ValueError as exc:
+            raise GenericActionError("ACTION_PARAMETERS_INVALID", str(exc)) from exc
         existing = self.db.scalar(
             select(WorldOperation).where(
                 WorldOperation.game_instance_id == self.scope.game_instance_id,
@@ -76,18 +94,22 @@ class GenericActionService:
             )
         )
         if existing is not None:
+            existing_parameters = dict(existing.parameters or {})
+            try:
+                existing_parameters = normalize_action_parameters(action, existing_parameters)
+            except ValueError:
+                existing_parameters = {}
             if (
                 existing.action_key != action_key
                 or existing.actor_key != actor_key
                 or existing.target_key != target_key
-                or existing.parameters != parameters
+                or existing_parameters != parameters
             ):
                 raise GenericActionError(
                     "ACTION_IDEMPOTENCY_CONFLICT",
                     "The idempotency key is already bound to different Action input",
                 )
             return ActionExecutionResult(existing, None, True)
-        action = self._action(action_key)
         actor = self.db.get(GameInstanceActor, (self.scope.game_instance_id, actor_key))
         if actor is None:
             raise GenericActionError(
@@ -126,13 +148,18 @@ class GenericActionService:
                 raise GenericApprovalRequired(decision)
             approval_granted = True
             decision_id = decision.id
-        preflight = self.game.preflight(
-            actor_key=actor_key,
-            action_key=action_key,
-            target_node_key=target_key,
-            parameters=parameters,
-            approval_granted=approval_granted,
-        )
+        try:
+            preflight = self.game.preflight(
+                actor_key=actor_key,
+                action_key=action_key,
+                target_node_key=target_key,
+                parameters=parameters,
+                approval_granted=approval_granted,
+            )
+        except GenericGameError as exc:
+            raise GenericActionError(exc.code, exc.message, retryable=exc.retryable) from exc
+        except RuleEngineError as exc:
+            raise GenericActionError(exc.code, exc.message) from exc
         if preflight is not None and preflight.failure is not None:
             raise GenericActionError(
                 preflight.failure.code,
@@ -161,13 +188,18 @@ class GenericActionService:
             approved.status = DecisionStatus.CONSUMED
         if action.execution_mode == ActionExecutionMode.ASYNC:
             return ActionExecutionResult(operation, None, False)
-        applied = self.game.execute(
-            actor_key=actor_key,
-            action_key=action_key,
-            target_node_key=target_key,
-            parameters=parameters,
-            approval_granted=approval_granted,
-        )
+        try:
+            applied = self.game.execute(
+                actor_key=actor_key,
+                action_key=action_key,
+                target_node_key=target_key,
+                parameters=parameters,
+                approval_granted=approval_granted,
+            )
+        except GenericGameError as exc:
+            applied = self._runtime_failure(exc.code, exc.message, retryable=exc.retryable)
+        except RuleEngineError as exc:
+            applied = self._runtime_failure(exc.code, exc.message, retryable=False)
         self._complete(operation, applied, resolution_key=idempotency_key)
         return ActionExecutionResult(operation, applied, False)
 
@@ -202,14 +234,33 @@ class GenericActionService:
                 "WORLD_OPERATION_LEGACY_UNSUPPORTED",
                 "Generic resolution requires a versioned Action and Actor",
             )
-        applied = self.game.execute(
-            actor_key=operation.actor_key,
-            action_key=operation.action_key,
-            target_node_key=operation.target_key,
-            parameters=operation.parameters,
-            operation_status=operation.status.value,
-            approval_granted=True,
-        )
+        try:
+            action = self._action(operation.action_key)
+        except GenericActionError as exc:
+            applied = self._runtime_failure(exc.code, exc.message, retryable=False)
+        else:
+            try:
+                operation.parameters = normalize_action_parameters(
+                    action, dict(operation.parameters or {})
+                )
+            except ValueError as exc:
+                applied = self._runtime_failure(
+                    "ACTION_PARAMETERS_INVALID", str(exc), retryable=False
+                )
+            else:
+                try:
+                    applied = self.game.execute(
+                        actor_key=operation.actor_key,
+                        action_key=operation.action_key,
+                        target_node_key=operation.target_key,
+                        parameters=operation.parameters,
+                        operation_status=operation.status.value,
+                        approval_granted=True,
+                    )
+                except GenericGameError as exc:
+                    applied = self._runtime_failure(exc.code, exc.message, retryable=exc.retryable)
+                except RuleEngineError as exc:
+                    applied = self._runtime_failure(exc.code, exc.message, retryable=False)
         self._complete(operation, applied, resolution_key=resolution_key)
         return ActionExecutionResult(operation, applied, False)
 
@@ -310,8 +361,26 @@ class GenericActionService:
             "failure": (
                 asdict(applied.outcome.failure) if applied.outcome.failure is not None else None
             ),
+            "knowledge_changes": [asdict(item) for item in applied.knowledge_changes],
         }
         self.db.flush()
+
+    def _runtime_failure(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+    ) -> AppliedRuleResult:
+        instance = self.db.get(GameInstance, self.scope.game_instance_id)
+        runtime_revision = instance.runtime_revision if instance is not None else 0
+        return AppliedRuleResult(
+            outcome=GenericRuleOutcome(
+                selected_rule_key="APPLICATION_RUNTIME_ERROR",
+                failure=RuleFailure(code=code, message=message, retryable=retryable),
+            ),
+            runtime_revision=runtime_revision,
+        )
 
 
 __all__ = [

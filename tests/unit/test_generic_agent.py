@@ -4,8 +4,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.generic import GenericAgentError, GenericAgentService, GenericGoalResolver
-from app.domain.enums import AgentPlanStatus, AgentTaskStatus
+from app.agent.generic import (
+    GenericAgentError,
+    GenericAgentService,
+    GenericGoalResolver,
+    normalize_objective_keys,
+)
+from app.domain.enums import AgentPlanStatus, AgentStepStatus, AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.domain.world import Visibility
@@ -15,9 +20,12 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceResourceState,
     Player,
+    PlayerExecutionCheckpoint,
 )
+from app.scenarios.builtin import STARFIRE_V2
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
+from app.services.play import PlayError, PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
 from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
@@ -85,6 +93,13 @@ def test_goal_resolver_uses_only_exact_version_candidates() -> None:
     assert exact.objective_key == "stabilize_patient"
     assert exact.source == "DETERMINISTIC"
     assert invented.status == "UNSUPPORTED"
+
+
+def test_objective_subsumption_is_normalized_before_scope_freeze() -> None:
+    assert normalize_objective_keys(
+        STARFIRE_V2,
+        ("full_northern_recovery", "open_northern_trade_route"),
+    ) == ("full_northern_recovery",)
 
 
 def test_generic_agent_completes_goal_plan_action_and_backend_objective(
@@ -163,6 +178,91 @@ def test_retryable_rule_failure_creates_generic_replan_without_fixed_fallback(
     agent.execute_next(task)
 
     assert task.status == AgentTaskStatus.SUCCEEDED
+
+
+def test_generic_replan_hard_limit_remains_enforced(session: Session) -> None:
+    agent, runtime = _agent(session)
+    task = agent.create_task(runtime.session, "stabilize the patient")
+    task.replan_count = agent.MAX_REPLANS
+
+    with pytest.raises(GenericAgentError) as caught:
+        agent.plan(task, reason="TEST_REPLAN")
+
+    assert caught.value.code == "GENERIC_REPLAN_LIMIT"
+
+
+def test_formal_play_transition_hard_limit_remains_enforced(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, runtime = _agent(session)
+    task = agent.create_task(runtime.session, "stabilize the patient")
+    orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
+    monkeypatch.setattr(orchestrator.agent, "execute_next", lambda _task: None)
+    orchestrator.MAX_TRANSITIONS = 2
+
+    with pytest.raises(PlayError) as caught:
+        orchestrator.advance_sandbox_until_pause(task)
+
+    assert caught.value.code == "PLAY_TRANSITION_LIMIT"
+
+
+def test_player_pacing_recovers_missing_checkpoint_and_enforces_phase(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _agent_service, runtime = _agent(session)
+    orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
+    submission = orchestrator.submit_goal(
+        "stabilize the patient", idempotency_key="pacing-recovery"
+    )
+    assert submission.task is not None
+    checkpoint = session.get(PlayerExecutionCheckpoint, submission.task.id)
+    assert checkpoint is not None
+    session.delete(checkpoint)
+    session.flush()
+    monkeypatch.setattr(orchestrator.agent, "execute_next", lambda _task: None)
+
+    orchestrator.acknowledge_action(expected_pacing_version=1)
+    recovered = session.get(PlayerExecutionCheckpoint, submission.task.id)
+    assert recovered is not None
+    assert recovered.phase == "AWAITING_DEBRIEF_ACK"
+    with pytest.raises(PlayError) as caught:
+        orchestrator.acknowledge_action(expected_pacing_version=recovered.version)
+    assert caught.value.code == "PLAYER_PACING_PHASE_INVALID"
+    submission.task.status = AgentTaskStatus.ABORTED
+    assert orchestrator._phase_after_cycle(submission.task).value == "ABORTED"
+
+
+def test_player_pacing_blocks_when_plan_has_no_action(session: Session) -> None:
+    _agent_service, runtime = _agent(session)
+    orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
+    submission = orchestrator.submit_goal(
+        "stabilize the patient", idempotency_key="pacing-no-action"
+    )
+    assert submission.task is not None
+    plan = session.scalar(
+        select(AgentPlan).where(
+            AgentPlan.task_id == submission.task.id,
+            AgentPlan.status == AgentPlanStatus.ACTIVE,
+        )
+    )
+    assert plan is not None
+    for step in session.scalars(select(AgentStep).where(AgentStep.plan_id == plan.id)):
+        step.status = AgentStepStatus.SKIPPED
+    session.flush()
+
+    blocked = orchestrator.acknowledge_action(expected_pacing_version=1)
+    assert blocked.status == AgentTaskStatus.BLOCKED
+    checkpoint = session.get(PlayerExecutionCheckpoint, blocked.id)
+    assert checkpoint is not None
+    assert checkpoint.phase == "BLOCKED"
+
+
+def test_play_rejects_blank_idempotency_key(session: Session) -> None:
+    _agent_service, runtime = _agent(session)
+    orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
+    with pytest.raises(PlayError) as caught:
+        orchestrator.submit_goal("stabilize the patient", idempotency_key=" ")
+    assert caught.value.code == "GOAL_IDEMPOTENCY_KEY_REQUIRED"
 
 
 def test_generic_agent_rejects_cross_instance_task(session: Session) -> None:

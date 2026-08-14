@@ -39,21 +39,37 @@ def _start_approval_game(client: TestClient, version_id: str) -> tuple[str, dict
         json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
     )
     assert goal.status_code == 200, goal.text
-    state = client.get(f"/api/v1/games/{game['id']}/play").json()
+    briefing = goal.json()["task"]
+    assert briefing["execution_phase"] == "AWAITING_ACTION_ACK"
+    state = client.post(
+        f"/api/v1/games/{game['id']}/play/acknowledge-action",
+        json={"expected_pacing_version": briefing["pacing_version"]},
+    ).json()
     assert state["current_task"]["status"] == "NEEDS_PLAYER_INPUT"
+    assert state["current_task"]["execution_phase"] == "APPROVAL_REQUIRED"
     assert state["pending_approval_id"]
     return str(game["id"]), state
 
 
-def test_approve_executes_and_continues_to_completion(client: TestClient, session: Session) -> None:
+def test_approve_executes_one_cycle_and_returns_a_debrief(
+    client: TestClient, session: Session
+) -> None:
     game_id, state = _start_approval_game(client, _approval_version(session))
     response = client.post(
         f"/api/v1/games/{game_id}/approvals/{state['pending_approval_id']}/approve",
         json={"expected_task_version": state["current_task"]["version"]},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["current_task"]["status"] == "COMPLETED"
-    assert response.json()["pending_approval_id"] is None
+    body = response.json()
+    assert body["current_task"]["execution_phase"] in (
+        "AWAITING_DEBRIEF_ACK",
+        "COMPLETED",
+    )
+    assert body["pending_approval_id"] is None
+    decisions = session.scalars(
+        select(ActionDecisionRequest).where(ActionDecisionRequest.game_instance_id == UUID(game_id))
+    ).all()
+    assert [item.status.value for item in decisions] == ["CONSUMED"]
 
 
 def test_reject_persists_exact_constraint_and_stops_without_approval_loop(

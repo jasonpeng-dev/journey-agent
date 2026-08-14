@@ -1,20 +1,20 @@
 type JsonObject = Record<string, unknown>;
 
 const defaults: Record<string, JsonObject> = {
-  node_type: { key: "new_node_type", name: "New Node Type", description: "" },
+  node_type: { key: "new_node_type", name: "新节点类型", description: "" },
   node: {
-    key: "new_node", name: "New Node", description: "", node_type_key: "node_type",
+    key: "new_node", name: "新节点", description: "", node_type_key: "node_type",
     initial_access: "AVAILABLE", initial_visibility: "KNOWN", interaction_keys: [], facts: [],
   },
-  resource: { key: "new_resource", name: "New Resource", description: "", initial_value: 0, minimum: 0, maximum: null, reservation_supported: false },
-  interaction: { key: "new_interaction", name: "New Interaction", description: "" },
-  role: { key: "new_role", name: "New Role", description: "", capabilities: ["EXECUTE_ACTION"] },
-  actor: { key: "new_actor", name: "New Actor", role_key: "role", persona: "Describe this actor.", doctrine: [], initial_node_key: "node", allowed_action_keys: [], authority_policy: { autonomous_limits: [], approval_required_values: [] } },
+  resource: { key: "new_resource", name: "新资源", description: "", initial_value: 0, minimum: 0, maximum: null, reservation_supported: false },
+  interaction: { key: "new_interaction", name: "新交互能力", description: "" },
+  role: { key: "new_role", name: "新角色", description: "", capabilities: ["EXECUTE_ACTION"] },
+  actor: { key: "new_actor", name: "新参与者", role_key: "role", persona: "请描述这个参与者。", doctrine: [], initial_node_key: "node", allowed_action_keys: [], authority_policy: { autonomous_limits: [], approval_required_values: [] } },
   action: {
-    key: "new_action", name: "New Action", description: "", required_interaction_key: "interaction",
+    key: "new_action", name: "新行动", description: "", required_interaction_key: "interaction",
     execution_mode: "IMMEDIATE", parameters: [], allowed_actor_capabilities: ["EXECUTE_ACTION"],
     authority_policy: { autonomous_limits: [], approval_required_values: [] },
-    expected_outcomes: [{ code: "Success", name: "Success", success: true }],
+    expected_outcomes: [{ code: "Success", name: "成功", success: true }],
     planning: { terminal_effects: [], supporting_effects: [], success_outcome_codes: ["Success"], wait_success_outcome_codes: [], hints: [] },
   },
   rule: {
@@ -22,8 +22,8 @@ const defaults: Record<string, JsonObject> = {
     effects: [{ kind: "EMIT_OUTCOME", outcome_code: "Success", retryable: false }],
   },
   objective: {
-    key: "new_objective", name: "New Objective", description: "Describe the objective.",
-    completion_requirements: [{ key: "completion", node_key: "node", fact_key: "fact", accepted_values: [true], description: "Completion requirement" }],
+    key: "new_objective", name: "新目标", description: "请描述这个目标。",
+    completion_requirements: [{ key: "completion", node_key: "node", fact_key: "fact", accepted_values: [true], description: "完成要求" }],
     prerequisites: [], subsumes: [], goal_aliases: [], goal_examples: [],
   },
 };
@@ -42,7 +42,7 @@ export const kindsBySection: Record<string, string[]> = {
 export function addObject(document: JsonObject, kind: string): { document: JsonObject; key: string } {
   const copy = structuredClone(document);
   const path = paths[kind];
-  if (!path) throw new Error(`Unsupported object kind ${kind}`);
+  if (!path) throw new Error(`不支持的对象类型：${kind}`);
   let current: JsonObject = copy;
   for (const part of path.slice(0, -1)) {
     const child = current[part];
@@ -63,8 +63,8 @@ export function addObject(document: JsonObject, kind: string): { document: JsonO
 export function defaultArrayItem(field: string): unknown {
   if (field === "conditions") return { kind: "FACT_EQUALS", node: { kind: "EXPLICIT", node_key: "node" }, fact_key: "fact", value: true, conditions: [], values: [] };
   if (field === "effects") return { kind: "EMIT_OUTCOME", outcome_code: "Success", retryable: false };
-  if (field.includes("requirements")) return { key: "requirement", node_key: "node", fact_key: "fact", accepted_values: [true], description: "Requirement" };
-  if (field === "facts") return { key: "new_fact", name: "New Fact", description: "", value_type: "BOOLEAN", initial_value: false, initial_visibility: "KNOWN", allowed_values: [] };
+  if (field.includes("requirements")) return { key: "requirement", node_key: "node", fact_key: "fact", accepted_values: [true], description: "要求" };
+  if (field === "facts") return { key: "new_fact", name: "新事实", description: "", value_type: "BOOLEAN", initial_value: false, initial_visibility: "KNOWN", allowed_values: [] };
   if (field === "relations") return { source_node_key: "node", relation_type_key: "related_to", target_node_key: "node" };
   if (field === "parameters") return { key: "parameter", name: "Parameter", value_type: "STRING", required: true, allowed_values: [] };
   return "";

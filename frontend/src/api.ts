@@ -21,7 +21,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   };
   if (!response.ok) {
     throw new ApiError(
-      body.error?.message ?? `Request failed (${response.status})`,
+      body.error?.message ?? `请求失败（HTTP ${response.status}）`,
       response.status,
       body.error?.code ?? "REQUEST_FAILED",
       body.error?.details,
@@ -73,9 +73,11 @@ export const api = {
     method: "POST", body: JSON.stringify({ scenario_version_id: versionId, idempotency_key: idempotencyKey }),
   }),
   archiveGame: (id: string) => request<GameSummary>(`/api/v1/games/${id}/archive`, { method: "POST" }),
+  deleteGame: (id: string) => request<void>(`/api/v1/games/${id}`, { method: "DELETE" }),
   playState: (id: string) => request<PlayerGameState>(`/api/v1/games/${id}/play`),
   submitGoal: (id: string, goal: string, idempotencyKey: string) => request<GoalSubmission>(`/api/v1/games/${id}/goals`, { method: "POST", body: JSON.stringify({ goal, idempotency_key: idempotencyKey }) }),
-  continueGame: (id: string) => request<PlayerGameState>(`/api/v1/games/${id}/continue`, { method: "POST" }),
+  acknowledgeAction: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/acknowledge-action`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
+  acknowledgeDebrief: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/acknowledge-debrief`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   abandonTask: (id: string, taskId: string) => request<{ task_id: string; status: string }>(`/api/v1/games/${id}/tasks/${taskId}/abandon`, { method: "POST" }),
   decideApproval: (id: string, decisionId: string, approve: boolean, taskVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/approvals/${decisionId}/${approve ? "approve" : "reject"}`, { method: "POST", body: JSON.stringify({ expected_task_version: taskVersion }) }),
   developerSnapshot: (id: string, token: string) => request<DeveloperSnapshot>(`/api/v1/developer/games/${id}/snapshot`, { headers: { "x-developer-token": token } }),

@@ -306,6 +306,45 @@ def test_async_resolution_rereads_latest_instance_truth(session: Session) -> Non
     assert resolved.applied.outcome.outcome_code == "VICTORY"
 
 
+def test_async_action_materializes_declared_defaults_before_rule_resolution(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(session, "starfire-v2-default-parameters")
+    actions = GenericActionService(session, scope)
+    valley = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "northern_valley", "valley_security"),
+    )
+    outpost = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "starfire_outpost"),
+    )
+    assert valley is not None and outpost is not None
+    valley.truth_value = "SAFE"
+    outpost.status = NodeStatus.AVAILABLE
+    session.flush()
+
+    started = actions.execute_action(
+        actor_key="lu_ning",
+        action_key="repair_outpost",
+        target_key="starfire_outpost",
+        parameters={},
+        idempotency_key="repair-default-parameters",
+    )
+    assert started.operation.parameters == {
+        "repair_level": "FULL",
+        "food_commitment": 30,
+        "gold_commitment": 40,
+    }
+    resolved = actions.resolve_operation(
+        started.operation.id,
+        resolution_key="repair-default-parameters-resolved",
+    )
+
+    assert resolved.applied is not None
+    assert resolved.applied.outcome.failure is None
+
+
 def test_same_player_same_version_instances_are_isolated(session: Session) -> None:
     version = require_builtin_v2_version(session, STARFIRE_V2)
     player = Player(name="same-player-same-version")
