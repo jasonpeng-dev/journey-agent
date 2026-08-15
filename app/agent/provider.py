@@ -214,6 +214,43 @@ class OpenAICompatibleGenericProvider:
                 '"parameters":{},"short_actor_reason":"short reason"}]}'
             )
         )
+        if purpose == "repair":
+            planning_prompt = (
+                "You are repairing a rejected plan for the same frozen ObjectiveScope. "
+                "Return one complete corrected plan for that exact scope. The steps array "
+                "MUST contain at least one step; never return an empty steps array. Use the "
+                "validator diagnostics in the user payload to fix the rejected parts, and "
+                "keep valid parts whenever possible. Every step must directly advance the "
+                "current Objective, satisfy a public prerequisite, obtain Knowledge needed "
+                "for that Objective, or be an explicitly necessary supporting action. Do not "
+                "expand the ObjectiveScope, add downstream or sibling Objectives, or continue "
+                "with broader work after the current Objective can be completed. Future steps "
+                "may be currently locked or unavailable when earlier steps establish their "
+                "prerequisites. Choose the Action, Actor, Target, parameters, and ordering "
+                "yourself, and return the full corrected plan."
+            )
+        elif purpose in {"initial_plan", "replan"}:
+            planning_prompt = (
+                "Produce one complete plan for exactly the frozen ObjectiveScope in the "
+                "user payload. The steps array MUST contain at least one step; never "
+                "return steps=[]. Every step must directly advance the current Objective, "
+                "satisfy a public prerequisite, obtain Knowledge needed for completing "
+                "the Objective, or be an explicitly necessary supporting action. Do not "
+                "expand the ObjectiveScope or include downstream, sibling, broader, or "
+                "unrelated verification work. Once the current Objective can be completed, "
+                "stop planning instead of adding more work. Future steps may be currently "
+                "locked or unavailable when earlier steps are expected to establish their "
+                "prerequisites. Choose the Action, Actor, Target, parameters, and ordering "
+                "yourself."
+            )
+        else:
+            planning_prompt = (
+                "Produce one coherent, ordered, complete multi-step plan toward "
+                "the frozen ObjectiveScope. You must choose action_key, actor_key, "
+                "target_key, parameters, and order yourself. Future steps may be "
+                "currently locked or unavailable when earlier steps are expected "
+                "to establish their prerequisites."
+            )
         started = perf_counter()
         try:
             response = httpx.post(
@@ -230,13 +267,9 @@ class OpenAICompatibleGenericProvider:
                                 f"Use exactly this response shape: {response_contract}. "
                                 "Select only keys supplied in the user payload; never invent keys. "
                                 "For planning, use only entities supplied in planning_context. "
-                                "Produce one coherent, ordered, complete multi-step plan toward "
-                                "the frozen ObjectiveScope. You must choose action_key, actor_key, "
-                                "target_key, parameters, and order yourself. Future steps may be "
-                                "currently locked or unavailable when earlier steps are expected "
-                                "to establish their prerequisites. Keep purpose and actor reason "
-                                "short, omit chain-of-thought, never infer hidden state, and "
-                                "respect repair_diagnostics."
+                                f"{planning_prompt} "
+                                "Keep purpose and actor reason short, omit chain-of-thought, "
+                                "never infer hidden state, and respect repair_diagnostics."
                             ),
                         },
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
