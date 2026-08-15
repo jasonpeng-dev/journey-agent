@@ -105,6 +105,17 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .console-resource-grid small { color: var(--console-soft); font-size: 10px; }
 .console-resource-grid strong { font: 23px Georgia, serif; }
 .console-resource-grid em { color: var(--console-soft); font-size: 9px; }
+.knowledge-accordions { display: grid; gap: 10px; }
+.knowledge-accordion { overflow: hidden; border: 1px solid #e4ddcf; border-radius: 14px; background: rgb(255 255 255 / 70%); }
+.knowledge-accordion-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 0; color: var(--console-ink); background: transparent; cursor: pointer; text-align: left; }
+.knowledge-accordion-toggle:hover { background: #faf8f3; }
+.knowledge-accordion-heading, .knowledge-accordion-heading strong, .knowledge-accordion-heading small { display: block; }
+.knowledge-accordion-heading strong { font-size: 13px; }
+.knowledge-accordion-heading small { margin-top: 4px; color: var(--console-soft); font-size: 10px; }
+.knowledge-accordion-action { flex: 0 0 auto; color: var(--console-jade); font-size: 10px; font-weight: 800; }
+.knowledge-accordion-content { padding: 0 10px 10px; }
+.knowledge-accordion-content .console-resource-grid { padding-top: 1px; }
+.knowledge-accordion-content .console-fact-list { background: rgb(255 255 255 / 80%); }
 .console-subheading { display: flex; align-items: end; justify-content: space-between; gap: 8px; margin: 25px 0 10px; }
 .console-subheading h2 { margin: 0; font-size: 14px; }
 .console-subheading span { color: var(--console-soft); font-size: 9px; }

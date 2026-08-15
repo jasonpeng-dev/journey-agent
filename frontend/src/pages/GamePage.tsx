@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 
 import { api } from "../api";
@@ -223,6 +223,151 @@ export function WaitingStatus({
     <div className="play-waiting-status" data-testid={testId} role="status" aria-live="polite">
       <span>{label}</span>
       <strong>· {elapsed}s</strong>
+    </div>
+  );
+}
+
+type KnowledgeAccordionKey = "resources" | "locations" | "actors" | "facts";
+
+type KnowledgeAccordionProps = {
+  id: KnowledgeAccordionKey;
+  title: string;
+  count: number;
+  summary: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+};
+
+export function KnowledgeAccordion({
+  id,
+  title,
+  count,
+  summary,
+  open,
+  onToggle,
+  children,
+}: KnowledgeAccordionProps) {
+  const contentId = `known-world-${id}-content`;
+  return (
+    <section className="knowledge-accordion" data-testid={`knowledge-accordion-${id}`}>
+      <button
+        className="knowledge-accordion-toggle"
+        type="button"
+        aria-expanded={open}
+        aria-controls={contentId}
+        onClick={onToggle}
+      >
+        <span className="knowledge-accordion-heading">
+          <strong>{title} · {count}</strong>
+          <small>{summary}</small>
+        </span>
+        <span className="knowledge-accordion-action">{open ? "收起" : "展开"}</span>
+      </button>
+      {open && <div className="knowledge-accordion-content" id={contentId}>{children}</div>}
+    </section>
+  );
+}
+
+type KnownWorldAccordionsProps = {
+  resources: PlayerGameState["resources"];
+  visibleNodes: PlayerGameState["visible_nodes"];
+  actors: PlayerGameState["actors"];
+  knownFacts: PlayerGameState["known_facts"];
+};
+
+export function KnownWorldAccordions({
+  resources,
+  visibleNodes,
+  actors,
+  knownFacts,
+}: KnownWorldAccordionsProps) {
+  const [expanded, setExpanded] = useState<Record<KnowledgeAccordionKey, boolean>>({
+    resources: true,
+    locations: false,
+    actors: false,
+    facts: false,
+  });
+  const toggle = (id: KnowledgeAccordionKey) => {
+    setExpanded((current) => ({ ...current, [id]: !current[id] }));
+  };
+
+  return (
+    <div className="knowledge-accordions">
+      <KnowledgeAccordion
+        id="resources"
+        title="资源"
+        count={resources.length}
+        summary="可用资源状态"
+        open={expanded.resources}
+        onToggle={() => toggle("resources")}
+      >
+        <div className="console-resource-grid">
+          {resources.map((resource) => (
+            <article key={resource.key}>
+              <span>{resource.name.slice(0, 1)}</span>
+              <div>
+                <small>{resource.name}</small>
+                <strong>{resource.value}</strong>
+                {resource.reserved_value > 0 && <em>已预留 {resource.reserved_value}</em>}
+              </div>
+            </article>
+          ))}
+        </div>
+      </KnowledgeAccordion>
+      <KnowledgeAccordion
+        id="locations"
+        title="已知地点"
+        count={visibleNodes.length}
+        summary="可见性与访问状态"
+        open={expanded.locations}
+        onToggle={() => toggle("locations")}
+      >
+        <div className="console-fact-list">
+          {visibleNodes.map((node) => (
+            <div key={node.key}>
+              <div><strong>{node.name}</strong><small>{node.key}</small></div>
+              <span className={`console-pill ${node.accessible ? "success" : "neutral"}`}>
+                {node.accessible ? "可访问" : "已锁定"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </KnowledgeAccordion>
+      <KnowledgeAccordion
+        id="actors"
+        title="参与者"
+        count={actors.length}
+        summary="身份、角色与已知位置"
+        open={expanded.actors}
+        onToggle={() => toggle("actors")}
+      >
+        <div className="console-fact-list">
+          {actors.map((actor) => (
+            <div key={actor.key}>
+              <div><strong>{actor.name}</strong><small>{actor.role_name}</small></div>
+              <span className="fact-chip">{actor.current_node_name}</span>
+            </div>
+          ))}
+        </div>
+      </KnowledgeAccordion>
+      <KnowledgeAccordion
+        id="facts"
+        title="已知事实"
+        count={knownFacts.length}
+        summary="当前已知世界状态"
+        open={expanded.facts}
+        onToggle={() => toggle("facts")}
+      >
+        <div className="console-fact-list">
+          {knownFacts.map((fact) => (
+            <div key={`${fact.node_key}.${fact.fact_key}`}>
+              <div><strong>{fact.name}</strong><small>{fact.node_key}</small></div>
+              <span className="fact-chip">{typeof fact.value === "string" ? uiLabel(fact.value) : String(fact.value)}</span>
+            </div>
+          ))}
+        </div>
+      </KnowledgeAccordion>
     </div>
   );
 }
@@ -511,13 +656,12 @@ export function GamePage() {
       <section className="command-grid">
         <aside className="command-panel world-panel">
           <header className="command-panel-heading"><div><p>01 · 世界</p><h1>已知世界</h1></div><span className="console-pill success">玩家可见</span></header>
-          <div className="console-resource-grid">{play.data.resources.map((resource) => <article key={resource.key}><span>{resource.name.slice(0, 1)}</span><div><small>{resource.name}</small><strong>{resource.value}</strong>{resource.reserved_value > 0 && <em>已预留 {resource.reserved_value}</em>}</div></article>)}</div>
-          <div className="console-subheading"><h2>已知地点</h2><span>可见性与访问状态</span></div>
-          <div className="console-fact-list">{play.data.visible_nodes.map((node) => <div key={node.key}><div><strong>{node.name}</strong><small>{node.key}</small></div><span className={`console-pill ${node.accessible ? "success" : "neutral"}`}>{node.accessible ? "可访问" : "已锁定"}</span></div>)}</div>
-          <div className="console-subheading"><h2>参与者</h2><span>当前可见位置</span></div>
-          <div className="console-fact-list">{play.data.actors.map((actor) => <div key={actor.key}><div><strong>{actor.name}</strong><small>{actor.role_name}</small></div><span className="fact-chip">{actor.current_node_name}</span></div>)}</div>
-          <div className="console-subheading"><h2>已知事实</h2><span>不包含隐藏真相</span></div>
-          <div className="console-fact-list">{play.data.known_facts.map((fact) => <div key={`${fact.node_key}.${fact.fact_key}`}><div><strong>{fact.name}</strong><small>{fact.node_key}</small></div><span className="fact-chip">{typeof fact.value === "string" ? uiLabel(fact.value) : String(fact.value)}</span></div>)}</div>
+          <KnownWorldAccordions
+            resources={play.data.resources}
+            visibleNodes={play.data.visible_nodes}
+            actors={play.data.actors}
+            knownFacts={play.data.known_facts}
+          />
         </aside>
         <div className="conversation-column-v2">
           <section className="command-panel mission-log-panel">

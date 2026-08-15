@@ -1,7 +1,14 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { GoalComposer, PlanHistory, TaskTabs, Timeline, WaitingStatus } from "./pages/GamePage";
+import {
+  GoalComposer,
+  KnownWorldAccordions,
+  PlanHistory,
+  TaskTabs,
+  Timeline,
+  WaitingStatus,
+} from "./pages/GamePage";
 import { formatDuration, operationBelongsToTask } from "./playPresentation";
 import type { PublicTask } from "./types";
 
@@ -90,6 +97,46 @@ describe("Formal Play player projections", () => {
     act(() => vi.advanceTimersByTime(1250));
     expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("1s");
     vi.useRealTimers();
+  });
+
+  it("renders Knowledge sections with dynamic counts and controlled defaults", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[
+          { key: "food", name: "粮食", value: 100, reserved_value: 0 },
+          { key: "gold", name: "金币", value: 80, reserved_value: 10 },
+        ]}
+        visibleNodes={[
+          { key: "capital", name: "首都议事厅", accessible: true },
+          { key: "valley", name: "北部山谷", accessible: false },
+        ]}
+        actors={[{ key: "han", name: "韩烈", role_name: "将军", current_node_name: "首都议事厅" }]}
+        knownFacts={[{ node_key: "valley", fact_key: "security", name: "山谷安全", value: "UNSAFE" }]}
+      />,
+    );
+
+    expect(screen.getByText("资源 · 2")).toBeVisible();
+    expect(screen.getByText("已知地点 · 2")).toBeVisible();
+    expect(screen.getByText("参与者 · 1")).toBeVisible();
+    expect(screen.getByText("已知事实 · 1")).toBeVisible();
+    expect(within(screen.getByTestId("knowledge-accordion-resources")).getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(within(screen.getByTestId("knowledge-accordion-locations")).getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.getByText("粮食")).toBeVisible();
+    expect(screen.queryByText("首都议事厅")).not.toBeInTheDocument();
+    expect(screen.queryByText("韩烈")).not.toBeInTheDocument();
+    expect(screen.queryByText("山谷安全")).not.toBeInTheDocument();
+
+    fireEvent.click(within(screen.getByTestId("knowledge-accordion-locations")).getByRole("button"));
+    expect(screen.getByText("首都议事厅")).toBeVisible();
+    fireEvent.click(within(screen.getByTestId("knowledge-accordion-resources")).getByRole("button"));
+    expect(screen.queryByText("粮食")).not.toBeInTheDocument();
+    expect(screen.getByText("可用资源状态")).toBeVisible();
   });
 
   it("默认展开最新方案、折叠旧方案，并允许查看冻结历史", () => {
