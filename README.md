@@ -144,7 +144,7 @@ experience, and the same source is also available from the matching GitHub Relea
 git clone --branch v0.1.0 --depth 1 https://github.com/jasonpeng-dev/journey-agent.git
 cd journey-agent
 Copy-Item .env.example .env
-docker compose up --build
+docker compose up --build -d
 ```
 
 On macOS/Linux, use `cp .env.example .env` for the third line.
@@ -158,7 +158,7 @@ continues, so it can differ from the stable release.
 git clone https://github.com/jasonpeng-dev/journey-agent.git
 cd journey-agent
 Copy-Item .env.example .env
-docker compose up --build
+docker compose up --build -d
 ```
 
 On macOS/Linux, use `cp .env.example .env` for the third line.
@@ -167,6 +167,8 @@ Open `http://localhost:8000`. Mock mode is the default and does not need an API 
 real OpenAI-compatible provider, edit `.env` before starting and set `MODEL_PROVIDER`,
 `MODEL_BASE_URL`, `MODEL_NAME`, and your local `MODEL_API_KEY`; DeepSeek configuration is shown
 in the Provider section above. The key is read at runtime and is not copied into the image.
+
+Use `docker compose logs -f` when you need live logs, and `docker compose down` for a normal shutdown.
 
 The API container exposes:
 

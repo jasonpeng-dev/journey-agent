@@ -139,7 +139,7 @@ Release source archive 下载。
 git clone --branch v0.1.0 --depth 1 https://github.com/jasonpeng-dev/journey-agent.git
 cd journey-agent
 Copy-Item .env.example .env
-docker compose up --build
+docker compose up --build -d
 ```
 
 在 macOS/Linux 上，第三行使用 `cp .env.example .env`。
@@ -153,7 +153,7 @@ docker compose up --build
 git clone https://github.com/jasonpeng-dev/journey-agent.git
 cd journey-agent
 Copy-Item .env.example .env
-docker compose up --build
+docker compose up --build -d
 ```
 
 在 macOS/Linux 上，第三行使用 `cp .env.example .env`。
@@ -162,6 +162,8 @@ docker compose up --build
 OpenAI-compatible provider，请在启动前编辑 `.env`，填写 `MODEL_PROVIDER`、
 `MODEL_BASE_URL`、`MODEL_NAME` 和本地 `MODEL_API_KEY`；上面的 Provider 章节包含 DeepSeek
 示例。API key 只在运行时读取，不会复制进 Docker image。
+
+需要查看实时日志时使用 `docker compose logs -f`，正常关闭时使用 `docker compose down`。
 
 容器提供以下地址：
 
