@@ -130,8 +130,27 @@ latency、context bytes，以及 provider 返回时的 usage 字段），不会�
 应用提供浏览器页面，启动时自动执行 Alembic migration 和幂等的内置 seed，并把 SQLite
 数据保存在 named volume 中。
 
+### Stable Release（推荐）
+
+稳定版本是固定且可复现的，首次体验优先推荐使用它；相同版本也可以从对应的 GitHub
+Release source archive 下载。
+
 ```powershell
-git clone <repository-url>
+git clone --branch v0.1.0 --depth 1 https://github.com/jasonpeng-dev/journey-agent.git
+cd journey-agent
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+在 macOS/Linux 上，第三行使用 `cp .env.example .env`。
+
+### Latest Main
+
+如果希望体验最新开发状态，可以使用这条路径。`main` 会随着开发继续变化，内容可能
+与稳定版本不同。
+
+```powershell
+git clone https://github.com/jasonpeng-dev/journey-agent.git
 cd journey-agent
 Copy-Item .env.example .env
 docker compose up --build
@@ -157,11 +176,18 @@ docker compose stop
 docker compose start
 docker compose down
 docker compose up
+docker compose down -v
 ```
 
 named `journey-data` volume 会在 stop/start 以及正常 `down`/`up` 后保留 GameInstance、
-AgentTask 和 Scenario 数据。如果确实要重置所有本地 Docker 数据，执行
-`docker compose down -v`，然后再次运行 `docker compose up --build`。
+AgentTask 和 Scenario 数据。生命周期命令的含义是：
+
+- `stop` / `start`：停止或恢复已有 containers。
+- 普通 `down` / `up`：重新创建 containers，但保留 named volume 中的 Journey Agent 数据。
+- `down -v`：删除当前 Journey Agent Compose volume，完全重置本地 Journey Agent 数据；
+  然后再次执行 `docker compose up --build` 重新初始化。
+
+`down -v` 只删除当前 Journey Agent Compose project 所拥有的数据，不会清空机器上的其他 Docker 数据。
 
 ## 手工本地开发
 

@@ -135,8 +135,27 @@ Docker is the shortest path for a first-time user. Docker Compose builds the Rea
 it from the existing FastAPI application, runs Alembic and the idempotent built-in seed on
 startup, and stores SQLite data in a named volume.
 
+### Stable Release (recommended)
+
+The stable release is fixed and reproducible. It is the recommended path for a first
+experience, and the same source is also available from the matching GitHub Release archive.
+
 ```powershell
-git clone <repository-url>
+git clone --branch v0.1.0 --depth 1 https://github.com/jasonpeng-dev/journey-agent.git
+cd journey-agent
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+On macOS/Linux, use `cp .env.example .env` for the third line.
+
+### Latest Main
+
+Use this path when you want the newest development state. `main` changes as development
+continues, so it can differ from the stable release.
+
+```powershell
+git clone https://github.com/jasonpeng-dev/journey-agent.git
 cd journey-agent
 Copy-Item .env.example .env
 docker compose up --build
@@ -162,11 +181,18 @@ docker compose stop
 docker compose start
 docker compose down
 docker compose up
+docker compose down -v
 ```
 
 The named `journey-data` volume preserves `GameInstance`, `AgentTask`, and Scenario data across
-stop/start and normal `down`/`up`. To intentionally reset all local Docker data, use
-`docker compose down -v` and then `docker compose up --build`.
+stop/start and normal `down`/`up`. The lifecycle commands mean:
+
+- `stop` / `start`: stop and resume the existing containers.
+- normal `down` / `up`: recreate containers while preserving Journey Agent data in the named volume.
+- `down -v`: remove the current Journey Agent Compose volume for a complete local Journey Agent
+  data reset; run `docker compose up --build` again to initialize it.
+
+The `down -v` command only removes data owned by this Journey Agent Compose project.
 
 ## Manual local development
 
