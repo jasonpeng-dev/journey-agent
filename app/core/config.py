@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     model_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4.1-mini"
     model_api_key: SecretStr | None = None
+    developer_api_token: SecretStr | None = None
     model_timeout_seconds: float = Field(default=20, gt=0, le=120)
     agent_max_rounds: int = Field(default=5, ge=1, le=10)
     agent_max_tool_calls: int = Field(default=8, ge=1, le=20)

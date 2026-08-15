@@ -5,11 +5,16 @@
 
 # Python environments and generated files
 .venv/
+.tools/
 __pycache__/
 *.py[cod]
 *.egg-info/
 build/
 dist/
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
 
 # Tool caches
 .pytest_cache/

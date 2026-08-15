@@ -55,15 +55,16 @@ def test_draft_revision_conflict_and_invalid_publish_diagnostics(session: Sessio
     )
 
 
-def test_publish_increments_versions_and_semantic_no_change_is_reused(session: Session) -> None:
+def test_publish_increments_versions_and_semantic_no_change_is_rejected(session: Session) -> None:
     scenario = _scenario(session)
     service = ScenarioService(session)
     first = service.publish_draft(scenario.id, expected_revision=1)
     reordered = deepcopy(first.version.snapshot_document)
     reordered["world"]["nodes"].reverse()
     service.replace_draft(scenario.id, expected_revision=1, definition_document=reordered)
-    same = service.publish_draft(scenario.id, expected_revision=2)
-    assert same.status == "NO_CHANGES" and same.version.id == first.version.id
+    with pytest.raises(ScenarioLifecycleError) as unchanged:
+        service.publish_draft(scenario.id, expected_revision=2)
+    assert unchanged.value.code == "SCENARIO_PUBLISH_NO_CHANGES"
     changed = deepcopy(first.version.snapshot_document)
     changed["metadata"]["name"] = "Medical Emergency Revised"
     changed["world"]["name"] = "Medical Emergency Revised"

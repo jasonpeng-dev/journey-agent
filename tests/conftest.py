@@ -2,6 +2,7 @@ from collections.abc import Generator
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -41,6 +42,7 @@ def client(session: Session) -> Generator[TestClient, None, None]:
         model_provider="mock",
         model_name="mock-model",
         model_api_key=None,
+        developer_api_token=SecretStr("test-developer"),
     )
     with TestClient(app) as test_client:
         yield test_client
