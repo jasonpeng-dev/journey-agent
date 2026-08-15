@@ -1,7 +1,7 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PlanHistory, TaskTabs, Timeline, WaitingStatus } from "./pages/GamePage";
+import { GoalComposer, PlanHistory, TaskTabs, Timeline, WaitingStatus } from "./pages/GamePage";
 import { formatDuration, operationBelongsToTask } from "./playPresentation";
 import type { PublicTask } from "./types";
 
@@ -45,6 +45,53 @@ const task: PublicTask = {
 };
 
 describe("Formal Play player projections", () => {
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it("renders a standalone GameInstance goal composer", () => {
+    const onGoalChange = vi.fn();
+    const onSubmit = vi.fn();
+    render(
+      <GoalComposer
+        goal="打开北部贸易路线"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        onGoalChange={onGoalChange}
+        onSubmit={onSubmit}
+      />,
+    );
+    expect(screen.getByTestId("goal-composer")).toBeVisible();
+    expect(screen.getByText("当前 · 下达目标")).toBeVisible();
+    expect(screen.getByLabelText("下达高层目标")).toHaveValue("打开北部贸易路线");
+    fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the composer and its timer visible while Goal Resolution runs", () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    render(
+      <GoalComposer
+        goal="打开北部贸易路线"
+        pendingGoal="打开北部贸易路线"
+        resolving={true}
+        startedAt={startedAt}
+        busy={true}
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("goal-composer")).toBeVisible();
+    expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("Agent 正在接收任务");
+    act(() => vi.advanceTimersByTime(1250));
+    expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("1s");
+    vi.useRealTimers();
+  });
+
   it("默认展开最新方案、折叠旧方案，并允许查看冻结历史", () => {
     render(<PlanHistory task={task} />);
     expect(screen.getByText("新行动")).toBeVisible();

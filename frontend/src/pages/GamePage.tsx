@@ -244,6 +244,7 @@ export function TaskTabs({
           key={item.id}
           type="button"
           data-testid={`task-tab-${item.id}`}
+          data-task-id={item.id}
           className={selectedTaskId === item.id ? "selected" : ""}
           aria-pressed={selectedTaskId === item.id}
           onClick={() => onSelect(item.id)}
@@ -254,6 +255,69 @@ export function TaskTabs({
         </button>
       ))}
     </nav>
+  );
+}
+
+export function GoalComposer({
+  goal,
+  pendingGoal,
+  resolving,
+  startedAt,
+  busy,
+  onGoalChange,
+  onSubmit,
+}: {
+  goal: string;
+  pendingGoal: string | null;
+  resolving: boolean;
+  startedAt: number | null;
+  busy: boolean;
+  onGoalChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const displayedGoal = resolving ? pendingGoal ?? goal : goal;
+  return (
+    <section className="command-panel goal-composer-panel" data-testid="goal-composer">
+      <header className="command-panel-heading">
+        <div>
+          <p>当前 · 下达目标</p>
+          <h1>下达目标</h1>
+        </div>
+        <span className="console-pill success">GameInstance</span>
+      </header>
+      <form
+        className="command-composer-v2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!resolving && goal.trim()) onSubmit();
+        }}
+      >
+        <label htmlFor="goal">下达高层目标</label>
+        <div>
+          <textarea
+            id="goal"
+            rows={3}
+            value={displayedGoal}
+            onChange={(event) => onGoalChange(event.target.value)}
+            placeholder="例如：打开北部贸易路线"
+            disabled={resolving}
+          />
+          <button disabled={resolving || !goal.trim() || busy} type="submit">
+            {resolving ? "正在接收……" : "开始目标"}
+          </button>
+        </div>
+        {resolving && startedAt !== null && (
+          <WaitingStatus
+            startedAt={startedAt}
+            label="Agent 正在接收任务"
+            testId="goal-resolving-status"
+          />
+        )}
+        {!resolving && (
+          <p>智能体只会选择当前精确版本中定义的目标和行动；场景作者定义的内容保持其原始语言。</p>
+        )}
+      </form>
+    </section>
   );
 }
 
@@ -272,12 +336,21 @@ export function GamePage() {
     queryFn: () => api.playState(gameId, selectedTaskId),
     placeholderData: (previous) => previous,
   });
+  const livePlay = useQuery({
+    queryKey: ["play", gameId, "live"],
+    queryFn: () => api.playState(gameId, null),
+    placeholderData: (previous) => previous,
+  });
   const scenario = useQuery({
     queryKey: ["scenario", play.data?.game.scenario_id],
     queryFn: () => api.scenario(play.data!.game.scenario_id),
     enabled: Boolean(play.data?.game.scenario_id),
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["play", gameId] });
+  const syncLivePlay = (state: PlayerGameState) => {
+    queryClient.setQueryData(["play", gameId, "live"], state);
+    void refresh();
+  };
   const submit = useMutation({
     mutationFn: () => api.submitGoal(gameId, goal, crypto.randomUUID()),
     onMutate: () => {
@@ -289,6 +362,7 @@ export function GamePage() {
       if (result.status === "ACCEPTED") {
         setGoal("");
         setAcceptedTask(result.task);
+        if (result.task) setSelectedTaskId(result.task.id);
         setActiveOperation((operation) =>
           operation?.kind === "goal"
             ? { ...operation, taskId: result.task?.id ?? null }
@@ -311,7 +385,7 @@ export function GamePage() {
       api.startInitialPlanning(gameId, version),
     onMutate: ({ taskId }) =>
       setActiveOperation({ kind: "planning", taskId, startedAt: Date.now() }),
-    onSuccess: () => void refresh(),
+    onSuccess: syncLivePlay,
     onError: () => setActiveOperation(null),
     onSettled: () =>
       setActiveOperation((operation) =>
@@ -336,21 +410,21 @@ export function GamePage() {
       decisionId: string;
       taskVersion: number;
     }) => api.decideApproval(gameId, decisionId, approve, taskVersion),
-    onSuccess: () => void refresh(),
+    onSuccess: syncLivePlay,
   });
   const pacing = useMutation({
     mutationFn: ({ phase, version }: { phase: "action" | "debrief"; version: number }) =>
       phase === "action"
         ? api.acknowledgeAction(gameId, version)
         : api.acknowledgeDebrief(gameId, version),
-    onSuccess: () => void refresh(),
+    onSuccess: syncLivePlay,
   });
   const replan = useMutation({
     mutationFn: ({ version }: { version: number; taskId: string }) =>
       api.replan(gameId, version),
     onMutate: ({ taskId }) =>
       setActiveOperation({ kind: "replanning", taskId, startedAt: Date.now() }),
-    onSuccess: () => void refresh(),
+    onSuccess: syncLivePlay,
     onError: () => setActiveOperation(null),
     onSettled: () =>
       setActiveOperation((operation) =>
@@ -365,11 +439,13 @@ export function GamePage() {
 
   const loadedTask = play.data?.current_task ?? null;
   const resolvingGoal = submit.isPending || pendingGoal !== null;
+  const goalResolving = resolvingGoal && activeOperation?.kind === "goal";
 
-  if (!play.data) {
+  if (!play.data || !livePlay.data) {
     return <main className="page"><p>正在加载游戏状态……</p></main>;
   }
   const { game } = play.data;
+  const liveGame = livePlay.data.game;
   const selectedTaskLoading = Boolean(
     selectedTaskId !== null && loadedTask?.id !== selectedTaskId,
   );
@@ -378,18 +454,19 @@ export function GamePage() {
       ? selectedTaskLoading
         ? null
         : loadedTask
-      : resolvingGoal
-        ? null
-        : acceptedTask && loadedTask?.id !== acceptedTask.id
-          ? acceptedTask
-          : loadedTask ?? acceptedTask;
-  const activeTaskSelected = Boolean(
+      : acceptedTask && loadedTask?.id !== acceptedTask.id
+        ? acceptedTask
+        : loadedTask ?? acceptedTask;
+  // The live projection is the authoritative GameInstance-level source for
+  // whether any Task is still active.  Do not infer this from acceptedTask:
+  // that local response remains in memory after the Task reaches a terminal
+  // state and would incorrectly hide the GameInstance Goal Composer.
+  const activeTaskId = liveGame.active_task_id;
+  const gameHasActiveTask = activeTaskId !== null;
+  const selectedTaskActive = Boolean(
     task &&
-      (selectedTaskId === null || selectedTaskId === task.id) &&
-      (game.active_task_id === task.id ||
-        (selectedTaskId === null &&
-          acceptedTask?.id === task.id &&
-          ["ACTIVE", "NEEDS_PLAYER_INPUT"].includes(task.status))),
+      activeTaskId === task.id &&
+      ["ACTIVE", "NEEDS_PLAYER_INPUT"].includes(task.status),
   );
   const busy =
     submit.isPending ||
@@ -405,14 +482,11 @@ export function GamePage() {
     submit.data && submit.data.status !== "ACCEPTED"
       ? submit.data.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。"
       : null;
-  const historicalTask = Boolean(task && !activeTaskSelected);
   const viewedTaskId =
-    selectedTaskId ?? game.active_task_id ?? task?.id ?? acceptedTask?.id ?? null;
+    selectedTaskId ?? activeTaskId ?? task?.id ?? acceptedTask?.id ?? null;
   const operationSelected = Boolean(
     activeOperation !== null && viewedTaskId === activeOperation.taskId,
   );
-  const goalOperationSelected =
-    operationSelected && activeOperation?.kind === "goal" && resolvingGoal;
   const planningForTask = operationSelected && activeOperation?.kind === "planning";
   const replanningForTask = operationSelected && activeOperation?.kind === "replanning";
   const goalAccepted = task?.execution_phase === "AWAITING_PLAN_START";
@@ -456,21 +530,8 @@ export function GamePage() {
               selectedTaskId={selectedTaskId ?? task?.id ?? null}
               onSelect={setSelectedTaskId}
             />
-            {goalOperationSelected && (
-              <div className="task-tabs pending-task-tabs" data-testid="pending-task-tab">
-                <span>新任务 · 接收中</span>
-                <strong>{pendingGoal}</strong>
-              </div>
-            )}
             <div className="timeline-scroll">
               <Timeline task={task} />
-              {goalOperationSelected && activeOperation?.kind === "goal" && (
-                <WaitingStatus
-                  startedAt={activeOperation.startedAt}
-                  label="Agent 接收任务中"
-                  testId="goal-resolving-status"
-                />
-              )}
               {planningForTask && activeOperation && (
                 <WaitingStatus
                   startedAt={activeOperation.startedAt}
@@ -492,21 +553,13 @@ export function GamePage() {
               )}
             </div>
           </section>
-          <section className="command-panel current-report-panel">
+          {task && (
+          <section className="command-panel current-report-panel" data-task-id={task.id}>
             <header className="command-panel-heading">
               <div><p>当前 · 汇报</p><h1>Agent 当前汇报</h1></div>
               <span className="console-pill warning">逐步确认</span>
             </header>
-            {goalOperationSelected && (
-              <section className="player-checkpoint goal-receiving-card" data-testid="goal-receiving-card">
-                <small>正在接收目标</small>
-                <h2>{pendingGoal}</h2>
-                <p>Agent 正在解析任务目标……</p>
-              </section>
-            )}
-            {selectedTaskLoading && <div className="historical-task-notice">正在加载所选任务的历史记录。</div>}
-            {historicalTask && <div className="historical-task-notice">这是历史任务的只读记录。左侧世界状态始终显示当前 GameInstance。</div>}
-            {task && goalAccepted && activeTaskSelected && (
+            {task && goalAccepted && selectedTaskActive && (
               <section className="player-checkpoint goal-accepted-card" data-testid="goal-accepted-card">
                 <small>目标已接受</small>
                 <h2>{task.goal}</h2>
@@ -519,7 +572,7 @@ export function GamePage() {
                 </button>
               </section>
             )}
-            {task && actionReady && task.briefing && activeTaskSelected && (
+            {task && actionReady && task.briefing && selectedTaskActive && (
               <section className="player-checkpoint action-briefing">
                 <small>下一步行动</small>
                 <h2>{task.briefing.actor_name} 准备执行</h2>
@@ -540,7 +593,7 @@ export function GamePage() {
                   <ul>{task.debrief.knowledge_changes.map((change) => <li key={change.key}>{change.name}{change.value !== null ? `：${typeof change.value === "string" ? uiLabel(change.value) : String(change.value)}` : ""}</li>)}</ul>
                 </>}
                 <button
-                  disabled={busy || !activeTaskSelected}
+                  disabled={busy || !selectedTaskActive}
                   onClick={() => {
                     if (failureDebrief) {
                       replan.mutate({ version: task.pacing_version, taskId: task.id });
@@ -553,23 +606,33 @@ export function GamePage() {
                 </button>
               </section>
             )}
-            {play.data.pending_approval_id && task?.execution_phase === "APPROVAL_REQUIRED" && activeTaskSelected && <div className="console-approval"><small>需要你的决定</small><strong>该行动超出了 Agent 的自主权限，需要你的批准。</strong><div><button disabled={busy} onClick={() => decision.mutate({ approve: true, decisionId: play.data.pending_approval_id!, taskVersion: task.version })}>批准</button><button className="danger-button" disabled={busy} onClick={() => decision.mutate({ approve: false, decisionId: play.data.pending_approval_id!, taskVersion: task.version })}>拒绝并重新规划</button></div></div>}
-            {task && ["COMPLETED", "BLOCKED", "ABORTED"].includes(task.execution_phase) && <div className={`current-report-terminal ${taskTone[task.status] ?? "neutral"}`}><strong>{uiLabel(task.status)}</strong><p>{task.explanation ?? "当前任务已经结束。你可以查看完整记录与计划历史。"}</p></div>}
-            {game.status === "ACTIVE" && !game.active_task_id && !resolvingGoal && <form className="command-composer-v2" onSubmit={(event) => { event.preventDefault(); if (goal.trim()) submit.mutate(); }}><label htmlFor="goal">下达高层目标</label><div><textarea id="goal" rows={3} value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="例如：打开北部贸易路线"/><button disabled={!goal.trim() || busy} type="submit">{submit.isPending ? "正在接收……" : "开始目标"}</button></div><p>智能体只会选择当前精确版本中定义的目标和行动；场景作者定义的内容保持其原始语言。</p></form>}
-            {game.status !== "ACTIVE" && <p className="archived-notice">游戏已归档，当前为只读状态。</p>}
+            {play.data.pending_approval_id && task.execution_phase === "APPROVAL_REQUIRED" && selectedTaskActive && <div className="console-approval"><small>需要你的决定</small><strong>该行动超出了 Agent 的自主权限，需要你的批准。</strong><div><button disabled={busy} onClick={() => decision.mutate({ approve: true, decisionId: play.data.pending_approval_id!, taskVersion: task.version })}>批准</button><button className="danger-button" disabled={busy} onClick={() => decision.mutate({ approve: false, decisionId: play.data.pending_approval_id!, taskVersion: task.version })}>拒绝并重新规划</button></div></div>}
+            {["COMPLETED", "BLOCKED", "ABORTED"].includes(task.execution_phase) && <div className={`current-report-terminal ${taskTone[task.status] ?? "neutral"}`}><strong>{uiLabel(task.status)}</strong><p>{task.explanation ?? "当前任务已经结束。你可以查看完整记录与计划历史。"}</p></div>}
+            {liveGame.status !== "ACTIVE" && <p className="archived-notice">游戏已归档，当前为只读状态。</p>}
           </section>
+          )}
+          {liveGame.status === "ACTIVE" && !gameHasActiveTask && (
+            <GoalComposer
+              goal={goal}
+              pendingGoal={pendingGoal}
+              resolving={goalResolving}
+              startedAt={goalResolving ? activeOperation?.startedAt ?? null : null}
+              busy={busy}
+              onGoalChange={setGoal}
+              onSubmit={() => submit.mutate()}
+            />
+          )}
         </div>
         <aside className="command-panel execution-panel-v2">
           <header className="command-panel-heading"><div><p>03 · 计划</p><h1>计划演进</h1></div></header>
-          {goalOperationSelected && <p className="plan-waiting-message">正在解析任务目标……</p>}
-          {!resolvingGoal && planningForTask && <p className="plan-waiting-message">正在生成初始方案……</p>}
-          {!resolvingGoal && replanningForTask && <p className="plan-waiting-message">正在生成调整方案……</p>}
-          {!resolvingGoal && task && goalAccepted && !planningForTask && <p className="plan-waiting-message">尚未开始规划。</p>}
-          {!task && !resolvingGoal && !selectedTaskLoading && <p className="console-empty">等待下达第一个目标。</p>}
+          {planningForTask && <p className="plan-waiting-message">正在生成初始方案……</p>}
+          {replanningForTask && <p className="plan-waiting-message">正在生成调整方案……</p>}
+          {task && goalAccepted && !planningForTask && <p className="plan-waiting-message">尚未开始规划。</p>}
+          {!task && !selectedTaskLoading && <p className="console-empty">等待下达第一个目标。</p>}
           {selectedTaskLoading && <p className="plan-waiting-message">正在加载所选任务记录……</p>}
           {task && <div className="task-brief"><small>当前目标</small><strong>{task.goal}</strong><span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span><p>{task.objective_names.join(" · ")}</p>{task.explanation && <code>{uiLabel(task.explanation)}</code>}</div>}
           {task && !planningForTask && <PlanHistory task={task} />}
-          {game.status === "ACTIVE" && activeTaskSelected && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
+          {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>
       <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span></div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <button className="danger-button" disabled={busy} onClick={() => archive.mutate()}>结束并归档游戏</button>}</div></section>

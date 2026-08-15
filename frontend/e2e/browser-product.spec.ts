@@ -30,6 +30,9 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
   await page.getByRole("button", { name: "创建游戏" }).click();
   await page.waitForURL(/\/games\/[0-9a-f-]{36}$/);
   const gameId = new URL(page.url()).pathname.split("/").at(-1) ?? "";
+  await expect(page.locator(".current-report-panel")).toHaveCount(0);
+  await expect(page.getByTestId("goal-composer")).toBeVisible();
+  await expect(page.getByText("当前 · 下达目标")).toBeVisible();
   await page.getByLabel("下达高层目标").fill("open the northern trade route");
   await page.getByRole("button", { name: "开始目标" }).click();
   await expect(page.getByTestId("goal-resolving-status")).toBeVisible();
@@ -112,6 +115,9 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
   }
 
   await expect(page.getByText("目标已完成", { exact: true }).first()).toBeVisible();
+  await expect(page.locator(".current-report-panel")).toBeVisible();
+  await expect(page.getByTestId("goal-composer")).toBeVisible();
+  await expect(page.locator(".current-report-panel .goal-composer-panel")).toHaveCount(0);
   expect(sawFailureKnowledgeReplan).toBe(true);
   expect(sawCompletedStep).toBe(true);
   await expect(page.locator(".plan-history-card").last()).toHaveClass(/completed/);
@@ -120,16 +126,35 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
   await expect(page.getByRole("heading", { name: "已知世界", exact: true })).toBeVisible();
   await page.getByLabel("下达高层目标").fill("gather valley intelligence");
   await page.getByRole("button", { name: "开始目标" }).click();
+  await expect(page.getByTestId("goal-composer")).toBeVisible();
+  await expect(page.getByTestId("goal-resolving-status")).toBeVisible();
+  await expect(page.locator(".current-report-panel")).toBeVisible();
+  const resolvingTaskTab = page.locator(".task-tabs button").first();
+  await resolvingTaskTab.click();
+  await expect(page.getByTestId("goal-resolving-status")).toBeVisible();
   await expect(page.locator(".task-tabs button")).toHaveCount(2);
   const firstTaskTab = page.locator(".task-tabs button").first();
   const secondTaskTab = page.locator(".task-tabs button").last();
+  await expect(secondTaskTab).toHaveAttribute("aria-pressed", "true");
+  const firstTaskId = await firstTaskTab.getAttribute("data-task-id");
+  const secondTaskId = await secondTaskTab.getAttribute("data-task-id");
+  expect(firstTaskId).not.toBeNull();
+  expect(secondTaskId).not.toBeNull();
+  await firstTaskTab.click();
+  await expect(page.locator(".task-brief")).toContainText("open the northern trade route");
+  await expect(page.locator(".current-report-panel")).toHaveAttribute("data-task-id", firstTaskId!);
+  await expect(page.getByTestId("goal-composer")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "不错，开始规划" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "知悉，开始执行" })).toHaveCount(0);
   await secondTaskTab.click();
   await expect(page.locator(".task-brief")).toContainText("gather valley intelligence");
+  await expect(page.locator(".current-report-panel")).toHaveAttribute("data-task-id", secondTaskId!);
   await expect(page.getByRole("button", { name: "不错，开始规划" })).toBeVisible();
   await page.getByRole("button", { name: "不错，开始规划" }).click();
   await expect(page.getByTestId("planning-status")).toBeVisible();
   await firstTaskTab.click();
-  await expect(page.locator(".historical-task-notice")).toBeVisible();
+  await expect(page.locator(".task-brief")).toContainText("open the northern trade route");
+  await expect(page.locator(".current-report-panel")).toHaveAttribute("data-task-id", firstTaskId!);
   await expect(page.getByTestId("planning-status")).toHaveCount(0);
   await expect(page.getByTestId("replanning-status")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "不错，开始规划" })).toHaveCount(0);
@@ -207,7 +232,7 @@ test("不同 Task 之间切换时不会泄漏 Replan 临时状态", async ({ pag
   // Prime the historical projection before the next write transaction.  The
   // browser can then switch immediately while Task 2's replan is in flight.
   await firstTaskTab.click();
-  await expect(page.locator(".historical-task-notice")).toBeVisible();
+  await expect(page.locator(".task-brief")).toContainText("gather valley intelligence");
   await secondTaskTab.click();
   await expect(page.getByRole("button", { name: "不错，开始规划" })).toBeVisible();
   await page.getByRole("button", { name: "不错，开始规划" }).click();
@@ -240,7 +265,7 @@ test("不同 Task 之间切换时不会泄漏 Replan 临时状态", async ({ pag
   await expect(replanTask).toBeVisible();
   await replanTask.click();
   await firstTaskTab.click();
-  await expect(page.locator(".historical-task-notice")).toBeVisible();
+  await expect(page.locator(".task-brief")).toContainText("gather valley intelligence");
   await expect(page.getByTestId("replanning-status")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "知悉，开始执行" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "没事，重新规划" })).toHaveCount(0);

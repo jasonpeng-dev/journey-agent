@@ -118,6 +118,8 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .conversation-column-v2 { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 18px; }
 .mission-log-panel { display: flex; min-height: 0; height: clamp(360px, 52vh, 560px); flex: 0 0 auto; flex-direction: column; }
 .current-report-panel { min-width: 0; flex: 0 0 auto; overflow: visible; }
+.goal-composer-panel { min-width: 0; flex: 0 0 auto; }
+.goal-composer-panel .command-composer-v2 { margin-top: 0; padding-top: 0; border-top: 0; }
 .timeline-scroll { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 2px 5px 4px; }
 .task-tabs { display: flex; flex-shrink: 0; gap: 8px; min-height: 0; margin: -3px 0 12px; padding: 2px 1px 7px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--console-line); }
 .task-tabs button { display: grid; min-width: 150px; gap: 3px; padding: 8px 10px; border: 1px solid #e4ddcf; border-radius: 10px; color: var(--console-ink); background: #fffdf9; cursor: pointer; text-align: left; }
