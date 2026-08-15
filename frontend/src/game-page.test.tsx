@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
-import { PlanHistory, Timeline } from "./pages/GamePage";
+import { PlanHistory, TaskTabs, Timeline, WaitingStatus } from "./pages/GamePage";
+import { formatDuration, operationBelongsToTask } from "./playPresentation";
 import type { PublicTask } from "./types";
 
 const task: PublicTask = {
@@ -37,7 +38,7 @@ const task: PublicTask = {
       steps: [{ id: "new-1", sequence: 1, action_name: "新行动", assigned_actor_name: "乙", status: "CURRENT", result_summary: null }],
     },
   ],
-  timeline: [{ id: "goal", kind: "TASK_STARTED", title: "测试目标", detail: null, actor_name: null, result_summary: null, success: null, knowledge_changes: [], occurred_at: null }],
+  timeline: [{ id: "goal", kind: "TASK_STARTED", title: "测试目标", detail: null, actor_name: null, result_summary: null, success: null, knowledge_changes: [], occurred_at: null, duration_ms: 22102 }],
   briefing: null,
   debrief: null,
   explanation: null,
@@ -56,6 +57,75 @@ describe("Formal Play player projections", () => {
   it("任务日志只渲染已经进入历史的安全事件", () => {
     render(<Timeline task={task} />);
     expect(screen.getByText("测试目标")).toBeVisible();
+    expect(screen.getByText("· 22s")).toBeVisible();
     expect(screen.queryByText(/WAIT|settle|operation/i)).not.toBeInTheDocument();
+  });
+
+  it("计划事件只显示标题和右侧冻结耗时", () => {
+    render(
+      <Timeline
+        task={{
+          ...task,
+          timeline: [
+            {
+              ...task.timeline[0],
+              id: "plan-created",
+              kind: "PLAN_CREATED",
+              title: "旧的 provider 标题",
+              detail: "不应显示的计划细节",
+              result_summary: "不应显示的计划结果",
+              duration_ms: 1200,
+            },
+            {
+              ...task.timeline[0],
+              id: "plan-updated",
+              kind: "PLAN_UPDATED",
+              title: "另一个旧标题",
+              detail: "不应显示的调整细节",
+              result_summary: "不应显示的调整结果",
+              duration_ms: 2200,
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("Agent 已完成计划")).toBeVisible();
+    expect(screen.getByText("Agent 已重新规划")).toBeVisible();
+    expect(screen.getAllByText("· 1s")).toHaveLength(1);
+    expect(screen.getAllByText("· 2s")).toHaveLength(1);
+    expect(screen.queryByText("不应显示的计划细节")).not.toBeInTheDocument();
+    expect(screen.queryByText("不应显示的调整细节")).not.toBeInTheDocument();
+    expect(screen.queryByText("不应显示的计划结果")).not.toBeInTheDocument();
+    expect(screen.queryByText("不应显示的调整结果")).not.toBeInTheDocument();
+  });
+
+  it("operation transient state is scoped to its Task", () => {
+    const operation = { kind: "planning" as const, taskId: "task-2", startedAt: 100 };
+    expect(operationBelongsToTask(operation, "task-2")).toBe(true);
+    expect(operationBelongsToTask(operation, "task-1")).toBe(false);
+    expect(operationBelongsToTask(null, "task-2")).toBe(false);
+    expect(formatDuration(0)).toBe("1s");
+    expect(formatDuration(null)).toBeNull();
+  });
+
+  it("shows a local planning timer without requiring a backend heartbeat", () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now();
+    render(<WaitingStatus startedAt={startedAt} label="Agent 正在规划" testId="planning-status" />);
+    act(() => vi.advanceTimersByTime(1250));
+    expect(screen.getByTestId("planning-status")).toHaveTextContent("Agent 正在规划");
+    expect(screen.getByTestId("planning-status")).toHaveTextContent("1s");
+    vi.useRealTimers();
+  });
+
+  it("switches task tabs using the task history read model", () => {
+    const onSelect = vi.fn();
+    render(<TaskTabs tasks={[
+      { id: "task-1", sequence: 1, goal: "第一个目标", status: "COMPLETED", execution_phase: "COMPLETED", created_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T00:01:00Z" },
+      { id: "task-2", sequence: 2, goal: "第二个目标", status: "ACTIVE", execution_phase: "AWAITING_ACTION_ACK", created_at: "2026-01-01T00:02:00Z", completed_at: null },
+    ]} selectedTaskId="task-2" onSelect={onSelect} />);
+    expect(screen.getByTestId("task-tab-task-2")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByTestId("task-tab-task-1"));
+    expect(onSelect).toHaveBeenCalledWith("task-1");
   });
 });

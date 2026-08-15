@@ -98,8 +98,10 @@ class MissionRoadmapStageStatus(StrEnum):
 
 
 class PublicExecutionPhase(StrEnum):
+    AWAITING_PLAN_START = "AWAITING_PLAN_START"
     AWAITING_ACTION_ACK = "AWAITING_ACTION_ACK"
     AWAITING_DEBRIEF_ACK = "AWAITING_DEBRIEF_ACK"
+    AWAITING_REPLAN_ACK = "AWAITING_REPLAN_ACK"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     COMPLETED = "COMPLETED"
     BLOCKED = "BLOCKED"
@@ -107,6 +109,8 @@ class PublicExecutionPhase(StrEnum):
 
 
 class PublicTimelineEventKind(StrEnum):
+    GOAL_ACCEPTED = "GOAL_ACCEPTED"
+    PLAN_CREATED = "PLAN_CREATED"
     TASK_STARTED = "TASK_STARTED"
     ACTION_BRIEFING = "ACTION_BRIEFING"
     ACTION_RESULT = "ACTION_RESULT"
@@ -366,6 +370,10 @@ class PublicTimelineEventResponse(ApiModel):
     success: bool | None = None
     knowledge_changes: list[PublicKnowledgeChangeResponse] = Field(default_factory=list)
     occurred_at: datetime | None = None
+    # A persisted operation snapshot, never a live client timer.  This is
+    # derived from the task's provider/application audit metadata so it stays
+    # stable after a page refresh.
+    duration_ms: int | None = Field(default=None, ge=0)
 
 
 class PublicTaskResponse(ApiModel):
@@ -383,6 +391,18 @@ class PublicTaskResponse(ApiModel):
     briefing: PublicActionBriefingResponse | None = None
     debrief: PublicActionDebriefResponse | None = None
     explanation: str | None = None
+
+
+class PublicTaskSummaryResponse(ApiModel):
+    """Compact player-safe entry used to switch between task histories."""
+
+    id: UUID
+    sequence: int = Field(ge=1)
+    goal: str
+    status: PublicTaskStatus
+    execution_phase: PublicExecutionPhase
+    created_at: datetime
+    completed_at: datetime | None = None
 
 
 class GoalSubmissionResponse(ApiModel):
@@ -435,6 +455,7 @@ class PlayerGameStateResponse(ApiModel):
     resources: list[PublicResourceResponse]
     actors: list[PublicActorResponse] = Field(default_factory=list)
     current_task: PublicTaskResponse | None
+    task_history: list[PublicTaskSummaryResponse] = Field(default_factory=list)
     pending_approval_id: UUID | None = None
 
 
@@ -504,6 +525,7 @@ __all__ = [
     "PublicStepStatus",
     "PublicTaskResponse",
     "PublicTaskStatus",
+    "PublicTaskSummaryResponse",
     "ReadinessCheckResponse",
     "ReadinessLevel",
     "ReferenceEdgeResponse",

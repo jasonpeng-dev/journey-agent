@@ -232,6 +232,7 @@ class GenericAgentService:
         goal: str,
         *,
         resolved_goal: GenericGoalResolution | None = None,
+        initialize_plan: bool = True,
     ) -> AgentTask:
         require_scope_writable(self.db, self.scope.game_instance_id)
         existing = self.db.scalar(
@@ -298,7 +299,12 @@ class GenericAgentService:
         )
         self.db.add(task)
         self.db.flush()
-        self.plan(task)
+        # Formal Play uses the same task/objective construction but lets the
+        # player explicitly acknowledge the resolved Goal before initial
+        # planning starts.  The default keeps the generic engine's existing
+        # eager-planning behavior unchanged for all other callers.
+        if initialize_plan:
+            self.plan(task)
         return task
 
     def plan(self, task: AgentTask, *, reason: str | None = None) -> AgentPlan:
@@ -384,7 +390,7 @@ class GenericAgentService:
         self.db.flush()
         return plan
 
-    def execute_next(self, task: AgentTask) -> AgentStep | None:
+    def execute_next(self, task: AgentTask, *, replan_on_failure: bool = True) -> AgentStep | None:
         require_scope_writable(self.db, self.scope.game_instance_id)
         self._task_scope(task)
         if self.evaluate(task).completed:
@@ -407,7 +413,7 @@ class GenericAgentService:
         )
         if step is None:
             self.plan(task, reason="PLAN_EXHAUSTED")
-            return self.execute_next(task)
+            return self.execute_next(task, replan_on_failure=replan_on_failure)
         if step.execution_type == StepExecutionType.WAIT_FOR_WORLD_EVENT:
             operation = self.db.scalar(
                 select(WorldOperation)
@@ -436,6 +442,7 @@ class GenericAgentService:
                     step,
                     failure_code,
                     retryable=bool(failure_payload.get("retryable", False)),
+                    replan=replan_on_failure,
                 )
                 self.db.flush()
                 return step
@@ -474,7 +481,13 @@ class GenericAgentService:
                 self.db.flush()
                 return step
             except GenericActionError as exc:
-                self._record_action_failure(task, step, exc.code, retryable=exc.retryable)
+                self._record_action_failure(
+                    task,
+                    step,
+                    exc.code,
+                    retryable=exc.retryable,
+                    replan=replan_on_failure,
+                )
                 self.db.flush()
                 return step
             step.actual_result = {
@@ -490,6 +503,7 @@ class GenericAgentService:
                     step,
                     failure.code,
                     retryable=failure.retryable,
+                    replan=replan_on_failure,
                 )
                 self.db.flush()
                 return step
@@ -1241,13 +1255,14 @@ class GenericAgentService:
         code: str,
         *,
         retryable: bool,
+        replan: bool = True,
     ) -> None:
         step.status = AgentStepStatus.FAILED
         step.failure_code = code
         task.last_error_code = code
-        if retryable:
+        if retryable and replan:
             self.plan(task, reason=code)
-        else:
+        elif not retryable:
             task.status = AgentTaskStatus.BLOCKED
 
     def _definition(self) -> ScenarioDefinitionV2:

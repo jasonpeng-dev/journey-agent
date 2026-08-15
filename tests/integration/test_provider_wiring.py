@@ -108,6 +108,11 @@ def _runtime(session: Session, definition=STARFIRE_V2):  # type: ignore[no-untyp
     return runtime, scope
 
 
+def _start_initial_plan(orchestrator, task):  # type: ignore[no-untyped-def]
+    checkpoint = orchestrator._ensure_checkpoint(task)
+    return orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
+
+
 def _medical_plan() -> tuple[PlanStepProposal, ...]:
     return (
         _step("diagnose_patient", "patient_one", "doctor_lee"),
@@ -152,12 +157,15 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
     runtime, _scope = _runtime(session, MEDICAL_EMERGENCY_V2)
-    submission = configured_play_orchestrator(
+    orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
+    )
+    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
     assert submission.task is not None
     assert provider.goal_requests == []
+    assert provider.plan_requests == []
+    _start_initial_plan(orchestrator, submission.task)
     assert len(provider.plan_requests) == 1
     assert submission.task.planning_mode == "PROVIDER"
     catalog = {item.action_key: item for item in provider.plan_requests[0].planning_action_catalog}
@@ -293,8 +301,11 @@ def test_failure_knowledge_replan_uses_same_provider(
     )
     task = orchestrator.submit_goal("secure the northern valley", idempotency_key=str(uuid4())).task
     assert task is not None
+    _start_initial_plan(orchestrator, task)
     checkpoint = orchestrator._ensure_checkpoint(task)
     orchestrator.acknowledge_action(expected_pacing_version=checkpoint.version)
+    assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN"]
+    orchestrator.replan(expected_pacing_version=checkpoint.version)
 
     assert len(provider.plan_requests) == 2
     assert provider.plan_requests[1].replan_reason == "ENCOUNTER_DEFEAT"
@@ -377,8 +388,12 @@ def test_starfire_catalog_evolves_from_failure_to_unlock_and_completion(
         checkpoint = orchestrator._ensure_checkpoint(task)
         if checkpoint.phase == "COMPLETED":
             break
-        if checkpoint.phase == "AWAITING_ACTION_ACK":
+        if checkpoint.phase == "AWAITING_PLAN_START":
+            orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
+        elif checkpoint.phase == "AWAITING_ACTION_ACK":
             orchestrator.acknowledge_action(expected_pacing_version=checkpoint.version)
+        elif checkpoint.phase == "AWAITING_REPLAN_ACK":
+            orchestrator.replan(expected_pacing_version=checkpoint.version)
         elif checkpoint.phase == "AWAITING_DEBRIEF_ACK":
             orchestrator.acknowledge_debrief(expected_pacing_version=checkpoint.version)
         else:
@@ -483,8 +498,10 @@ def test_future_step_is_plan_valid_but_execution_guard_replans_if_still_locked(
     ).task
     assert task is not None
 
+    _start_initial_plan(orchestrator, task)
     checkpoint = orchestrator._ensure_checkpoint(task)
     orchestrator.acknowledge_action(expected_pacing_version=checkpoint.version)
+    orchestrator.replan(expected_pacing_version=checkpoint.version)
 
     assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN", "REPLAN"]
     assert provider.plan_requests[1].replan_reason == "ACTION_TARGET_UNAVAILABLE"
@@ -509,11 +526,13 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
     runtime, _scope = _runtime(session, MEDICAL_EMERGENCY_V2)
-    submission = configured_play_orchestrator(
+    orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
+    )
+    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
     assert submission.task is not None
+    _start_initial_plan(orchestrator, submission.task)
     assert [item.call_type for item in provider.plan_requests] == [
         "INITIAL_PLAN",
         "REPAIR",
@@ -540,6 +559,12 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     ).submit_goal("diagnose the patient", idempotency_key=str(uuid4()))
     assert rejected.task is not None
+    _start_initial_plan(
+        configured_play_orchestrator(
+            session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        ),
+        rejected.task,
+    )
     assert rejected.task.status.value == "BLOCKED"
     assert rejected.task.last_error_code == "MODEL_PLAN_REJECTED"
     assert len(rejected_provider.plan_requests) == 3
@@ -555,11 +580,13 @@ def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     )
     runtime, _scope = _runtime(session, MEDICAL_EMERGENCY_V2)
 
-    submission = configured_play_orchestrator(
+    orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
+    )
+    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
     assert submission.task is not None
+    _start_initial_plan(orchestrator, submission.task)
     assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN", "REPAIR"]
     assert provider.plan_requests[1].repair_diagnostics[0]["code"] == "PLAN_ORDER_INVALID"
 
@@ -585,6 +612,12 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
     ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
     assert submission.task is not None
+    _start_initial_plan(
+        configured_play_orchestrator(
+            session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        ),
+        submission.task,
+    )
     assert submission.task.status.value == "BLOCKED"
     assert submission.task.last_error_code == "UNREACHABLE_IN_CURRENT_STATE"
     assert provider.plan_requests == []
@@ -625,6 +658,7 @@ def test_starfire_and_medical_share_composition_wiring(
     )
     submission = orchestrator.submit_goal(goal, idempotency_key=str(uuid4()))
     assert submission.task is not None
+    _start_initial_plan(orchestrator, submission.task)
     assert len(provider.plan_requests) == 1
 
 
@@ -737,10 +771,16 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
         json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
     )
 
+    assert response.status_code == 200
+    task = response.json()["task"]
+    response = client.post(
+        f"/api/v1/games/{game_id}/play/start-planning",
+        json={"expected_pacing_version": task["pacing_version"]},
+    )
     assert response.status_code == 504
     assert response.json()["error"]["code"] == "MODEL_PROVIDER_TIMEOUT"
     assert session.scalar(select(func.count()).select_from(WorldOperation)) == before_operations
-    assert client.get(f"/api/v1/games/{game_id}/play").json()["current_task"] is None
+    assert client.get(f"/api/v1/games/{game_id}/play").json()["current_task"] is not None
 
 
 def test_replan_provider_failure_rolls_back_action_cycle_to_safe_pause(
@@ -777,6 +817,12 @@ def test_replan_provider_failure_rolls_back_action_cycle_to_safe_pause(
     )
     assert goal.status_code == 200, goal.text
     task = goal.json()["task"]
+    start = client.post(
+        f"/api/v1/games/{game['id']}/play/start-planning",
+        json={"expected_pacing_version": task["pacing_version"]},
+    )
+    assert start.status_code == 200, start.text
+    task = start.json()["current_task"]
     before_operations = session.scalar(select(func.count()).select_from(WorldOperation))
 
     failed = client.post(
@@ -784,8 +830,13 @@ def test_replan_provider_failure_rolls_back_action_cycle_to_safe_pause(
         json={"expected_pacing_version": task["pacing_version"]},
     )
 
-    assert failed.status_code == 504
-    assert failed.json()["error"]["code"] == "MODEL_PROVIDER_TIMEOUT"
+    assert failed.status_code == 200
+    replanned = client.post(
+        f"/api/v1/games/{game['id']}/play/replan",
+        json={"expected_pacing_version": failed.json()["current_task"]["pacing_version"]},
+    )
+    assert replanned.status_code == 504
+    assert replanned.json()["error"]["code"] == "MODEL_PROVIDER_TIMEOUT"
     state = client.get(f"/api/v1/games/{game['id']}/play").json()
-    assert state["current_task"]["execution_phase"] == "AWAITING_ACTION_ACK"
-    assert session.scalar(select(func.count()).select_from(WorldOperation)) == before_operations
+    assert state["current_task"]["execution_phase"] == "AWAITING_REPLAN_ACK"
+    assert session.scalar(select(func.count()).select_from(WorldOperation)) == before_operations + 1
