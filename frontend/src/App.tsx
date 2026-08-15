@@ -12,8 +12,8 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <Link className="brand" to="/scenarios">Journey Agent</Link>
-        <nav><Link to="/scenarios">Scenarios</Link><Link to="/games">Games</Link></nav>
+        <Link className="brand" to="/scenarios">Journey Agent · 征途智能体</Link>
+        <nav><Link to="/scenarios">场景库</Link><Link to="/games">游戏</Link></nav>
       </header>
       <Routes>
         <Route path="/" element={<Navigate replace to="/scenarios" />} />

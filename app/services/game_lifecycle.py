@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,9 +17,19 @@ from app.domain.enums import (
 )
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
+    AgentPlan,
+    AgentStep,
     AgentTask,
+    ConversationMessage,
+    ConversationSession,
     GameInstance,
+    GameInstanceActor,
+    GameInstanceFactState,
+    GameInstanceMemoryEvent,
+    GameInstanceNodeState,
+    GameInstanceResourceState,
     Player,
+    PlayerExecutionCheckpoint,
     Scenario,
     ScenarioVersion,
     WorldOperation,
@@ -95,6 +106,74 @@ class GameLifecycleService:
         instance.runtime_revision += 1
         self.db.flush()
         return instance
+
+    def delete(self, game_instance_id: UUID) -> UUID:
+        """Permanently remove one owned Game and every instance-scoped row atomically."""
+        player = self.platform_player()
+        instance = self.db.scalar(
+            select(GameInstance)
+            .where(
+                GameInstance.id == game_instance_id,
+                GameInstance.player_id == player.id,
+            )
+            .with_for_update()
+        )
+        if instance is None:
+            raise GameLifecycleError("GAME_INSTANCE_NOT_FOUND", "The Game does not exist")
+        deleted_id = instance.id
+        task_ids = tuple(
+            self.db.scalars(select(AgentTask.id).where(AgentTask.game_instance_id == deleted_id))
+        )
+        session_ids = tuple(
+            self.db.scalars(
+                select(ConversationSession.id).where(
+                    ConversationSession.game_instance_id == deleted_id
+                )
+            )
+        )
+        plan_ids = (
+            tuple(self.db.scalars(select(AgentPlan.id).where(AgentPlan.task_id.in_(task_ids))))
+            if task_ids
+            else ()
+        )
+        self.db.execute(
+            sql_delete(ActionDecisionRequest).where(
+                ActionDecisionRequest.game_instance_id == deleted_id
+            )
+        )
+        self.db.execute(
+            sql_delete(PlayerExecutionCheckpoint).where(
+                PlayerExecutionCheckpoint.game_instance_id == deleted_id
+            )
+        )
+        self.db.execute(
+            sql_delete(WorldOperation).where(WorldOperation.game_instance_id == deleted_id)
+        )
+        if plan_ids:
+            self.db.execute(sql_delete(AgentStep).where(AgentStep.plan_id.in_(plan_ids)))
+            self.db.execute(sql_delete(AgentPlan).where(AgentPlan.id.in_(plan_ids)))
+        if task_ids:
+            self.db.execute(sql_delete(AgentTask).where(AgentTask.id.in_(task_ids)))
+        if session_ids:
+            self.db.execute(
+                sql_delete(ConversationMessage).where(
+                    ConversationMessage.session_id.in_(session_ids)
+                )
+            )
+            self.db.execute(
+                sql_delete(ConversationSession).where(ConversationSession.id.in_(session_ids))
+            )
+        for model in (
+            GameInstanceMemoryEvent,
+            GameInstanceActor,
+            GameInstanceResourceState,
+            GameInstanceFactState,
+            GameInstanceNodeState,
+        ):
+            self.db.execute(sql_delete(model).where(model.game_instance_id == deleted_id))
+        self.db.execute(sql_delete(GameInstance).where(GameInstance.id == deleted_id))
+        self.db.flush()
+        return deleted_id
 
     def abandon_task(self, game_instance_id: UUID, task_id: UUID) -> AgentTask:
         instance = self.get(game_instance_id)

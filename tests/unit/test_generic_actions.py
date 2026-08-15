@@ -1,10 +1,12 @@
 from copy import deepcopy
 from uuid import UUID
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.engine.rules import RuleEngineError
 from app.infrastructure.db.models import GameInstanceFactState, Player
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
@@ -91,3 +93,33 @@ def test_async_action_waits_then_resolves_through_exact_same_generic_path(
     assert resolved.applied.outcome.outcome_code == "COMPLETED"
     assert fact.truth_value is True
     assert replay.replayed
+
+
+def test_rule_engine_error_becomes_safe_operation_failure(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, context, _runtime = _game(session, async_action=True)
+    started = execute_action(
+        session,
+        context,
+        ExecuteActionArgs(
+            action_key="treat_patient",
+            target_key="patient_one",
+            parameters={"dosage": 2},
+            idempotency_key="contract-error-action",
+        ),
+    )
+
+    def raise_contract_error(**_kwargs: object) -> None:
+        raise RuleEngineError("RULE_PARAMETER_MISSING", "Required rule state is missing")
+
+    monkeypatch.setattr(service.game, "execute", raise_contract_error)
+    resolved = service.resolve_operation(
+        UUID(started["operation_id"]), resolution_key="contract-error-resolution"
+    )
+
+    assert resolved.operation.status.value == "RESOLVED"
+    assert resolved.applied is not None
+    assert resolved.applied.outcome.failure is not None
+    assert resolved.applied.outcome.failure.code == "RULE_PARAMETER_MISSING"
+    assert not resolved.applied.outcome.failure.retryable

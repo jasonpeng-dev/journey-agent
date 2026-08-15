@@ -71,6 +71,24 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     )
 
 
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Keep unexpected server failures secret-safe and machine-readable."""
+
+    log.exception("Unhandled application error", error_type=type(exc).__name__)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "The server could not complete the request",
+                "details": {},
+                "request_id": request.state.request_id,
+            }
+        },
+    )
+
+
 frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if frontend_dist.is_dir():
     app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="browser-product")

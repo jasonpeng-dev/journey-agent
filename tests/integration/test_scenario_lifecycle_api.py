@@ -280,14 +280,14 @@ def test_definition_schema_exposes_closed_condition_and_effect_vocabulary(
     assert "execute_action" not in encoded
 
 
-def test_examples_cover_authoring_maturity_levels(client: TestClient) -> None:
+def test_examples_expose_only_the_two_complete_test_templates(client: TestClient) -> None:
     examples = client.get("/api/v1/scenario-examples")
     assert examples.status_code == 200
     maturity = {item["key"]: item["maturity"] for item in examples.json()}
-    assert maturity["structurally_valid"] == "STRUCTURALLY_VALID"
-    assert maturity["minimum_runnable"] == "MINIMUM_RUNNABLE"
-    assert maturity["minimum_playable"] == "MINIMUM_PLAYABLE"
-    assert maturity["feature_showcase"] == "PUBLISH_READY"
+    assert maturity == {
+        "medical_emergency": "PUBLISH_READY",
+        "starfire_command": "PUBLISH_READY",
+    }
 
 
 def test_warning_does_not_block_publish_but_missing_playability_does(

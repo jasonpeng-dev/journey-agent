@@ -151,24 +151,41 @@ not merely the HTTP router, enforces the Instance write guard.
 
 ## 7. Formal Play orchestration
 
-`PlayOrchestrator.advance_until_pause()` composes the existing exact-Version Generic Agent, Action,
-Rule, Operation, and Objective services. It does not interpret Scenario rules itself.
+`PlayOrchestrator` composes the existing exact-Version Generic Agent, Action, Rule, Operation, and
+Objective services. It does not interpret Scenario rules itself. A separate Phase D
+`PlayerExecutionCheckpoint` stores presentation pacing and is not part of the Phase R Task state
+machine.
 
 ```text
-Goal -> resolve -> plan -> execute Action -> settle generic Operation
-     -> apply Rule outcome -> update Knowledge -> evaluate -> replan
-     -> completion / approval / player input / blocked / safety bound
+Goal -> resolve -> plan -> AWAITING_ACTION_ACK
+     -> execute one Action + settle Operation + Rules + mutation + Knowledge + evaluate + replan
+     -> AWAITING_DEBRIEF_ACK / APPROVAL_REQUIRED / COMPLETED / BLOCKED
+     -> acknowledge debrief -> next Action briefing
 ```
 
-Formal Play deterministically settles ordinary pending Operations instead of asking the Player to
-press a debug settle button. The existing generic async Operation path remains the sole mutation
-path. Each invocation has hard bounds on transitions and replans, commits atomically to a safe pause,
-and is idempotent. Browser disconnect/reload cannot end a Game or erase persisted progress.
+Formal Play deterministically settles ordinary pending Operations inside one meaningful Action
+cycle instead of asking the Player to press debug controls. “知悉，执行” is only a presentation
+acknowledgement: it creates no approval record and changes no authority. “收到，继续任务” is a pure
+application transition to the next briefing and creates no gameplay mutation. The existing generic
+async Operation path remains the sole mutation path. Checkpoint versions reject stale browser
+actions, and persisted pacing survives reload/restart.
 
 A rejected approval persists a Task-scoped canonical proposal signature over Actor, Action, target,
 and parameters. Both deterministic and provider planners must pass the same backend validator, which
 rejects that exact proposal. Replan prefers valid autonomous candidates. Candidate exhaustion or the
 configured replan limit produces a reliable blocked result instead of another approval loop.
+
+Provider planning deliberately separates plan-time structure from execution-time legality. The
+Knowledge-safe Planning Action Catalog contains known, statically compatible Actor/Action/target
+bindings, including future steps whose targets are currently locked or whose public Objective
+prerequisites are not yet satisfied. Those dynamic blockers are supplied as planning context instead
+of deleting the candidate. The plan-time validator rejects invented identifiers, hidden-information
+references, invalid parameters/authority, rejected proposals, missing Objective coverage, and public
+prerequisite ordering errors, with at most two provider repair attempts. It does not require every
+future step to be executable immediately. When a step reaches the front of the Stepwise plan, the
+existing Generic Action preflight remains authoritative for access, Facts, Resources, authority,
+interactions, and Rules; a runtime rejection records the safe failure and replans the complete
+remaining strategy. Provider exhaustion is `MODEL_PLAN_REJECTED`, not an unreachable world state.
 
 ## 8. HTTP resources
 
@@ -207,18 +224,28 @@ exact Version into a new Scenario Draft and rewrites only the new Scenario ident
 GET    /api/v1/games?status=active|archived
 POST   /api/v1/games
 GET    /api/v1/games/{game_id}
+DELETE /api/v1/games/{game_id}
 POST   /api/v1/games/{game_id}/archive
 GET    /api/v1/games/{game_id}/history
 GET    /api/v1/games/{game_id}/play
 POST   /api/v1/games/{game_id}/goals
-POST   /api/v1/games/{game_id}/continue
+POST   /api/v1/games/{game_id}/play/acknowledge-action
+POST   /api/v1/games/{game_id}/play/acknowledge-debrief
 POST   /api/v1/games/{game_id}/tasks/{task_id}/abandon
 POST   /api/v1/games/{game_id}/approvals/{decision_id}/approve
 POST   /api/v1/games/{game_id}/approvals/{decision_id}/reject
 ```
 
-Creation and Goal submission require client idempotency keys. Continue and decision requests use
-persisted Task/Decision identity and optimistic versions to reject stale browser actions.
+Creation and Goal submission require client idempotency keys. Pacing and decision requests use
+persisted checkpoint/Task/Decision identity and optimistic versions to reject stale browser
+actions. Pacing acknowledgements and authority decisions remain distinct DTOs and endpoints.
+Permanent delete accepts ACTIVE and archived Games and removes only the selected instance's full
+runtime closure in one authoritative transaction. It never deletes the bound ScenarioVersion.
+
+The Player Task response exposes every persisted AgentPlan through `plan_history`. Only meaningful
+TOOL actions are projected: internal WAIT/settle steps stay hidden. Superseded plans are frozen for
+display, with their non-terminal actions mapped to player-facing cancellation; replan appends a new
+entry rather than overwriting the previous plan. Formal Play does not render Mission Roadmap.
 
 ### Developer
 

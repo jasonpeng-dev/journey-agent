@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import Settings
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.base import Base
@@ -19,8 +20,8 @@ from app.scenarios.validation import (
     ScenarioDefinitionValidator,
     ScenarioValidationIssue,
 )
+from app.services.composition import configured_play_orchestrator
 from app.services.game_lifecycle import PLATFORM_PLAYER_ID
-from app.services.play import PlayOrchestrator
 from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
@@ -39,8 +40,9 @@ class DraftSandboxResult:
 class DraftSandboxService:
     """Validate in the caller DB, then run only in a disposable in-memory DB."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, settings: Settings) -> None:
         self.db = db
+        self.settings = settings
 
     def test(
         self,
@@ -74,6 +76,7 @@ class DraftSandboxService:
             definition=validation.definition,
             issues=validation.issues,
             goal=goal.strip() if goal and goal.strip() else None,
+            settings=self.settings,
         )
 
     @staticmethod
@@ -84,6 +87,7 @@ class DraftSandboxService:
         definition: ScenarioDefinitionV2,
         issues: tuple[ScenarioValidationIssue, ...],
         goal: str | None,
+        settings: Settings,
     ) -> DraftSandboxResult:
         engine = create_engine(
             "sqlite+pysqlite:///:memory:",
@@ -105,9 +109,16 @@ class DraftSandboxService:
                 )
                 goal_status: str | None = None
                 if goal is not None:
-                    submission = PlayOrchestrator(
-                        sandbox, GameInstanceId(runtime.instance.id)
-                    ).submit_goal(goal, idempotency_key=f"draft-sandbox-goal:{uuid4()}")
+                    orchestrator = configured_play_orchestrator(
+                        sandbox,
+                        GameInstanceId(runtime.instance.id),
+                        settings,
+                    )
+                    submission = orchestrator.submit_goal(
+                        goal, idempotency_key=f"draft-sandbox-goal:{uuid4()}"
+                    )
+                    if submission.task is not None:
+                        orchestrator.advance_sandbox_until_pause(submission.task)
                     goal_status = (
                         submission.task.status.value
                         if submission.task is not None

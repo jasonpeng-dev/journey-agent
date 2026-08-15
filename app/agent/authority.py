@@ -10,7 +10,7 @@ from app.domain.scenario_v2 import (
     AuthorityPolicyV2,
     ScenarioDefinitionV2,
     StrictScalar,
-    validate_action_parameters,
+    normalize_action_parameters,
 )
 from app.infrastructure.db.models import GameInstanceActor
 
@@ -49,7 +49,7 @@ def evaluate_authority(
     parameters: dict[str, StrictScalar],
 ) -> GenericAuthorityDecision:
     try:
-        validate_action_parameters(action, parameters)
+        parameters = normalize_action_parameters(action, parameters)
     except ValueError:
         return _deny("ACTION_PARAMETERS_INVALID")
     if actor.status != "ACTIVE":

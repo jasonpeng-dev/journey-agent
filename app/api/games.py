@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any, Literal, Never
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentError
+from app.agent.provider import GenericProviderError
 from app.api.schemas.phase_d import (
     ApprovalDecisionRequest,
     GameSummaryResponse,
@@ -18,8 +19,10 @@ from app.api.schemas.phase_d import (
     GoalSubmissionStatus,
     NewGameRequest,
     PlayerGameStateResponse,
+    PlayerPacingRequest,
     PublicGameStatus,
 )
+from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.domain.enums import AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
@@ -31,10 +34,11 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.infrastructure.db.session import get_db
+from app.services.composition import configured_play_orchestrator
 from app.services.game_instances import GameInstanceError
 from app.services.game_lifecycle import GameLifecycleError, GameLifecycleService
 from app.services.generic_actions import GenericActionError
-from app.services.play import PlayError, PlayOrchestrator
+from app.services.play import PlayError
 from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationError
 
@@ -96,11 +100,12 @@ def submit_goal(
     game_instance_id: UUID,
     request: GoalSubmissionRequest,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> GoalSubmissionResponse:
     try:
-        submission = PlayOrchestrator(db, GameInstanceId(game_instance_id)).submit_goal(
-            request.goal, idempotency_key=request.idempotency_key
-        )
+        submission = configured_play_orchestrator(
+            db, GameInstanceId(game_instance_id), settings
+        ).submit_goal(request.goal, idempotency_key=request.idempotency_key)
         if submission.task is None:
             db.rollback()
             status_value = GoalSubmissionStatus(submission.resolution.status)
@@ -119,16 +124,27 @@ def submit_goal(
         GameLifecycleError,
         GenericAgentError,
         GenericActionError,
+        GenericProviderError,
         PlayError,
     ) as exc:
         db.rollback()
         _raise_http(exc)
 
 
-@router.post("/{game_instance_id}/continue", response_model=PlayerGameStateResponse)
-def continue_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> PlayerGameStateResponse:
+@router.post(
+    "/{game_instance_id}/play/acknowledge-action",
+    response_model=PlayerGameStateResponse,
+)
+def acknowledge_action(
+    game_instance_id: UUID,
+    request: PlayerPacingRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PlayerGameStateResponse:
     try:
-        PlayOrchestrator(db, GameInstanceId(game_instance_id)).continue_current()
+        configured_play_orchestrator(
+            db, GameInstanceId(game_instance_id), settings
+        ).acknowledge_action(expected_pacing_version=request.expected_pacing_version)
         db.commit()
         return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
     except (
@@ -136,6 +152,35 @@ def continue_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> Play
         GameLifecycleError,
         GenericAgentError,
         GenericActionError,
+        GenericProviderError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
+@router.post(
+    "/{game_instance_id}/play/acknowledge-debrief",
+    response_model=PlayerGameStateResponse,
+)
+def acknowledge_debrief(
+    game_instance_id: UUID,
+    request: PlayerPacingRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PlayerGameStateResponse:
+    try:
+        configured_play_orchestrator(
+            db, GameInstanceId(game_instance_id), settings
+        ).acknowledge_debrief(expected_pacing_version=request.expected_pacing_version)
+        db.commit()
+        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        GenericProviderError,
         PlayError,
     ) as exc:
         db.rollback()
@@ -151,8 +196,9 @@ def approve_action(
     decision_id: UUID,
     request: ApprovalDecisionRequest,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> PlayerGameStateResponse:
-    return _decide_action(db, game_instance_id, decision_id, request, approve=True)
+    return _decide_action(db, game_instance_id, decision_id, request, settings, approve=True)
 
 
 @router.post(
@@ -164,8 +210,9 @@ def reject_action(
     decision_id: UUID,
     request: ApprovalDecisionRequest,
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> PlayerGameStateResponse:
-    return _decide_action(db, game_instance_id, decision_id, request, approve=False)
+    return _decide_action(db, game_instance_id, decision_id, request, settings, approve=False)
 
 
 @router.post("/{game_instance_id}/archive", response_model=GameSummaryResponse)
@@ -174,6 +221,17 @@ def archive_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> GameS
         game = GameLifecycleService(db).archive(game_instance_id)
         db.commit()
         return game_summary(db, game)
+    except GameLifecycleError as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
+@router.delete("/{game_instance_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> Response:
+    try:
+        GameLifecycleService(db).delete(game_instance_id)
+        db.commit()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     except GameLifecycleError as exc:
         db.rollback()
         _raise_http(exc)
@@ -263,11 +321,12 @@ def _decide_action(
     game_instance_id: UUID,
     decision_id: UUID,
     request: ApprovalDecisionRequest,
+    settings: Settings,
     *,
     approve: bool,
 ) -> PlayerGameStateResponse:
     try:
-        PlayOrchestrator(db, GameInstanceId(game_instance_id)).decide(
+        configured_play_orchestrator(db, GameInstanceId(game_instance_id), settings).decide(
             decision_id,
             approve=approve,
             expected_task_version=request.expected_task_version,
@@ -279,6 +338,7 @@ def _decide_action(
         GameLifecycleError,
         GenericAgentError,
         GenericActionError,
+        GenericProviderError,
         PlayError,
     ) as exc:
         db.rollback()
@@ -291,11 +351,19 @@ def _raise_http(
         | GameLifecycleError
         | GenericActionError
         | GenericAgentError
+        | GenericProviderError
         | PlayError
         | RuntimeInitializationError
     ),
 ) -> Never:
-    status_code = 404 if exc.code.endswith("NOT_FOUND") else 409
+    if exc.code == "MODEL_PROVIDER_TIMEOUT":
+        status_code = 504
+    elif exc.code.startswith("MODEL_PROVIDER_"):
+        status_code = 502
+    elif exc.code == "RUNTIME_CONTRACT_ERROR" or exc.code.startswith("RULE_"):
+        status_code = 500
+    else:
+        status_code = 404 if exc.code.endswith("NOT_FOUND") else 409
     raise AppError(exc.code, exc.message, status_code=status_code) from exc
 
 

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentError, GenericAgentService, GenericGoalResolver
+from app.agent.planning_context import legal_candidate_id
 from app.agent.provider import (
     GoalSelection,
     GoalSelectionRequest,
@@ -51,6 +52,18 @@ class FakeProvider:
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_request = request
         return PlanProposal(steps=self.proposed)
+
+
+def _provider_step(
+    action_key: str,
+    target_key: str,
+    actor_key: str,
+    parameters: dict[str, object],
+) -> PlanStepProposal:
+    return PlanStepProposal(
+        candidate_id=legal_candidate_id(action_key, actor_key, target_key),
+        parameters=parameters,  # type: ignore[arg-type]
+    )
 
 
 def _runtime(session: Session, document: dict | None = None):  # type: ignore[type-arg,no-untyped-def]
@@ -234,14 +247,7 @@ def test_provider_goal_and_plan_are_structured_exact_version_and_validated(
     _definition, runtime, scope = _runtime(session)
     provider = FakeProvider(
         selected=("stabilize_patient",),
-        proposed=(
-            PlanStepProposal(
-                action_key="treat_patient",
-                target_key="patient_one",
-                actor_key="doctor_lee",
-                parameters={"dosage": 2},
-            ),
-        ),
+        proposed=(_provider_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 2}),),
     )
     agent = GenericAgentService(session, scope, provider=provider)
     task = agent.create_task(runtime.session, "work out what is wrong")
@@ -261,17 +267,10 @@ def test_provider_goal_and_plan_are_structured_exact_version_and_validated(
 
     bad = FakeProvider(
         selected=("stabilize_patient",),
-        proposed=(
-            PlanStepProposal(
-                action_key="treat_patient",
-                target_key="patient_one",
-                actor_key="invented_actor",
-                parameters={"dosage": 2},
-            ),
-        ),
+        proposed=(_provider_step("treat_patient", "patient_one", "invented_actor", {"dosage": 2}),),
     )
     with pytest.raises(GenericAgentError) as caught:
         GenericAgentService(session, scope, provider=bad).create_task(
             runtime.session, "another unclear diagnosis request"
         )
-    assert caught.value.code == "GENERIC_PROVIDER_PLAN_INVALID"
+    assert caught.value.code == "MODEL_PLAN_REJECTED"

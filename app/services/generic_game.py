@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from app.agent.authority import actor_binding_matches, evaluate_authority
 from app.domain.enums import AuthorityOutcome, NodeStatus
 from app.domain.runtime_scope import RuntimeScope
-from app.domain.scenario_v2 import ScenarioDefinitionV2, StrictScalar
+from app.domain.scenario_v2 import (
+    ScenarioDefinitionV2,
+    StrictScalar,
+    normalize_action_parameters,
+)
 from app.domain.world import AccessState, Visibility
 from app.engine.rules import (
     ActionRuleContext,
@@ -34,16 +38,26 @@ from app.services.game_lifecycle import require_scope_writable
 
 
 class GenericGameError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.retryable = retryable
 
 
 @dataclass(frozen=True, slots=True)
 class AppliedRuleResult:
     outcome: GenericRuleOutcome
     runtime_revision: int
+    knowledge_changes: tuple[PlayerKnowledgeChange, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerKnowledgeChange:
+    kind: str
+    key: str
+    name: str
+    value: StrictScalar | None = None
 
 
 class GenericGameService:
@@ -77,6 +91,10 @@ class GenericGameService:
                 "ACTION_NOT_AUTHORIZED",
                 "The exact Version Actor is not authorized for this Action",
             )
+        try:
+            parameters = normalize_action_parameters(action, parameters)
+        except ValueError as exc:
+            raise GenericGameError("ACTION_PARAMETERS_INVALID", str(exc)) from exc
         self._require_authority(actor, action, parameters, approval_granted)
         target = definition.world.node(target_node_key)
         if target is None or action.required_interaction_key not in target.interaction_keys:
@@ -93,6 +111,7 @@ class GenericGameService:
             raise GenericGameError(
                 "ACTION_TARGET_UNAVAILABLE",
                 "The target is not known and accessible in this Instance",
+                retryable=True,
             )
         context = ActionRuleContext(
             action_key=action_key,
@@ -109,11 +128,51 @@ class GenericGameService:
                 runtime_revision=self._instance().runtime_revision,
             )
         outcome = engine.evaluate_resolution(state, context)
+        newly_known_facts = {
+            (item.node_key, item.fact_key)
+            for item in outcome.fact_visibility_updates
+            if item.visibility == Visibility.KNOWN
+            and state.facts[(item.node_key, item.fact_key)].visibility != Visibility.KNOWN
+        }
+        newly_known_nodes = {
+            item.node_key
+            for item in outcome.node_visibility_updates
+            if item.visibility == Visibility.KNOWN
+            and state.nodes[item.node_key].visibility != Visibility.KNOWN
+        }
         self._apply(definition, actor_key, outcome)
         instance = self._instance()
         instance.runtime_revision += 1
         self.db.flush()
-        return AppliedRuleResult(outcome=outcome, runtime_revision=instance.runtime_revision)
+        knowledge_changes: list[PlayerKnowledgeChange] = []
+        for node_key in sorted(newly_known_nodes):
+            node = definition.world.node(node_key)
+            assert node is not None
+            knowledge_changes.append(
+                PlayerKnowledgeChange(
+                    kind="NODE_REVEALED",
+                    key=node_key,
+                    name=node.name,
+                )
+            )
+        for node_key, fact_key in sorted(newly_known_facts):
+            node = definition.world.node(node_key)
+            assert node is not None
+            fact = next(item for item in node.facts if item.key == fact_key)
+            row = self._fact_row(node_key, fact_key)
+            knowledge_changes.append(
+                PlayerKnowledgeChange(
+                    kind="FACT_REVEALED",
+                    key=f"{node_key}.{fact_key}",
+                    name=fact.name,
+                    value=row.truth_value,
+                )
+            )
+        return AppliedRuleResult(
+            outcome=outcome,
+            runtime_revision=instance.runtime_revision,
+            knowledge_changes=tuple(knowledge_changes),
+        )
 
     def preflight(
         self,
@@ -137,6 +196,10 @@ class GenericGameService:
                 "ACTION_NOT_AUTHORIZED",
                 "The exact Version Actor is not authorized for this Action",
             )
+        try:
+            parameters = normalize_action_parameters(action, parameters)
+        except ValueError as exc:
+            raise GenericGameError("ACTION_PARAMETERS_INVALID", str(exc)) from exc
         self._require_authority(actor, action, parameters, approval_granted)
         target = definition.world.node(target_node_key)
         if target is None or action.required_interaction_key not in target.interaction_keys:
@@ -153,6 +216,7 @@ class GenericGameService:
             raise GenericGameError(
                 "ACTION_TARGET_UNAVAILABLE",
                 "The target is not known and accessible in this Instance",
+                retryable=True,
             )
         return DeclarativeRuleEngine(definition).evaluate_preflight(
             state,
@@ -361,4 +425,9 @@ class GenericGameService:
         return row
 
 
-__all__ = ["AppliedRuleResult", "GenericGameError", "GenericGameService"]
+__all__ = [
+    "AppliedRuleResult",
+    "GenericGameError",
+    "GenericGameService",
+    "PlayerKnowledgeChange",
+]
