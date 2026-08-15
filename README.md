@@ -129,9 +129,48 @@ MODEL_TIMEOUT_SECONDS=60
 The ScenarioVersion remains provider-agnostic. The backend records secret-safe call metadata
 (call type, latency, context bytes, and usage fields when supplied) and never logs the API key.
 
-## Run locally
+## Docker Quick Start
 
-The supported toolchain is Python 3.12, Node 22, and `uv` for the Python environment.
+Docker is the shortest path for a first-time user. Docker Compose builds the React bundle, serves
+it from the existing FastAPI application, runs Alembic and the idempotent built-in seed on
+startup, and stores SQLite data in a named volume.
+
+```powershell
+git clone <repository-url>
+cd journey-agent
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+On macOS/Linux, use `cp .env.example .env` for the third line.
+
+Open `http://localhost:8000`. Mock mode is the default and does not need an API key. To use a
+real OpenAI-compatible provider, edit `.env` before starting and set `MODEL_PROVIDER`,
+`MODEL_BASE_URL`, `MODEL_NAME`, and your local `MODEL_API_KEY`; DeepSeek configuration is shown
+in the Provider section above. The key is read at runtime and is not copied into the image.
+
+The API container exposes:
+
+- `http://localhost:8000/` — the browser product
+- `http://localhost:8000/health` — process health
+- `http://localhost:8000/ready` — database readiness (also used by the Compose healthcheck)
+
+Normal lifecycle commands are:
+
+```powershell
+docker compose stop
+docker compose start
+docker compose down
+docker compose up
+```
+
+The named `journey-data` volume preserves `GameInstance`, `AgentTask`, and Scenario data across
+stop/start and normal `down`/`up`. To intentionally reset all local Docker data, use
+`docker compose down -v` and then `docker compose up --build`.
+
+## Manual local development
+
+The supported development toolchain is Python 3.12, Node 22, and `uv` for the Python environment.
 
 ### Backend
 
@@ -145,9 +184,9 @@ uv run python -m app.seed
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Edit `.env` before starting if you need PostgreSQL or an OpenAI-compatible provider. The seed
-command publishes the built-in Starfire and Medical V2 definitions through the normal Scenario
-lifecycle. `/health` and `/ready` are available once the API is running.
+Edit `.env` before starting if you need an OpenAI-compatible provider. The seed command publishes
+the built-in Starfire and Medical V2 definitions through the normal Scenario lifecycle. `/health`
+and `/ready` are available once the API is running.
 
 ### Frontend
 
@@ -161,12 +200,6 @@ npm run dev -- --host 127.0.0.1 --port 4173
 
 Open `http://127.0.0.1:4173`. Vite proxies `/api` to the backend on port 8000. For a production
 bundle, run `npm run build`; when `frontend/dist` exists, the FastAPI app can serve that bundle.
-
-### Docker-backed PostgreSQL (optional)
-
-`docker-compose.yml` provides a PostgreSQL 16 service and an API image. Set
-`POSTGRES_PASSWORD` and the model settings in the environment before using `docker compose up`.
-The SQLite `.env.example` setup is the smallest local path.
 
 ## HTTP/API and pages
 

@@ -124,7 +124,46 @@ MODEL_TIMEOUT_SECONDS=60
 ScenarioVersion 与 provider 无关。Backend 会记录不含 secret 的 call metadata（call type、
 latency、context bytes，以及 provider 返回时的 usage 字段），不会记录 API key。
 
-## 本地运行
+## Docker 快速启动
+
+第一次使用时，Docker 是最简单的路径。Docker Compose 会构建 React 前端，由现有 FastAPI
+应用提供浏览器页面，启动时自动执行 Alembic migration 和幂等的内置 seed，并把 SQLite
+数据保存在 named volume 中。
+
+```powershell
+git clone <repository-url>
+cd journey-agent
+Copy-Item .env.example .env
+docker compose up --build
+```
+
+在 macOS/Linux 上，第三行使用 `cp .env.example .env`。
+
+打开 `http://localhost:8000`。默认是 mock 模式，不需要 API key。如果要使用真实的
+OpenAI-compatible provider，请在启动前编辑 `.env`，填写 `MODEL_PROVIDER`、
+`MODEL_BASE_URL`、`MODEL_NAME` 和本地 `MODEL_API_KEY`；上面的 Provider 章节包含 DeepSeek
+示例。API key 只在运行时读取，不会复制进 Docker image。
+
+容器提供以下地址：
+
+- `http://localhost:8000/` — 浏览器产品入口
+- `http://localhost:8000/health` — 进程健康状态
+- `http://localhost:8000/ready` — 数据库 readiness，也用于 Compose healthcheck
+
+正常停止、重启和启动：
+
+```powershell
+docker compose stop
+docker compose start
+docker compose down
+docker compose up
+```
+
+named `journey-data` volume 会在 stop/start 以及正常 `down`/`up` 后保留 GameInstance、
+AgentTask 和 Scenario 数据。如果确实要重置所有本地 Docker 数据，执行
+`docker compose down -v`，然后再次运行 `docker compose up --build`。
+
+## 手工本地开发
 
 当前支持的工具链是 Python 3.12、Node 22 和 Python 环境管理工具 `uv`。
 
@@ -140,9 +179,9 @@ uv run python -m app.seed
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-如果需要 PostgreSQL 或 OpenAI-compatible provider，请在启动前编辑 `.env`。seed 命令会通过
-正常 Scenario lifecycle 发布内置的 Starfire 与 Medical V2 definition。服务启动后可访问
-`/health` 和 `/ready`。
+如果需要 OpenAI-compatible provider，请在启动前编辑 `.env`。seed 命令会通过正常 Scenario
+lifecycle 发布内置的 Starfire 与 Medical V2 definition。服务启动后可访问 `/health` 和
+`/ready`。
 
 ### Frontend
 
@@ -156,12 +195,6 @@ npm run dev -- --host 127.0.0.1 --port 4173
 
 打开 `http://127.0.0.1:4173`。Vite 会把 `/api` 代理到 8000 端口的 Backend。构建生产包时
 运行 `npm run build`；存在 `frontend/dist` 后，FastAPI 也可以直接提供该静态包。
-
-### 可选的 Docker PostgreSQL
-
-`docker-compose.yml` 提供 PostgreSQL 16 和 API image。运行 `docker compose up` 前设置
-`POSTGRES_PASSWORD` 以及 model 相关环境变量。最简单的本地路径仍然是 `.env.example` 的
-SQLite 配置。
 
 ## HTTP/API 与页面
 
