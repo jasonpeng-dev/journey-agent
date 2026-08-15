@@ -40,6 +40,13 @@ def _start_approval_game(client: TestClient, version_id: str) -> tuple[str, dict
     )
     assert goal.status_code == 200, goal.text
     briefing = goal.json()["task"]
+    assert briefing["execution_phase"] == "AWAITING_PLAN_START"
+    planning = client.post(
+        f"/api/v1/games/{game['id']}/play/start-planning",
+        json={"expected_pacing_version": briefing["pacing_version"]},
+    )
+    assert planning.status_code == 200, planning.text
+    briefing = planning.json()["current_task"]
     assert briefing["execution_phase"] == "AWAITING_ACTION_ACK"
     state = client.post(
         f"/api/v1/games/{game['id']}/play/acknowledge-action",

@@ -105,6 +105,17 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .console-resource-grid small { color: var(--console-soft); font-size: 10px; }
 .console-resource-grid strong { font: 23px Georgia, serif; }
 .console-resource-grid em { color: var(--console-soft); font-size: 9px; }
+.knowledge-accordions { display: grid; gap: 10px; }
+.knowledge-accordion { overflow: hidden; border: 1px solid #e4ddcf; border-radius: 14px; background: rgb(255 255 255 / 70%); }
+.knowledge-accordion-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 0; color: var(--console-ink); background: transparent; cursor: pointer; text-align: left; }
+.knowledge-accordion-toggle:hover { background: #faf8f3; }
+.knowledge-accordion-heading, .knowledge-accordion-heading strong, .knowledge-accordion-heading small { display: block; }
+.knowledge-accordion-heading strong { font-size: 13px; }
+.knowledge-accordion-heading small { margin-top: 4px; color: var(--console-soft); font-size: 10px; }
+.knowledge-accordion-action { flex: 0 0 auto; color: var(--console-jade); font-size: 10px; font-weight: 800; }
+.knowledge-accordion-content { padding: 0 10px 10px; }
+.knowledge-accordion-content .console-resource-grid { padding-top: 1px; }
+.knowledge-accordion-content .console-fact-list { background: rgb(255 255 255 / 80%); }
 .console-subheading { display: flex; align-items: end; justify-content: space-between; gap: 8px; margin: 25px 0 10px; }
 .console-subheading h2 { margin: 0; font-size: 14px; }
 .console-subheading span { color: var(--console-soft); font-size: 9px; }
@@ -115,10 +126,33 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .console-fact-list strong { font-size: 12px; }
 .console-fact-list small { margin-top: 2px; color: var(--console-soft); font-size: 9px; }
 .fact-chip { max-width: 48%; overflow: hidden; padding: 5px 8px; border-radius: 999px; color: #216b52; background: var(--console-jade-soft); font-size: 10px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
-.conversation-column-v2 { display: flex; min-width: 0; min-height: 740px; max-height: calc(100vh - 190px); flex-direction: column; gap: 18px; }
-.mission-log-panel { display: flex; min-height: 0; flex: 1 1 55%; flex-direction: column; }
-.current-report-panel { flex: 0 0 auto; }
-.timeline-scroll { min-height: 260px; flex: 1; overflow: auto; padding: 2px 5px 4px; }
+.conversation-column-v2 { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 18px; }
+.mission-log-panel { display: flex; min-height: 0; height: clamp(360px, 52vh, 560px); flex: 0 0 auto; flex-direction: column; }
+.current-report-panel { min-width: 0; flex: 0 0 auto; overflow: visible; }
+.goal-composer-panel { min-width: 0; flex: 0 0 auto; }
+.goal-composer-panel .command-composer-v2 { margin-top: 0; padding-top: 0; border-top: 0; }
+.timeline-scroll { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 2px 5px 4px; }
+.task-tabs { display: flex; flex-shrink: 0; gap: 8px; min-height: 0; margin: -3px 0 12px; padding: 2px 1px 7px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--console-line); }
+.task-tabs button { display: grid; min-width: 150px; gap: 3px; padding: 8px 10px; border: 1px solid #e4ddcf; border-radius: 10px; color: var(--console-ink); background: #fffdf9; cursor: pointer; text-align: left; }
+.task-tabs button.selected { border-color: #77a895; background: var(--console-jade-soft); }
+.task-tabs button span { color: var(--console-soft); font-size: 9px; font-weight: 800; letter-spacing: .08em; }
+.task-tabs button strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.task-tabs button em { width: fit-content; padding: 2px 6px; border-radius: 999px; font-size: 9px; font-style: normal; font-weight: 800; }
+.task-tabs button em.success { color: #216b52; background: var(--console-jade-soft); }
+.task-tabs button em.warning { color: #8b5a13; background: var(--console-gold-soft); }
+.task-tabs button em.danger { color: #9c3d36; background: var(--console-danger-soft); }
+.task-tabs button em.neutral { color: #5d6964; background: #eeeae1; }
+.pending-task-tabs { flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; color: var(--console-soft); background: #faf8f3; }
+.pending-task-tabs span { font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+.pending-task-tabs strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.play-waiting-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding: 11px 13px; border: 1px dashed #d6ae69; border-radius: 10px; color: #80561b; background: #fff8e9; font-size: 12px; }
+.play-waiting-status strong { font-variant-numeric: tabular-nums; }
+.timeline-entry-content { min-width: 0; flex: 1 1 auto; }
+.timeline-entry-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.timeline-entry-heading > small:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-duration { flex: 0 0 auto; margin: 1px 0 4px; color: var(--console-soft); font-size: 10px; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.task-loading-notice { margin: 12px; padding: 10px 12px; border: 1px dashed var(--console-line); border-radius: 9px; color: var(--console-soft); background: #faf8f3; font-size: 11px; }
+.historical-task-notice { margin: 0 0 13px; padding: 9px 12px; border-radius: 9px; color: #6b736f; background: #f1efe8; font-size: 11px; }
 .console-welcome { display: flex; align-items: flex-start; gap: 13px; padding: 18px; border: 1px solid #dfd8ca; border-radius: 15px; background: #fffdf8; }
 .console-welcome > span { display: grid; width: 42px; height: 42px; flex: 0 0 auto; place-items: center; border-radius: 12px; color: white; background: var(--console-jade); font: 20px Georgia, serif; }
 .console-welcome strong, .console-welcome p { display: block; margin: 0; }
@@ -159,8 +193,12 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .player-checkpoint button { margin-top: 10px; padding: 11px 18px; border: 0; border-radius: 9px; color: white; background: var(--console-jade); cursor: pointer; }
 .player-checkpoint button:disabled { cursor: wait; opacity: .55; }
 .player-checkpoint.failed { border-color: #d7a8a2; background: #fff4f1; }
+.goal-receiving-card { border-color: #d9d2c5; background: #faf8f3; }
+.goal-receiving-card p { margin-bottom: 0; }
+.goal-accepted-card { border-color: #a7c9bb; background: #f1f8f5; }
 .debrief-replan { margin-top: 12px; padding: 10px 12px; border-radius: 9px; background: var(--console-gold-soft); }
 .debrief-replan p { margin: 4px 0 0; }
+.debrief-replan button { margin-top: 8px; padding: 7px 10px; color: #80561b; border: 1px solid #d6ae69; border-radius: 7px; background: #fff8e9; cursor: pointer; }
 .danger-button { color: #953a33 !important; background: var(--console-danger-soft) !important; }
 .current-report-terminal { padding: 16px; border-radius: 12px; background: #eeeae1; }
 .current-report-terminal.success { color: #216b52; background: var(--console-jade-soft); }
@@ -193,6 +231,7 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .current-plan-section { margin-top: 22px; padding-top: 2px; border-top: 1px solid var(--console-line); }
 .plan-reason { margin: -2px 0 8px; padding: 8px 10px; border-radius: 8px; color: #7b541a; background: var(--console-gold-soft); font-size: 10px; }
 .plan-history { display: grid; gap: 11px; }
+.plan-waiting-message { margin: 0 0 14px; padding: 11px 13px; border-radius: 10px; color: #80561b; background: #fff8e9; font-size: 12px; }
 .plan-history-card { overflow: hidden; border: 1px solid #e4ddcf; border-radius: 13px; background: #fffdf9; }
 .plan-history-card.adjusted { background: #faf8f3; }
 .plan-history-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 0; color: var(--console-ink); background: transparent; cursor: pointer; text-align: left; }

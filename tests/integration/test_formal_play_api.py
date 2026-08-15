@@ -37,6 +37,16 @@ def _ack_action(client: TestClient, game_id: str, task: dict[str, Any]) -> dict[
     return response.json()["current_task"]
 
 
+def _start_planning(client: TestClient, game_id: str, task: dict[str, Any]) -> dict[str, Any]:
+    response = client.post(
+        f"/api/v1/games/{game_id}/play/start-planning",
+        json={"expected_pacing_version": task["pacing_version"]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["current_task"] is not None
+    return response.json()["current_task"]
+
+
 def _ack_debrief(client: TestClient, game_id: str, task: dict[str, Any]) -> dict[str, Any]:
     response = client.post(
         f"/api/v1/games/{game_id}/play/acknowledge-debrief",
@@ -54,9 +64,18 @@ def _drive_task(
     for _ in range(30):
         if task["execution_phase"] in ("COMPLETED", "BLOCKED", "ABORTED"):
             return task, action_results
-        if task["execution_phase"] == "AWAITING_ACTION_ACK":
+        if task["execution_phase"] == "AWAITING_PLAN_START":
+            task = _start_planning(client, game_id, task)
+        elif task["execution_phase"] == "AWAITING_ACTION_ACK":
             task = _ack_action(client, game_id, task)
             action_results.append(task)
+        elif task["execution_phase"] == "AWAITING_REPLAN_ACK":
+            response = client.post(
+                f"/api/v1/games/{game_id}/play/replan",
+                json={"expected_pacing_version": task["pacing_version"]},
+            )
+            assert response.status_code == 200, response.text
+            task = response.json()["current_task"]
         elif task["execution_phase"] == "AWAITING_DEBRIEF_ACK":
             task = _ack_debrief(client, game_id, task)
         else:
@@ -101,13 +120,21 @@ def test_goal_submission_stops_at_first_briefing_and_ack_runs_one_action_cycle(
     assert goal.status_code == 200, goal.text
     task = goal.json()["task"]
     assert task["status"] == "ACTIVE"
+    assert task["execution_phase"] == "AWAITING_PLAN_START"
+    assert task["briefing"] is None
+    assert task["debrief"] is None
+    assert task["plan_history"] == []
+    goal_event = next(event for event in task["timeline"] if event["kind"] == "GOAL_ACCEPTED")
+    assert goal_event["duration_ms"] is not None
+    task = _start_planning(client, game_id, task)
     assert task["execution_phase"] == "AWAITING_ACTION_ACK"
     assert task["briefing"]["action_name"] == "侦察北部山谷"
-    assert task["debrief"] is None
     assert len(task["plan_history"]) == 1
     assert task["plan_history"][0]["ordinal"] == 1
     assert task["plan_history"][0]["steps"][0]["status"] == "CURRENT"
     assert task["plan_history"][0]["steps"][0]["action_name"] == "侦察北部山谷"
+    plan_event = next(event for event in task["timeline"] if event["kind"] == "PLAN_CREATED")
+    assert plan_event["duration_ms"] is not None
     persisted_plan = session.scalar(select(AgentPlan).where(AgentPlan.task_id == UUID(task["id"])))
     assert persisted_plan is not None
     persisted_tool_steps = tuple(
@@ -194,8 +221,10 @@ def test_failure_debrief_contains_knowledge_and_same_task_replan(
 
     failed_round: dict[str, Any] | None = None
     for _ in range(10):
+        if task["execution_phase"] == "AWAITING_PLAN_START":
+            task = _start_planning(client, game_id, task)
         task = _ack_action(client, game_id, task)
-        if task["execution_phase"] == "AWAITING_DEBRIEF_ACK" and not task["debrief"]["success"]:
+        if task["execution_phase"] == "AWAITING_REPLAN_ACK":
             failed_round = task
             break
         if task["execution_phase"] == "AWAITING_DEBRIEF_ACK":
@@ -203,32 +232,52 @@ def test_failure_debrief_contains_knowledge_and_same_task_replan(
     assert failed_round is not None
     assert failed_round["id"] == original_task_id
     assert failed_round["debrief"]["knowledge_changes"]
-    assert failed_round["debrief"]["plan_adjusted"] is True
-    assert any(event["kind"] == "PLAN_UPDATED" for event in failed_round["timeline"])
+    assert failed_round["debrief"]["success"] is False
+    assert not any(event["kind"] == "PLAN_UPDATED" for event in failed_round["timeline"])
+    initial_plan_event = next(
+        event for event in failed_round["timeline"] if event["kind"] == "PLAN_CREATED"
+    )
     assert any(
         change["key"] == "enemy_north_supply_route.supply_status"
         for change in failed_round["debrief"]["knowledge_changes"]
     )
-    assert len(failed_round["plan_history"]) >= 2
-    old_plan = failed_round["plan_history"][-2]
+    assert len(failed_round["plan_history"]) == 1
+    replanned_response = client.post(
+        f"/api/v1/games/{game_id}/play/replan",
+        json={"expected_pacing_version": failed_round["pacing_version"]},
+    )
+    assert replanned_response.status_code == 200, replanned_response.text
+    replanned = replanned_response.json()["current_task"]
+    assert replanned["id"] == original_task_id
+    assert replanned["execution_phase"] == "AWAITING_ACTION_ACK"
+    assert replanned["debrief"] is None
+    replanned_event = next(
+        event for event in replanned["timeline"] if event["kind"] == "PLAN_UPDATED"
+    )
+    assert replanned_event["detail"] is not None
+    assert initial_plan_event["detail"] is not None
+    assert len(replanned["plan_history"]) >= 2
+    old_plan = replanned["plan_history"][-2]
     old_plan_snapshot = dict(old_plan)
-    new_plan = failed_round["plan_history"][-1]
+    new_plan = replanned["plan_history"][-1]
     assert old_plan["status"] == "ADJUSTED"
     assert any(step["status"] == "FAILED" for step in old_plan["steps"])
     assert all(step["status"] in {"COMPLETED", "FAILED", "CANCELLED"} for step in old_plan["steps"])
     assert new_plan["ordinal"] == old_plan["ordinal"] + 1
     assert new_plan["status"] == "EXECUTING"
     assert "supply_status" not in str(new_plan)
-    task = _ack_debrief(client, game_id, failed_round)
-    assert task["execution_phase"] == "AWAITING_ACTION_ACK"
-    assert task["briefing"] is not None
-    completed, _ = _drive_task(client, game_id, task)
+    assert replanned["briefing"] is not None
+    completed, _ = _drive_task(client, game_id, replanned)
     assert completed["status"] == "COMPLETED"
     assert completed["explanation"] is None
     assert (
         next(plan for plan in completed["plan_history"] if plan["id"] == old_plan_snapshot["id"])
         == old_plan_snapshot
     )
+    completed_replanned_event = next(
+        event for event in completed["timeline"] if event["id"] == replanned_event["id"]
+    )
+    assert completed_replanned_event["detail"] == replanned_event["detail"]
     persisted = session.get(AgentTask, UUID(original_task_id))
     assert persisted is not None
     assert persisted.objective_scope_keys == ["secure_northern_valley"]
@@ -245,9 +294,10 @@ def test_trade_goal_advances_one_cycle_per_ack_and_preserves_scope(
         f"/api/v1/games/{game_id}/goals",
         json={"goal": "open the northern trade route", "idempotency_key": str(uuid4())},
     ).json()["task"]
+    task = _start_planning(client, game_id, task)
     first_briefing_id = task["briefing"]["step_id"]
     after_one = _ack_action(client, game_id, task)
-    assert after_one["execution_phase"] == "AWAITING_DEBRIEF_ACK"
+    assert after_one["execution_phase"] in {"AWAITING_DEBRIEF_ACK", "AWAITING_REPLAN_ACK"}
     assert sum(event["kind"] == "ACTION_RESULT" for event in after_one["timeline"]) == 1
     assert after_one["debrief"]["step_id"] == first_briefing_id
     operation_count = session.scalar(
@@ -265,7 +315,16 @@ def test_trade_goal_advances_one_cycle_per_ack_and_preserves_scope(
         )
     )
 
-    task = _ack_debrief(client, game_id, after_one)
+    if not after_one["debrief"]["success"]:
+        replan_response = client.post(
+            f"/api/v1/games/{game_id}/play/replan",
+            json={"expected_pacing_version": after_one["pacing_version"]},
+        )
+        assert replan_response.status_code == 200, replan_response.text
+        after_one = replan_response.json()["current_task"]
+    elif after_one["execution_phase"] == "AWAITING_DEBRIEF_ACK":
+        after_one = _ack_debrief(client, game_id, after_one)
+    task = after_one
     assert (
         session.scalar(
             select(func.count())
@@ -299,6 +358,44 @@ def test_trade_goal_advances_one_cycle_per_ack_and_preserves_scope(
     assert persisted.objective_scope_keys == ["open_northern_trade_route"]
 
 
+def test_play_state_exposes_task_history_and_scopes_selected_task(
+    client: TestClient, session: Session
+) -> None:
+    scenario = next(
+        item for item in client.get("/api/v1/scenarios").json() if item["key"] == "starfire_command"
+    )
+    game_id = _new_game(client, scenario["current_published_version_id"])
+    first = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "gather valley intelligence", "idempotency_key": str(uuid4())},
+    ).json()["task"]
+    completed, _ = _drive_task(client, game_id, first)
+    assert completed["status"] == "COMPLETED"
+    second = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "restore the starfire outpost", "idempotency_key": str(uuid4())},
+    ).json()["task"]
+
+    latest = client.get(f"/api/v1/games/{game_id}/play")
+    assert latest.status_code == 200
+    latest_state = latest.json()
+    assert [item["id"] for item in latest_state["task_history"]] == [first["id"], second["id"]]
+    assert latest_state["current_task"]["id"] == second["id"]
+    assert latest_state["game"]["active_task_id"] == second["id"]
+
+    historical = client.get(f"/api/v1/games/{game_id}/play?task_id={first['id']}")
+    assert historical.status_code == 200
+    historical_state = historical.json()
+    assert historical_state["current_task"]["id"] == first["id"]
+    assert historical_state["current_task"]["timeline"]
+    assert historical_state["game"]["active_task_id"] == second["id"]
+    assert historical_state["known_facts"] == latest_state["known_facts"]
+
+    missing = client.get(f"/api/v1/games/{game_id}/play?task_id={uuid4()}")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "TASK_NOT_FOUND"
+
+
 def test_pacing_version_and_phase_are_server_enforced(client: TestClient) -> None:
     scenario = next(
         item for item in client.get("/api/v1/scenarios").json() if item["key"] == "starfire_command"
@@ -314,6 +411,7 @@ def test_pacing_version_and_phase_are_server_enforced(client: TestClient) -> Non
     )
     assert wrong_phase.status_code == 409
     assert wrong_phase.json()["error"]["code"] == "PLAYER_PACING_PHASE_INVALID"
+    task = _start_planning(client, game_id, task)
     advanced = _ack_action(client, game_id, task)
     stale = client.post(
         f"/api/v1/games/{game_id}/play/acknowledge-debrief",
@@ -337,6 +435,8 @@ def test_truly_unreachable_goal_stops_reliably(client: TestClient, session: Sess
         f"/api/v1/games/{game_id}/goals",
         json={"goal": "secure the northern valley", "idempotency_key": str(uuid4())},
     ).json()["task"]
+    assert task["status"] == "ACTIVE"
+    task = _start_planning(client, game_id, task)
     assert task["status"] == "UNREACHABLE_IN_CURRENT_STATE"
     assert task["execution_phase"] == "BLOCKED"
 

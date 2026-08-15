@@ -87,10 +87,14 @@ def get_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> GameSumma
 
 @router.get("/{game_instance_id}/play", response_model=PlayerGameStateResponse)
 def get_play_state(
-    game_instance_id: UUID, db: Session = Depends(get_db)
+    game_instance_id: UUID,
+    task_id: UUID | None = Query(default=None),
+    db: Session = Depends(get_db),
 ) -> PlayerGameStateResponse:
     try:
-        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+        return PlayerProjectionService(db).game_state(
+            GameInstanceId(game_instance_id), selected_task_id=task_id
+        )
     except (GameInstanceError, GameLifecycleError) as exc:
         _raise_http(exc)
 
@@ -119,6 +123,34 @@ def submit_goal(
         state = PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
         assert state.current_task is not None
         return GoalSubmissionResponse(status=GoalSubmissionStatus.ACCEPTED, task=state.current_task)
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        GenericProviderError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
+@router.post(
+    "/{game_instance_id}/play/start-planning",
+    response_model=PlayerGameStateResponse,
+)
+def start_initial_planning(
+    game_instance_id: UUID,
+    request: PlayerPacingRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PlayerGameStateResponse:
+    try:
+        configured_play_orchestrator(
+            db, GameInstanceId(game_instance_id), settings
+        ).start_initial_planning(expected_pacing_version=request.expected_pacing_version)
+        db.commit()
+        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
     except (
         GameInstanceError,
         GameLifecycleError,
@@ -173,6 +205,34 @@ def acknowledge_debrief(
         configured_play_orchestrator(
             db, GameInstanceId(game_instance_id), settings
         ).acknowledge_debrief(expected_pacing_version=request.expected_pacing_version)
+        db.commit()
+        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        GenericProviderError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
+@router.post(
+    "/{game_instance_id}/play/replan",
+    response_model=PlayerGameStateResponse,
+)
+def replan_play(
+    game_instance_id: UUID,
+    request: PlayerPacingRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PlayerGameStateResponse:
+    try:
+        configured_play_orchestrator(db, GameInstanceId(game_instance_id), settings).replan(
+            expected_pacing_version=request.expected_pacing_version
+        )
         db.commit()
         return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
     except (

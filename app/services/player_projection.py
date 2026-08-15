@@ -31,6 +31,7 @@ from app.api.schemas.phase_d import (
     PublicStepStatus,
     PublicTaskResponse,
     PublicTaskStatus,
+    PublicTaskSummaryResponse,
     PublicTimelineEventKind,
     PublicTimelineEventResponse,
 )
@@ -59,7 +60,7 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
-from app.services.game_instances import GameInstanceService
+from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
 from app.services.mission_roadmap import MissionRoadmap, MissionRoadmapProjector
 from app.services.player_pacing import PlayerExecutionPhase
@@ -69,7 +70,12 @@ class PlayerProjectionService:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def game_state(self, game_instance_id: GameInstanceId) -> PlayerGameStateResponse:
+    def game_state(
+        self,
+        game_instance_id: GameInstanceId,
+        *,
+        selected_task_id: UUID | None = None,
+    ) -> PlayerGameStateResponse:
         scope = GameInstanceService(self.db).load(game_instance_id)
         game = GameLifecycleService(self.db).get(game_instance_id)
         definition = ScenarioVersionRepository(self.db).load(scope.scenario_version_id).definition
@@ -110,19 +116,37 @@ class PlayerProjectionService:
                 )
             )
         )
-        task = self.db.scalar(
+        task_query = (
             select(AgentTask)
             .where(AgentTask.game_instance_id == game.id)
-            .order_by(AgentTask.created_at.desc())
+            .order_by(AgentTask.created_at)
         )
-        pending = self.db.scalar(
-            select(ActionDecisionRequest.id).where(
-                ActionDecisionRequest.game_instance_id == game.id,
-                ActionDecisionRequest.status == DecisionStatus.PENDING,
+        task_rows = tuple(self.db.scalars(task_query))
+        active_task = next(
+            (item for item in reversed(task_rows) if item.status in _PUBLIC_ACTIVE_TASKS),
+            None,
+        )
+        if selected_task_id is None:
+            # The active Task is the player-facing default.  A terminal Task
+            # can only be the fallback when the Instance has no active work.
+            task = active_task or (task_rows[-1] if task_rows else None)
+        else:
+            task = next((item for item in task_rows if item.id == selected_task_id), None)
+            if task is None:
+                raise GameInstanceError("TASK_NOT_FOUND", "The requested Task is not in this Game")
+        pending = (
+            self.db.scalar(
+                select(ActionDecisionRequest.id).where(
+                    ActionDecisionRequest.game_instance_id == game.id,
+                    ActionDecisionRequest.task_id == task.id,
+                    ActionDecisionRequest.status == DecisionStatus.PENDING,
+                )
             )
+            if task is not None
+            else None
         )
         return PlayerGameStateResponse(
-            game=self._game_summary(game, task),
+            game=self._game_summary(game, active_task),
             visible_nodes=[
                 PublicNodeResponse(
                     key=item.node_key,
@@ -174,7 +198,24 @@ class PlayerProjectionService:
                 if task is not None
                 else None
             ),
+            task_history=[
+                self._task_summary(item, sequence=index)
+                for index, item in enumerate(task_rows, start=1)
+            ],
             pending_approval_id=pending,
+        )
+
+    def _task_summary(self, task: AgentTask, *, sequence: int) -> PublicTaskSummaryResponse:
+        return PublicTaskSummaryResponse(
+            id=task.id,
+            sequence=sequence,
+            goal=task.goal_description,
+            status=_task_status(task.status, task.last_error_code),
+            execution_phase=PublicExecutionPhase(
+                _execution_phase(task, self.db.get(PlayerExecutionCheckpoint, task.id)).value
+            ),
+            created_at=task.created_at,
+            completed_at=task.completed_at,
         )
 
     def _game_summary(self, game: GameInstance, task: AgentTask | None) -> GameSummaryResponse:
@@ -322,7 +363,11 @@ class PlayerProjectionService:
             debrief=(
                 self._debrief(last_action_step, definition, plans, steps_by_plan)
                 if last_action_step is not None
-                and phase == PlayerExecutionPhase.AWAITING_DEBRIEF_ACK
+                and phase
+                in (
+                    PlayerExecutionPhase.AWAITING_DEBRIEF_ACK,
+                    PlayerExecutionPhase.AWAITING_REPLAN_ACK,
+                )
                 else None
             ),
             explanation=(
@@ -366,21 +411,36 @@ class PlayerProjectionService:
         }
         events = [
             PublicTimelineEventResponse(
-                id=f"task:{task.id}:started",
-                kind=PublicTimelineEventKind.TASK_STARTED,
-                title=task.goal_description,
+                id=f"task:{task.id}:accepted",
+                kind=PublicTimelineEventKind.GOAL_ACCEPTED,
+                title="任务已接受",
+                detail=task.goal_description,
                 occurred_at=task.created_at,
+                duration_ms=_goal_resolution_duration(task),
             )
         ]
+        plan_durations = _plan_durations(task)
         for plan in plans:
-            if plan.version > 1:
+            if plan.version == 1:
+                events.append(
+                    PublicTimelineEventResponse(
+                        id=f"plan:{plan.id}:created",
+                        kind=PublicTimelineEventKind.PLAN_CREATED,
+                        title="Agent 已完成计划",
+                        detail=_first_action_name(definition, steps_by_plan[plan.id]),
+                        occurred_at=plan.created_at,
+                        duration_ms=plan_durations.get(plan.version),
+                    )
+                )
+            else:
                 events.append(
                     PublicTimelineEventResponse(
                         id=f"plan:{plan.id}",
                         kind=PublicTimelineEventKind.PLAN_UPDATED,
-                        title="Agent 已根据最新情况调整后续行动",
-                        detail=_next_action_name(definition, steps_by_plan[plan.id]),
+                        title="Agent 已重新规划",
+                        detail=_first_action_name(definition, steps_by_plan[plan.id]),
                         occurred_at=plan.created_at,
+                        duration_ms=plan_durations.get(plan.version),
                     )
                 )
             plan_steps = steps_by_plan[plan.id]
@@ -744,6 +804,26 @@ def _next_action_name(definition: ScenarioDefinitionV2, steps: tuple[AgentStep, 
     return action.name if action is not None else step.description
 
 
+def _first_action_name(
+    definition: ScenarioDefinitionV2, steps: tuple[AgentStep, ...]
+) -> str | None:
+    """Return the plan's creation-time first Action without reading step status.
+
+    Mission history is reconstructed from persisted Plan/Step inputs.  Using
+    the first tool step instead of the current pending step keeps historical
+    PLAN_CREATED/PLAN_UPDATED event text stable after execution advances.
+    """
+
+    step = next(
+        (item for item in steps if item.execution_type == StepExecutionType.TOOL),
+        None,
+    )
+    if step is None:
+        return None
+    action = _action_definition(definition, step)
+    return action.name if action is not None else step.description
+
+
 def _public_result_summary(
     action: ActionDefinitionV2 | None,
     operation: WorldOperation | None,
@@ -775,6 +855,89 @@ def _knowledge_changes(operation: WorldOperation) -> list[PublicKnowledgeChangeR
         except ValueError:
             continue
     return changes
+
+
+def _provider_calls(task: AgentTask) -> tuple[dict[str, object], ...]:
+    metadata = task.objective_resolution_metadata
+    if not isinstance(metadata, dict):
+        return ()
+    calls = metadata.get("provider_calls")
+    if not isinstance(calls, list):
+        return ()
+    return tuple(item for item in calls if isinstance(item, dict))
+
+
+def _call_latency_ms(call: dict[str, object]) -> int:
+    value = call.get("latency_ms")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _goal_resolution_duration(task: AgentTask) -> int | None:
+    """Return the persisted goal-resolution operation duration, if available."""
+
+    for snapshot in _operation_durations(task):
+        if snapshot.get("kind") == "GOAL_RESOLUTION":
+            duration = snapshot.get("duration_ms")
+            if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
+                return duration
+
+    duration = sum(
+        _call_latency_ms(call)
+        for call in _provider_calls(task)
+        if call.get("call_type") == "GOAL_SELECTION"
+    )
+    return duration or None
+
+
+def _plan_durations(task: AgentTask) -> dict[int, int]:
+    """Map persisted plan ordinals to provider operation durations.
+
+    A plan call may be followed by bounded ``REPAIR`` calls.  The metadata is
+    append-only and ordered, so grouping each INITIAL_PLAN/REPLAN with its
+    repairs gives a stable presentation snapshot without adding a heartbeat or
+    timing subsystem.
+    """
+
+    operation_durations: dict[int, int] = {}
+    for snapshot in _operation_durations(task):
+        plan_version = snapshot.get("plan_version")
+        duration = snapshot.get("duration_ms")
+        if (
+            isinstance(plan_version, int)
+            and not isinstance(plan_version, bool)
+            and isinstance(duration, int)
+            and not isinstance(duration, bool)
+            and duration >= 0
+        ):
+            operation_durations[plan_version] = duration
+    if operation_durations:
+        return operation_durations
+
+    durations: dict[int, int] = {}
+    plan_version = 0
+    current_duration = 0
+    for call in _provider_calls(task):
+        call_type = call.get("call_type")
+        if call_type in ("INITIAL_PLAN", "REPLAN"):
+            if plan_version:
+                durations[plan_version] = current_duration or 0
+            plan_version += 1
+            current_duration = _call_latency_ms(call)
+        elif call_type == "REPAIR" and plan_version:
+            current_duration += _call_latency_ms(call)
+    if plan_version:
+        durations[plan_version] = current_duration or 0
+    return {key: value for key, value in durations.items() if value > 0}
+
+
+def _operation_durations(task: AgentTask) -> tuple[dict[str, object], ...]:
+    metadata = task.objective_resolution_metadata
+    if not isinstance(metadata, dict):
+        return ()
+    durations = metadata.get("operation_durations")
+    if not isinstance(durations, list):
+        return ()
+    return tuple(item for item in durations if isinstance(item, dict))
 
 
 __all__ = ["PlayerProjectionService"]

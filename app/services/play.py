@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import cast
 from uuid import UUID
 
@@ -107,7 +108,9 @@ class PlayOrchestrator:
         definition = (
             ScenarioVersionRepository(self.db).load(self.scope.scenario_version_id).definition
         )
+        resolution_started = perf_counter()
         resolution = self.goal_resolver.resolve(goal, definition)
+        resolution_duration_ms = _duration_ms(resolution_started)
         if resolution.status != "RESOLVED":
             return GoalSubmission(resolution, None)
         conversation = self.db.scalar(
@@ -119,7 +122,16 @@ class PlayOrchestrator:
         if conversation is None:
             raise PlayError("PLAY_SESSION_NOT_FOUND", "The Game has no playable Actor session")
         try:
-            task = self.agent.create_task(conversation, goal, resolved_goal=resolution)
+            # Goal resolution and initial planning are separate player-facing
+            # operations.  GenericAgentService still owns task construction;
+            # Formal Play simply defers its first plan until the player
+            # acknowledges the resolved Goal.
+            task = self.agent.create_task(
+                conversation,
+                goal,
+                resolved_goal=resolution,
+                initialize_plan=False,
+            )
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                 raise
@@ -134,9 +146,61 @@ class PlayOrchestrator:
                 else "UNREACHABLE_IN_CURRENT_STATE"
             )
         task.submission_idempotency_key = idempotency_key
+        self._record_operation_duration(
+            task,
+            kind="GOAL_RESOLUTION",
+            duration_ms=resolution_duration_ms,
+        )
         self._ensure_checkpoint(task)
         self.db.flush()
         return GoalSubmission(resolution, task)
+
+    def start_initial_planning(self, *, expected_pacing_version: int) -> AgentTask:
+        """Generate the first plan after the player accepts the resolved Goal."""
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        task = self._current_task()
+        if task is None:
+            raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Game has no active Task")
+        checkpoint = self._checkpoint(task, expected_pacing_version=expected_pacing_version)
+        if checkpoint.phase != PlayerExecutionPhase.AWAITING_PLAN_START:
+            raise PlayError(
+                "PLAY_PLAN_ALREADY_STARTED",
+                "The Task is not waiting to start initial planning",
+            )
+        planning_started = perf_counter()
+        try:
+            plan = self.agent.plan(task)
+        except GenericAgentError as exc:
+            if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
+                raise
+            task.status = AgentTaskStatus.BLOCKED
+            task.last_error_code = (
+                "MODEL_PLAN_REJECTED"
+                if exc.code in _MODEL_PLAN_CODES
+                else "UNREACHABLE_IN_CURRENT_STATE"
+            )
+            checkpoint.phase = PlayerExecutionPhase.BLOCKED
+            checkpoint.version += 1
+            self.db.flush()
+            return task
+        self._record_operation_duration(
+            task,
+            kind="INITIAL_PLANNING",
+            duration_ms=_duration_ms(planning_started),
+            plan_version=plan.version,
+        )
+        if task.status == AgentTaskStatus.ACTIVE and self._next_action_step(task) is None:
+            self._block_unreachable(task, checkpoint)
+            return task
+        checkpoint.phase = (
+            PlayerExecutionPhase.AWAITING_ACTION_ACK
+            if task.status == AgentTaskStatus.ACTIVE
+            else self._phase_after_cycle(task)
+        )
+        checkpoint.version += 1
+        self.db.flush()
+        return task
 
     def acknowledge_action(self, *, expected_pacing_version: int) -> AgentTask:
         require_scope_writable(self.db, self.scope.game_instance_id)
@@ -155,7 +219,7 @@ class PlayOrchestrator:
             return task
         self._execute_action_cycle(task, action_step)
         checkpoint.last_action_step_id = action_step.id
-        checkpoint.phase = self._phase_after_cycle(task)
+        checkpoint.phase = self._phase_after_cycle(task, action_step=action_step)
         checkpoint.version += 1
         self.db.flush()
         return task
@@ -171,12 +235,82 @@ class PlayOrchestrator:
                 "PLAYER_PACING_PHASE_INVALID",
                 "The Task is not waiting for debrief acknowledgement",
             )
-        # This is only a presentation transition.  All gameplay work, including
-        # any required replan, was completed inside the preceding action cycle.
         if self._next_action_step(task) is None:
             self._block_unreachable(task, checkpoint)
             return task
         checkpoint.phase = PlayerExecutionPhase.AWAITING_ACTION_ACK
+        checkpoint.version += 1
+        self.db.flush()
+        return task
+
+    def replan(self, *, expected_pacing_version: int) -> AgentTask:
+        """Build the next Plan after a visible Action failure.
+
+        This is a small application boundary split: the Generic Agent still
+        owns planning and validation, while Formal Play controls when the
+        player-visible failure is persisted and when the provider is called.
+        Repeated requests are idempotent once a newer Plan exists.
+        """
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        task = self._current_task()
+        if task is None:
+            raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Game has no active Task")
+        checkpoint = self._checkpoint(task, expected_pacing_version=expected_pacing_version)
+        if checkpoint.phase != PlayerExecutionPhase.AWAITING_REPLAN_ACK:
+            raise PlayError(
+                "PLAY_REPLAN_NOT_REQUIRED",
+                "The Task is not waiting for a failed Action replan",
+            )
+        failed_step = (
+            self.db.get(AgentStep, checkpoint.last_action_step_id)
+            if checkpoint.last_action_step_id is not None
+            else None
+        )
+        if failed_step is None or not self._action_cycle_failed(failed_step):
+            raise PlayError(
+                "PLAY_REPLAN_NOT_REQUIRED",
+                "The current Action did not produce a retryable failure",
+            )
+        latest_plan = self.db.scalar(
+            select(AgentPlan)
+            .where(
+                AgentPlan.task_id == task.id,
+                AgentPlan.status == AgentPlanStatus.ACTIVE,
+            )
+            .order_by(AgentPlan.version.desc())
+        )
+        if latest_plan is None or latest_plan.id == failed_step.plan_id:
+            replan_started = perf_counter()
+            try:
+                plan = self.agent.plan(task, reason=task.last_error_code or "ACTION_FAILED")
+            except GenericAgentError as exc:
+                if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
+                    raise
+                task.status = AgentTaskStatus.BLOCKED
+                task.last_error_code = (
+                    "MODEL_PLAN_REJECTED"
+                    if exc.code in _MODEL_PLAN_CODES
+                    else "UNREACHABLE_IN_CURRENT_STATE"
+                )
+                checkpoint.phase = PlayerExecutionPhase.BLOCKED
+                checkpoint.version += 1
+                self.db.flush()
+                return task
+            self._record_operation_duration(
+                task,
+                kind="REPLANNING",
+                duration_ms=_duration_ms(replan_started),
+                plan_version=plan.version,
+            )
+        if task.status == AgentTaskStatus.ACTIVE and self._next_action_step(task) is None:
+            self._block_unreachable(task, checkpoint)
+            return task
+        checkpoint.phase = (
+            PlayerExecutionPhase.AWAITING_ACTION_ACK
+            if task.status == AgentTaskStatus.ACTIVE
+            else self._phase_after_cycle(task)
+        )
         checkpoint.version += 1
         self.db.flush()
         return task
@@ -189,8 +323,12 @@ class PlayOrchestrator:
             phase = PlayerExecutionPhase(checkpoint.phase)
             if phase in _PRODUCT_TERMINAL or phase == PlayerExecutionPhase.APPROVAL_REQUIRED:
                 return task
-            if phase == PlayerExecutionPhase.AWAITING_ACTION_ACK:
+            if phase == PlayerExecutionPhase.AWAITING_PLAN_START:
+                self.start_initial_planning(expected_pacing_version=checkpoint.version)
+            elif phase == PlayerExecutionPhase.AWAITING_ACTION_ACK:
                 self.acknowledge_action(expected_pacing_version=checkpoint.version)
+            elif phase == PlayerExecutionPhase.AWAITING_REPLAN_ACK:
+                self.replan(expected_pacing_version=checkpoint.version)
             else:
                 self.acknowledge_debrief(expected_pacing_version=checkpoint.version)
         raise PlayError("PLAY_TRANSITION_LIMIT", "Formal Play reached its safety bound")
@@ -227,7 +365,7 @@ class PlayOrchestrator:
                 raise PlayError("ACTION_DECISION_INVALID", "Approval has no executable Action")
             self._execute_action_cycle(task, step)
             checkpoint.last_action_step_id = step.id
-            checkpoint.phase = self._phase_after_cycle(task)
+            checkpoint.phase = self._phase_after_cycle(task, action_step=step)
             checkpoint.version += 1
             self.db.flush()
             return task
@@ -245,8 +383,9 @@ class PlayOrchestrator:
         if step is not None:
             step.status = AgentStepStatus.FAILED
             step.failure_code = "PLAYER_REJECTED"
+        replan_started = perf_counter()
         try:
-            self.agent.plan(task, reason="PLAYER_REJECTED")
+            plan = self.agent.plan(task, reason="PLAYER_REJECTED")
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                 raise
@@ -260,8 +399,17 @@ class PlayOrchestrator:
             checkpoint.version += 1
             self.db.flush()
             return task
+        self._record_operation_duration(
+            task,
+            kind="REPLANNING",
+            duration_ms=_duration_ms(replan_started),
+            plan_version=plan.version,
+        )
         checkpoint.last_action_step_id = step.id if step is not None else None
-        checkpoint.phase = PlayerExecutionPhase.AWAITING_DEBRIEF_ACK
+        if task.status == AgentTaskStatus.ACTIVE and self._next_action_step(task) is not None:
+            checkpoint.phase = PlayerExecutionPhase.AWAITING_ACTION_ACK
+        else:
+            checkpoint.phase = self._phase_after_cycle(task)
         checkpoint.version += 1
         self.db.flush()
         return task
@@ -270,7 +418,7 @@ class PlayOrchestrator:
         """Run one TOOL action plus its internal async settlement and replan."""
 
         try:
-            self.agent.execute_next(task)
+            self.agent.execute_next(task, replan_on_failure=False)
             if task.status == AgentTaskStatus.REQUIRES_PLAYER_DECISION:
                 return
             operation = self.db.scalar(
@@ -286,13 +434,15 @@ class PlayOrchestrator:
             if operation is not None:
                 # The Generic Agent owns the WAIT state; Formal Play merely
                 # hides it inside this one player-visible action cycle.
-                self.agent.execute_next(task)
+                self.agent.execute_next(task, replan_on_failure=False)
                 GenericActionService(self.db, self.scope).resolve_operation(
                     operation.id, resolution_key=f"formal-play:{operation.id}"
                 )
                 task.status = AgentTaskStatus.ACTIVE
                 self.db.flush()
-                self.agent.execute_next(task)
+                self.agent.execute_next(task, replan_on_failure=False)
+            if self._action_cycle_failed(action_step):
+                return
             self._ensure_next_plan(task)
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
@@ -340,7 +490,11 @@ class PlayOrchestrator:
             return checkpoint
         phase = self._phase_after_cycle(task)
         if task.status == AgentTaskStatus.ACTIVE:
-            phase = PlayerExecutionPhase.AWAITING_ACTION_ACK
+            phase = (
+                PlayerExecutionPhase.AWAITING_PLAN_START
+                if task.current_plan_version == 0
+                else PlayerExecutionPhase.AWAITING_ACTION_ACK
+            )
         checkpoint = PlayerExecutionCheckpoint(
             task_id=task.id,
             game_instance_id=task.game_instance_id,
@@ -350,6 +504,41 @@ class PlayOrchestrator:
         self.db.add(checkpoint)
         self.db.flush()
         return checkpoint
+
+    def _failure_requires_replan(
+        self, task: AgentTask, checkpoint: PlayerExecutionCheckpoint
+    ) -> bool:
+        step = (
+            self.db.get(AgentStep, checkpoint.last_action_step_id)
+            if checkpoint.last_action_step_id is not None
+            else None
+        )
+        if step is None or not self._action_cycle_failed(step):
+            return False
+        latest_plan = self.db.scalar(
+            select(AgentPlan)
+            .where(AgentPlan.task_id == task.id, AgentPlan.status == AgentPlanStatus.ACTIVE)
+            .order_by(AgentPlan.version.desc())
+        )
+        return latest_plan is not None and latest_plan.id == step.plan_id
+
+    def _action_cycle_failed(self, action_step: AgentStep) -> bool:
+        if action_step.status == AgentStepStatus.FAILED:
+            return True
+        return (
+            self.db.scalar(
+                select(AgentStep)
+                .where(
+                    AgentStep.plan_id == action_step.plan_id,
+                    AgentStep.sequence > action_step.sequence,
+                    AgentStep.action_intent == action_step.action_intent,
+                    AgentStep.execution_type == StepExecutionType.WAIT_FOR_WORLD_EVENT,
+                    AgentStep.status == AgentStepStatus.FAILED,
+                )
+                .order_by(AgentStep.sequence)
+            )
+            is not None
+        )
 
     def _checkpoint(
         self, task: AgentTask, *, expected_pacing_version: int
@@ -365,7 +554,9 @@ class PlayOrchestrator:
             raise PlayError("PLAYER_PACING_CONFLICT", "The player checkpoint has changed")
         return checkpoint
 
-    def _phase_after_cycle(self, task: AgentTask) -> PlayerExecutionPhase:
+    def _phase_after_cycle(
+        self, task: AgentTask, *, action_step: AgentStep | None = None
+    ) -> PlayerExecutionPhase:
         if task.status == AgentTaskStatus.REQUIRES_PLAYER_DECISION:
             return PlayerExecutionPhase.APPROVAL_REQUIRED
         if task.status == AgentTaskStatus.SUCCEEDED:
@@ -375,6 +566,8 @@ class PlayOrchestrator:
             return PlayerExecutionPhase.BLOCKED
         if task.status == AgentTaskStatus.ABORTED:
             return PlayerExecutionPhase.ABORTED
+        if action_step is not None and self._action_cycle_failed(action_step):
+            return PlayerExecutionPhase.AWAITING_REPLAN_ACK
         return PlayerExecutionPhase.AWAITING_DEBRIEF_ACK
 
     def _block_unreachable(self, task: AgentTask, checkpoint: PlayerExecutionCheckpoint) -> None:
@@ -409,6 +602,34 @@ class PlayOrchestrator:
         ):
             step.status = AgentStepStatus.SKIPPED
         plan.status = AgentPlanStatus.SUCCEEDED
+        self.db.flush()
+
+    def _record_operation_duration(
+        self,
+        task: AgentTask,
+        *,
+        kind: str,
+        duration_ms: int,
+        plan_version: int | None = None,
+    ) -> None:
+        """Persist a completed player-facing operation snapshot.
+
+        This is presentation/audit metadata only.  It does not participate in
+        planning, validation, execution, or task state transitions.
+        """
+
+        metadata = dict(task.objective_resolution_metadata or {})
+        durations = metadata.get("operation_durations")
+        snapshots = list(durations) if isinstance(durations, list) else []
+        snapshot: dict[str, object] = {
+            "kind": kind,
+            "duration_ms": max(0, duration_ms),
+        }
+        if plan_version is not None:
+            snapshot["plan_version"] = plan_version
+        snapshots.append(snapshot)
+        metadata["operation_durations"] = snapshots
+        task.objective_resolution_metadata = metadata
         self.db.flush()
 
     def _current_task(self) -> AgentTask | None:
@@ -447,5 +668,10 @@ _PRODUCT_TERMINAL = (
     PlayerExecutionPhase.BLOCKED,
     PlayerExecutionPhase.ABORTED,
 )
+
+
+def _duration_ms(started_at: float) -> int:
+    return max(0, round((perf_counter() - started_at) * 1000))
+
 
 __all__ = ["GoalSubmission", "PlayError", "PlayOrchestrator"]

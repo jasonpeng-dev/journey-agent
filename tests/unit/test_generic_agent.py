@@ -197,7 +197,7 @@ def test_formal_play_transition_hard_limit_remains_enforced(
     agent, runtime = _agent(session)
     task = agent.create_task(runtime.session, "stabilize the patient")
     orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
-    monkeypatch.setattr(orchestrator.agent, "execute_next", lambda _task: None)
+    monkeypatch.setattr(orchestrator.agent, "execute_next", lambda _task, **_kwargs: None)
     orchestrator.MAX_TRANSITIONS = 2
 
     with pytest.raises(PlayError) as caught:
@@ -219,9 +219,10 @@ def test_player_pacing_recovers_missing_checkpoint_and_enforces_phase(
     assert checkpoint is not None
     session.delete(checkpoint)
     session.flush()
-    monkeypatch.setattr(orchestrator.agent, "execute_next", lambda _task: None)
+    monkeypatch.setattr(orchestrator.agent, "execute_next", lambda _task, **_kwargs: None)
 
-    orchestrator.acknowledge_action(expected_pacing_version=1)
+    orchestrator.start_initial_planning(expected_pacing_version=1)
+    orchestrator.acknowledge_action(expected_pacing_version=2)
     recovered = session.get(PlayerExecutionCheckpoint, submission.task.id)
     assert recovered is not None
     assert recovered.phase == "AWAITING_DEBRIEF_ACK"
@@ -239,6 +240,7 @@ def test_player_pacing_blocks_when_plan_has_no_action(session: Session) -> None:
         "stabilize the patient", idempotency_key="pacing-no-action"
     )
     assert submission.task is not None
+    orchestrator.start_initial_planning(expected_pacing_version=1)
     plan = session.scalar(
         select(AgentPlan).where(
             AgentPlan.task_id == submission.task.id,
@@ -250,7 +252,7 @@ def test_player_pacing_blocks_when_plan_has_no_action(session: Session) -> None:
         step.status = AgentStepStatus.SKIPPED
     session.flush()
 
-    blocked = orchestrator.acknowledge_action(expected_pacing_version=1)
+    blocked = orchestrator.acknowledge_action(expected_pacing_version=2)
     assert blocked.status == AgentTaskStatus.BLOCKED
     checkpoint = session.get(PlayerExecutionCheckpoint, blocked.id)
     assert checkpoint is not None
