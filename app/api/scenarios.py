@@ -44,7 +44,7 @@ from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.infrastructure.db.session import get_db
 from app.scenarios.builtin import (
-    LINJIANG_INFRASTRUCTURE_RECOVERY_V0,
+    LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
     MEDICAL_EMERGENCY_V2,
     STARFIRE_V2,
 )
@@ -64,7 +64,7 @@ _EXAMPLES = {
         ReadinessLevel.PUBLISH_READY,
     ),
     "linjiang_infrastructure_recovery": (
-        LINJIANG_INFRASTRUCTURE_RECOVERY_V0,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
         ReadinessLevel.PUBLISH_READY,
     ),
 }

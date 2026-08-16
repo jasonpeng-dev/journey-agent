@@ -69,6 +69,8 @@ class PlanningActionCandidate(ProviderModel):
     known_blockers: tuple[dict[str, object], ...] = ()
     public_prerequisites: tuple[dict[str, object], ...] = ()
     authority: dict[str, object] = Field(default_factory=dict)
+    action_behavior: str = "RULE"
+    action_locality: str = "NONE"
 
 
 class PlanStepProposal(ProviderModel):

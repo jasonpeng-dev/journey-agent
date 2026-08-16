@@ -210,10 +210,22 @@ class GameInstanceFactState(TimestampMixin, Base):
 
 
 class GameInstanceResourceState(TimestampMixin, Base):
-    """Generic Instance-owned balance initialized from ScenarioVersion resources."""
+    """Generic Instance-owned balance, optionally scoped to a Region Node.
+
+    ``resource_identity`` is deliberately non-null because SQLite does not
+    enforce NULL-containing composite primary keys.  Global rows retain the
+    legacy identity ``resource_key``; scoped rows use the deterministic
+    ``resource_key@scope_node_key`` identity.
+    """
 
     __tablename__ = "game_instance_resource_states"
     __table_args__ = (
+        Index(
+            "ix_instance_resource_scope",
+            "game_instance_id",
+            "resource_key",
+            "scope_node_key",
+        ),
         CheckConstraint("value >= 0", name="ck_instance_resource_value"),
         CheckConstraint(
             "reserved_value >= 0 AND reserved_value <= value",
@@ -224,7 +236,9 @@ class GameInstanceResourceState(TimestampMixin, Base):
     game_instance_id: Mapped[UUID] = mapped_column(
         ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
     )
-    resource_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    resource_identity: Mapped[str] = mapped_column(String(161), primary_key=True)
+    resource_key: Mapped[str] = mapped_column(String(80), index=True)
+    scope_node_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     value: Mapped[int] = mapped_column(Integer)
     reserved_value: Mapped[int] = mapped_column(Integer, default=0)
     version: Mapped[int] = mapped_column(Integer, default=1)

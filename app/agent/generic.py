@@ -811,6 +811,8 @@ class GenericAgentService:
             and (
                 bool(item.get("objective_relevance"))
                 or bool(item.get("declared_knowledge_effects"))
+                or item.get("behavior") != "RULE"
+                or item.get("locality") != "NONE"
             )
         }
         diagnostics: list[dict[str, object]] = []

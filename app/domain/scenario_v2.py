@@ -58,6 +58,29 @@ class EngineCapability(StrEnum):
     PLAN = "PLAN"
     EXECUTE_ACTION = "EXECUTE_ACTION"
     INSPECT_STATE = "INSPECT_STATE"
+    LOGISTICS = "LOGISTICS"
+
+
+class ActionBehavior(StrEnum):
+    """Generic runtime behavior layered on top of declarative Rules."""
+
+    RULE = "RULE"
+    TRAVEL = "TRAVEL"
+    INSPECT = "INSPECT"
+    TRANSPORT_RESOURCE = "TRANSPORT_RESOURCE"
+
+
+class ActionLocality(StrEnum):
+    NONE = "NONE"
+    LOCAL_TARGET = "LOCAL_TARGET"
+    FACILITY_REGION = "FACILITY_REGION"
+    TRANSPORT_ENDPOINT = "TRANSPORT_ENDPOINT"
+
+
+class ResourceScopeKind(StrEnum):
+    EXPLICIT = "EXPLICIT"
+    ACTOR_CURRENT_REGION = "ACTOR_CURRENT_REGION"
+    CURRENT_TARGET_REGION = "CURRENT_TARGET_REGION"
 
 
 class ActionExecutionMode(StrEnum):
@@ -132,10 +155,72 @@ class EffectKind(StrEnum):
     WRITE_MEMORY_EVENT = "WRITE_MEMORY_EVENT"
 
 
+class ResourceInitialStateV2(FrozenDefinitionModel):
+    """One initialized balance, optionally scoped to a Region Node."""
+
+    resource_key: StableKey
+    scope_node_key: StableKey | None = None
+    value: int = Field(ge=0)
+    reserved_value: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_reservation(self) -> ResourceInitialStateV2:
+        if self.reserved_value > self.value:
+            raise ValueError("Resource initial reserved_value cannot exceed value")
+        return self
+
+
+class LocalityContractV2(FrozenDefinitionModel):
+    """Explicit opt-in contract for Region/Facility/Transport semantics."""
+
+    enabled: bool = False
+    scoped_resources: bool = False
+    region_node_type_key: StableKey | None = None
+    facility_node_type_key: StableKey | None = None
+    transport_node_type_key: StableKey | None = None
+    located_in_relation_type_key: StableKey | None = None
+    transport_endpoint_relation_type_key: StableKey | None = None
+    passability_fact_key: StableKey | None = None
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> LocalityContractV2:
+        keys = (
+            self.region_node_type_key,
+            self.facility_node_type_key,
+            self.transport_node_type_key,
+            self.located_in_relation_type_key,
+            self.transport_endpoint_relation_type_key,
+        )
+        if not self.enabled:
+            if self.scoped_resources or any(
+                key is not None for key in (*keys, self.passability_fact_key)
+            ):
+                raise ValueError("Locality fields require explicit enabled opt-in")
+        elif any(key is None for key in keys):
+            raise ValueError(
+                "Enabled locality requires Region/Facility/Transport type and relation keys"
+            )
+        return self
+
+
+class ResourceScopeV2(FrozenDefinitionModel):
+    kind: ResourceScopeKind
+    node_key: StableKey | None = None
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> ResourceScopeV2:
+        if self.kind == ResourceScopeKind.EXPLICIT and self.node_key is None:
+            raise ValueError("EXPLICIT Resource scope requires node_key")
+        if self.kind != ResourceScopeKind.EXPLICIT and self.node_key is not None:
+            raise ValueError("Actor/target Resource scope cannot define node_key")
+        return self
+
+
 class ScenarioMetadataV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)
+    locality: LocalityContractV2 = Field(default_factory=LocalityContractV2)
 
 
 class EngineContractV2(FrozenDefinitionModel):
@@ -146,6 +231,7 @@ class EngineContractV2(FrozenDefinitionModel):
 class InitializationV2(FrozenDefinitionModel):
     start_node_key: StableKey
     primary_actor_key: StableKey
+    resource_initial_states: tuple[ResourceInitialStateV2, ...] = ()
 
 
 class NodeTypeDefinitionV2(FrozenDefinitionModel):
@@ -381,6 +467,8 @@ class ActionDefinitionV2(FrozenDefinitionModel):
     authority_policy: AuthorityPolicyV2 = Field(default_factory=AuthorityPolicyV2)
     expected_outcomes: tuple[ExpectedOutcomeV2, ...]
     planning: ActionPlanningProjectionV2 = Field(default_factory=ActionPlanningProjectionV2)
+    behavior: ActionBehavior = ActionBehavior.RULE
+    locality: ActionLocality = ActionLocality.NONE
 
     @model_validator(mode="after")
     def validate_action(self) -> ActionDefinitionV2:
@@ -468,6 +556,7 @@ class ConditionV2(FrozenDefinitionModel):
     node: NodeSelectorV2 | None = None
     fact_key: StableKey | None = None
     resource_key: StableKey | None = None
+    resource_scope: ResourceScopeV2 | None = None
     parameter_key: StableKey | None = None
     operator: ComparisonOperator | None = None
     value: StrictScalar | None = None
@@ -526,6 +615,7 @@ class EffectV2(FrozenDefinitionModel):
     value: ValueExpressionV2 | None = None
     access: AccessState | None = None
     resource_key: StableKey | None = None
+    resource_scope: ResourceScopeV2 | None = None
     amount: IntegerExpressionV2 | None = None
     outcome_code: SymbolicCode | None = None
     failure_code: SymbolicCode | None = None
@@ -770,6 +860,9 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     actions = {item.key: item for item in definition.actions}
     objectives = {item.key: item for item in definition.objectives}
 
+    _validate_locality_contract(definition, nodes, node_types)
+    _validate_resource_initial_states(definition, nodes)
+
     _require_key(nodes, definition.initialization.start_node_key, "start Node")
     primary = _require_key(
         actors,
@@ -806,6 +899,20 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 )
 
     for action in definition.actions:
+        if (
+            action.behavior != ActionBehavior.RULE
+            or action.locality != ActionLocality.NONE
+        ) and not definition.metadata.locality.enabled:
+            raise ValueError(
+                f"Action {action.key} requires the Scenario locality contract to be enabled"
+            )
+        if (
+            action.behavior == ActionBehavior.TRANSPORT_RESOURCE
+            and not definition.metadata.locality.scoped_resources
+        ):
+            raise ValueError(
+                f"Action {action.key} requires scoped_resources in the locality contract"
+            )
         _require_key(
             interactions,
             action.required_interaction_key,
@@ -829,9 +936,22 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
         action = _require_key(actions, rule.action_key, f"Rule {rule.key} Action")
         parameters = {parameter.key: parameter for parameter in action.parameters}
         if rule.condition is not None:
-            _validate_condition_refs(rule.condition, nodes, resources, parameters)
+            _validate_condition_refs(
+                rule.condition,
+                nodes,
+                resources,
+                parameters,
+                definition.metadata.locality,
+            )
         for effect in rule.effects:
-            _validate_effect_refs(effect, nodes, resources, parameters, action)
+            _validate_effect_refs(
+                effect,
+                nodes,
+                resources,
+                parameters,
+                action,
+                definition.metadata.locality,
+            )
 
     aliases: set[str] = set()
     subsumption_graph: dict[str, tuple[str, ...]] = {}
@@ -882,16 +1002,18 @@ def _validate_condition_refs(
     nodes: dict[str, NodeDefinitionV2],
     resources: dict[str, ResourceDefinitionV2],
     parameters: dict[str, ActionParameterV2],
+    locality: LocalityContractV2,
 ) -> None:
     for child in condition.conditions:
-        _validate_condition_refs(child, nodes, resources, parameters)
+        _validate_condition_refs(child, nodes, resources, parameters, locality)
     if condition.condition is not None:
-        _validate_condition_refs(condition.condition, nodes, resources, parameters)
+        _validate_condition_refs(condition.condition, nodes, resources, parameters, locality)
     _validate_selector(condition.node, nodes)
     if condition.node is not None and condition.fact_key is not None:
         _validate_selector_fact(condition.node, condition.fact_key, nodes)
     if condition.resource_key is not None:
         _require_key(resources, condition.resource_key, "Condition Resource")
+        _validate_resource_scope(condition.resource_scope, nodes, locality, "Condition")
     if condition.parameter_key is not None:
         parameter = _require_key(parameters, condition.parameter_key, "Condition parameter")
         if condition.value is not None:
@@ -904,12 +1026,14 @@ def _validate_effect_refs(
     resources: dict[str, ResourceDefinitionV2],
     parameters: dict[str, ActionParameterV2],
     action: ActionDefinitionV2,
+    locality: LocalityContractV2,
 ) -> None:
     _validate_selector(effect.node, nodes)
     if effect.node is not None and effect.fact_key is not None:
         _validate_selector_fact(effect.node, effect.fact_key, nodes)
     if effect.resource_key is not None:
         resource = _require_key(resources, effect.resource_key, "Effect Resource")
+        _validate_resource_scope(effect.resource_scope, nodes, locality, "Effect")
         if effect.kind in {EffectKind.RESERVE_RESOURCE, EffectKind.RELEASE_RESOURCE} and not (
             resource.reservation_supported
         ):
@@ -970,6 +1094,84 @@ def _validate_objective_requirement(
             raise ValueError("Objective value does not match BOOLEAN Fact")
 
 
+def _validate_locality_contract(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+    node_types: set[str],
+) -> None:
+    locality = definition.metadata.locality
+    if not locality.enabled:
+        return
+    for key, label in (
+        (locality.region_node_type_key, "Region Node Type"),
+        (locality.facility_node_type_key, "Facility Node Type"),
+        (locality.transport_node_type_key, "Transport Node Type"),
+    ):
+        assert key is not None
+        _require_key(node_types, key, label)
+    relation_types = {item.relation_type_key for item in definition.world.relations}
+    for key, label in (
+        (locality.located_in_relation_type_key, "located_in Relation Type"),
+        (locality.transport_endpoint_relation_type_key, "endpoint Relation Type"),
+    ):
+        assert key is not None
+        _require_key(relation_types, key, label)
+    if locality.passability_fact_key is not None and not any(
+        node.fact(locality.passability_fact_key) is not None for node in nodes.values()
+    ):
+        raise ValueError("Locality passability_fact_key does not reference a Fact")
+
+
+def _validate_resource_initial_states(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+) -> None:
+    locality = definition.metadata.locality
+    resources = {item.key: item for item in definition.world.resources}
+    states = definition.initialization.resource_initial_states
+    if not states:
+        return
+    seen: set[tuple[str, str | None]] = set()
+    for state in states:
+        resource = _require_key(resources, state.resource_key, "Initial Resource state")
+        scope = state.scope_node_key
+        if scope is not None:
+            if not locality.enabled or not locality.scoped_resources:
+                raise ValueError("Scoped initial Resource state requires locality.scoped_resources")
+            node = _require_key(nodes, scope, "Initial Resource scope")
+            if node.node_type_key != locality.region_node_type_key:
+                raise ValueError("Scoped initial Resource state must target a Region Node")
+        identity = (state.resource_key, scope)
+        if identity in seen:
+            raise ValueError("Initial Resource state identities must be unique")
+        seen.add(identity)
+        if state.value < resource.minimum or (
+            resource.maximum is not None and state.value > resource.maximum
+        ):
+            raise ValueError("Initial Resource state value is outside its Resource bounds")
+        if state.reserved_value > state.value:
+            raise ValueError("Initial Resource reserved_value cannot exceed value")
+    if {item.resource_key for item in states} != set(resources):
+        raise ValueError("Initial Resource states must initialize every Resource definition")
+
+
+def _validate_resource_scope(
+    scope: ResourceScopeV2 | None,
+    nodes: dict[str, NodeDefinitionV2],
+    locality: LocalityContractV2,
+    label: str,
+) -> None:
+    if scope is None:
+        return
+    if not locality.enabled or not locality.scoped_resources:
+        raise ValueError(f"{label} Resource scope requires locality.scoped_resources")
+    if scope.kind == ResourceScopeKind.EXPLICIT:
+        assert scope.node_key is not None
+        node = _require_key(nodes, scope.node_key, f"{label} Resource scope")
+        if node.node_type_key != locality.region_node_type_key:
+            raise ValueError(f"{label} Resource scope must target a Region Node")
+
+
 def _require_fact(
     nodes: dict[str, NodeDefinitionV2],
     node_key: str,
@@ -1020,12 +1222,18 @@ def _require_acyclic(graph: dict[str, tuple[str, ...]]) -> None:
 
 
 __all__ = [
+    "ActionBehavior",
     "ActionDefinitionV2",
     "ActionExecutionMode",
+    "ActionLocality",
     "ActionParameterType",
     "ConditionKind",
     "EffectKind",
     "EngineCapability",
+    "LocalityContractV2",
+    "ResourceInitialStateV2",
+    "ResourceScopeKind",
+    "ResourceScopeV2",
     "RulePhase",
     "ScenarioDefinitionV2",
 ]

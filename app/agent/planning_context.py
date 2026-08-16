@@ -12,7 +12,12 @@ from app.agent.authority import actor_binding_matches
 from app.agent.provider import PlanningActionCandidate, PlanningContext
 from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import RuntimeScope
-from app.domain.scenario_v2 import ObjectiveDefinitionV2, ScenarioDefinitionV2
+from app.domain.scenario_v2 import (
+    ActionBehavior,
+    ActionLocality,
+    ObjectiveDefinitionV2,
+    ScenarioDefinitionV2,
+)
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     AgentPlan,
@@ -119,7 +124,10 @@ class PlanningContextBuilder:
                     )
                     if (item.node_key, item.fact_key) in known_refs
                 }
-                if not visible_effects:
+                if not visible_effects and (
+                    action.behavior == ActionBehavior.RULE
+                    and action.locality == ActionLocality.NONE
+                ):
                     continue
                 if not any(
                     node.key in known_nodes
@@ -138,18 +146,23 @@ class PlanningContextBuilder:
         # every additional action with a visible public effect and a known
         # target affordance, including actions that are currently locked.
         for action in definition.actions:
-            if any(
+            known_target = any(
                 node.key in known_nodes
                 and action.required_interaction_key in node.interaction_keys
-                and any(
-                    (effect.node_key, effect.fact_key) in known_refs
-                    for effect in (
-                        *action.planning.terminal_effects,
-                        *action.planning.supporting_effects,
-                    )
-                )
                 for node in definition.world.nodes
-            ):
+            )
+            visible_effect = any(
+                (effect.node_key, effect.fact_key) in known_refs
+                for effect in (
+                    *action.planning.terminal_effects,
+                    *action.planning.supporting_effects,
+                )
+            )
+            operational = (
+                action.behavior != ActionBehavior.RULE
+                or action.locality != ActionLocality.NONE
+            )
+            if known_target and (visible_effect or operational):
                 selected.add(action.key)
         return selected
 
@@ -263,6 +276,8 @@ class PlanningContextBuilder:
                     "cost_risk": {},
                     "soft_signals": {"hints": list(action.planning.hints)},
                     "execution_mode": action.execution_mode.value,
+                    "behavior": action.behavior.value,
+                    "locality": action.locality.value,
                 }
             )
         return result
@@ -295,6 +310,11 @@ class PlanningContextBuilder:
                     "current_known_state": {
                         "availability": actor.status,
                         "current_node_key": actor.current_node_key,
+                        **(
+                            {"current_region": actor.current_node_key}
+                            if definition.metadata.locality.enabled
+                            else {}
+                        ),
                     },
                     "allowed_action_keys": [
                         key for key in actor.allowed_action_keys if key in action_keys
@@ -487,7 +507,10 @@ class PlanningActionCatalogBuilder:
                     for item in visible_effects
                     if (item.node_key, item.fact_key) in objective_refs
                 )
-                if not relevant and not action.planning.supporting_effects:
+                if not relevant and not action.planning.supporting_effects and (
+                    action.behavior == ActionBehavior.RULE
+                    and action.locality == ActionLocality.NONE
+                ):
                     continue
                 for actor in sorted(actors, key=lambda item: item.actor_key):
                     if not _actor_can_execute(definition, actor, action.key):
@@ -539,6 +562,8 @@ class PlanningActionCatalogBuilder:
                                 "actor_policy": actor.authority_policy,
                                 "action_policy": action.authority_policy.model_dump(mode="json"),
                             },
+                            action_behavior=action.behavior.value,
+                            action_locality=action.locality.value,
                         )
                     )
         return tuple(candidates)
@@ -584,9 +609,14 @@ class PlanningActionCatalogBuilder:
                 if item.source_node_key in known_keys and item.target_node_key in known_keys
             ],
             "resources": {
-                item.resource_key: {"value": item.value, "reserved": item.reserved_value}
-                for item in resources
+                resource_key: _resource_context(rows)
+                for resource_key, rows in _group_resources(resources).items()
             },
+            **(
+                {"locality": definition.metadata.locality.model_dump(mode="json")}
+                if definition.metadata.locality.enabled
+                else {}
+            ),
         }
 
     def known_fact_refs(self) -> set[tuple[str, str]]:
@@ -599,6 +629,26 @@ class PlanningActionCatalogBuilder:
                 )
             )
         }
+
+
+def _group_resources(
+    rows: tuple[GameInstanceResourceState, ...],
+) -> dict[str, list[GameInstanceResourceState]]:
+    grouped: dict[str, list[GameInstanceResourceState]] = {}
+    for row in rows:
+        grouped.setdefault(row.resource_key, []).append(row)
+    return grouped
+
+
+def _resource_context(rows: list[GameInstanceResourceState]) -> dict[str, object]:
+    if len(rows) == 1 and rows[0].scope_node_key is None:
+        row = rows[0]
+        return {"value": row.value, "reserved": row.reserved_value}
+    scopes: dict[str, dict[str, int]] = {}
+    for row in sorted(rows, key=lambda item: item.scope_node_key or ""):
+        scope_key = row.scope_node_key or "global"
+        scopes[scope_key] = {"value": row.value, "reserved": row.reserved_value}
+    return {"scopes": scopes}
 
 
 def objective_context(

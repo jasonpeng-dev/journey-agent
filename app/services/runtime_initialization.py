@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import GameInstanceStatus, NodeStatus
+from app.domain.resources import resource_identity, resource_initial_states
 from app.domain.world import AccessState
 from app.infrastructure.db.models import (
     ConversationSession,
@@ -125,15 +127,50 @@ class RuntimeInitializationService:
                         visibility=fact.initial_visibility,
                     )
                 )
-        for resource in definition.world.resources:
-            self.db.add(
-                GameInstanceResourceState(
-                    game_instance_id=instance.id,
-                    resource_key=resource.key,
-                    value=resource.initial_value,
-                    reserved_value=0,
+        resource_states = resource_initial_states(definition)
+        if self._supports_scoped_resource_schema():
+            for resource_state in resource_states:
+                self.db.add(
+                    GameInstanceResourceState(
+                        game_instance_id=instance.id,
+                        resource_identity=resource_identity(
+                            resource_state.resource_key,
+                            resource_state.scope_node_key,
+                        ),
+                        resource_key=resource_state.resource_key,
+                        scope_node_key=resource_state.scope_node_key,
+                        value=resource_state.value,
+                        reserved_value=resource_state.reserved_value,
+                    )
                 )
-            )
+        else:
+            if any(item.scope_node_key is not None for item in resource_states):
+                raise RuntimeInitializationError(
+                    "RUNTIME_SCOPED_RESOURCE_SCHEMA_REQUIRED",
+                    "This database must be upgraded before a scoped Resource Scenario can start",
+                )
+            now = datetime.now(UTC)
+            for resource_state in resource_states:
+                self.db.execute(
+                    text(
+                        """
+                        INSERT INTO game_instance_resource_states
+                            (game_instance_id, resource_key, value, reserved_value,
+                             version, created_at, updated_at)
+                        VALUES (:game_instance_id, :resource_key, :value, :reserved_value,
+                                :version, :created_at, :updated_at)
+                        """
+                    ),
+                    {
+                        "game_instance_id": instance.id.hex,
+                        "resource_key": resource_state.resource_key,
+                        "value": resource_state.value,
+                        "reserved_value": resource_state.reserved_value,
+                        "version": 1,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
         roles = {role.key: role for role in definition.actors.roles}
         primary_key = definition.initialization.primary_actor_key
         for actor in definition.actors.actor_profiles:
@@ -171,6 +208,14 @@ class RuntimeInitializationService:
                 GameInstance.creation_key == creation_key,
             )
         )
+
+    def _supports_scoped_resource_schema(self) -> bool:
+        # Use the Session's active connection.  Inspecting the Engine would
+        # borrow a second SQLite connection; with StaticPool that connection
+        # is the same handle and its inspector rollback can invalidate the
+        # initialization savepoint.
+        columns = inspect(self.db.connection()).get_columns("game_instance_resource_states")
+        return "resource_identity" in {str(item["name"]) for item in columns}
 
     def _replay(self, instance: GameInstance, requested_version_id: UUID) -> InitializedRuntime:
         if instance.scenario_version_id != requested_version_id:
@@ -217,7 +262,7 @@ class RuntimeInitializationService:
         expected = (
             len(definition.world.nodes),
             sum(len(node.facts) for node in definition.world.nodes),
-            len(definition.world.resources),
+            len(resource_initial_states(definition)),
             len(definition.actors.actor_profiles),
         )
         if len(sessions) != 1 or counts != expected:

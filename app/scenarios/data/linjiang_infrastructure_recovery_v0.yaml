@@ -2,11 +2,26 @@ schema_version: 2
 metadata:
   key: linjiang_infrastructure_recovery
   name: 临江市灾后基础设施恢复
-  description: 临江市大型城市灾后基础设施恢复场景的初始世界骨架，仅包含区域、设施与交通通道拓扑；正式灾后状态与玩法尚未定义。
-engine_contract: {key: declarative-rule-engine, version: "1"}
+  description: 临江市灾后基础设施恢复的 Generic Locality V1 场景。
+  locality:
+    enabled: true
+    scoped_resources: true
+    region_node_type_key: region
+    facility_node_type_key: facility
+    transport_node_type_key: transport
+    located_in_relation_type_key: located_in
+    transport_endpoint_relation_type_key: endpoint
+    passability_fact_key: passable
+engine_contract:
+  key: declarative-rule-engine
+  version: "1"
 initialization:
   start_node_key: emergency_command_center
-  primary_actor_key: template_bootstrap_operator
+  primary_actor_key: electrical_team_beta
+  resource_initial_states:
+    - {resource_key: electrical_repair_parts, scope_node_key: west_logistics_district, value: 10}
+    - {resource_key: electrical_repair_parts, scope_node_key: north_industrial_district, value: 10}
+    - {resource_key: electrical_repair_parts, scope_node_key: central_district, value: 0}
 world:
   key: linjiang_infrastructure_recovery
   name: 临江市灾后基础设施恢复
@@ -17,37 +32,40 @@ world:
   nodes:
     - key: central_district
       name: 中央城区
-      description: 城市行政与综合应急资源集中的核心区域。
+      description: 临江市行政与综合应急资源集中的核心区域。
       node_type_key: region
       initial_access: AVAILABLE
       initial_visibility: KNOWN
+      interaction_keys: [travel_destination, transport_destination]
     - key: north_industrial_district
       name: 北部工业区
-      description: 集中分布能源与市政工程设施的北部工业区域。
+      description: 集中分布能源与市政工程设施的北部区域。
       node_type_key: region
       initial_access: AVAILABLE
       initial_visibility: KNOWN
+      interaction_keys: [travel_destination, transport_destination]
     - key: west_logistics_district
       name: 西部物流区
       description: 承担物资集散、车辆调度与铁路货运的西部区域。
       node_type_key: region
       initial_access: AVAILABLE
       initial_visibility: KNOWN
+      interaction_keys: [travel_destination, transport_destination]
     - key: east_residential_district
-      name: 东部住宅区
+      name: 东部居住区
       description: 人口居住、社区医疗与民生供水设施集中的东部区域。
       node_type_key: region
       initial_access: AVAILABLE
       initial_visibility: KNOWN
     - key: south_waterfront_district
       name: 南部滨水区
-      description: 沿江分布水处理、港口与燃料设施的南部滨水区域。
+      description: 沿江分布水处理、港口与燃料设施的南部区域。
       node_type_key: region
       initial_access: AVAILABLE
       initial_visibility: KNOWN
     - key: southeast_heights_district
       name: 东南高地区
-      description: 位于城市东南高地、承担避难、蓄水与公共服务的区域。
+      description: 承担避难、蓄水与公共服务的东南高地区域。
       node_type_key: region
       initial_access: AVAILABLE
       initial_visibility: KNOWN
@@ -58,21 +76,20 @@ world:
       node_type_key: facility
       initial_access: AVAILABLE
       initial_visibility: KNOWN
-      interaction_keys: [template_bootstrap]
-      facts:
-        - key: world_v0_bootstrap_status
-          name: WORLD V0 骨架状态（占位）
-          description: 仅用于满足当前 ScenarioDefinition 最小契约，不表示任何灾情或设施状态。
-          value_type: ENUM
-          initial_value: PENDING
-          initial_visibility: KNOWN
-          allowed_values: [PENDING, READY]
     - key: central_hospital
       name: 中央医院
       description: 为中央城区提供综合医疗救治服务。
       node_type_key: facility
       initial_access: AVAILABLE
       initial_visibility: KNOWN
+      interaction_keys: [inspectable, repairable]
+      facts:
+        - key: emergency_power_operational
+          name: 应急供电
+          description: 中央医院的应急供电是否恢复。
+          value_type: BOOLEAN
+          initial_value: false
+          initial_visibility: KNOWN
     - key: central_telecom_hub
       name: 中央通信枢纽
       description: 汇聚并转接城市核心通信网络。
@@ -94,7 +111,7 @@ world:
       initial_visibility: KNOWN
     - key: utility_service_depot
       name: 市政工程维修基地
-      description: 集中存放并调度市政工程维护设备。
+      description: 集中存放并调度市政工程维修设备。
       node_type_key: facility
       initial_access: AVAILABLE
       initial_visibility: KNOWN
@@ -119,7 +136,7 @@ world:
       initial_visibility: KNOWN
     - key: emergency_supply_warehouse
       name: 应急物资仓库
-      description: 集中存储城市应急物资与周转用品。
+      description: 集中储存城市应急物资与周转用品。
       node_type_key: facility
       initial_access: AVAILABLE
       initial_visibility: KNOWN
@@ -138,7 +155,7 @@ world:
 
     - key: east_community_hospital
       name: 东区社区医院
-      description: 为东部住宅区提供社区医疗服务。
+      description: 为东部居住区提供社区医疗服务。
       node_type_key: facility
       initial_access: AVAILABLE
       initial_visibility: KNOWN
@@ -150,13 +167,13 @@ world:
       initial_visibility: KNOWN
     - key: east_water_pump_station
       name: 东部供水泵站
-      description: 负责东部住宅区的供水加压与输送。
+      description: 负责东部居住区的供水加压与输送。
       node_type_key: facility
       initial_access: AVAILABLE
       initial_visibility: KNOWN
     - key: east_telecom_station
       name: 东区通信站
-      description: 为东部住宅区提供区域通信接入服务。
+      description: 为东部居住区提供区域通信接入服务。
       node_type_key: facility
       initial_access: AVAILABLE
       initial_visibility: KNOWN
@@ -217,15 +234,21 @@ world:
       node_type_key: transport
       initial_access: AVAILABLE
       initial_visibility: KNOWN
+      interaction_keys: [inspectable]
+      facts:
+        - {key: passable, name: 通行状态, description: 北部联络通道是否可通行。, value_type: BOOLEAN, initial_value: true, initial_visibility: KNOWN}
     - key: west_freight_corridor
       name: 西部货运走廊
       description: 连接中央城区与西部物流区的货运通道。
       node_type_key: transport
       initial_access: AVAILABLE
       initial_visibility: KNOWN
+      interaction_keys: [inspectable, clearable]
+      facts:
+        - {key: passable, name: 通行状态, description: 西部货运走廊是否可通行。, value_type: BOOLEAN, initial_value: false, initial_visibility: HIDDEN}
     - key: central_river_tunnel
       name: 中央河底隧道
-      description: 连接中央城区与东部住宅区的河底通道。
+      description: 连接中央城区与东部居住区的河底通道。
       node_type_key: transport
       initial_access: AVAILABLE
       initial_visibility: KNOWN
@@ -237,7 +260,7 @@ world:
       initial_visibility: KNOWN
     - key: waterfront_access_corridor
       name: 滨江通道
-      description: 连接东部住宅区与南部滨水区的滨江通道。
+      description: 连接东部居住区与南部滨水区的滨江通道。
       node_type_key: transport
       initial_access: AVAILABLE
       initial_visibility: KNOWN
@@ -285,61 +308,197 @@ world:
     - {source_node_key: waterfront_access_corridor, relation_type_key: endpoint, target_node_key: south_waterfront_district}
     - {source_node_key: southeast_access_corridor, relation_type_key: endpoint, target_node_key: south_waterfront_district}
     - {source_node_key: southeast_access_corridor, relation_type_key: endpoint, target_node_key: southeast_heights_district}
-  resources: []
+  resources:
+    - key: electrical_repair_parts
+      name: 电力维修部件
+      description: 用于恢复中央医院应急供电的维修部件。
+      initial_value: 0
+      minimum: 0
+      reservation_supported: false
 actors:
   roles:
-    - key: template_bootstrap_operator
-      name: 模板占位操作员
-      description: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式玩法角色。
+    - key: electrical_response_team
+      name: 电力抢修队
+      description: 负责电力设施与应急供电恢复。
       capabilities: [PLAN, EXECUTE_ACTION, INSPECT_STATE]
+    - key: emergency_logistics_team
+      name: 应急物流队
+      description: 负责跨区域运输维修部件。
+      capabilities: [EXECUTE_ACTION, INSPECT_STATE, LOGISTICS]
+    - key: municipal_repair_team
+      name: 市政抢修队
+      description: 负责清理和恢复市政交通通道。
+      capabilities: [EXECUTE_ACTION, INSPECT_STATE]
   actor_profiles:
-    - key: template_bootstrap_operator
-      name: 模板占位操作员
-      role_key: template_bootstrap_operator
-      persona: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式 Scenario 角色。
-      initial_node_key: emergency_command_center
-      allowed_action_keys: [bootstrap_world_skeleton]
+    - key: electrical_team_beta
+      name: 电力抢修二队
+      role_key: electrical_response_team
+      persona: 以恢复关键设施供电为优先的电力抢修队。
+      initial_node_key: central_district
+      allowed_action_keys: [travel, inspect, repair_electrical]
+    - key: logistics_team_alpha
+      name: 应急物流一队
+      role_key: emergency_logistics_team
+      persona: 负责在已知可行通道上调度应急维修部件。
+      initial_node_key: central_district
+      allowed_action_keys: [travel, inspect, transport_resource]
+    - key: municipal_repair_team_alpha
+      name: 市政抢修一队
+      role_key: municipal_repair_team
+      persona: 负责清理受阻交通通道并恢复区域连通性。
+      initial_node_key: central_district
+      allowed_action_keys: [travel, inspect, clear_transport]
 interactions:
-  - key: template_bootstrap
-    name: 模板骨架初始化（占位）
-    description: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式玩法。
+  - {key: travel_destination, name: 可前往区域, description: 作为 Travel 目标的区域。}
+  - {key: transport_destination, name: 可运输到区域, description: 作为资源运输目标的区域。}
+  - {key: inspectable, name: 可检查, description: 可检查目标的公开状态。}
+  - {key: clearable, name: 可清障, description: 可清理交通通道。}
+  - {key: repairable, name: 可维修, description: 可执行设施维修。}
 actions:
-  - key: bootstrap_world_skeleton
-    name: WORLD V0 骨架初始化（占位）
-    description: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式灾后恢复玩法。
-    required_interaction_key: template_bootstrap
+  - key: travel
+    name: 前往区域
+    description: 通过一个连接当前区域与目标区域的交通通道移动。
+    required_interaction_key: travel_destination
     execution_mode: IMMEDIATE
+    behavior: TRAVEL
     allowed_actor_capabilities: [EXECUTE_ACTION]
     expected_outcomes:
-      - {code: BOOTSTRAP_COMPLETE, name: 骨架初始化完成（占位）, success: true}
+      - {code: TRAVELLED, name: 已到达目标区域, success: true}
     planning:
-      terminal_effects: [{node_key: emergency_command_center, fact_key: world_v0_bootstrap_status}]
-      success_outcome_codes: [BOOTSTRAP_COMPLETE]
+      success_outcome_codes: [TRAVELLED]
+      hints: [一次行动只跨越一个 Transport 连接的相邻 Region。]
+  - key: transport_resource
+    name: 运输维修部件
+    description: 由具备物流能力的 Actor 将当前区域的维修部件运输到目标区域。
+    required_interaction_key: transport_destination
+    execution_mode: IMMEDIATE
+    behavior: TRANSPORT_RESOURCE
+    allowed_actor_capabilities: [EXECUTE_ACTION, LOGISTICS]
+    parameters:
+      - {key: resource_key, name: 资源键, value_type: STRING}
+      - {key: amount, name: 数量, value_type: INTEGER, minimum: 1}
+      - {key: destination_region_key, name: 目标区域, value_type: STRING}
+    expected_outcomes:
+      - {code: TRANSPORTED, name: 维修部件已运输, success: true}
+    planning:
+      success_outcome_codes: [TRANSPORTED]
+      hints: [运输只读取并更新起点与终点 Region 的同一 Resource 类型余额。]
+  - key: inspect
+    name: 检查状态
+    description: 检查当前区域内设施或交通通道的隐藏状态。
+    required_interaction_key: inspectable
+    execution_mode: IMMEDIATE
+    behavior: INSPECT
+    locality: LOCAL_TARGET
+    allowed_actor_capabilities: [EXECUTE_ACTION, INSPECT_STATE]
+    expected_outcomes:
+      - {code: INSPECTED, name: 状态已检查, success: true}
+    planning:
+      success_outcome_codes: [INSPECTED]
+      hints: [检查不会修改世界事实，只会揭示目标的隐藏 Fact。]
+  - key: clear_transport
+    name: 清理交通通道
+    description: 由市政抢修队清理受阻交通通道。
+    required_interaction_key: clearable
+    execution_mode: IMMEDIATE
+    locality: TRANSPORT_ENDPOINT
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: CLEARED, name: 通道已清理, success: true}
+    planning:
+      success_outcome_codes: [CLEARED]
+      hints: [清障不消耗本 Scenario 的维修部件。]
+  - key: repair_electrical
+    name: 修复应急供电
+    description: 消耗当前区域维修部件并恢复中央医院应急供电。
+    required_interaction_key: repairable
+    execution_mode: IMMEDIATE
+    locality: FACILITY_REGION
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: REPAIRED, name: 应急供电已恢复, success: true}
+    planning:
+      terminal_effects: [{node_key: central_hospital, fact_key: emergency_power_operational}]
+      success_outcome_codes: [REPAIRED]
+      hints: [维修必须在中央医院所在 Region 执行，并需要至少 10 个部件。]
 rules:
-  - key: bootstrap_world_skeleton_complete
+  - key: travel_resolution
     phase: RESOLVE
-    action_key: bootstrap_world_skeleton
+    action_key: travel
+    priority: 0
+    effects:
+      - {kind: EMIT_OUTCOME, outcome_code: TRAVELLED}
+  - key: transport_resolution
+    phase: RESOLVE
+    action_key: transport_resource
+    priority: 0
+    effects:
+      - {kind: EMIT_OUTCOME, outcome_code: TRANSPORTED}
+  - key: inspect_resolution
+    phase: RESOLVE
+    action_key: inspect
+    priority: 0
+    effects:
+      - {kind: EMIT_OUTCOME, outcome_code: INSPECTED}
+  - key: clear_transport_resolution
+    phase: RESOLVE
+    action_key: clear_transport
     priority: 0
     effects:
       - kind: SET_FACT
-        node: {kind: EXPLICIT, node_key: emergency_command_center}
-        fact_key: world_v0_bootstrap_status
-        value: {source: LITERAL, literal: READY}
-      - {kind: EMIT_OUTCOME, outcome_code: BOOTSTRAP_COMPLETE}
+        node: {kind: CURRENT_TARGET}
+        fact_key: passable
+        value: {source: LITERAL, literal: true}
+      - {kind: EMIT_OUTCOME, outcome_code: CLEARED}
+  - key: repair_insufficient_parts
+    phase: PREFLIGHT
+    action_key: repair_electrical
+    priority: 10
+    condition:
+      kind: RESOURCE_COMPARE
+      resource_key: electrical_repair_parts
+      resource_scope: {kind: ACTOR_CURRENT_REGION}
+      operator: LT
+      value: 10
+    effects:
+      - {kind: EMIT_FAILURE, failure_code: INSUFFICIENT_REPAIR_PARTS, message: 当前区域维修部件不足 10 个。, retryable: true}
+  - key: repair_electrical_resolution
+    phase: RESOLVE
+    action_key: repair_electrical
+    priority: 0
+    effects:
+      - kind: SET_FACT
+        node: {kind: CURRENT_TARGET}
+        fact_key: emergency_power_operational
+        value: {source: LITERAL, literal: true}
+      - kind: ADJUST_RESOURCE
+        resource_key: electrical_repair_parts
+        resource_scope: {kind: ACTOR_CURRENT_REGION}
+        amount: {source: LITERAL, literal: -10}
+      - {kind: EMIT_OUTCOME, outcome_code: REPAIRED}
 objectives:
-  - key: world_v0_bootstrap
-    name: WORLD V0 骨架初始化（占位）
-    description: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式灾后恢复目标。
+  - key: restore_central_hospital_emergency_power
+    name: 恢复中央医院应急供电
+    description: 将中央医院的应急供电恢复为可运行状态。
     completion_requirements:
-      - key: bootstrap_ready
-        node_key: emergency_command_center
-        fact_key: world_v0_bootstrap_status
-        accepted_values: [READY]
-        description: 仅表示模板占位初始化完成。
-    goal_aliases: [initialize the WORLD V0 skeleton, 初始化 WORLD V0 骨架]
+      - key: central_hospital_power_restored
+        node_key: central_hospital
+        fact_key: emergency_power_operational
+        accepted_values: [true]
+        description: 中央医院应急供电已恢复。
+    goal_aliases:
+      - 恢复中央医院应急供电
+      - restore central hospital emergency power
+      - Restore emergency power to Central Hospital.
 goal_resolution:
   allow_llm_fallback: false
-  clarification_prompt: 当前模板仅包含 WORLD V0 世界骨架，不包含正式玩法目标。
+  clarification_prompt: 当前 Scenario 的目标是恢复中央医院应急供电。
 planning:
-  instructions: [本模板仅提供 WORLD V0 世界骨架；正式灾后状态与玩法尚未定义。]
-  recovery_hints: []
+  instructions:
+    - 先确认 Actor 当前 Region，再选择一个相邻且可用的 Transport。
+    - 资源余额按 Region 作用域展示；运输前必须确保起点余额足够。
+    - 隐藏的 Transport 通行状态只能在执行或检查后成为已知事实。
+  recovery_hints:
+    - {failure_code: TRAVEL_BLOCKED, hint: 通行受阻时保留当前区域，读取新揭示的通行事实并重新规划。}
+    - {failure_code: TRANSPORT_BLOCKED, hint: 运输受阻时不改变两端资源余额，并重新规划。}
+    - {failure_code: INSUFFICIENT_REPAIR_PARTS, hint: 先将维修部件运输到执行维修的 Region。}

@@ -439,6 +439,7 @@ class PublicResourceResponse(ApiModel):
     name: str
     value: int
     reserved_value: int
+    scope_node_key: str | None = None
 
 
 class PublicActorResponse(ApiModel):

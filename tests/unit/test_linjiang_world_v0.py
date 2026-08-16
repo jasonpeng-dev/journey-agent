@@ -1,22 +1,29 @@
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V0
+from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
 
 
-def test_linjiang_world_v0_contains_only_the_declared_skeleton() -> None:
-    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V0
+def test_linjiang_v1_preserves_topology_and_adds_gameplay() -> None:
+    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V1
     nodes_by_type = {
         node_type.key: {
             node.key for node in definition.world.nodes if node.node_type_key == node_type.key
         }
         for node_type in definition.world.node_types
     }
-
     assert definition.metadata.key == "linjiang_infrastructure_recovery"
     assert definition.metadata.name == "临江市灾后基础设施恢复"
     assert len(nodes_by_type["region"]) == 6
     assert len(nodes_by_type["facility"]) == 24
     assert len(nodes_by_type["transport"]) == 6
     assert len({node.key for node in definition.world.nodes}) == 36
-    assert len(definition.world.resources) == 0
+    assert definition.metadata.locality.enabled
+    assert len(definition.world.resources) == 1
+    assert definition.world.resources[0].key == "electrical_repair_parts"
+    assert len(definition.initialization.resource_initial_states) == 3
+    assert {item.key for item in definition.actors.actor_profiles} == {
+        "electrical_team_beta",
+        "logistics_team_alpha",
+        "municipal_repair_team_alpha",
+    }
 
     located_in = {
         relation.source_node_key: relation.target_node_key

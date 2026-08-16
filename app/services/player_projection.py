@@ -174,6 +174,7 @@ class PlayerProjectionService:
                     name=resource_definitions[item.resource_key].name,
                     value=item.value,
                     reserved_value=item.reserved_value,
+                    scope_node_key=item.scope_node_key,
                 )
                 for item in resources
             ],

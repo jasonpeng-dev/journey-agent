@@ -3,14 +3,14 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 
-def test_linjiang_world_v0_draft_round_trip_preserves_topology_and_localization(
+def test_linjiang_v1_draft_round_trip_preserves_topology_and_localization(
     client: TestClient,
 ) -> None:
     created = client.post(
         "/api/v1/scenarios",
         json={
             "mode": "EXAMPLE",
-            "key": "linjiang_world_v0_test",
+            "key": "linjiang_world_v1_test",
             "name": "临江市灾后基础设施恢复测试",
             "example_key": "linjiang_infrastructure_recovery",
         },
@@ -32,6 +32,7 @@ def test_linjiang_world_v0_draft_round_trip_preserves_topology_and_localization(
     assert len({node["key"] for node in nodes}) == 36
     assert nodes_by_key["central_hospital"]["name"] == "中央医院"
     assert nodes_by_key["central_hospital"]["description"]
+    assert document["metadata"]["locality"]["scoped_resources"] is True
 
     located_in = {
         relation["source_node_key"]: relation["target_node_key"]

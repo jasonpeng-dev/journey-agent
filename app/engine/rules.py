@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from app.domain.resources import resource_state_key
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
     ActionParameterType,
@@ -25,6 +26,7 @@ from app.domain.scenario_v2 import (
     ValueSource,
 )
 from app.domain.world import AccessState, Visibility
+from app.engine.locality import LocalityEngineError, resolve_resource_scope
 
 type FactRef = tuple[str, str]
 
@@ -63,6 +65,7 @@ class ActionRuleContext:
     parameters: Mapping[str, StrictScalar]
     actor_key: str | None = None
     operation_status: str | None = None
+    actor_current_node_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,12 +98,14 @@ class NodeAccessMutation:
 class ResourceMutation:
     resource_key: str
     amount: int
+    scope_node_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ResourceReservationMutation:
     resource_key: str
     amount: int
+    scope_node_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +133,7 @@ class GenericRuleOutcome:
     resource_mutations: tuple[ResourceMutation, ...] = ()
     resource_reservations: tuple[ResourceReservationMutation, ...] = ()
     memory_events: tuple[MemoryEvent, ...] = ()
+    actor_location_update: str | None = None
 
 
 class DeclarativeRuleEngine:
@@ -235,7 +241,12 @@ class DeclarativeRuleEngine:
             return _compare(value, condition.operator, condition.value)
         if kind == ConditionKind.RESOURCE_COMPARE:
             assert condition.resource_key and condition.operator and condition.value is not None
-            value = _required(state.resources, condition.resource_key, "RULE_RESOURCE_MISSING")
+            key = self._resource_key(condition.resource_scope, context)
+            value = _required(
+                state.resources,
+                key_for_resource(condition.resource_key, key),
+                "RULE_RESOURCE_MISSING",
+            )
             return _compare(value, condition.operator, condition.value)
         if kind == ConditionKind.PARAMETER_COMPARE:
             assert condition.parameter_key and condition.operator and condition.value is not None
@@ -299,18 +310,24 @@ class DeclarativeRuleEngine:
                 node_access.extend(NodeAccessMutation(node, effect.access) for node in nodes)
             elif effect.kind == EffectKind.ADJUST_RESOURCE:
                 assert effect.resource_key and effect.amount
+                scope = self._resource_scope(effect.resource_scope, context)
                 resources.append(
-                    ResourceMutation(effect.resource_key, self._integer(effect.amount, context))
+                    ResourceMutation(
+                        effect.resource_key,
+                        self._integer(effect.amount, context),
+                        scope,
+                    )
                 )
             elif effect.kind in {
                 EffectKind.RESERVE_RESOURCE,
                 EffectKind.RELEASE_RESOURCE,
             }:
                 assert effect.resource_key and effect.amount
+                scope = self._resource_scope(effect.resource_scope, context)
                 amount = self._integer(effect.amount, context)
                 if effect.kind == EffectKind.RELEASE_RESOURCE:
                     amount = -amount
-                reservations.append(ResourceReservationMutation(effect.resource_key, amount))
+                reservations.append(ResourceReservationMutation(effect.resource_key, amount, scope))
             elif effect.kind == EffectKind.EMIT_OUTCOME:
                 outcome_code = effect.outcome_code
             elif effect.kind == EffectKind.EMIT_FAILURE:
@@ -435,6 +452,24 @@ class DeclarativeRuleEngine:
     def _action(self, key: str) -> ActionDefinitionV2:
         return _required(self._actions, key, "RULE_ACTION_NOT_FOUND")
 
+    def _resource_scope(
+        self,
+        scope: object,
+        context: ActionRuleContext,
+    ) -> str | None:
+        try:
+            return resolve_resource_scope(
+                self.definition,
+                scope,  # type: ignore[arg-type]
+                actor_current_node_key=context.actor_current_node_key,
+                target_node_key=context.target_node_key,
+            )
+        except LocalityEngineError as exc:
+            raise RuleEngineError(exc.code, exc.message) from exc
+
+    def _resource_key(self, scope: object, context: ActionRuleContext) -> str | None:
+        return self._resource_scope(scope, context)
+
     @staticmethod
     def _validate_context(action: ActionDefinitionV2, context: ActionRuleContext) -> None:
         definitions = {parameter.key: parameter for parameter in action.parameters}
@@ -482,6 +517,10 @@ def _required[Key, Value](mapping: Mapping[Key, Value], key: Key, code: str) -> 
         return mapping[key]
     except KeyError:
         raise RuleEngineError(code, f"Required rule state is missing: {key}") from None
+
+
+def key_for_resource(resource_key: str, scope_node_key: str | None) -> str:
+    return resource_state_key(resource_key, scope_node_key)
 
 
 def _compare(left: StrictScalar, operator: ComparisonOperator, right: StrictScalar) -> bool:

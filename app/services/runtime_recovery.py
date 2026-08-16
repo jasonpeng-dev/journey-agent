@@ -8,8 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.enums import GameInstanceStatus, WorldOperationStatus
+from app.domain.resources import resource_initial_states
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
-from app.domain.scenario_v2 import NodeDefinitionV2, ResourceDefinitionV2
+from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentTask,
@@ -127,7 +128,7 @@ class RuntimeRecoveryService:
         self._verify_snapshot_state(
             instance,
             definition.world.nodes,
-            definition.world.resources,
+            definition,
             {actor.key for actor in definition.actors.actor_profiles},
         )
         return RecoveredRuntime(
@@ -149,7 +150,7 @@ class RuntimeRecoveryService:
         self,
         instance: GameInstance,
         nodes: tuple[NodeDefinitionV2, ...],
-        resources: tuple[ResourceDefinitionV2, ...],
+        definition: ScenarioDefinitionV2,
         actor_keys: set[str],
     ) -> None:
         node_rows = self.db.scalars(
@@ -173,7 +174,14 @@ class RuntimeRecoveryService:
         if (
             len(node_rows) != len(nodes)
             or len(fact_rows) != sum(len(node.facts) for node in nodes)
-            or len(resource_rows) != len(resources)
+            or {
+                (row.resource_key, row.scope_node_key)
+                for row in resource_rows
+            }
+            != {
+                (item.resource_key, item.scope_node_key)
+                for item in resource_initial_states(definition)
+            }
             or {actor.actor_key for actor in actor_rows} != actor_keys
         ):
             self._corrupt("initialized state")

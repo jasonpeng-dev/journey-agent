@@ -2,26 +2,38 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
 from app.domain.enums import AuthorityOutcome, NodeStatus
+from app.domain.resources import resource_initial_states, resource_state_key
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
+    ActionBehavior,
     ScenarioDefinitionV2,
     StrictScalar,
     normalize_action_parameters,
 )
 from app.domain.world import AccessState, Visibility
+from app.engine.locality import (
+    LocalityEngineError,
+    passability_fact,
+    region_for_node,
+    transport_between,
+    validate_action_locality,
+)
 from app.engine.rules import (
     ActionRuleContext,
     DeclarativeRuleEngine,
     DeclarativeRuleState,
+    FactVisibilityMutation,
     GenericRuleOutcome,
+    ResourceMutation,
     RuleFactState,
+    RuleFailure,
     RuleNodeState,
 )
 from app.infrastructure.db.models import (
@@ -102,6 +114,13 @@ class GenericGameService:
                 "ACTION_TARGET_INVALID",
                 "The target does not support the Action's required Interaction",
             )
+        self._validate_locality(
+            definition,
+            action,
+            actor.current_node_key,
+            target_node_key,
+            parameters,
+        )
         state = self._locked_state(definition)
         target_state = state.nodes[target_node_key]
         if (
@@ -119,6 +138,7 @@ class GenericGameService:
             parameters=parameters,
             actor_key=actor_key,
             operation_status=operation_status,
+            actor_current_node_key=actor.current_node_key,
         )
         engine = DeclarativeRuleEngine(definition)
         preflight = engine.evaluate_preflight(state, context)
@@ -128,6 +148,15 @@ class GenericGameService:
                 runtime_revision=self._instance().runtime_revision,
             )
         outcome = engine.evaluate_resolution(state, context)
+        outcome = self._apply_behavior(
+            definition,
+            action,
+            actor,
+            target_node_key,
+            state,
+            outcome,
+            parameters,
+        )
         newly_known_facts = {
             (item.node_key, item.fact_key)
             for item in outcome.fact_visibility_updates
@@ -207,6 +236,13 @@ class GenericGameService:
                 "ACTION_TARGET_INVALID",
                 "The target does not support the Action's required Interaction",
             )
+        self._validate_locality(
+            definition,
+            action,
+            actor.current_node_key,
+            target_node_key,
+            parameters,
+        )
         state = self._locked_state(definition, lock=False)
         target_state = state.nodes[target_node_key]
         if (
@@ -225,6 +261,7 @@ class GenericGameService:
                 target_node_key=target_node_key,
                 parameters=parameters,
                 actor_key=actor_key,
+                actor_current_node_key=actor.current_node_key,
             ),
         )
 
@@ -255,6 +292,171 @@ class GenericGameService:
                 "RUNTIME_ACTOR_NOT_FOUND", "The active Actor does not belong to this Instance"
             )
         return actor
+
+    @staticmethod
+    def _validate_locality(
+        definition: ScenarioDefinitionV2,
+        action: object,
+        actor_current_node_key: str,
+        target_node_key: str,
+        parameters: dict[str, StrictScalar],
+    ) -> None:
+        from app.domain.scenario_v2 import ActionDefinitionV2
+
+        assert isinstance(action, ActionDefinitionV2)
+        try:
+            validate_action_locality(
+                definition,
+                action,
+                actor_current_node_key=actor_current_node_key,
+                target_node_key=target_node_key,
+                parameters=parameters,
+            )
+        except LocalityEngineError as exc:
+            raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+
+    def _apply_behavior(
+        self,
+        definition: ScenarioDefinitionV2,
+        action: object,
+        actor: GameInstanceActor,
+        target_node_key: str,
+        state: DeclarativeRuleState,
+        outcome: GenericRuleOutcome,
+        parameters: dict[str, StrictScalar],
+    ) -> GenericRuleOutcome:
+        from app.domain.scenario_v2 import ActionDefinitionV2
+
+        assert isinstance(action, ActionDefinitionV2)
+        if action.behavior == ActionBehavior.TRAVEL:
+            connector = self._connector(definition, actor.current_node_key, target_node_key)
+            if not self._is_passable(definition, connector, state):
+                return self._blocked_outcome(
+                    outcome,
+                    code="TRAVEL_BLOCKED",
+                    message="The one-hop Transport is currently blocked",
+                    reveal=self._passability_reveal(definition, connector, state),
+                )
+            return replace(outcome, actor_location_update=target_node_key)
+        if action.behavior == ActionBehavior.INSPECT:
+            return replace(
+                outcome,
+                fact_visibility_updates=outcome.fact_visibility_updates
+                + self._inspect_reveals(target_node_key, definition, state),
+            )
+        if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+            connector = self._connector(definition, actor.current_node_key, target_node_key)
+            if not self._is_passable(definition, connector, state):
+                return self._blocked_outcome(
+                    outcome,
+                    code="TRANSPORT_BLOCKED",
+                    message="The one-hop Transport is currently blocked",
+                    reveal=self._passability_reveal(definition, connector, state),
+                )
+            resource_key = parameters.get("resource_key")
+            amount = parameters.get("amount")
+            if not isinstance(resource_key, str) or not isinstance(amount, int):
+                raise GenericGameError(
+                    "TRANSPORT_PARAMETERS_INVALID",
+                    "Transport requires a Resource key and integer amount",
+                )
+            source_region = region_for_node(definition, actor.current_node_key)
+            target_region = region_for_node(definition, target_node_key)
+            source_balance = state.resources.get(resource_state_key(resource_key, source_region))
+            if source_balance is None:
+                raise GenericGameError(
+                    "TRANSPORT_RESOURCE_MISSING",
+                    "The scoped source Resource balance is missing",
+                )
+            if source_balance < amount:
+                return self._blocked_outcome(
+                    outcome,
+                    code="TRANSPORT_RESOURCE_INSUFFICIENT",
+                    message="The source Region lacks the requested Resource amount",
+                    retryable=True,
+                )
+            return replace(
+                outcome,
+                resource_mutations=(
+                    *outcome.resource_mutations,
+                    ResourceMutation(resource_key, -amount, source_region),
+                    ResourceMutation(resource_key, amount, target_region),
+                ),
+                actor_location_update=target_region,
+            )
+        return outcome
+
+    @staticmethod
+    def _blocked_outcome(
+        outcome: GenericRuleOutcome,
+        *,
+        code: str,
+        message: str,
+        retryable: bool = True,
+        reveal: tuple[FactVisibilityMutation, ...] = (),
+    ) -> GenericRuleOutcome:
+        return GenericRuleOutcome(
+            selected_rule_key=outcome.selected_rule_key,
+            outcome_code=None,
+            failure=RuleFailure(code=code, message=message, retryable=retryable),
+            fact_visibility_updates=reveal,
+        )
+
+    @staticmethod
+    def _connector(
+        definition: ScenarioDefinitionV2,
+        actor_current_node_key: str,
+        target_node_key: str,
+    ) -> str:
+        try:
+            return transport_between(
+                definition,
+                region_for_node(definition, actor_current_node_key),
+                target_node_key,
+            )
+        except LocalityEngineError as exc:
+            raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+
+    @staticmethod
+    def _is_passable(
+        definition: ScenarioDefinitionV2,
+        transport_key: str,
+        state: DeclarativeRuleState,
+    ) -> bool:
+        try:
+            value = passability_fact(definition, transport_key, state)
+        except LocalityEngineError as exc:
+            raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+        return value is None or value[1]
+
+    @staticmethod
+    def _passability_reveal(
+        definition: ScenarioDefinitionV2,
+        transport_key: str,
+        state: DeclarativeRuleState,
+    ) -> tuple[FactVisibilityMutation, ...]:
+        fact_key = definition.metadata.locality.passability_fact_key
+        if fact_key is None:
+            return ()
+        fact = state.facts.get((transport_key, fact_key))
+        if fact is None or fact.visibility.value == "KNOWN":
+            return ()
+        return (FactVisibilityMutation(transport_key, fact_key, Visibility.KNOWN),)
+
+    @staticmethod
+    def _inspect_reveals(
+        target_node_key: str,
+        definition: ScenarioDefinitionV2,
+        state: DeclarativeRuleState,
+    ) -> tuple[FactVisibilityMutation, ...]:
+        node = definition.world.node(target_node_key)
+        if node is None:
+            return ()
+        return tuple(
+            FactVisibilityMutation(target_node_key, fact.key, Visibility.KNOWN)
+            for fact in node.facts
+            if state.facts[(target_node_key, fact.key)].visibility != Visibility.KNOWN
+        )
 
     @staticmethod
     def _require_authority(
@@ -296,12 +498,15 @@ class GenericGameService:
         nodes = self.db.scalars(node_query).all()
         facts = self.db.scalars(fact_query).all()
         resources = self.db.scalars(resource_query).all()
+        expected_resources = {
+            (item.resource_key, item.scope_node_key) for item in resource_initial_states(definition)
+        }
         if (
             {row.node_key for row in nodes} != {node.key for node in definition.world.nodes}
             or {(row.node_key, row.fact_key) for row in facts}
             != {(node.key, fact.key) for node in definition.world.nodes for fact in node.facts}
-            or {row.resource_key for row in resources}
-            != {resource.key for resource in definition.world.resources}
+            or {(row.resource_key, row.scope_node_key) for row in resources}
+            != expected_resources
         ):
             raise GenericGameError(
                 "RUNTIME_STATE_INCOMPLETE",
@@ -326,8 +531,14 @@ class GenericGameService:
                 )
                 for row in facts
             },
-            resources={row.resource_key: row.value for row in resources},
-            resource_reservations={row.resource_key: row.reserved_value for row in resources},
+            resources={
+                resource_state_key(row.resource_key, row.scope_node_key): row.value
+                for row in resources
+            },
+            resource_reservations={
+                resource_state_key(row.resource_key, row.scope_node_key): row.reserved_value
+                for row in resources
+            },
         )
 
     def _apply(
@@ -339,27 +550,47 @@ class GenericGameService:
         resources = {item.key: item for item in definition.world.resources}
         resource_rows: dict[str, GameInstanceResourceState] = {}
         resource_keys = {
-            balance_item.resource_key for balance_item in outcome.resource_mutations
-        } | {reserve_item.resource_key for reserve_item in outcome.resource_reservations}
-        for resource_key in resource_keys:
-            if resource_key not in resource_rows:
+            resource_state_key(item.resource_key, item.scope_node_key)
+            for item in outcome.resource_mutations
+        } | {
+            resource_state_key(item.resource_key, item.scope_node_key)
+            for item in outcome.resource_reservations
+        }
+        for identity in resource_keys:
+            if identity not in resource_rows:
+                if not any(
+                    resource_state_key(item.resource_key, item.scope_node_key) == identity
+                    for item in outcome.resource_mutations
+                ) and not any(
+                    resource_state_key(item.resource_key, item.scope_node_key) == identity
+                    for item in outcome.resource_reservations
+                ):
+                    continue
                 resource_row = self.db.get(
                     GameInstanceResourceState,
-                    (self.scope.game_instance_id, resource_key),
+                    (self.scope.game_instance_id, identity),
                 )
                 if resource_row is None:
                     raise GenericGameError(
                         "RUNTIME_RESOURCE_MISSING", "A Rule referenced missing Instance state"
                     )
-                resource_rows[resource_key] = resource_row
+                resource_rows[identity] = resource_row
         projected_values = {key: row.value for key, row in resource_rows.items()}
         projected_reserved = {key: row.reserved_value for key, row in resource_rows.items()}
         for balance_mutation in outcome.resource_mutations:
-            projected_values[balance_mutation.resource_key] += balance_mutation.amount
+            identity = resource_state_key(
+                balance_mutation.resource_key,
+                balance_mutation.scope_node_key,
+            )
+            projected_values[identity] += balance_mutation.amount
         for reserve_mutation in outcome.resource_reservations:
-            projected_reserved[reserve_mutation.resource_key] += reserve_mutation.amount
+            identity = resource_state_key(
+                reserve_mutation.resource_key,
+                reserve_mutation.scope_node_key,
+            )
+            projected_reserved[identity] += reserve_mutation.amount
         for key, value in projected_values.items():
-            resource = resources[key]
+            resource = resources[resource_rows[key].resource_key]
             reserved = projected_reserved[key]
             if (
                 value < resource.minimum
@@ -398,6 +629,10 @@ class GenericGameService:
             persisted_resource.value = projected_values[key]
             persisted_resource.reserved_value = projected_reserved[key]
             persisted_resource.version += 1
+        if outcome.actor_location_update is not None:
+            actor = self._actor(actor_key)
+            actor.current_node_key = outcome.actor_location_update
+            actor.version += 1
         for event in outcome.memory_events:
             self.db.add(
                 GameInstanceMemoryEvent(
