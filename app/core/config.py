@@ -1,8 +1,31 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+
+
+def resolved_database_target(database_url: str) -> str:
+    """Render the resolved database target without exposing credentials."""
+
+    url = make_url(database_url)
+    if url.drivername.startswith("sqlite"):
+        database = url.database
+        if database is None or database == "":
+            return f"{url.drivername}://"
+        if database == ":memory:":
+            return f"{url.drivername}:///:memory:"
+        if database.startswith("/"):
+            path_text = database
+        else:
+            path = Path(database)
+            if not path.is_absolute():
+                path = (Path.cwd() / path).resolve()
+            path_text = path.as_posix()
+        return f"{url.drivername}:///{path_text}"
+    return url.render_as_string(hide_password=True)
 
 
 class Settings(BaseSettings):

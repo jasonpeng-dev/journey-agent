@@ -207,9 +207,12 @@ uv run python -m app.seed
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-如果需要 OpenAI-compatible provider，请在启动前编辑 `.env`。seed 命令会通过正常 Scenario
-lifecycle 发布内置的 Starfire 与 Medical V2 definition。服务启动后可访问 `/health` 和
-`/ready`。
+本地开发统一使用 `sqlite+pysqlite:///./journey_dev.db`。请在 `.env` 中保留这个
+`DATABASE_URL`，让 backend、场景编辑器和玩家页面使用同一个数据库；不要把本地命令指向
+历史遗留的 `journey_manual` 数据库。Backend 启动日志会打印最终解析出的数据库目标。如果
+需要 OpenAI-compatible provider，再编辑其他 `.env` 设置。seed 命令会通过正常 Scenario
+lifecycle 发布内置的 Starfire、Medical 和 Linjiang V1 definition。服务启动后可访问
+`/health` 和 `/ready`。
 
 ### Frontend
 
