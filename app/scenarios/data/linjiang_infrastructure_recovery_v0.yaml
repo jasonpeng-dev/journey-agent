@@ -1,0 +1,345 @@
+schema_version: 2
+metadata:
+  key: linjiang_infrastructure_recovery
+  name: 临江市灾后基础设施恢复
+  description: 临江市大型城市灾后基础设施恢复场景的初始世界骨架，仅包含区域、设施与交通通道拓扑；正式灾后状态与玩法尚未定义。
+engine_contract: {key: declarative-rule-engine, version: "1"}
+initialization:
+  start_node_key: emergency_command_center
+  primary_actor_key: template_bootstrap_operator
+world:
+  key: linjiang_infrastructure_recovery
+  name: 临江市灾后基础设施恢复
+  node_types:
+    - {key: region, name: 区域}
+    - {key: facility, name: 设施}
+    - {key: transport, name: 交通通道}
+  nodes:
+    - key: central_district
+      name: 中央城区
+      description: 城市行政与综合应急资源集中的核心区域。
+      node_type_key: region
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: north_industrial_district
+      name: 北部工业区
+      description: 集中分布能源与市政工程设施的北部工业区域。
+      node_type_key: region
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: west_logistics_district
+      name: 西部物流区
+      description: 承担物资集散、车辆调度与铁路货运的西部区域。
+      node_type_key: region
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: east_residential_district
+      name: 东部住宅区
+      description: 人口居住、社区医疗与民生供水设施集中的东部区域。
+      node_type_key: region
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: south_waterfront_district
+      name: 南部滨水区
+      description: 沿江分布水处理、港口与燃料设施的南部滨水区域。
+      node_type_key: region
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: southeast_heights_district
+      name: 东南高地区
+      description: 位于城市东南高地、承担避难、蓄水与公共服务的区域。
+      node_type_key: region
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+
+    - key: emergency_command_center
+      name: 市应急指挥中心
+      description: 负责统筹全市应急信息与资源调度。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+      interaction_keys: [template_bootstrap]
+      facts:
+        - key: world_v0_bootstrap_status
+          name: WORLD V0 骨架状态（占位）
+          description: 仅用于满足当前 ScenarioDefinition 最小契约，不表示任何灾情或设施状态。
+          value_type: ENUM
+          initial_value: PENDING
+          initial_visibility: KNOWN
+          allowed_values: [PENDING, READY]
+    - key: central_hospital
+      name: 中央医院
+      description: 为中央城区提供综合医疗救治服务。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: central_telecom_hub
+      name: 中央通信枢纽
+      description: 汇聚并转接城市核心通信网络。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: central_fire_rescue_station
+      name: 中央消防救援站
+      description: 承担中央城区消防与应急救援响应。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+
+    - key: north_power_substation
+      name: 北部主变电站
+      description: 为北部工业区及周边区域提供电力变配服务。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: utility_service_depot
+      name: 市政工程维修基地
+      description: 集中存放并调度市政工程维护设备。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: north_fuel_depot
+      name: 北部燃料储备库
+      description: 储存并供应城市应急运行所需燃料。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: heavy_equipment_yard
+      name: 重型工程设备场
+      description: 停放和调配重型工程作业设备。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+
+    - key: city_distribution_center
+      name: 城市配送中心
+      description: 负责城市物资的集中分拨与配送组织。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: emergency_supply_warehouse
+      name: 应急物资仓库
+      description: 集中存储城市应急物资与周转用品。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: vehicle_depot
+      name: 应急车辆基地
+      description: 集中停放并调度应急响应车辆。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: rail_freight_yard
+      name: 铁路货运场
+      description: 承担铁路货物到发与装卸组织。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+
+    - key: east_community_hospital
+      name: 东区社区医院
+      description: 为东部住宅区提供社区医疗服务。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: riverside_shelter
+      name: 河滨应急避难所
+      description: 为河滨居民提供集中避难与公共服务空间。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: east_water_pump_station
+      name: 东部供水泵站
+      description: 负责东部住宅区的供水加压与输送。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: east_telecom_station
+      name: 东区通信站
+      description: 为东部住宅区提供区域通信接入服务。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+
+    - key: water_treatment_plant
+      name: 城市水处理厂
+      description: 负责城市原水处理与供水系统衔接。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: south_pump_station
+      name: 南部主泵站
+      description: 负责南部滨水区的水务输送与泵送调度。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: river_port
+      name: 临江港
+      description: 承担沿江货物与应急运输的装卸作业。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: south_fuel_terminal
+      name: 南部燃料码头
+      description: 承担燃料水运接卸与转运组织。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+
+    - key: southeast_shelter
+      name: 东南高地避难所
+      description: 为东南片区提供高地集中避难空间。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: hill_reservoir
+      name: 高地蓄水池
+      description: 储存并调节东南高地区的供水资源。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: southeast_telecom_relay
+      name: 东南通信中继站
+      description: 为东南高地区提供通信信号中继服务。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: district_service_center
+      name: 东南公共服务中心
+      description: 提供东南高地区的综合公共服务与办事支持。
+      node_type_key: facility
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+
+    - key: north_service_corridor
+      name: 北部联络通道
+      description: 连接北部工业区与中央城区的区域联络通道。
+      node_type_key: transport
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: west_freight_corridor
+      name: 西部货运走廊
+      description: 连接中央城区与西部物流区的货运通道。
+      node_type_key: transport
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: central_river_tunnel
+      name: 中央河底隧道
+      description: 连接中央城区与东部住宅区的河底通道。
+      node_type_key: transport
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: south_bridge
+      name: 南港大桥
+      description: 连接西部物流区与南部滨水区的跨江通道。
+      node_type_key: transport
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: waterfront_access_corridor
+      name: 滨江通道
+      description: 连接东部住宅区与南部滨水区的滨江通道。
+      node_type_key: transport
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+    - key: southeast_access_corridor
+      name: 东南山麓通道
+      description: 连接南部滨水区与东南高地区的山麓通道。
+      node_type_key: transport
+      initial_access: AVAILABLE
+      initial_visibility: KNOWN
+
+  relations:
+    - {source_node_key: emergency_command_center, relation_type_key: located_in, target_node_key: central_district}
+    - {source_node_key: central_hospital, relation_type_key: located_in, target_node_key: central_district}
+    - {source_node_key: central_telecom_hub, relation_type_key: located_in, target_node_key: central_district}
+    - {source_node_key: central_fire_rescue_station, relation_type_key: located_in, target_node_key: central_district}
+    - {source_node_key: north_power_substation, relation_type_key: located_in, target_node_key: north_industrial_district}
+    - {source_node_key: utility_service_depot, relation_type_key: located_in, target_node_key: north_industrial_district}
+    - {source_node_key: north_fuel_depot, relation_type_key: located_in, target_node_key: north_industrial_district}
+    - {source_node_key: heavy_equipment_yard, relation_type_key: located_in, target_node_key: north_industrial_district}
+    - {source_node_key: city_distribution_center, relation_type_key: located_in, target_node_key: west_logistics_district}
+    - {source_node_key: emergency_supply_warehouse, relation_type_key: located_in, target_node_key: west_logistics_district}
+    - {source_node_key: vehicle_depot, relation_type_key: located_in, target_node_key: west_logistics_district}
+    - {source_node_key: rail_freight_yard, relation_type_key: located_in, target_node_key: west_logistics_district}
+    - {source_node_key: east_community_hospital, relation_type_key: located_in, target_node_key: east_residential_district}
+    - {source_node_key: riverside_shelter, relation_type_key: located_in, target_node_key: east_residential_district}
+    - {source_node_key: east_water_pump_station, relation_type_key: located_in, target_node_key: east_residential_district}
+    - {source_node_key: east_telecom_station, relation_type_key: located_in, target_node_key: east_residential_district}
+    - {source_node_key: water_treatment_plant, relation_type_key: located_in, target_node_key: south_waterfront_district}
+    - {source_node_key: south_pump_station, relation_type_key: located_in, target_node_key: south_waterfront_district}
+    - {source_node_key: river_port, relation_type_key: located_in, target_node_key: south_waterfront_district}
+    - {source_node_key: south_fuel_terminal, relation_type_key: located_in, target_node_key: south_waterfront_district}
+    - {source_node_key: southeast_shelter, relation_type_key: located_in, target_node_key: southeast_heights_district}
+    - {source_node_key: hill_reservoir, relation_type_key: located_in, target_node_key: southeast_heights_district}
+    - {source_node_key: southeast_telecom_relay, relation_type_key: located_in, target_node_key: southeast_heights_district}
+    - {source_node_key: district_service_center, relation_type_key: located_in, target_node_key: southeast_heights_district}
+    - {source_node_key: north_service_corridor, relation_type_key: endpoint, target_node_key: north_industrial_district}
+    - {source_node_key: north_service_corridor, relation_type_key: endpoint, target_node_key: central_district}
+    - {source_node_key: west_freight_corridor, relation_type_key: endpoint, target_node_key: central_district}
+    - {source_node_key: west_freight_corridor, relation_type_key: endpoint, target_node_key: west_logistics_district}
+    - {source_node_key: central_river_tunnel, relation_type_key: endpoint, target_node_key: central_district}
+    - {source_node_key: central_river_tunnel, relation_type_key: endpoint, target_node_key: east_residential_district}
+    - {source_node_key: south_bridge, relation_type_key: endpoint, target_node_key: west_logistics_district}
+    - {source_node_key: south_bridge, relation_type_key: endpoint, target_node_key: south_waterfront_district}
+    - {source_node_key: waterfront_access_corridor, relation_type_key: endpoint, target_node_key: east_residential_district}
+    - {source_node_key: waterfront_access_corridor, relation_type_key: endpoint, target_node_key: south_waterfront_district}
+    - {source_node_key: southeast_access_corridor, relation_type_key: endpoint, target_node_key: south_waterfront_district}
+    - {source_node_key: southeast_access_corridor, relation_type_key: endpoint, target_node_key: southeast_heights_district}
+  resources: []
+actors:
+  roles:
+    - key: template_bootstrap_operator
+      name: 模板占位操作员
+      description: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式玩法角色。
+      capabilities: [PLAN, EXECUTE_ACTION, INSPECT_STATE]
+  actor_profiles:
+    - key: template_bootstrap_operator
+      name: 模板占位操作员
+      role_key: template_bootstrap_operator
+      persona: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式 Scenario 角色。
+      initial_node_key: emergency_command_center
+      allowed_action_keys: [bootstrap_world_skeleton]
+interactions:
+  - key: template_bootstrap
+    name: 模板骨架初始化（占位）
+    description: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式玩法。
+actions:
+  - key: bootstrap_world_skeleton
+    name: WORLD V0 骨架初始化（占位）
+    description: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式灾后恢复玩法。
+    required_interaction_key: template_bootstrap
+    execution_mode: IMMEDIATE
+    allowed_actor_capabilities: [EXECUTE_ACTION]
+    expected_outcomes:
+      - {code: BOOTSTRAP_COMPLETE, name: 骨架初始化完成（占位）, success: true}
+    planning:
+      terminal_effects: [{node_key: emergency_command_center, fact_key: world_v0_bootstrap_status}]
+      success_outcome_codes: [BOOTSTRAP_COMPLETE]
+rules:
+  - key: bootstrap_world_skeleton_complete
+    phase: RESOLVE
+    action_key: bootstrap_world_skeleton
+    priority: 0
+    effects:
+      - kind: SET_FACT
+        node: {kind: EXPLICIT, node_key: emergency_command_center}
+        fact_key: world_v0_bootstrap_status
+        value: {source: LITERAL, literal: READY}
+      - {kind: EMIT_OUTCOME, outcome_code: BOOTSTRAP_COMPLETE}
+objectives:
+  - key: world_v0_bootstrap
+    name: WORLD V0 骨架初始化（占位）
+    description: 仅用于满足当前 ScenarioDefinition 最小契约，不代表正式灾后恢复目标。
+    completion_requirements:
+      - key: bootstrap_ready
+        node_key: emergency_command_center
+        fact_key: world_v0_bootstrap_status
+        accepted_values: [READY]
+        description: 仅表示模板占位初始化完成。
+    goal_aliases: [initialize the WORLD V0 skeleton, 初始化 WORLD V0 骨架]
+goal_resolution:
+  allow_llm_fallback: false
+  clarification_prompt: 当前模板仅包含 WORLD V0 世界骨架，不包含正式玩法目标。
+planning:
+  instructions: [本模板仅提供 WORLD V0 世界骨架；正式灾后状态与玩法尚未定义。]
+  recovery_hints: []

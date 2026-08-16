@@ -43,7 +43,11 @@ from app.core.errors import AppError
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.infrastructure.db.session import get_db
-from app.scenarios.builtin import MEDICAL_EMERGENCY_V2, STARFIRE_V2
+from app.scenarios.builtin import (
+    LINJIANG_INFRASTRUCTURE_RECOVERY_V0,
+    MEDICAL_EMERGENCY_V2,
+    STARFIRE_V2,
+)
 from app.scenarios.validation import ScenarioValidationIssue
 from app.services.draft_sandbox import DraftSandboxService
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
@@ -57,6 +61,10 @@ _EXAMPLES = {
     ),
     "starfire_command": (
         STARFIRE_V2,
+        ReadinessLevel.PUBLISH_READY,
+    ),
+    "linjiang_infrastructure_recovery": (
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V0,
         ReadinessLevel.PUBLISH_READY,
     ),
 }
