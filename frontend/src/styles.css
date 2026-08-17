@@ -234,15 +234,16 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .mission-roadmap small { margin-top: 4px; color: var(--console-gold); font-size: 10px; }
 .current-plan-section { margin-top: 22px; padding-top: 2px; border-top: 1px solid var(--console-line); }
 .plan-reason { margin: -2px 0 8px; padding: 8px 10px; border-radius: 8px; color: #7b541a; background: var(--console-gold-soft); font-size: 10px; }
-.plan-history { display: grid; gap: 0; }
+.plan-history { display: grid; gap: 10px; }
 .plan-waiting-message { margin: 0 0 14px; padding: 11px 13px; border-radius: 10px; color: #80561b; background: #fff8e9; font-size: 12px; }
-.plan-history-card { overflow: hidden; border-bottom: 1px solid #e4ddcf; border-radius: 0; background: transparent; }
-.plan-history-card.adjusted { background: transparent; }
+.plan-history-card { overflow: hidden; border: 1px solid #e4ddcf; border-radius: 14px; background: #fffdf9; box-shadow: 0 4px 12px rgb(78 65 39 / 4%); }
+.plan-history-card.adjusted { background: #fcfaf4; }
 .plan-history-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 0; color: var(--console-ink); background: transparent; cursor: pointer; text-align: left; }
 .plan-history-toggle span, .plan-history-toggle strong, .plan-history-toggle small { display: block; }
 .plan-history-toggle strong { font-size: 13px; }
 .plan-history-toggle small { margin-top: 4px; color: var(--console-soft); font-size: 10px; }
 .plan-history-toggle > b { color: var(--console-jade); font-size: 10px; }
+.timeline-plan-reason { margin: 4px 0 0; color: var(--console-soft); font-size: 10px; }
 .plan-history-steps { display: grid; gap: 8px; margin: 0; padding: 12px 12px 10px; border-top: 1px solid #eee8dd; list-style: none; }
 .plan-history-steps li { display: flex; gap: 10px; padding: 10px 11px; border: 1px solid #e4ddcf; border-radius: 12px; background: #fffdf9; box-shadow: 0 3px 9px rgb(78 65 39 / 4%); }
 .plan-history-steps li > b { width: 17px; flex: 0 0 17px; color: #6e7b75; }
@@ -251,6 +252,8 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .plan-history-steps li.cancelled { color: #8a918e; text-decoration-color: #afb4b1; }
 .plan-history-steps li.current { border-color: #a7c9bb; background: #edf4f0; }
 .plan-history-steps li.current > b { color: var(--console-gold); }
+.plan-history-steps li.plan-interruption { padding: 8px 11px; border-style: dashed; color: #8b5a13; background: #fff8e9; box-shadow: none; }
+.plan-history-steps li.plan-interruption > b { color: #b97819; }
 .plan-history-steps strong, .plan-history-steps small { display: block; }
 .plan-history-steps strong { font-size: 12px; }
 .plan-history-steps small, .plan-history-steps p { margin: 3px 0 0; color: var(--console-soft); font-size: 10px; }

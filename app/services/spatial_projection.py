@@ -117,6 +117,7 @@ class SpatialDisplayProjector:
         target_node_key: str,
         source_node_key: str | None = None,
         parameters: Mapping[str, StrictScalar] | None = None,
+        compact: bool = False,
     ) -> ActionLocationProjection | None:
         """Return one common location label for every Player-facing action view."""
 
@@ -156,8 +157,11 @@ class SpatialDisplayProjector:
         ):
             return ActionLocationProjection(
                 kind="TRANSPORT",
-                summary=" ↔ ".join(target.endpoint_region_names),
-                detail=f"目标\uff1a{target.name}",
+                summary=(
+                    target.name
+                    if compact
+                    else f"{target.name} · {' ↔ '.join(target.endpoint_region_names)}"
+                ),
             )
 
         if target.region_name is not None and target.node_type_key == self._facility_type:

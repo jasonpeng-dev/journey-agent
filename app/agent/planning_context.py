@@ -204,7 +204,6 @@ class PlanningContextBuilder:
                 }
                 for item in objectives
             ],
-            "desired_state": completion,
             "completion_requirements": completion,
             "public_prerequisites": prerequisites,
         }
@@ -247,39 +246,37 @@ class PlanningContextBuilder:
                 if item["node_key"] in objective_nodes
                 and (item["node_key"], item["fact_key"]) not in objective_refs
             )
-            result.append(
-                {
-                    "action_key": action.key,
-                    "display": action.name,
-                    "description": action.description,
-                    "declared_world_effects": terminal,
-                    "declared_knowledge_effects": supporting,
-                    "objective_relevance": relevance,
-                    "public_prerequisites": [],
-                    "target_requirements": {
-                        "required_interaction_key": action.required_interaction_key,
-                    },
-                    "parameter_schema": [
-                        item.model_dump(mode="json") for item in action.parameters
+            action_context: dict[str, object] = {
+                "action_key": action.key,
+                "display": action.name,
+                "description": action.description,
+                "declared_world_effects": terminal,
+                "declared_knowledge_effects": supporting,
+                "objective_relevance": relevance,
+                "target_requirements": {
+                    "required_interaction_key": action.required_interaction_key,
+                },
+                "parameter_schema": [
+                    item.model_dump(mode="json") for item in action.parameters
+                ],
+                "parameter_defaults": {
+                    item.key: item.default
+                    for item in action.parameters
+                    if item.default is not None
+                },
+                "hard_constraints": {
+                    "required_actor_capabilities": [
+                        item.value for item in action.allowed_actor_capabilities
                     ],
-                    "parameter_defaults": {
-                        item.key: item.default
-                        for item in action.parameters
-                        if item.default is not None
-                    },
-                    "hard_constraints": {
-                        "required_actor_capabilities": [
-                            item.value for item in action.allowed_actor_capabilities
-                        ],
-                        "static_authority": action.authority_policy.model_dump(mode="json"),
-                    },
-                    "cost_risk": {},
-                    "soft_signals": {"hints": list(action.planning.hints)},
-                    "execution_mode": action.execution_mode.value,
-                    "behavior": action.behavior.value,
-                    "locality": action.locality.value,
-                }
-            )
+                    "static_authority": action.authority_policy.model_dump(mode="json"),
+                },
+                "execution_mode": action.execution_mode.value,
+                "behavior": action.behavior.value,
+                "locality": action.locality.value,
+            }
+            if action.planning.hints:
+                action_context["soft_signals"] = {"hints": list(action.planning.hints)}
+            result.append(action_context)
         return result
 
     def _actors(
@@ -310,16 +307,10 @@ class PlanningContextBuilder:
                     "current_known_state": {
                         "availability": actor.status,
                         "current_node_key": actor.current_node_key,
-                        **(
-                            {"current_region": actor.current_node_key}
-                            if definition.metadata.locality.enabled
-                            else {}
-                        ),
                     },
                     "allowed_action_keys": [
                         key for key in actor.allowed_action_keys if key in action_keys
                     ],
-                    "cost_risk": {},
                     "soft_signals": {"doctrine": actor.doctrine, "persona": actor.persona},
                 }
             )
@@ -339,40 +330,13 @@ class PlanningContextBuilder:
         raw_nodes = known_world.get("nodes", [])
         node_rows = cast(list[dict[str, object]], raw_nodes) if isinstance(raw_nodes, list) else []
         known_nodes = {item["key"]: item for item in node_rows if isinstance(item.get("key"), str)}
-        raw_facts = known_world.get("facts", {})
-        facts = cast(dict[str, object], raw_facts) if isinstance(raw_facts, dict) else {}
         result: list[dict[str, object]] = []
         for node in sorted(definition.world.nodes, key=lambda item: item.key):
             if node.key not in known_nodes or not set(node.interaction_keys).intersection(
                 interaction_keys
             ):
                 continue
-            node_facts = {
-                key.split(".", 1)[1]: value
-                for key, value in facts.items()
-                if isinstance(key, str) and key.startswith(f"{node.key}.")
-            }
-            result.append(
-                {
-                    "target_key": node.key,
-                    "display": node.name,
-                    "type": node.node_type_key,
-                    "current_known_state": {
-                        "access": known_nodes[node.key].get("access"),
-                        "facts": node_facts,
-                    },
-                    "affordances": list(node.interaction_keys),
-                    "public_relationships": [
-                        item.model_dump(mode="json")
-                        for item in definition.world.relations
-                        if (
-                            (item.source_node_key == node.key or item.target_node_key == node.key)
-                            and item.source_node_key in known_nodes
-                            and item.target_node_key in known_nodes
-                        )
-                    ],
-                }
-            )
+            result.append({"target_key": node.key})
         return result
 
     def _previous_execution(self, task: AgentTask, replan_reason: str | None) -> dict[str, object]:
@@ -421,6 +385,13 @@ class PlanningContextBuilder:
                         failed = {**item, "failure_code": step.failure_code}
                     else:
                         completed.append(item)
+        if (
+            plan is None
+            and operation is None
+            and replan_reason is None
+            and task.last_error_code is None
+        ):
+            return {}
         return {
             "previous_plan_summary": plan.strategy_summary if plan is not None else None,
             "previous_plan_version": plan.version if plan is not None else None,
@@ -805,6 +776,7 @@ def _node_context(
     return {
         "key": state.node_key,
         "name": node.name if node is not None else state.node_key,
+        "type": node.node_type_key if node is not None else None,
         "access": state.status.value,
         "interactions": list(node.interaction_keys) if node is not None else [],
     }

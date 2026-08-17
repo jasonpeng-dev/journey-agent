@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 
 import { api } from "../api";
@@ -49,16 +49,16 @@ const timelinePresentation: Record<
   PublicTimelineEvent["kind"],
   { label: string; mark: string; tone: string }
 > = {
-  GOAL_ACCEPTED: { label: "目标已接受", mark: "令", tone: "goal-received" },
+  GOAL_ACCEPTED: { label: "目标已接受", mark: "🚩", tone: "goal-received" },
   PLAN_CREATED: { label: "计划已完成", mark: "✓", tone: "plan-event" },
-  TASK_STARTED: { label: "目标已接受", mark: "令", tone: "goal-received" },
+  TASK_STARTED: { label: "目标已接受", mark: "🚩", tone: "goal-received" },
   ACTION_BRIEFING: { label: "下一步行动", mark: "令", tone: "current" },
   ACTION_RESULT: { label: "行动汇报", mark: "✓", tone: "completed" },
   PLAN_UPDATED: { label: "计划调整", mark: "↻", tone: "plan-event updated" },
   APPROVAL_REQUIRED: { label: "需要玩家决定", mark: "?", tone: "current" },
   APPROVAL_APPROVED: { label: "玩家已批准", mark: "✓", tone: "completed" },
   APPROVAL_REJECTED: { label: "玩家已拒绝", mark: "✕", tone: "failed" },
-  TASK_COMPLETED: { label: "目标已完成", mark: "✓", tone: "success" },
+  TASK_COMPLETED: { label: "目标已完成", mark: "🚩", tone: "success" },
   TASK_BLOCKED: { label: "目标暂时无法推进", mark: "!", tone: "danger" },
   TASK_ABORTED: { label: "目标已放弃", mark: "·", tone: "neutral" },
 };
@@ -71,6 +71,42 @@ export function ActionLocationLine({ location }: { location?: ActionLocation | n
       <strong>{text}</strong>
     </div>
   );
+}
+
+function planBeforeReplan(task: PublicTask, event: PublicTimelineEvent): PublicPlanHistory | null {
+  if (event.kind !== "PLAN_UPDATED") return null;
+  const updatedPlanId = event.id.startsWith("plan:") ? event.id.slice("plan:".length) : null;
+  const updatedPlan = updatedPlanId
+    ? task.plan_history.find((plan) => plan.id === updatedPlanId)
+    : undefined;
+  const updatedOrdinal = updatedPlan?.ordinal ?? (
+    task.timeline
+      .filter((item) => item.kind === "PLAN_UPDATED")
+      .findIndex((item) => item.id === event.id) + 2
+  );
+  if (updatedOrdinal < 2) return null;
+  return task.plan_history.find((plan) => plan.ordinal === updatedOrdinal - 1) ?? null;
+}
+
+function replanReason(task: PublicTask, event: PublicTimelineEvent): string | null {
+  const sourcePlan = planBeforeReplan(task, event);
+  if (!sourcePlan) return null;
+  const interruption = sourcePlan.interruption;
+  const stepName = interruption?.step_name ?? sourcePlan.failed_step_name;
+  if (!stepName) return null;
+  const reasonType = interruption?.kind === "KNOWLEDGE_CONFLICT" ? "冲突" : "失败";
+  return `原因：${stepName} ${reasonType}`;
+}
+
+function interruptionMarkerSequence(plan: PublicPlanHistory): number | null {
+  const interruption = plan.interruption;
+  if (!interruption) return null;
+  if (interruption.kind === "FAILURE") return interruption.sequence;
+  const trigger = plan.steps
+    .filter((step) => step.sequence < interruption.sequence && step.status === "COMPLETED")
+    .sort((left, right) => left.sequence - right.sequence)
+    .at(-1);
+  return trigger?.sequence ?? null;
 }
 
 export function Timeline({ task }: { task: PublicTask | null }) {
@@ -99,9 +135,11 @@ export function Timeline({ task }: { task: PublicTask | null }) {
             ? { ...base, mark: "✕", tone: "failed" }
             : base;
         const isApproval = event.kind.startsWith("APPROVAL_");
-        const eventLabel = event.kind.startsWith("PLAN_")
+        const eventLabel = (event.kind === "GOAL_ACCEPTED" || event.kind === "TASK_STARTED")
+          ? "任务状态"
+          : event.kind.startsWith("PLAN_")
           ? "执行方案"
-          : event.kind.startsWith("TASK_") && event.kind !== "TASK_STARTED"
+          : event.kind.startsWith("TASK_")
             ? "任务状态"
             : isApproval
               ? "玩家决定"
@@ -115,10 +153,11 @@ export function Timeline({ task }: { task: PublicTask | null }) {
               : event.kind === "PLAN_UPDATED"
                 ? "Agent 已重新规划"
               : event.kind === "TASK_STARTED"
-            ? event.title
+            ? "任务已接受"
             : event.kind.startsWith("TASK_")
               ? presentation.label
               : event.title;
+        const planReason = replanReason(task, event);
         return (
           <article className={`timeline-entry ${presentation.tone}`} key={event.id}>
             <span className="timeline-mark">{presentation.mark}</span>
@@ -138,6 +177,7 @@ export function Timeline({ task }: { task: PublicTask | null }) {
                   ? ` · ${actionLocationText(event.location)}`
                   : ""}
               </strong>
+              {planReason && <p className="timeline-plan-reason">{planReason}</p>}
               {event.kind !== "ACTION_RESULT" && <ActionLocationLine location={event.location} />}
               {event.detail && !event.kind.startsWith("PLAN_") && (
                 <p>
@@ -181,6 +221,8 @@ export function PlanHistory({ task }: { task: PublicTask }) {
     <div className="plan-history">
       {task.plan_history.map((plan) => {
         const open = expanded.has(plan.id);
+        const markerSequence = interruptionMarkerSequence(plan);
+        const interruption = plan.interruption;
         const title = plan.ordinal === 1 ? "初始方案" : `调整方案 ${plan.ordinal - 1}`;
         return (
           <section className={`plan-history-card ${plan.status.toLowerCase()}`} key={plan.id}>
@@ -203,7 +245,13 @@ export function PlanHistory({ task }: { task: PublicTask }) {
                 </strong>
                 <small>
                   {plan.completed_steps}/{plan.total_steps} 完成
-                  {plan.failed_step_name ? ` · ${plan.failed_step_name} 失败` : ""}
+                  {plan.interruption
+                    ? ` · ${plan.interruption.step_name} ${
+                        plan.interruption.kind === "KNOWLEDGE_CONFLICT" ? "冲突" : "失败"
+                      }`
+                    : plan.failed_step_name
+                      ? ` · ${plan.failed_step_name} 失败`
+                      : ""}
                 </small>
               </span>
               <b>{open ? "收起" : "展开"}</b>
@@ -211,16 +259,30 @@ export function PlanHistory({ task }: { task: PublicTask }) {
             {open && (
               <ol className="plan-history-steps">
                 {plan.steps.map((step) => (
-                  <li className={step.status.toLowerCase()} key={step.id}>
-                    <b>{planStepMark[step.status]}</b>
-                    <div>
-                      <strong>{step.assigned_actor_name} · {step.action_name}</strong>
-                      <ActionLocationLine location={step.location} />
-                      {meaningfulResult(step.result_summary) && (
-                        <p>{resultLabel(meaningfulResult(step.result_summary))}</p>
-                      )}
-                    </div>
-                  </li>
+                  <Fragment key={step.id}>
+                    <li className={step.status.toLowerCase()}>
+                      <b>{planStepMark[step.status]}</b>
+                      <div>
+                        <strong>{step.assigned_actor_name} · {step.action_name}</strong>
+                        <ActionLocationLine location={step.location} />
+                        {meaningfulResult(step.result_summary) && (
+                          <p>{resultLabel(meaningfulResult(step.result_summary))}</p>
+                        )}
+                      </div>
+                    </li>
+                    {markerSequence === step.sequence && interruption && (
+                      <li className="plan-interruption">
+                        <b>!</b>
+                        <div>
+                          <strong>计划已中断</strong>
+                          <p>
+                            原因：{interruption.step_name}{" "}
+                            {interruption.kind === "KNOWLEDGE_CONFLICT" ? "冲突" : "失败"}
+                          </p>
+                        </div>
+                      </li>
+                    )}
+                  </Fragment>
                 ))}
               </ol>
             )}

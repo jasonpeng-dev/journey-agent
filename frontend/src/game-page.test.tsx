@@ -298,8 +298,14 @@ describe("Formal Play player projections", () => {
 
   it("默认展开最新方案、折叠旧方案，并允许查看冻结历史", () => {
     render(<PlanHistory task={task} />);
+    expect(document.querySelectorAll(".plan-history-card")).toHaveLength(2);
     expect(screen.getByText("乙 · 新行动")).toBeVisible();
     expect(screen.queryByText("甲 · 旧行动", { selector: ".plan-history-steps strong" })).not.toBeInTheDocument();
+    const latestToggle = screen.getByRole("button", { name: /调整方案 1 · 执行中/ });
+    expect(latestToggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(latestToggle);
+    expect(latestToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("乙 · 新行动")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /初始方案 · 已调整/ }));
     expect(screen.getByText("甲 · 旧行动", { selector: ".plan-history-steps strong" })).toBeVisible();
     expect(screen.getByText("甲 · 取消行动").closest("li")).toHaveClass("cancelled");
@@ -307,7 +313,7 @@ describe("Formal Play player projections", () => {
 
   it("任务日志只渲染已经进入历史的安全事件", () => {
     render(<Timeline task={task} />);
-    expect(screen.getByText("测试目标")).toBeVisible();
+    expect(screen.getByText("任务已接受")).toBeVisible();
     expect(screen.getByText("· 22s")).toBeVisible();
     expect(screen.queryByText(/WAIT|settle|operation/i)).not.toBeInTheDocument();
   });
@@ -506,6 +512,265 @@ describe("Formal Play player projections", () => {
     expect(screen.getByText("行动汇报 · 应急物流一队")).toBeVisible();
     expect(screen.getByText("运输维修部件 · 北部工业区 → 中央城区 · 电力维修部件 ×10")).toBeVisible();
     expect(screen.queryByText("行动已完成")).not.toBeInTheDocument();
+  });
+
+  it("uses structured interruption metadata and separates detailed history from compact plan locations", () => {
+    render(
+      <PlanHistory
+        task={{
+          ...task,
+          plan_history: [{
+            id: "interrupted-plan",
+            ordinal: 1,
+            status: "ADJUSTED",
+            completed_steps: 1,
+            total_steps: 3,
+            failed_step_name: null,
+            interruption: {
+              kind: "KNOWLEDGE_CONFLICT",
+              step_id: "conflict-step",
+              sequence: 2,
+              step_name: "前往区域",
+            },
+            steps: [
+              {
+                id: "completed-step",
+                sequence: 1,
+                action_name: "检查状态",
+                assigned_actor_name: "应急物流一队",
+                status: "COMPLETED",
+                result_summary: null,
+                location: null,
+              },
+              {
+                id: "conflict-step",
+                sequence: 2,
+                action_name: "前往区域",
+                assigned_actor_name: "应急物流一队",
+                status: "CANCELLED",
+                result_summary: null,
+                location: { kind: "ROUTE", summary: "中央城区 → 西部物流区", detail: null },
+              },
+              {
+                id: "transport-step",
+                sequence: 3,
+                action_name: "运输维修部件",
+                assigned_actor_name: "应急物流一队",
+                status: "CANCELLED",
+                result_summary: null,
+                location: {
+                  kind: "ROUTE",
+                  summary: "西部物流区 → 中央城区",
+                  detail: "电力维修部件 ×10",
+                },
+              },
+            ],
+          }],
+        }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /初始方案/ })).toHaveTextContent("前往区域 冲突");
+    expect(screen.getByText("计划已中断")).toBeVisible();
+    const conflictMarker = screen.getByText("计划已中断").closest("li");
+    expect(conflictMarker).toHaveTextContent("原因：前往区域 冲突");
+    expect(conflictMarker?.previousElementSibling).toHaveTextContent("检查状态");
+    expect(conflictMarker?.nextElementSibling).toHaveTextContent("前往区域");
+    expect(screen.getByText("西部物流区 → 中央城区 · 电力维修部件 ×10")).toBeVisible();
+
+    cleanup();
+    render(
+      <PlanHistory
+        task={{
+          ...task,
+          plan_history: [{
+            id: "compact-plan",
+            ordinal: 1,
+            status: "EXECUTING",
+            completed_steps: 0,
+            total_steps: 1,
+            failed_step_name: null,
+            interruption: null,
+            steps: [{
+              id: "transport-node-step",
+              sequence: 1,
+              action_name: "清理交通通道",
+              assigned_actor_name: "市政抢修一队",
+              status: "CURRENT",
+              result_summary: null,
+              location: { kind: "TRANSPORT", summary: "西部货运走廊", detail: null },
+            }],
+          }],
+        }}
+      />,
+    );
+    expect(screen.getByText("西部货运走廊")).toBeVisible();
+    expect(screen.queryByText("中央城区 ↔ 西部物流区")).not.toBeInTheDocument();
+  });
+
+  it("shows structured direct-failure and knowledge-conflict causes on replan timeline events", () => {
+    const replanTimeline = (planId: string) => [{
+      id: `plan:${planId}`,
+      kind: "PLAN_UPDATED" as const,
+      title: "旧标题",
+      detail: "不使用的字符串原因",
+      actor_name: null,
+      result_summary: null,
+      success: null,
+      knowledge_changes: [],
+      occurred_at: null,
+    }];
+    const replan = {
+      id: "replan-plan",
+      ordinal: 2,
+      status: "EXECUTING" as const,
+      completed_steps: 0,
+      total_steps: 1,
+      failed_step_name: null,
+      steps: [{
+        id: "replan-step",
+        sequence: 1,
+        action_name: "清理交通通道",
+        assigned_actor_name: "市政抢修一队",
+        status: "CURRENT" as const,
+        result_summary: null,
+      }],
+    };
+
+    render(
+      <Timeline
+        task={{
+          ...task,
+          plan_history: [
+            {
+              ...task.plan_history[0],
+              id: "failure-plan",
+              ordinal: 1,
+              interruption: {
+                kind: "FAILURE",
+                step_id: "failed-step",
+                sequence: 1,
+                step_name: "前往区域",
+              },
+              failed_step_name: "前往区域",
+            },
+            replan,
+          ],
+          timeline: replanTimeline("replan-plan"),
+        }}
+      />,
+    );
+    expect(screen.getByText("Agent 已重新规划")).toBeVisible();
+    expect(screen.getByText("原因：前往区域 失败")).toBeVisible();
+
+    cleanup();
+    render(
+      <Timeline
+        task={{
+          ...task,
+          plan_history: [
+            {
+              ...task.plan_history[0],
+              id: "conflict-plan",
+              ordinal: 1,
+              interruption: {
+                kind: "KNOWLEDGE_CONFLICT",
+                step_id: "future-step",
+                sequence: 2,
+                step_name: "前往区域",
+              },
+              failed_step_name: null,
+            },
+            { ...replan, id: "replan-plan-2" },
+          ],
+          timeline: replanTimeline("replan-plan-2"),
+        }}
+      />,
+    );
+    expect(screen.getByText("原因：前往区域 冲突")).toBeVisible();
+  });
+
+  it("places a direct-failure interruption marker immediately after the failed step", () => {
+    render(
+      <PlanHistory
+        task={{
+          ...task,
+          plan_history: [{
+            id: "failure-plan",
+            ordinal: 1,
+            status: "ADJUSTED",
+            completed_steps: 0,
+            total_steps: 3,
+            failed_step_name: "前往区域",
+            interruption: {
+              kind: "FAILURE",
+              step_id: "failed-step",
+              sequence: 1,
+              step_name: "前往区域",
+            },
+            steps: [
+              {
+                id: "failed-step",
+                sequence: 1,
+                action_name: "前往区域",
+                assigned_actor_name: "应急物流一队",
+                status: "FAILED",
+                result_summary: null,
+              },
+              {
+                id: "transport-step",
+                sequence: 2,
+                action_name: "运输维修部件",
+                assigned_actor_name: "应急物流一队",
+                status: "CANCELLED",
+                result_summary: null,
+              },
+            ],
+          }],
+        }}
+      />,
+    );
+    const marker = screen.getByText("计划已中断").closest("li");
+    expect(marker).toHaveTextContent("原因：前往区域 失败");
+    expect(marker?.previousElementSibling).toHaveTextContent("前往区域");
+    expect(marker?.nextElementSibling).toHaveTextContent("运输维修部件");
+  });
+
+  it("uses the same flag lifecycle mark for accepted and completed task events", () => {
+    render(
+      <Timeline
+        task={{
+          ...task,
+          timeline: [
+            {
+              id: "accepted",
+              kind: "GOAL_ACCEPTED",
+              title: "任务已接受",
+              detail: "恢复中央医院应急供电",
+              actor_name: null,
+              result_summary: null,
+              success: null,
+              knowledge_changes: [],
+              occurred_at: null,
+            },
+            {
+              id: "completed",
+              kind: "TASK_COMPLETED",
+              title: "目标已完成",
+              detail: "恢复中央医院应急供电",
+              actor_name: null,
+              result_summary: null,
+              success: null,
+              knowledge_changes: [],
+              occurred_at: null,
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("任务已接受")).toBeVisible();
+    expect(screen.getByText("目标已完成")).toBeVisible();
+    expect(screen.getAllByText("任务状态")).toHaveLength(2);
+    expect(screen.getAllByText("🚩")).toHaveLength(2);
   });
 
   it("shows a local planning timer without requiring a backend heartbeat", () => {

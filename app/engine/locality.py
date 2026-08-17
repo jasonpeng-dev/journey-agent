@@ -162,12 +162,16 @@ def validate_action_locality(
         target_region = _require_region(definition, target_node_key)
         return _require_connector(definition, actor_region, target_region)
     if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
-        target_region = _require_region(definition, target_node_key)
-        declared_destination = parameters.get("destination_region_key")
-        if declared_destination is not None and declared_destination != target_region:
+        if target.node_type_key != definition.metadata.locality.region_node_type_key:
             raise LocalityEngineError(
-                "TRANSPORT_DESTINATION_INVALID",
-                "Transport destination_region_key must match the target Region",
+                "LOCALITY_TRANSPORT_TARGET_INVALID",
+                "Transport destination must be a Region Node",
+            )
+        target_region = _require_region(definition, target_node_key)
+        if actor_region == target_region:
+            raise LocalityEngineError(
+                "LOCALITY_TRAVEL_SAME_REGION",
+                "Transport requires a different destination Region",
             )
         return _require_connector(definition, actor_region, target_region)
 

@@ -59,7 +59,6 @@ class FormalKnowledgeRevalidationProvider:
                     parameters={
                         "resource_key": "electrical_repair_parts",
                         "amount": 10,
-                        "destination_region_key": "central_district",
                     },
                 ),
                 PlanStepProposal(
@@ -93,7 +92,6 @@ class FormalKnowledgeRevalidationProvider:
                     parameters={
                         "resource_key": "electrical_repair_parts",
                         "amount": 10,
-                        "destination_region_key": "central_district",
                     },
                 ),
                 PlanStepProposal(
@@ -401,6 +399,7 @@ def test_failure_debrief_contains_knowledge_and_same_task_replan(
     old_plan_snapshot = dict(old_plan)
     new_plan = replanned["plan_history"][-1]
     assert old_plan["status"] == "ADJUSTED"
+    assert old_plan["interruption"]["kind"] == "FAILURE"
     assert any(step["status"] == "FAILED" for step in old_plan["steps"])
     assert all(step["status"] in {"COMPLETED", "FAILED", "CANCELLED"} for step in old_plan["steps"])
     assert new_plan["ordinal"] == old_plan["ordinal"] + 1
@@ -467,6 +466,13 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
     )
     assert [operation.action_key for operation in operations] == ["inspect"]
     assert interrupted["plan_history"][0]["status"] == "ADJUSTED"
+    interruption = interrupted["plan_history"][0]["interruption"]
+    assert interruption["kind"] == "KNOWLEDGE_CONFLICT"
+    assert interruption["sequence"] == 2
+    assert interruption["step_name"] == "前往区域"
+    transport_location = interrupted["plan_history"][0]["steps"][2]["location"]
+    assert transport_location is not None
+    assert "西部物流区 → 中央城区" in transport_location["summary"]
     assert [step["status"] for step in interrupted["plan_history"][0]["steps"]] == [
         "COMPLETED",
         "CANCELLED",
@@ -497,6 +503,11 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
     completed, _rounds = _drive_task(client, game_id, replanned)
     assert completed["status"] == "COMPLETED"
     assert completed["execution_phase"] == "COMPLETED"
+    terminal_event = next(
+        event for event in completed["timeline"] if event["kind"] == "TASK_COMPLETED"
+    )
+    assert terminal_event["title"] == "目标已完成"
+    assert terminal_event["detail"] == "恢复中央医院应急供电"
     operations = tuple(
         session.scalars(
             select(WorldOperation)

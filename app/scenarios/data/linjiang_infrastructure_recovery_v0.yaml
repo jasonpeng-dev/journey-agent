@@ -375,7 +375,6 @@ actions:
     parameters:
       - {key: resource_key, name: 资源键, value_type: STRING}
       - {key: amount, name: 数量, value_type: INTEGER, minimum: 1}
-      - {key: destination_region_key, name: 目标区域, value_type: STRING}
     expected_outcomes:
       - {code: TRANSPORTED, name: 维修部件已运输, success: true}
     planning:

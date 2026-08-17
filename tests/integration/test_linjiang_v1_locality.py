@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import (
     PLAN_INVALIDATED_BY_NEW_KNOWLEDGE,
+    GenericAgentError,
     GenericAgentService,
 )
 from app.agent.planning_context import legal_candidate_id
 from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import AgentPlanStatus, AgentStepStatus, AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
+from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     AgentPlan,
     AgentStep,
+    AgentTask,
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceResourceState,
@@ -24,7 +29,7 @@ from app.infrastructure.db.models import (
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1, require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionError, GenericActionService
-from app.services.runtime_initialization import RuntimeInitializationService
+from app.services.runtime_initialization import InitializedRuntime, RuntimeInitializationService
 
 
 class LinjiangProvider:
@@ -54,7 +59,6 @@ class LinjiangProvider:
                     parameters={
                         "resource_key": "electrical_repair_parts",
                         "amount": 10,
-                        "destination_region_key": "central_district",
                     },
                 ),
                 PlanStepProposal(
@@ -86,7 +90,6 @@ class LinjiangProvider:
                     parameters={
                         "resource_key": "electrical_repair_parts",
                         "amount": 10,
-                        "destination_region_key": "central_district",
                     },
                 ),
                 PlanStepProposal(
@@ -133,7 +136,6 @@ class KnowledgeRevalidationProvider:
                     parameters={
                         "resource_key": "electrical_repair_parts",
                         "amount": 10,
-                        "destination_region_key": "central_district",
                     },
                 ),
                 PlanStepProposal(
@@ -153,6 +155,22 @@ class KnowledgeRevalidationProvider:
                             "west_freight_corridor",
                         ),
                         purpose="Clear the known West corridor blockage.",
+                    ),
+                    PlanStepProposal(
+                        candidate_id=legal_candidate_id(
+                            "travel", "logistics_team_alpha", "west_logistics_district"
+                        ),
+                        purpose="Travel to the West logistics district after clearing it.",
+                    ),
+                    PlanStepProposal(
+                        candidate_id=legal_candidate_id(
+                            "transport_resource", "logistics_team_alpha", "central_district"
+                        ),
+                        purpose="Transport ten electrical repair parts to Central.",
+                        parameters={
+                            "resource_key": "electrical_repair_parts",
+                            "amount": 10,
+                        },
                     ),
                     steps[-1],
                 )
@@ -178,7 +196,6 @@ class KnowledgeRevalidationProvider:
                     parameters={
                         "resource_key": "electrical_repair_parts",
                         "amount": 10,
-                        "destination_region_key": "central_district",
                     },
                 ),
                 PlanStepProposal(
@@ -189,6 +206,52 @@ class KnowledgeRevalidationProvider:
                 ),
             )
         return PlanProposal(plan_summary=request.call_type, steps=steps)
+
+
+class FixedPlanProvider:
+    model_name = "linjiang-fixed-plan-provider"
+
+    def __init__(self, steps: tuple[PlanStepProposal, ...]) -> None:
+        self.steps = steps
+        self.requests: list[PlanRequest] = []
+
+    def select_objectives(self, request):  # type: ignore[no-untyped-def]
+        raise AssertionError("The exact Linjiang goal alias should resolve deterministically")
+
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        self.requests.append(request)
+        return PlanProposal(plan_summary=request.call_type, steps=self.steps)
+
+
+def _travel_to_west_step() -> PlanStepProposal:
+    return PlanStepProposal(
+        purpose="Travel to the West logistics district.",
+        action_key="travel",
+        actor_key="logistics_team_alpha",
+        target_key="west_logistics_district",
+    )
+
+
+def _transport_step(target_key: str) -> PlanStepProposal:
+    return PlanStepProposal(
+        purpose="Transport ten electrical repair parts.",
+        action_key="transport_resource",
+        actor_key="logistics_team_alpha",
+        target_key=target_key,
+        parameters={
+            "resource_key": "electrical_repair_parts",
+            "amount": 10,
+        },
+    )
+
+
+def _repair_step() -> PlanStepProposal:
+    return PlanStepProposal(
+        purpose="Restore Central Hospital emergency power.",
+        action_key="repair_electrical",
+        actor_key="electrical_team_beta",
+        target_key="central_hospital",
+    )
 
 
 def _runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
@@ -203,6 +266,118 @@ def _runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
     )
     scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
     return runtime, scope
+
+
+def _set_actor_location(
+    session: Session, game_instance_id: UUID, actor_key: str, node_key: str
+) -> None:
+    actor = session.get(GameInstanceActor, (game_instance_id, actor_key))
+    assert actor is not None
+    actor.current_node_key = node_key
+    session.flush()
+
+
+def _create_with_fixed_plan(
+    session: Session,
+    key: str,
+    steps: tuple[PlanStepProposal, ...],
+    *,
+    logistics_location: str | None = None,
+) -> tuple[FixedPlanProvider, InitializedRuntime, AgentTask]:
+    runtime, scope = _runtime(session, key)
+    if logistics_location is not None:
+        _set_actor_location(
+            session,
+            runtime.instance.id,
+            "logistics_team_alpha",
+            logistics_location,
+        )
+    provider = FixedPlanProvider(steps)
+    task = GenericAgentService(session, scope, provider=provider).create_task(
+        runtime.session,
+        "restore central hospital emergency power",
+    )
+    return provider, runtime, task
+
+
+def test_transport_target_is_the_only_destination_and_accepts_projected_west_source(
+    session: Session,
+) -> None:
+    provider, _runtime_value, task = _create_with_fixed_plan(
+        session,
+        "linjiang-transport-contract-accept",
+        (_transport_step("central_district"), _repair_step()),
+        logistics_location="west_logistics_district",
+    )
+    assert task.current_plan_version == 1
+    assert len(provider.requests) == 1
+    plan = session.scalar(select(AgentPlan).where(AgentPlan.task_id == task.id))
+    assert plan is not None
+    transport = session.scalar(
+        select(AgentStep).where(
+            AgentStep.plan_id == plan.id,
+            AgentStep.action_intent == "transport_resource",
+        )
+    )
+    assert transport is not None
+    assert transport.tool_arguments["target_key"] == "central_district"
+    assert transport.tool_arguments["parameters"] == {
+        "resource_key": "electrical_repair_parts",
+        "amount": 10,
+    }
+
+
+def test_sequential_plan_locality_uses_projected_location_and_rejects_same_region(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(session, "linjiang-sequential-locality")
+    provider = FixedPlanProvider(
+        (_travel_to_west_step(), _transport_step("west_logistics_district"), _repair_step())
+    )
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore central hospital emergency power",
+        )
+    assert len(provider.requests) == 3
+    assert provider.requests[1].call_type == "REPAIR"
+    assert any(
+        diagnostic["code"] == "LOCALITY_INVALID"
+        for diagnostic in provider.requests[1].repair_diagnostics
+    )
+
+
+def test_sequential_plan_accepts_travel_then_transport_to_central(session: Session) -> None:
+    provider, _runtime_value, task = _create_with_fixed_plan(
+        session,
+        "linjiang-sequential-locality-valid",
+        (_travel_to_west_step(), _transport_step("central_district"), _repair_step()),
+    )
+    assert task.current_plan_version == 1
+    assert len(provider.requests) == 1
+
+
+def test_known_blocked_connector_is_rejected_without_reading_hidden_truth(session: Session) -> None:
+    runtime, scope = _runtime(session, "linjiang-known-blocked-plan")
+    fact = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "west_freight_corridor", "passable"),
+    )
+    assert fact is not None
+    fact.visibility = Visibility.KNOWN
+    fact.truth_value = False
+    session.flush()
+
+    provider = FixedPlanProvider((_transport_step("west_logistics_district"), _repair_step()))
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore central hospital emergency power",
+        )
+    assert any(
+        diagnostic["code"] == "KNOWN_TRANSPORT_BLOCKED"
+        for diagnostic in provider.requests[1].repair_diagnostics
+    )
 
 
 def test_linjiang_vertical_slice_hidden_block_reveals_and_replans(session: Session) -> None:
@@ -232,7 +407,7 @@ def test_linjiang_vertical_slice_hidden_block_reveals_and_replans(session: Sessi
         )
     } == {("electrical_repair_parts", "west_logistics_district")}
     assert any(
-        item["current_known_state"]["current_region"] == "central_district"
+        item["current_known_state"]["current_node_key"] == "central_district"
         for item in initial_context.relevant_actors
     )
     assert any(item["action_key"] == "travel" for item in initial_context.relevant_actions)
@@ -340,7 +515,6 @@ def test_linjiang_locality_and_atomic_transport_guards(session: Session) -> None
         parameters={
             "resource_key": "electrical_repair_parts",
             "amount": 10,
-            "destination_region_key": "west_logistics_district",
         },
         idempotency_key="linjiang-blocked-transport",
     )
@@ -440,6 +614,8 @@ def test_known_knowledge_invalidates_only_remaining_plan_and_enters_replan(
     marker = task.objective_resolution_metadata["plan_invalidation"]
     assert marker["reason"] == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
     assert marker["diagnostics"][0]["code"] == "KNOWN_TRANSPORT_BLOCKED"
+    assert marker["diagnostics"][0]["sequence"] == 2
+    assert marker["diagnostics"][0]["action_key"] == "travel"
     assert marker["diagnostics"][0]["known_value"] is False
 
     replanned = agent.plan(task, reason=PLAN_INVALIDATED_BY_NEW_KNOWLEDGE)

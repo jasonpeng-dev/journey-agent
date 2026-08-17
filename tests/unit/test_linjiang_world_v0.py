@@ -22,6 +22,13 @@ def test_linjiang_v1_preserves_topology_and_adds_gameplay() -> None:
     assert definition.initialization.resource_initial_states[0].scope_node_key == (
         "west_logistics_district"
     )
+    transport_action = next(
+        action for action in definition.actions if action.key == "transport_resource"
+    )
+    assert {parameter.key for parameter in transport_action.parameters} == {
+        "resource_key",
+        "amount",
+    }
     assert {item.key for item in definition.actors.actor_profiles} == {
         "electrical_team_beta",
         "logistics_team_alpha",

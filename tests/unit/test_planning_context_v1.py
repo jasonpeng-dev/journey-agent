@@ -126,7 +126,45 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     locked_target = next(
         item for item in context.relevant_targets if item["target_key"] == "starfire_outpost"
     )
-    assert locked_target["current_known_state"]["access"] == "LOCKED"
+    assert set(locked_target) == {"target_key"}
+    known_node_keys = {
+        item["key"] for item in context.current_knowledge["nodes"]
+    }
+    locked_node = next(
+        item for item in context.current_knowledge["nodes"] if item["key"] == "starfire_outpost"
+    )
+    assert locked_node["type"] == "facility"
+    assert set(context.current_knowledge) >= {
+        "nodes",
+        "facts",
+        "relations",
+        "resources",
+        "observations",
+    }
+    assert context.current_knowledge["facts"]
+    assert context.current_knowledge["relations"]
+    assert context.current_knowledge["resources"]
+    assert all(
+        relation["source_node_key"] in known_node_keys
+        and relation["target_node_key"] in known_node_keys
+        for relation in context.current_knowledge["relations"]
+    )
+    assert "desired_state" not in context.goal
+    assert "completion_requirements" in context.goal
+    assert all(set(item) == {"target_key"} for item in context.relevant_targets)
+    for action in context.relevant_actions:
+        assert "public_prerequisites" not in action
+        assert "cost_risk" not in action
+        if "soft_signals" in action:
+            assert action["soft_signals"].get("hints")
+    for actor in context.relevant_actors:
+        assert "cost_risk" not in actor
+        assert "current_region" not in actor["current_known_state"]
+    initial_payload = request.provider_payload()
+    assert "replan_reason" not in initial_payload
+    assert "repair_attempt" not in initial_payload
+    assert "repair_diagnostics" not in initial_payload
+    assert "previous_execution_context" not in initial_payload["planning_context"]
     assert task.current_plan_version == 1
 
 
@@ -141,6 +179,45 @@ def test_legacy_catalog_is_not_in_canonical_provider_payload(session: Session) -
     assert "planning_context" in payload
     assert "candidate_id" not in payload
     assert request.planning_action_catalog
+
+
+def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
+    initial_context = PlanningContext(previous_execution_context={})
+    initial_payload = PlanRequest(
+        call_type="INITIAL_PLAN",
+        goal="goal",
+        planning_context=initial_context,
+    ).provider_payload()
+    assert set(initial_payload) == {"call_type", "goal", "planning_context"}
+    assert "previous_execution_context" not in initial_payload["planning_context"]
+
+    replan_context = PlanningContext(
+        previous_execution_context={"previous_plan_version": 1},
+    )
+    replan_payload = PlanRequest(
+        call_type="REPLAN",
+        goal="goal",
+        replan_reason="TRAVEL_BLOCKED",
+        planning_context=replan_context,
+    ).provider_payload()
+    assert replan_payload["replan_reason"] == "TRAVEL_BLOCKED"
+    assert replan_payload["planning_context"]["previous_execution_context"] == {
+        "previous_plan_version": 1
+    }
+    assert "repair_attempt" not in replan_payload
+    assert "repair_diagnostics" not in replan_payload
+
+    repair_payload = PlanRequest(
+        call_type="REPAIR",
+        goal="goal",
+        repair_attempt=0,
+        repair_diagnostics=(
+            {"code": "PLAN_REJECTED"},
+        ),
+        planning_context=initial_context,
+    ).provider_payload()
+    assert repair_payload["repair_attempt"] == 0
+    assert repair_payload["repair_diagnostics"] == [{"code": "PLAN_REJECTED"}]
 
 
 def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrelated(
@@ -234,6 +311,20 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
     captured: dict[str, object] = {}
+    response_content = json.dumps(
+        {
+            "plan_summary": "test",
+            "steps": [
+                {
+                    "purpose": "inspect",
+                    "action_key": "inspect",
+                    "actor_key": "actor_one",
+                    "target_key": "node_one",
+                    "parameters": {},
+                }
+            ],
+        }
+    )
 
     def fake_post(*_args: object, **kwargs: object) -> httpx.Response:
         captured.update(kwargs)
@@ -243,24 +334,19 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog(
                 "choices": [
                     {
                         "message": {
-                            "content": json.dumps(
-                                {
-                                    "plan_summary": "test",
-                                    "steps": [
-                                        {
-                                            "purpose": "inspect",
-                                            "action_key": "inspect",
-                                            "actor_key": "actor_one",
-                                            "target_key": "node_one",
-                                            "parameters": {},
-                                        }
-                                    ],
-                                }
-                            )
-                        }
+                            "content": response_content,
+                        },
+                        "finish_reason": "stop",
                     }
                 ],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+                "usage": {
+                    "prompt_tokens": 10,
+                    "prompt_cache_hit_tokens": 4,
+                    "prompt_cache_miss_tokens": 6,
+                    "completion_tokens": 8,
+                    "completion_tokens_details": {"reasoning_tokens": 3},
+                    "total_tokens": 18,
+                },
             },
             request=httpx.Request("POST", "https://provider.test/chat/completions"),
         )
@@ -309,5 +395,16 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog(
     )
     assert "planning_context" in user_payload
     assert "candidate_id" not in json.dumps(user_payload)
+    assert captured["json"]["thinking"] == {"type": "enabled"}  # type: ignore[index]
+    assert captured["json"]["reasoning_effort"] == "low"  # type: ignore[index]
     assert provider.last_call_metadata is not None
+    assert provider.last_call_metadata.model == "fake-model"
+    assert provider.last_call_metadata.call_type == "INITIAL_PLAN"
+    assert provider.last_call_metadata.thinking_mode == "disabled"
     assert provider.last_call_metadata.context_bytes is not None
+    assert provider.last_call_metadata.request_size_bytes is not None
+    assert provider.last_call_metadata.prompt_cache_hit_tokens == 4
+    assert provider.last_call_metadata.prompt_cache_miss_tokens == 6
+    assert provider.last_call_metadata.reasoning_tokens == 3
+    assert provider.last_call_metadata.final_content_bytes == len(response_content.encode("utf-8"))
+    assert provider.last_call_metadata.finish_reason == "stop"

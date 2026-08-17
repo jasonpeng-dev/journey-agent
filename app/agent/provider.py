@@ -51,6 +51,14 @@ class PlanningContext(ProviderModel):
     previous_execution_context: dict[str, object] = Field(default_factory=dict)
     scenario_planning_hints: dict[str, object] = Field(default_factory=dict)
 
+    def compact_dump(self) -> dict[str, object]:
+        """Return the lossless provider projection of this context."""
+
+        payload = self.model_dump(mode="json")
+        if not payload.get("previous_execution_context"):
+            payload.pop("previous_execution_context", None)
+        return payload
+
 
 class PlanningActionCandidate(ProviderModel):
     """Deprecated compatibility view of an Actor x Action x Target binding.
@@ -122,14 +130,18 @@ class PlanRequest(ProviderModel):
         """
 
         if self.planning_context is not None:
-            return {
+            payload: dict[str, object] = {
                 "call_type": self.call_type,
                 "goal": self.goal,
-                "replan_reason": self.replan_reason,
-                "planning_context": self.planning_context.model_dump(mode="json"),
-                "repair_attempt": self.repair_attempt,
-                "repair_diagnostics": list(self.repair_diagnostics),
+                "planning_context": self.planning_context.compact_dump(),
             }
+            if self.replan_reason:
+                payload["replan_reason"] = self.replan_reason
+            if self.call_type == "REPAIR" or self.repair_attempt != 0:
+                payload["repair_attempt"] = self.repair_attempt
+            if self.repair_diagnostics:
+                payload["repair_diagnostics"] = list(self.repair_diagnostics)
+            return payload
         return self.model_dump(mode="json")
 
 
@@ -141,10 +153,18 @@ class PlanProposal(ProviderModel):
 class ProviderCallMetadata(ProviderModel):
     call_type: str
     latency_ms: int
+    model: str | None = None
+    thinking_mode: str | None = None
     context_bytes: int | None = None
+    request_size_bytes: int | None = None
     prompt_tokens: int | None = None
+    prompt_cache_hit_tokens: int | None = None
+    prompt_cache_miss_tokens: int | None = None
     completion_tokens: int | None = None
+    reasoning_tokens: int | None = None
     total_tokens: int | None = None
+    final_content_bytes: int | None = None
+    finish_reason: str | None = None
 
 
 class GenericModelProvider(Protocol):
@@ -270,6 +290,8 @@ class OpenAICompatibleGenericProvider:
             )
         request_body = {
             "model": self._model_name,
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "low",
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -323,7 +345,8 @@ class OpenAICompatibleGenericProvider:
             ) from exc
         try:
             body = response.json()
-            content = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            content = choice["message"]["content"]
             parsed = json.loads(content)
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise GenericProviderError(
@@ -331,9 +354,16 @@ class OpenAICompatibleGenericProvider:
                 "The model provider returned malformed JSON",
             ) from exc
         usage = body.get("usage", {}) if isinstance(body, dict) else {}
+        finish_reason = (
+            choice.get("finish_reason")
+            if isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str)
+            else None
+        )
         self._last_call_metadata = ProviderCallMetadata(
             call_type=purpose.upper(),
             latency_ms=round((perf_counter() - started) * 1000),
+            model=self._model_name,
+            thinking_mode="disabled",
             context_bytes=(
                 len(
                     json.dumps(
@@ -345,9 +375,19 @@ class OpenAICompatibleGenericProvider:
                 if "planning_context" in payload
                 else None
             ),
+            request_size_bytes=request_size_bytes,
             prompt_tokens=_optional_int(usage, "prompt_tokens"),
+            prompt_cache_hit_tokens=_optional_int(usage, "prompt_cache_hit_tokens"),
+            prompt_cache_miss_tokens=_optional_int(usage, "prompt_cache_miss_tokens"),
             completion_tokens=_optional_int(usage, "completion_tokens"),
+            reasoning_tokens=_optional_nested_int(
+                usage, "completion_tokens_details", "reasoning_tokens"
+            ),
             total_tokens=_optional_int(usage, "total_tokens"),
+            final_content_bytes=(
+                len(content.encode("utf-8")) if isinstance(content, str) else None
+            ),
+            finish_reason=finish_reason,
         )
         return parsed
 
@@ -368,6 +408,12 @@ def _optional_int(value: object, key: str) -> int | None:
         return None
     item = value.get(key)
     return item if isinstance(item, int) and not isinstance(item, bool) else None
+
+
+def _optional_nested_int(value: object, outer_key: str, inner_key: str) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    return _optional_int(value.get(outer_key), inner_key)
 
 
 def _log_provider_failure(

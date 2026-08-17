@@ -91,6 +91,11 @@ class PublicPlanHistoryStepStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class PublicPlanInterruptionKind(StrEnum):
+    FAILURE = "FAILURE"
+    KNOWLEDGE_CONFLICT = "KNOWLEDGE_CONFLICT"
+
+
 class MissionRoadmapStageStatus(StrEnum):
     COMPLETED = "COMPLETED"
     CURRENT = "CURRENT"
@@ -323,6 +328,13 @@ class PublicPlanHistoryStepResponse(ApiModel):
     location: PublicActionLocationResponse | None = None
 
 
+class PublicPlanInterruptionResponse(ApiModel):
+    kind: PublicPlanInterruptionKind
+    step_id: UUID
+    sequence: int = Field(ge=1)
+    step_name: str
+
+
 class PublicPlanHistoryResponse(ApiModel):
     id: UUID
     ordinal: int = Field(ge=1)
@@ -330,6 +342,7 @@ class PublicPlanHistoryResponse(ApiModel):
     completed_steps: int = Field(ge=0)
     total_steps: int = Field(ge=0)
     failed_step_name: str | None = None
+    interruption: PublicPlanInterruptionResponse | None = None
     steps: list[PublicPlanHistoryStepResponse]
 
 

@@ -26,6 +26,8 @@ from app.api.schemas.phase_d import (
     PublicPlanHistoryStatus,
     PublicPlanHistoryStepResponse,
     PublicPlanHistoryStepStatus,
+    PublicPlanInterruptionKind,
+    PublicPlanInterruptionResponse,
     PublicPlanResponse,
     PublicPlanStepResponse,
     PublicResourceResponse,
@@ -331,12 +333,20 @@ class PlayerProjectionService:
             for plan in plans
         }
         spatial = SpatialDisplayProjector(definition)
-        location_by_step = self._locations_by_step(
+        detailed_location_by_step = self._locations_by_step(
             task,
             definition,
             spatial,
             plans,
             steps_by_plan,
+        )
+        compact_location_by_step = self._locations_by_step(
+            task,
+            definition,
+            spatial,
+            plans,
+            steps_by_plan,
+            compact=True,
         )
         latest = plans[-1] if plans else None
         checkpoint = self.db.get(PlayerExecutionCheckpoint, task.id)
@@ -355,7 +365,7 @@ class PlayerProjectionService:
                         ),
                         status=_step_status(step.status),
                         result_summary=_result_summary(step),
-                        location=location_by_step.get(step.id),
+                        location=compact_location_by_step.get(step.id),
                     )
                     for step in steps_by_plan[latest.id]
                     if step.execution_type == StepExecutionType.TOOL
@@ -402,11 +412,12 @@ class PlayerProjectionService:
             plan=public_plan,
             plan_history=[
                 _plan_history_entry(
+                    task,
                     plan,
                     steps_by_plan[plan.id],
                     definition,
                     actors,
-                    location_by_step=location_by_step,
+                    location_by_step=detailed_location_by_step,
                     task_status=task.status,
                     is_latest=plan == latest,
                     current_step_id=(
@@ -430,7 +441,7 @@ class PlayerProjectionService:
                 steps_by_plan,
                 actors,
                 checkpoint,
-                location_by_step=location_by_step,
+                location_by_step=detailed_location_by_step,
             ),
             briefing=(
                 self._briefing(
@@ -438,7 +449,7 @@ class PlayerProjectionService:
                     definition,
                     actors,
                     roadmap,
-                    location_by_step=location_by_step,
+                    location_by_step=detailed_location_by_step,
                 )
                 if current_step is not None
                 and phase
@@ -455,7 +466,7 @@ class PlayerProjectionService:
                     definition,
                     plans,
                     steps_by_plan,
-                    location_by_step=location_by_step,
+                    location_by_step=detailed_location_by_step,
                 )
                 if last_action_step is not None
                 and phase
@@ -479,6 +490,7 @@ class PlayerProjectionService:
         spatial: SpatialDisplayProjector,
         plans: tuple[AgentPlan, ...],
         steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
+        compact: bool = False,
     ) -> dict[UUID, PublicActionLocationResponse | None]:
         source_nodes = self._source_nodes_by_step(task, definition, plans, steps_by_plan)
         locations: dict[UUID, PublicActionLocationResponse | None] = {}
@@ -498,6 +510,7 @@ class PlayerProjectionService:
                     target_node_key=target_key,
                     source_node_key=source_nodes.get(step.id),
                     parameters=parameters,
+                    compact=compact,
                 )
                 locations[step.id] = (
                     PublicActionLocationResponse(
@@ -525,7 +538,7 @@ class PlayerProjectionService:
         virtual position is never written back to runtime state.
         """
 
-        positions = {
+        initial_positions = {
             profile.key: profile.initial_node_key
             for profile in definition.actors.actor_profiles
         }
@@ -536,18 +549,11 @@ class PlayerProjectionService:
                 .order_by(WorldOperation.created_at, WorldOperation.id)
             )
         )
-        operations_by_step: dict[UUID, list[WorldOperation]] = {}
-        for operation in operations:
-            if operation.source_step_id is not None:
-                operations_by_step.setdefault(operation.source_step_id, []).append(operation)
-        applied_operation_ids: set[UUID] = set()
         source_nodes: dict[UUID, str | None] = {}
-        latest_plan_id = plans[-1].id if plans else None
 
-        def apply_operation(operation: WorldOperation) -> None:
-            if operation.id in applied_operation_ids:
-                return
-            applied_operation_ids.add(operation.id)
+        def apply_operation(
+            positions: dict[str, str], operation: WorldOperation
+        ) -> None:
             if not _operation_succeeded(operation):
                 return
             destination = (
@@ -569,24 +575,19 @@ class PlayerProjectionService:
             positions[operation.actor_key] = destination
 
         for plan in plans:
+            # Every Plan gets an independent projected replay.  The starting
+            # position is the real runtime position at Plan creation, while
+            # the Plan's own travel sequence remains a display-only intent
+            # even when one of its steps later failed or was skipped.
+            positions = dict(initial_positions)
             for operation in operations:
                 if operation.created_at <= plan.created_at:
-                    apply_operation(operation)
+                    apply_operation(positions, operation)
             plan_steps = steps_by_plan[plan.id]
             for step in plan_steps:
                 if step.execution_type != StepExecutionType.TOOL:
                     continue
                 source_nodes[step.id] = positions.get(step.assigned_actor_key)
-                step_operations = operations_by_step.get(step.id, [])
-                if step_operations:
-                    for operation in step_operations:
-                        apply_operation(operation)
-                    continue
-                if plan.id != latest_plan_id or step.status not in (
-                    AgentStepStatus.PENDING,
-                    AgentStepStatus.REQUIRES_PLAYER_DECISION,
-                ):
-                    continue
                 action = _action_definition(definition, step)
                 target_key = step.tool_arguments.get("target_key")
                 if (
@@ -597,6 +598,10 @@ class PlayerProjectionService:
                     )
                     and isinstance(target_key, str)
                 ):
+                    # Use the planned destination for the next step.  This is
+                    # intentionally independent of persisted operation success
+                    # so a failed Travel does not rewrite the following
+                    # transport's historical source into the runtime location.
                     positions[step.assigned_actor_key] = target_key
         return source_nodes
 
@@ -732,12 +737,25 @@ class PlayerProjectionService:
             AgentTaskStatus.ABORTED: PublicTimelineEventKind.TASK_ABORTED,
         }.get(task.status)
         if terminal_kind is not None:
+            objective_names = tuple(
+                objective.name
+                for objective in definition.objectives
+                if objective.key in (task.objective_scope_keys or ())
+            )
             events.append(
                 PublicTimelineEventResponse(
                     id=f"task:{task.id}:terminal",
                     kind=terminal_kind,
-                    title=task.goal_description,
-                    detail=None,
+                    title=(
+                        "目标已完成"
+                        if task.status == AgentTaskStatus.SUCCEEDED
+                        else task.goal_description
+                    ),
+                    detail=(
+                        " · ".join(objective_names)
+                        if task.status == AgentTaskStatus.SUCCEEDED and objective_names
+                        else None
+                    ),
                     occurred_at=task.completed_at,
                 )
             )
@@ -851,6 +869,7 @@ def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskS
 
 
 def _plan_history_entry(
+    task: AgentTask,
     plan: AgentPlan,
     steps: tuple[AgentStep, ...],
     definition: ScenarioDefinitionV2,
@@ -892,6 +911,13 @@ def _plan_history_entry(
         (step for step in public_steps if step.status == PublicPlanHistoryStepStatus.FAILED),
         None,
     )
+    interruption = _plan_interruption(
+        task=task,
+        plan=plan,
+        tool_steps=tool_steps,
+        public_steps=public_steps,
+        failed_step=failed_step,
+    )
     status = {
         AgentPlanStatus.ACTIVE: PublicPlanHistoryStatus.EXECUTING,
         AgentPlanStatus.SUPERSEDED: PublicPlanHistoryStatus.ADJUSTED,
@@ -914,7 +940,52 @@ def _plan_history_entry(
         ),
         total_steps=len(public_steps),
         failed_step_name=failed_step.action_name if failed_step is not None else None,
+        interruption=interruption,
         steps=public_steps,
+    )
+
+
+def _plan_interruption(
+    *,
+    task: AgentTask,
+    plan: AgentPlan,
+    tool_steps: tuple[AgentStep, ...],
+    public_steps: list[PublicPlanHistoryStepResponse],
+    failed_step: PublicPlanHistoryStepResponse | None,
+) -> PublicPlanInterruptionResponse | None:
+    if failed_step is not None:
+        return PublicPlanInterruptionResponse(
+            kind=PublicPlanInterruptionKind.FAILURE,
+            step_id=failed_step.id,
+            sequence=failed_step.sequence,
+            step_name=failed_step.action_name,
+        )
+
+    marker = _plan_invalidation_for(task, plan.version)
+    diagnostics = marker.get("diagnostics") if marker is not None else None
+    if not isinstance(diagnostics, list):
+        return None
+    diagnostic = next(
+        (
+            item
+            for item in diagnostics
+            if isinstance(item, dict) and isinstance(item.get("sequence"), int)
+        ),
+        None,
+    )
+    if diagnostic is None:
+        return None
+    sequence = diagnostic["sequence"]
+    assert isinstance(sequence, int)
+    step = next((item for item in public_steps if item.sequence == sequence), None)
+    persisted_step = next((item for item in tool_steps if item.sequence == sequence), None)
+    if step is None or persisted_step is None:
+        return None
+    return PublicPlanInterruptionResponse(
+        kind=PublicPlanInterruptionKind.KNOWLEDGE_CONFLICT,
+        step_id=step.id,
+        sequence=step.sequence,
+        step_name=step.action_name,
     )
 
 

@@ -9,8 +9,10 @@ def test_linjiang_nodes_resources_and_transport_use_generic_spatial_projection()
 
     hospital = projector.node("central_hospital")
     assert hospital is not None
+    central = projector.node("central_district")
+    assert central is not None
     assert hospital.region_key == "central_district"
-    assert hospital.region_name == definition.world.node("central_district").name
+    assert hospital.region_name == central.name
 
     corridor = projector.node("west_freight_corridor")
     assert corridor is not None
@@ -21,8 +23,10 @@ def test_linjiang_nodes_resources_and_transport_use_generic_spatial_projection()
     assert len(corridor.endpoint_region_names) == 2
 
     resource = projector.resource_scope("west_logistics_district")
+    west = projector.node("west_logistics_district")
+    assert west is not None
     assert resource.scope_region_key == "west_logistics_district"
-    assert resource.scope_region_name == definition.world.node("west_logistics_district").name
+    assert resource.scope_region_name == west.name
 
 
 def test_action_location_formats_route_transport_facility_and_connector() -> None:
@@ -47,6 +51,12 @@ def test_action_location_formats_route_transport_facility_and_connector() -> Non
     )
     assert transport is not None
     assert transport.kind == "ROUTE"
+    north = projector.node("north_industrial_district")
+    central = projector.node("central_district")
+    assert north is not None and central is not None
+    assert transport.summary == (
+        f"{north.name} \u2192 {central.name}"
+    )
     assert "\u00d710" in (transport.detail or "")
 
     repair = projector.action_location(
@@ -64,5 +74,16 @@ def test_action_location_formats_route_transport_facility_and_connector() -> Non
     assert clear is not None
     assert clear.kind == "TRANSPORT"
     assert "↔" in clear.summary
+    corridor = projector.node("west_freight_corridor")
+    assert corridor is not None
+    assert corridor.name in clear.summary
+    clear_compact = projector.action_location(
+        actions["clear_transport"],
+        target_node_key="west_freight_corridor",
+        compact=True,
+    )
+    assert clear_compact is not None
+    assert clear_compact.summary == corridor.name
+    assert clear_compact.detail is None
 
     assert actions["travel"].behavior == ActionBehavior.TRAVEL

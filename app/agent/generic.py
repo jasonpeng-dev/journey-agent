@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -41,9 +42,13 @@ from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionDefinitionV2,
     ActionExecutionMode,
+    EffectKind,
+    NodeSelectorKind,
     ObjectiveDefinitionV2,
+    RulePhase,
     ScenarioDefinitionV2,
     StrictScalar,
+    ValueSource,
     normalize_action_parameters,
 )
 from app.domain.world import Visibility
@@ -579,12 +584,9 @@ class GenericAgentService:
                 .order_by(AgentStep.sequence)
             )
         )
-        diagnostics = tuple(
-            diagnostic
-            for step in remaining_steps
-            if step.execution_type == StepExecutionType.TOOL
-            for diagnostic in (self._known_step_conflict(step),)
-            if diagnostic is not None
+        diagnostics = self._revalidate_remaining_plan_sequential(
+            definition=self._definition(),
+            remaining_steps=remaining_steps,
         )
         if not diagnostics:
             return PlanRevalidationResult(False)
@@ -629,94 +631,135 @@ class GenericAgentService:
             is None
         )
 
-    def _known_step_conflict(self, step: AgentStep) -> dict[str, object] | None:
-        action_key = step.tool_arguments.get("action_key")
-        actor_key = step.assigned_actor_key
-        target_key = step.tool_arguments.get("target_key")
-        if (
-            not isinstance(action_key, str)
-            or not action_key
-            or not isinstance(actor_key, str)
-            or not actor_key
-            or not isinstance(target_key, str)
-            or not target_key
-        ):
-            return {
-                "code": "KNOWN_PLAN_STEP_INVALID",
-                "sequence": step.sequence,
-                "action_key": action_key,
-            }
-        assert isinstance(action_key, str)
-        assert isinstance(target_key, str)
+    def _revalidate_remaining_plan_sequential(
+        self,
+        *,
+        definition: ScenarioDefinitionV2,
+        remaining_steps: tuple[AgentStep, ...],
+    ) -> tuple[dict[str, object], ...]:
+        """Validate the remaining suffix as one projected Plan.
 
-        definition = self._definition()
-        action = next((item for item in definition.actions if item.key == action_key), None)
-        actor = self.db.get(GameInstanceActor, (self.scope.game_instance_id, actor_key))
-        if action is None or actor is None:
-            return {
-                "code": "KNOWN_PLAN_STEP_INVALID",
-                "sequence": step.sequence,
-                "action_key": action_key,
-            }
-        parameters_value = step.tool_arguments.get("parameters", {})
-        parameters = dict(parameters_value) if isinstance(parameters_value, dict) else {}
-        try:
-            parameters = normalize_action_parameters(action, parameters)
-        except ValueError:
-            return {
-                "code": "KNOWN_PLAN_STEP_INVALID",
-                "sequence": step.sequence,
-                "action_key": action.key,
-            }
-        if not self._validate_planning_action(definition, action, actor, target_key):
-            return {
-                "code": "KNOWN_PLAN_STEP_INVALID",
-                "sequence": step.sequence,
-                "action_key": action.key,
-                "target_key": target_key,
-            }
-        try:
-            connector = validate_action_locality(
-                definition,
-                action,
-                actor_current_node_key=actor.current_node_key,
-                target_node_key=target_key,
-                parameters=parameters,
-            )
-        except LocalityEngineError as exc:
-            return {
-                "code": exc.code,
-                "sequence": step.sequence,
-                "action_key": action.key,
-                "target_key": target_key,
-            }
-        if (
-            connector is not None
-            and action.behavior in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE)
-        ):
-            fact_key = definition.metadata.locality.passability_fact_key
-            if fact_key is not None:
-                fact = self.db.get(
-                    GameInstanceFactState,
-                    (self.scope.game_instance_id, connector, fact_key),
+        The runtime actor locations are the starting state.  Only the same
+        narrow projections used by initial proposal validation are advanced:
+        travel/transport moves an actor, and a declarative passability effect
+        can update the validation-only known-passability map.  No hidden Truth,
+        resource simulation, or rule preflight is consulted here.
+        """
+
+        actors = {
+            actor.actor_key: actor
+            for actor in self.db.scalars(
+                select(GameInstanceActor).where(
+                    GameInstanceActor.game_instance_id == self.scope.game_instance_id
                 )
-                # The value is read only after Knowledge is KNOWN.  A hidden
-                # Truth value cannot invalidate an otherwise valid Plan.
-                if (
-                    fact is not None
-                    and fact.visibility == Visibility.KNOWN
-                    and fact.truth_value is False
-                ):
-                    return {
-                        "code": "KNOWN_TRANSPORT_BLOCKED",
+            )
+        }
+        projected_actor_locations = {
+            actor_key: actor.current_node_key for actor_key, actor in actors.items()
+        }
+        projected_known_passability = self._known_passability(definition)
+        actions = {action.key: action for action in definition.actions}
+
+        for step in remaining_steps:
+            if step.execution_type != StepExecutionType.TOOL:
+                continue
+            action_key = step.tool_arguments.get("action_key")
+            actor_key = step.assigned_actor_key
+            target_key = step.tool_arguments.get("target_key")
+            if (
+                not isinstance(action_key, str)
+                or not action_key
+                or not isinstance(actor_key, str)
+                or not actor_key
+                or not isinstance(target_key, str)
+                or not target_key
+            ):
+                return (
+                    {
+                        "code": "KNOWN_PLAN_STEP_INVALID",
+                        "sequence": step.sequence,
+                        "action_key": action_key,
+                    },
+                )
+
+            action = actions.get(action_key)
+            actor = actors.get(actor_key)
+            if action is None or actor is None:
+                return (
+                    {
+                        "code": "KNOWN_PLAN_STEP_INVALID",
+                        "sequence": step.sequence,
+                        "action_key": action_key,
+                    },
+                )
+            parameters_value = step.tool_arguments.get("parameters", {})
+            parameters = dict(parameters_value) if isinstance(parameters_value, dict) else {}
+            try:
+                parameters = normalize_action_parameters(action, parameters)
+            except ValueError:
+                return (
+                    {
+                        "code": "KNOWN_PLAN_STEP_INVALID",
+                        "sequence": step.sequence,
+                        "action_key": action.key,
+                    },
+                )
+            if not self._validate_planning_action(definition, action, actor, target_key):
+                return (
+                    {
+                        "code": "KNOWN_PLAN_STEP_INVALID",
                         "sequence": step.sequence,
                         "action_key": action.key,
                         "target_key": target_key,
-                        "transport_key": connector,
-                        "fact_key": fact_key,
-                        "known_value": False,
-                    }
-        return None
+                    },
+                )
+            try:
+                self._validate_projected_action_state(
+                    definition,
+                    action,
+                    actor_key,
+                    target_key,
+                    parameters,
+                    projected_actor_locations,
+                    projected_known_passability,
+                )
+            except GenericAgentError as exc:
+                diagnostic: dict[str, object] = {
+                    "code": _safe_provider_diagnostic(exc.code),
+                    "sequence": step.sequence,
+                    "action_key": action.key,
+                    "target_key": target_key,
+                }
+                if exc.code == "KNOWN_TRANSPORT_BLOCKED":
+                    fact_key = definition.metadata.locality.passability_fact_key
+                    diagnostic_connector: str | None = None
+                    with suppress(GenericAgentError):
+                        diagnostic_connector = self._validate_projected_plan_locality(
+                            definition,
+                            action,
+                            actor_key,
+                            target_key,
+                            parameters,
+                            projected_actor_locations,
+                        )
+                    diagnostic.update(
+                        {
+                            "transport_key": diagnostic_connector,
+                            "fact_key": fact_key,
+                            "known_value": False,
+                        }
+                    )
+                return (diagnostic,)
+
+            self._advance_projected_action_state(
+                definition,
+                action,
+                actor_key,
+                target_key,
+                projected_actor_locations,
+                projected_known_passability,
+            )
+        return ()
 
     @staticmethod
     def _step_has_knowledge_changes(step: AgentStep) -> bool:
@@ -1024,6 +1067,10 @@ class GenericAgentService:
                 )
             )
         }
+        projected_actor_locations = {
+            actor_key: actor.current_node_key for actor_key, actor in actors.items()
+        }
+        projected_known_passability = self._known_passability(definition)
         target_keys = {
             str(item.get("target_key"))
             for item in planning_context.relevant_targets
@@ -1117,6 +1164,27 @@ class GenericAgentService:
                     }
                 )
                 continue
+            if action.behavior in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE):
+                try:
+                    self._validate_projected_action_state(
+                        definition,
+                        action,
+                        actor_key,
+                        target_key,
+                        parameters,
+                        projected_actor_locations,
+                        projected_known_passability,
+                    )
+                except GenericAgentError as exc:
+                    diagnostics.append(
+                        {
+                            "code": _safe_provider_diagnostic(exc.code),
+                            "step": index,
+                            "action_key": action_key,
+                            "target_key": target_key,
+                        }
+                    )
+                    continue
             signature = proposal_signature(actor_key, action_key, target_key, parameters)
             if signature in set(task.rejected_proposal_signatures):
                 diagnostics.append(
@@ -1188,6 +1256,14 @@ class GenericAgentService:
                 generated[0]["description"] = purpose.strip()[:400]
             result.extend(generated)
             step_effects.append(effect_refs)
+            self._advance_projected_action_state(
+                definition,
+                action,
+                actor_key,
+                target_key,
+                projected_actor_locations,
+                projected_known_passability,
+            )
 
         if diagnostics:
             return [], tuple(diagnostics)
@@ -1255,6 +1331,121 @@ class GenericAgentService:
                         refs.add((node_key, fact_key))
         return refs
 
+    @staticmethod
+    def _validate_projected_plan_locality(
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor_key: str,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_actor_locations: dict[str, str],
+    ) -> str | None:
+        source_node_key = projected_actor_locations.get(actor_key)
+        if source_node_key is None:
+            raise GenericAgentError(
+                "LOCALITY_ACTOR_REGION_REQUIRED",
+                "The Actor has no projected current location",
+            )
+        try:
+            return validate_action_locality(
+                definition,
+                action,
+                actor_current_node_key=source_node_key,
+                target_node_key=target_key,
+                parameters=parameters,
+            )
+        except LocalityEngineError as exc:
+            raise GenericAgentError(exc.code, exc.message) from exc
+
+    def _validate_projected_action_state(
+        self,
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor_key: str,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_actor_locations: dict[str, str],
+        projected_known_passability: dict[str, bool],
+    ) -> str | None:
+        if action.behavior not in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE):
+            return None
+        connector = self._validate_projected_plan_locality(
+            definition,
+            action,
+            actor_key,
+            target_key,
+            parameters,
+            projected_actor_locations,
+        )
+        if connector is not None and projected_known_passability.get(connector) is False:
+            raise GenericAgentError(
+                "KNOWN_TRANSPORT_BLOCKED",
+                "The proposed route is known to be blocked",
+            )
+        return connector
+
+    @staticmethod
+    def _advance_projected_action_state(
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor_key: str,
+        target_key: str,
+        projected_actor_locations: dict[str, str],
+        projected_known_passability: dict[str, bool],
+    ) -> None:
+        if action.behavior in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE):
+            projected_actor_locations[actor_key] = target_key
+        GenericAgentService._apply_projected_passability_effect(
+            definition,
+            action,
+            target_key,
+            projected_known_passability,
+        )
+
+    def _known_passability(self, definition: ScenarioDefinitionV2) -> dict[str, bool]:
+        fact_key = definition.metadata.locality.passability_fact_key
+        if fact_key is None:
+            return {}
+        return {
+            row.node_key: row.truth_value
+            for row in self.db.scalars(
+                select(GameInstanceFactState).where(
+                    GameInstanceFactState.game_instance_id == self.scope.game_instance_id,
+                    GameInstanceFactState.fact_key == fact_key,
+                    GameInstanceFactState.visibility == Visibility.KNOWN,
+                )
+            )
+            if isinstance(row.truth_value, bool)
+        }
+
+    @staticmethod
+    def _apply_projected_passability_effect(
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        target_key: str,
+        projected_known_passability: dict[str, bool],
+    ) -> None:
+        fact_key = definition.metadata.locality.passability_fact_key
+        if fact_key is None:
+            return
+        values: set[bool] = set()
+        for rule in definition.rules:
+            if rule.phase != RulePhase.RESOLVE or rule.action_key != action.key:
+                continue
+            for effect in rule.effects:
+                if (
+                    effect.kind == EffectKind.SET_FACT
+                    and effect.node is not None
+                    and effect.node.kind == NodeSelectorKind.CURRENT_TARGET
+                    and effect.fact_key == fact_key
+                    and effect.value is not None
+                    and effect.value.source == ValueSource.LITERAL
+                    and isinstance(effect.value.literal, bool)
+                ):
+                    values.add(effect.value.literal)
+        if len(values) == 1:
+            projected_known_passability[target_key] = values.pop()
+
     def _record_provider_plan_call(
         self,
         task: AgentTask,
@@ -1274,14 +1465,14 @@ class GenericAgentService:
                 "model": self.provider.model_name,
                 "repair_attempt": request.repair_attempt,
                 "planning_context": (
-                    request.planning_context.model_dump(mode="json")
+                    request.planning_context.compact_dump()
                     if request.planning_context is not None
                     else None
                 ),
                 "planning_context_bytes": (
                     len(
                         json.dumps(
-                            request.planning_context.model_dump(mode="json"),
+                            request.planning_context.compact_dump(),
                             ensure_ascii=False,
                             separators=(",", ":"),
                         ).encode("utf-8")
@@ -1600,6 +1791,10 @@ def _normalize(value: str) -> str:
 
 
 def _safe_provider_diagnostic(code: str) -> str:
+    if code == "KNOWN_TRANSPORT_BLOCKED":
+        return code
+    if code.startswith("LOCALITY_"):
+        return "LOCALITY_INVALID"
     return {
         "ACTION_PARAMETERS_INVALID": "PARAMETER_INVALID",
         "GENERIC_PLAN_PARAMETER_INVALID": "PARAMETER_INVALID",
