@@ -54,9 +54,7 @@ def test_action_location_formats_route_transport_facility_and_connector() -> Non
     north = projector.node("north_industrial_district")
     central = projector.node("central_district")
     assert north is not None and central is not None
-    assert transport.summary == (
-        f"{north.name} \u2192 {central.name}"
-    )
+    assert transport.summary == (f"{north.name} \u2192 {central.name}")
     assert "\u00d710" in (transport.detail or "")
 
     repair = projector.action_location(

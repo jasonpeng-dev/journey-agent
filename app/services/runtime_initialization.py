@@ -269,8 +269,7 @@ class RuntimeInitializationService:
             len(definition.actors.actor_profiles),
         )
         expected_resources = {
-            (item.resource_key, item.scope_node_key)
-            for item in resource_initial_states(definition)
+            (item.resource_key, item.scope_node_key) for item in resource_initial_states(definition)
         }
         actual_resources = {(row.resource_key, row.scope_node_key) for row in resource_rows}
         resources_valid = expected_resources.issubset(actual_resources) and all(

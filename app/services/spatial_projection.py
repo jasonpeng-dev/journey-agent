@@ -81,9 +81,7 @@ class SpatialDisplayProjector:
                 region_key = self._safe_region_for_node(node.key)
             elif node.node_type_key == self._transport_type:
                 endpoint_region_keys = self._safe_transport_endpoints(node.key)
-                endpoint_region_names = tuple(
-                    self._node_name(key) for key in endpoint_region_keys
-                )
+                endpoint_region_names = tuple(self._node_name(key) for key in endpoint_region_keys)
             if region_key is not None:
                 region_name = self._node_name(region_key)
 
@@ -139,8 +137,10 @@ class SpatialDisplayProjector:
                     resource_key = values.get("resource_key")
                     amount = values.get("amount")
                     resource_name = self._resource_names.get(str(resource_key))
-                    if resource_name is not None and isinstance(amount, int) and not isinstance(
-                        amount, bool
+                    if (
+                        resource_name is not None
+                        and isinstance(amount, int)
+                        and not isinstance(amount, bool)
                     ):
                         detail = f"{resource_name} \u00d7{amount}"
                 return ActionLocationProjection(

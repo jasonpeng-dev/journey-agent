@@ -147,8 +147,7 @@ class PlanningContextBuilder:
         # target affordance, including actions that are currently locked.
         for action in definition.actions:
             known_target = any(
-                node.key in known_nodes
-                and action.required_interaction_key in node.interaction_keys
+                node.key in known_nodes and action.required_interaction_key in node.interaction_keys
                 for node in definition.world.nodes
             )
             visible_effect = any(
@@ -159,8 +158,7 @@ class PlanningContextBuilder:
                 )
             )
             operational = (
-                action.behavior != ActionBehavior.RULE
-                or action.locality != ActionLocality.NONE
+                action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
             )
             if known_target and (visible_effect or operational):
                 selected.add(action.key)
@@ -256,13 +254,9 @@ class PlanningContextBuilder:
                 "target_requirements": {
                     "required_interaction_key": action.required_interaction_key,
                 },
-                "parameter_schema": [
-                    item.model_dump(mode="json") for item in action.parameters
-                ],
+                "parameter_schema": [item.model_dump(mode="json") for item in action.parameters],
                 "parameter_defaults": {
-                    item.key: item.default
-                    for item in action.parameters
-                    if item.default is not None
+                    item.key: item.default for item in action.parameters if item.default is not None
                 },
                 "hard_constraints": {
                     "required_actor_capabilities": [
@@ -478,9 +472,13 @@ class PlanningActionCatalogBuilder:
                     for item in visible_effects
                     if (item.node_key, item.fact_key) in objective_refs
                 )
-                if not relevant and not action.planning.supporting_effects and (
-                    action.behavior == ActionBehavior.RULE
-                    and action.locality == ActionLocality.NONE
+                if (
+                    not relevant
+                    and not action.planning.supporting_effects
+                    and (
+                        action.behavior == ActionBehavior.RULE
+                        and action.locality == ActionLocality.NONE
+                    )
                 ):
                     continue
                 for actor in sorted(actors, key=lambda item: item.actor_key):

@@ -47,9 +47,7 @@ def test_linjiang_v1_preserves_topology_and_adds_gameplay() -> None:
     endpoints: dict[str, set[str]] = {}
     for relation in definition.world.relations:
         if relation.relation_type_key == "endpoint":
-            endpoints.setdefault(relation.source_node_key, set()).add(
-                relation.target_node_key
-            )
+            endpoints.setdefault(relation.source_node_key, set()).add(relation.target_node_key)
     assert endpoints == {
         "north_service_corridor": {"north_industrial_district", "central_district"},
         "west_freight_corridor": {"central_district", "west_logistics_district"},

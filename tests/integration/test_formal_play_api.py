@@ -451,10 +451,7 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
     assert interrupted["execution_phase"] == "AWAITING_REPLAN_ACK"
     assert interrupted["debrief"]["success"] is True
     assert interrupted["debrief"]["plan_invalidated"] is True
-    assert (
-        interrupted["debrief"]["plan_invalidation_reason"]
-        == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
-    )
+    assert interrupted["debrief"]["plan_invalidation_reason"] == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
     assert interrupted["debrief"]["knowledge_changes"]
     assert len(provider.requests) == 1
     operations = tuple(

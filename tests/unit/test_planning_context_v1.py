@@ -127,9 +127,7 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
         item for item in context.relevant_targets if item["target_key"] == "starfire_outpost"
     )
     assert set(locked_target) == {"target_key"}
-    known_node_keys = {
-        item["key"] for item in context.current_knowledge["nodes"]
-    }
+    known_node_keys = {item["key"] for item in context.current_knowledge["nodes"]}
     locked_node = next(
         item for item in context.current_knowledge["nodes"] if item["key"] == "starfire_outpost"
     )
@@ -211,9 +209,7 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
         call_type="REPAIR",
         goal="goal",
         repair_attempt=0,
-        repair_diagnostics=(
-            {"code": "PLAN_REJECTED"},
-        ),
+        repair_diagnostics=({"code": "PLAN_REJECTED"},),
         planning_context=initial_context,
     ).provider_payload()
     assert repair_payload["repair_attempt"] == 0

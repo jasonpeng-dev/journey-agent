@@ -239,8 +239,7 @@ def passability_fact(
 def _is_region(definition: ScenarioDefinitionV2, node_key: str) -> bool:
     node = definition.world.node(node_key)
     return bool(
-        node is not None
-        and node.node_type_key == definition.metadata.locality.region_node_type_key
+        node is not None and node.node_type_key == definition.metadata.locality.region_node_type_key
     )
 
 

@@ -539,8 +539,7 @@ class PlayerProjectionService:
         """
 
         initial_positions = {
-            profile.key: profile.initial_node_key
-            for profile in definition.actors.actor_profiles
+            profile.key: profile.initial_node_key for profile in definition.actors.actor_profiles
         }
         operations = tuple(
             self.db.scalars(
@@ -551,9 +550,7 @@ class PlayerProjectionService:
         )
         source_nodes: dict[UUID, str | None] = {}
 
-        def apply_operation(
-            positions: dict[str, str], operation: WorldOperation
-        ) -> None:
+        def apply_operation(positions: dict[str, str], operation: WorldOperation) -> None:
             if not _operation_succeeded(operation):
                 return
             destination = (
@@ -592,7 +589,8 @@ class PlayerProjectionService:
                 target_key = step.tool_arguments.get("target_key")
                 if (
                     action is not None
-                    and action.behavior in (
+                    and action.behavior
+                    in (
                         ActionBehavior.TRAVEL,
                         ActionBehavior.TRANSPORT_RESOURCE,
                     )

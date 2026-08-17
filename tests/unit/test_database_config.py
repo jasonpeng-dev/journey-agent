@@ -18,9 +18,7 @@ def test_docker_sqlite_target_keeps_the_container_path() -> None:
 
 
 def test_non_sqlite_target_hides_password() -> None:
-    target = resolved_database_target(
-        "postgresql+psycopg://journey:secret@localhost:5432/journey"
-    )
+    target = resolved_database_target("postgresql+psycopg://journey:secret@localhost:5432/journey")
 
     assert target == "postgresql+psycopg://journey:***@localhost:5432/journey"
     assert "secret" not in target

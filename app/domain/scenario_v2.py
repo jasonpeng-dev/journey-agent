@@ -900,8 +900,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
 
     for action in definition.actions:
         if (
-            action.behavior != ActionBehavior.RULE
-            or action.locality != ActionLocality.NONE
+            action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
         ) and not definition.metadata.locality.enabled:
             raise ValueError(
                 f"Action {action.key} requires the Scenario locality contract to be enabled"

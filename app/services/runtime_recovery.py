@@ -173,8 +173,7 @@ class RuntimeRecoveryService:
         ).all()
         resource_identities = {(row.resource_key, row.scope_node_key) for row in resource_rows}
         initial_resource_identities = {
-            (item.resource_key, item.scope_node_key)
-            for item in resource_initial_states(definition)
+            (item.resource_key, item.scope_node_key) for item in resource_initial_states(definition)
         }
         if (
             len(node_rows) != len(nodes)

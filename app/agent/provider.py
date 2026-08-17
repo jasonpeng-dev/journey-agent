@@ -488,8 +488,7 @@ def _response_body_summary(response: httpx.Response | None) -> dict[str, object]
             summary["error"] = {
                 key: _safe_text(value, limit=240)
                 for key, value in error.items()
-                if key in {"type", "code", "message"}
-                and isinstance(value, (str, int, float, bool))
+                if key in {"type", "code", "message"} and isinstance(value, (str, int, float, bool))
             }
         else:
             summary["fields"] = {

@@ -556,10 +556,12 @@ def test_knowledge_change_does_not_replan_when_remaining_suffix_is_legal(
     plan = session.get(AgentPlan, first_step.plan_id)
     assert plan is not None and plan.status == AgentPlanStatus.ACTIVE
     next_step = session.scalar(
-        select(AgentStep).where(
+        select(AgentStep)
+        .where(
             AgentStep.plan_id == first_step.plan_id,
             AgentStep.status == AgentStepStatus.PENDING,
-        ).order_by(AgentStep.sequence)
+        )
+        .order_by(AgentStep.sequence)
     )
     assert next_step is not None and next_step.action_intent == "clear_transport"
 
