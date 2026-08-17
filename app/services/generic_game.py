@@ -9,7 +9,12 @@ from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
 from app.domain.enums import AuthorityOutcome, NodeStatus
-from app.domain.resources import resource_initial_states, resource_state_key
+from app.domain.resources import (
+    resource_identity,
+    resource_initial_states,
+    resource_state_key,
+    valid_resource_state_identity,
+)
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
@@ -498,15 +503,23 @@ class GenericGameService:
         nodes = self.db.scalars(node_query).all()
         facts = self.db.scalars(fact_query).all()
         resources = self.db.scalars(resource_query).all()
-        expected_resources = {
+        expected_initial_resources = {
             (item.resource_key, item.scope_node_key) for item in resource_initial_states(definition)
         }
+        actual_resources = {(row.resource_key, row.scope_node_key) for row in resources}
         if (
             {row.node_key for row in nodes} != {node.key for node in definition.world.nodes}
             or {(row.node_key, row.fact_key) for row in facts}
             != {(node.key, fact.key) for node in definition.world.nodes for fact in node.facts}
-            or {(row.resource_key, row.scope_node_key) for row in resources}
-            != expected_resources
+            or not expected_initial_resources.issubset(actual_resources)
+            or any(
+                not valid_resource_state_identity(
+                    definition,
+                    row.resource_key,
+                    row.scope_node_key,
+                )
+                for row in resources
+            )
         ):
             raise GenericGameError(
                 "RUNTIME_STATE_INCOMPLETE",
@@ -549,32 +562,53 @@ class GenericGameService:
     ) -> None:
         resources = {item.key: item for item in definition.world.resources}
         resource_rows: dict[str, GameInstanceResourceState] = {}
-        resource_keys = {
-            resource_state_key(item.resource_key, item.scope_node_key)
-            for item in outcome.resource_mutations
-        } | {
+        balance_mutations_by_identity: dict[str, list[ResourceMutation]] = {}
+        for mutation in outcome.resource_mutations:
+            balance_mutations_by_identity.setdefault(
+                resource_state_key(mutation.resource_key, mutation.scope_node_key),
+                [],
+            ).append(mutation)
+        reservation_identities = {
             resource_state_key(item.resource_key, item.scope_node_key)
             for item in outcome.resource_reservations
         }
+        resource_keys = set(balance_mutations_by_identity) | reservation_identities
         for identity in resource_keys:
-            if identity not in resource_rows:
-                if not any(
-                    resource_state_key(item.resource_key, item.scope_node_key) == identity
-                    for item in outcome.resource_mutations
-                ) and not any(
-                    resource_state_key(item.resource_key, item.scope_node_key) == identity
-                    for item in outcome.resource_reservations
-                ):
-                    continue
-                resource_row = self.db.get(
-                    GameInstanceResourceState,
-                    (self.scope.game_instance_id, identity),
-                )
-                if resource_row is None:
-                    raise GenericGameError(
-                        "RUNTIME_RESOURCE_MISSING", "A Rule referenced missing Instance state"
-                    )
+            resource_row = self.db.get(
+                GameInstanceResourceState,
+                (self.scope.game_instance_id, identity),
+            )
+            if resource_row is not None:
                 resource_rows[identity] = resource_row
+                continue
+            mutations = balance_mutations_by_identity.get(identity, [])
+            candidate_mutation = mutations[0] if mutations else None
+            if (
+                candidate_mutation is None
+                or not any(item.amount > 0 for item in mutations)
+                or not valid_resource_state_identity(
+                    definition,
+                    candidate_mutation.resource_key,
+                    candidate_mutation.scope_node_key,
+                )
+            ):
+                raise GenericGameError(
+                    "RUNTIME_RESOURCE_MISSING", "A Rule referenced missing Instance state"
+                )
+            resource_row = GameInstanceResourceState(
+                game_instance_id=self.scope.game_instance_id,
+                resource_identity=resource_identity(
+                    candidate_mutation.resource_key,
+                    candidate_mutation.scope_node_key,
+                ),
+                resource_key=candidate_mutation.resource_key,
+                scope_node_key=candidate_mutation.scope_node_key,
+                value=0,
+                reserved_value=0,
+                version=1,
+            )
+            self.db.add(resource_row)
+            resource_rows[identity] = resource_row
         projected_values = {key: row.value for key, row in resource_rows.items()}
         projected_reserved = {key: row.reserved_value for key, row in resource_rows.items()}
         for balance_mutation in outcome.resource_mutations:

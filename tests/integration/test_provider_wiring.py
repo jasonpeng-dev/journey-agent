@@ -1,6 +1,7 @@
 import json
 from collections import deque
 from collections.abc import Iterable
+from types import SimpleNamespace
 from typing import Literal, NoReturn
 from uuid import uuid4
 
@@ -11,6 +12,7 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+import app.agent.provider as provider_module
 from app.agent.generic import GenericAgentError, GenericAgentService, proposal_signature
 from app.agent.planning_context import legal_candidate_id
 from app.agent.provider import (
@@ -745,6 +747,113 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe(
     with pytest.raises(GenericProviderError) as http_error:
         provider.select_objectives(request)
     assert http_error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
+
+
+def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings("openai_compatible")
+    provider = OpenAICompatibleGenericProvider(settings)
+    request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        provider_module,
+        "log",
+        SimpleNamespace(
+            error=lambda event, **fields: events.append((event, fields)),
+        ),
+    )
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *_args, **_kwargs: httpx.Response(
+            503,
+            json={
+                "error": {
+                    "type": "upstream_error",
+                    "code": "temporarily_unavailable",
+                    "message": "token=sk-test-secret upstream unavailable",
+                }
+            },
+            headers={"x-request-id": "provider-request-123"},
+            request=httpx.Request("POST", "https://provider.test/chat/completions"),
+        ),
+    )
+
+    with pytest.raises(GenericProviderError) as http_error:
+        provider.select_objectives(request)
+
+    assert http_error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
+    assert len(events) == 1
+    event, fields = events[0]
+    assert event == "model_provider_upstream_error"
+    assert fields["model"] == "fake-provider"
+    assert fields["error_type"] == "HTTPStatusError"
+    assert fields["upstream_status_code"] == 503
+    assert fields["request_size_bytes"] > 0
+    assert fields["provider_request_id"] == "provider-request-123"
+    assert "planning_context" not in fields
+    assert "prompt" not in fields
+    assert "sk-test-secret" not in json.dumps(fields)
+    assert "upstream unavailable" in json.dumps(fields)
+
+
+def test_generic_planner_prompt_requires_known_concrete_purpose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings("openai_compatible")
+    provider = OpenAICompatibleGenericProvider(settings)
+    system_prompts: list[str] = []
+
+    def complete(*_args: object, **kwargs: object) -> httpx.Response:
+        request_body = kwargs["json"]
+        assert isinstance(request_body, dict)
+        messages = request_body["messages"]
+        assert isinstance(messages, list)
+        system_message = messages[0]
+        assert isinstance(system_message, dict)
+        system_prompts.append(str(system_message["content"]))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"plan_summary":"complete","steps":['
+                                '{"purpose":"known task step",'
+                                '"action_key":"known_action",'
+                                '"actor_key":"known_actor",'
+                                '"target_key":"known_target",'
+                                '"parameters":{}}]}'
+                            )
+                        }
+                    }
+                ]
+            },
+            request=httpx.Request("POST", "https://provider.test/chat/completions"),
+        )
+
+    monkeypatch.setattr(httpx, "post", complete)
+    context = provider_module.PlanningContext(
+        goal={"objective_keys": ["known_objective"]},
+        current_knowledge={"facts": {}},
+    )
+    for call_type in ("INITIAL_PLAN", "REPLAN"):
+        provider.propose_plan(
+            PlanRequest(
+                call_type=call_type,
+                goal="known goal",
+                objective_keys=("known_objective",),
+                planning_context=context,
+            )
+        )
+
+    assert len(system_prompts) == 2
+    for prompt in system_prompts:
+        assert "concrete purpose supported by the current Knowledge and task state" in prompt
+        assert "Do not add speculative or preventive corrective actions" in prompt
+        assert "currently known failure, blockage, unmet prerequisite" in prompt
 
 
 def test_provider_failure_returns_gateway_error_without_deterministic_fallback(

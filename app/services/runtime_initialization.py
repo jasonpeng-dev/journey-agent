@@ -11,7 +11,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import GameInstanceStatus, NodeStatus
-from app.domain.resources import resource_identity, resource_initial_states
+from app.domain.resources import (
+    resource_identity,
+    resource_initial_states,
+    valid_resource_state_identity,
+)
 from app.domain.world import AccessState
 from app.infrastructure.db.models import (
     ConversationSession,
@@ -234,6 +238,11 @@ class RuntimeInitializationService:
         sessions = self.db.scalars(
             select(ConversationSession).where(ConversationSession.game_instance_id == instance.id)
         ).all()
+        resource_rows = self.db.scalars(
+            select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == instance.id
+            )
+        ).all()
         counts = tuple(
             int(value or 0)
             for value in (
@@ -249,11 +258,6 @@ class RuntimeInitializationService:
                 ),
                 self.db.scalar(
                     select(func.count())
-                    .select_from(GameInstanceResourceState)
-                    .where(GameInstanceResourceState.game_instance_id == instance.id)
-                ),
-                self.db.scalar(
-                    select(func.count())
                     .select_from(GameInstanceActor)
                     .where(GameInstanceActor.game_instance_id == instance.id)
                 ),
@@ -262,10 +266,22 @@ class RuntimeInitializationService:
         expected = (
             len(definition.world.nodes),
             sum(len(node.facts) for node in definition.world.nodes),
-            len(resource_initial_states(definition)),
             len(definition.actors.actor_profiles),
         )
-        if len(sessions) != 1 or counts != expected:
+        expected_resources = {
+            (item.resource_key, item.scope_node_key)
+            for item in resource_initial_states(definition)
+        }
+        actual_resources = {(row.resource_key, row.scope_node_key) for row in resource_rows}
+        resources_valid = expected_resources.issubset(actual_resources) and all(
+            valid_resource_state_identity(
+                definition,
+                row.resource_key,
+                row.scope_node_key,
+            )
+            for row in resource_rows
+        )
+        if len(sessions) != 1 or counts != expected or not resources_valid:
             raise RuntimeInitializationError(
                 "RUNTIME_INITIALIZATION_INCOMPLETE",
                 "The idempotent GameInstance runtime graph is incomplete",

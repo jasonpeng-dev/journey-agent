@@ -36,4 +36,32 @@ def resource_initial_states(
     )
 
 
-__all__ = ["resource_identity", "resource_initial_states", "resource_state_key"]
+def valid_resource_state_identity(
+    definition: ScenarioDefinitionV2,
+    resource_key: str,
+    scope_node_key: str | None,
+) -> bool:
+    """Return whether a persisted runtime Resource identity belongs to a Version.
+
+    A scoped Resource row is materialized lazily.  The Scenario still defines
+    which scopes are legal; it does not need to enumerate every future balance
+    row in ``resource_initial_states``.
+    """
+
+    if resource_key not in {item.key for item in definition.world.resources}:
+        return False
+    if scope_node_key is None:
+        return True
+    locality = definition.metadata.locality
+    if not locality.enabled or not locality.scoped_resources:
+        return False
+    node = definition.world.node(scope_node_key)
+    return node is not None and node.node_type_key == locality.region_node_type_key
+
+
+__all__ = [
+    "resource_identity",
+    "resource_initial_states",
+    "resource_state_key",
+    "valid_resource_state_identity",
+]

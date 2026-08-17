@@ -1,10 +1,14 @@
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.agent.generic import PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
+from app.agent.planning_context import legal_candidate_id
+from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import NodeStatus, StepExecutionType
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
@@ -15,7 +19,91 @@ from app.infrastructure.db.models import (
     GameInstanceNodeState,
     WorldOperation,
 )
-from app.scenarios.builtin import MEDICAL_EMERGENCY_V2, require_builtin_v2_version
+from app.scenarios.builtin import (
+    LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
+    MEDICAL_EMERGENCY_V2,
+    require_builtin_v2_version,
+)
+
+
+class FormalKnowledgeRevalidationProvider:
+    model_name = "formal-knowledge-revalidation-provider"
+
+    def __init__(self) -> None:
+        self.requests: list[PlanRequest] = []
+
+    def select_objectives(self, request):  # type: ignore[no-untyped-def]
+        raise AssertionError("The exact Linjiang goal alias should resolve deterministically")
+
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        self.requests.append(request)
+        if request.call_type == "INITIAL_PLAN":
+            steps = (
+                PlanStepProposal(
+                    candidate_id=legal_candidate_id(
+                        "inspect", "logistics_team_alpha", "west_freight_corridor"
+                    ),
+                    purpose="Inspect the West freight corridor before committing the route.",
+                ),
+                PlanStepProposal(
+                    candidate_id=legal_candidate_id(
+                        "travel", "logistics_team_alpha", "west_logistics_district"
+                    ),
+                    purpose="Travel to the West logistics district.",
+                ),
+                PlanStepProposal(
+                    candidate_id=legal_candidate_id(
+                        "transport_resource", "logistics_team_alpha", "central_district"
+                    ),
+                    purpose="Transport ten electrical repair parts to Central.",
+                    parameters={
+                        "resource_key": "electrical_repair_parts",
+                        "amount": 10,
+                        "destination_region_key": "central_district",
+                    },
+                ),
+                PlanStepProposal(
+                    candidate_id=legal_candidate_id(
+                        "repair_electrical", "electrical_team_beta", "central_hospital"
+                    ),
+                    purpose="Restore Central Hospital emergency power.",
+                ),
+            )
+        else:
+            steps = (
+                PlanStepProposal(
+                    candidate_id=legal_candidate_id(
+                        "clear_transport",
+                        "municipal_repair_team_alpha",
+                        "west_freight_corridor",
+                    ),
+                    purpose="Clear the known West corridor blockage.",
+                ),
+                PlanStepProposal(
+                    candidate_id=legal_candidate_id(
+                        "travel", "logistics_team_alpha", "west_logistics_district"
+                    ),
+                    purpose="Travel to the West logistics district.",
+                ),
+                PlanStepProposal(
+                    candidate_id=legal_candidate_id(
+                        "transport_resource", "logistics_team_alpha", "central_district"
+                    ),
+                    purpose="Transport ten electrical repair parts to Central.",
+                    parameters={
+                        "resource_key": "electrical_repair_parts",
+                        "amount": 10,
+                        "destination_region_key": "central_district",
+                    },
+                ),
+                PlanStepProposal(
+                    candidate_id=legal_candidate_id(
+                        "repair_electrical", "electrical_team_beta", "central_hospital"
+                    ),
+                    purpose="Restore Central Hospital emergency power.",
+                ),
+            )
+        return PlanProposal(plan_summary=request.call_type, steps=steps)
 
 
 def _new_game(client: TestClient, version_id: str) -> str:
@@ -206,6 +294,58 @@ def test_medical_uses_same_stepwise_play_and_game_remains_active(
     assert state["game"]["active_task_id"] is None
 
 
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "恢复中央医院应急供电",
+        "恢复中央医院的应急供电",
+        "恢复中央医院应急电力",
+        "Restore emergency power to Central Hospital.",
+    ],
+)
+def test_linjiang_goal_aliases_create_confirmed_single_objective_scope(
+    client: TestClient,
+    session: Session,
+    goal: str,
+) -> None:
+    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    session.commit()
+    game_id = _new_game(client, str(version.id))
+
+    response = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": goal, "idempotency_key": str(uuid4())},
+    )
+
+    assert response.status_code == 200, response.text
+    task_payload = response.json()["task"]
+    assert task_payload["execution_phase"] == "AWAITING_PLAN_START"
+    persisted = session.get(AgentTask, UUID(task_payload["id"]))
+    assert persisted is not None
+    assert persisted.objective_resolution_status == "CONFIRMED"
+    assert persisted.objective_scope_keys == ["restore_central_hospital_emergency_power"]
+    assert persisted.objective_catalog_version == f"scenario-version:{version.id}"
+    assert persisted.objective_scope_hash
+
+
+def test_linjiang_unrelated_goal_is_unsupported_without_a_task(
+    client: TestClient,
+    session: Session,
+) -> None:
+    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    session.commit()
+    game_id = _new_game(client, str(version.id))
+
+    response = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "恢复临江市机场运行", "idempotency_key": str(uuid4())},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "UNSUPPORTED"
+    assert session.scalar(select(func.count()).select_from(AgentTask)) == 0
+
+
 def test_failure_debrief_contains_knowledge_and_same_task_replan(
     client: TestClient, session: Session
 ) -> None:
@@ -281,6 +421,97 @@ def test_failure_debrief_contains_knowledge_and_same_task_replan(
     persisted = session.get(AgentTask, UUID(original_task_id))
     assert persisted is not None
     assert persisted.objective_scope_keys == ["secure_northern_valley"]
+
+
+def test_formal_play_revalidates_known_block_and_survives_restart(
+    client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FormalKnowledgeRevalidationProvider()
+    monkeypatch.setattr(
+        "app.services.composition.build_generic_provider", lambda _settings: provider
+    )
+    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    session.commit()
+    game_id = _new_game(client, str(version.id))
+
+    initial = client.get(f"/api/v1/games/{game_id}/play")
+    assert initial.status_code == 200
+    assert "west_freight_corridor.passable" not in initial.text
+    task = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "恢复中央医院应急供电", "idempotency_key": str(uuid4())},
+    ).json()["task"]
+    task = _start_planning(client, game_id, task)
+    assert task["execution_phase"] == "AWAITING_ACTION_ACK"
+    assert task["briefing"]["action_name"]
+    assert len(provider.requests) == 1
+
+    interrupted = _ack_action(client, game_id, task)
+    assert interrupted["execution_phase"] == "AWAITING_REPLAN_ACK"
+    assert interrupted["debrief"]["success"] is True
+    assert interrupted["debrief"]["plan_invalidated"] is True
+    assert (
+        interrupted["debrief"]["plan_invalidation_reason"]
+        == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
+    )
+    assert interrupted["debrief"]["knowledge_changes"]
+    assert len(provider.requests) == 1
+    operations = tuple(
+        session.scalars(
+            select(WorldOperation)
+            .where(WorldOperation.game_instance_id == UUID(game_id))
+            .order_by(WorldOperation.created_at)
+        )
+    )
+    assert [operation.action_key for operation in operations] == ["inspect"]
+    assert interrupted["plan_history"][0]["status"] == "ADJUSTED"
+    assert [step["status"] for step in interrupted["plan_history"][0]["steps"]] == [
+        "COMPLETED",
+        "CANCELLED",
+        "CANCELLED",
+        "CANCELLED",
+    ]
+
+    session.expire_all()
+    after_restart = client.get(f"/api/v1/games/{game_id}/play")
+    assert after_restart.status_code == 200
+    reloaded = after_restart.json()["current_task"]
+    assert reloaded["execution_phase"] == "AWAITING_REPLAN_ACK"
+    assert reloaded["debrief"]["plan_invalidated"] is True
+    assert len(provider.requests) == 1
+
+    replanned_response = client.post(
+        f"/api/v1/games/{game_id}/play/replan",
+        json={"expected_pacing_version": reloaded["pacing_version"]},
+    )
+    assert replanned_response.status_code == 200, replanned_response.text
+    replanned = replanned_response.json()["current_task"]
+    assert replanned["execution_phase"] == "AWAITING_ACTION_ACK"
+    assert replanned["briefing"]["action_name"]
+    assert len(provider.requests) == 2
+    assert provider.requests[1].call_type == "REPLAN"
+    assert provider.requests[1].replan_reason == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
+
+    completed, _rounds = _drive_task(client, game_id, replanned)
+    assert completed["status"] == "COMPLETED"
+    assert completed["execution_phase"] == "COMPLETED"
+    operations = tuple(
+        session.scalars(
+            select(WorldOperation)
+            .where(WorldOperation.game_instance_id == UUID(game_id))
+            .order_by(WorldOperation.created_at)
+        )
+    )
+    assert [operation.action_key for operation in operations] == [
+        "inspect",
+        "clear_transport",
+        "travel",
+        "transport_resource",
+        "repair_electrical",
+    ]
+    assert completed["plan_history"][0]["steps"][1]["status"] == "CANCELLED"
 
 
 def test_trade_goal_advances_one_cycle_per_ack_and_preserves_scope(

@@ -3,7 +3,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 
 import { api } from "../api";
+import { groupActorsByTask } from "../actorPresentation";
 import type {
+  ActionLocation,
   PublicPlanHistory,
   PublicPlanHistoryStep,
   PlayerGameState,
@@ -12,6 +14,14 @@ import type {
 } from "../types";
 import { errorText, resultLabel, stepDescription, uiLabel } from "../ui";
 import { formatDuration, type ActivePlayOperation } from "../playPresentation";
+import {
+  actionLocationText,
+  factDisplayName,
+  groupFactsByRegion,
+  groupNodesByRegion,
+  groupResourcesByRegion,
+  meaningfulResult,
+} from "../spatialPresentation";
 
 const taskTone: Record<string, string> = {
   COMPLETED: "success",
@@ -52,6 +62,16 @@ const timelinePresentation: Record<
   TASK_BLOCKED: { label: "目标暂时无法推进", mark: "!", tone: "danger" },
   TASK_ABORTED: { label: "目标已放弃", mark: "·", tone: "neutral" },
 };
+
+export function ActionLocationLine({ location }: { location?: ActionLocation | null }) {
+  const text = actionLocationText(location);
+  if (!text) return null;
+  return (
+    <div className="action-location-line" data-testid="action-location">
+      <strong>{text}</strong>
+    </div>
+  );
+}
 
 export function Timeline({ task }: { task: PublicTask | null }) {
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -112,15 +132,21 @@ export function Timeline({ task }: { task: PublicTask | null }) {
                   <small className="timeline-duration">· {formatDuration(event.duration_ms)}</small>
                 )}
               </div>
-              <strong>{headline}</strong>
+              <strong>
+                {headline}
+                {event.kind === "ACTION_RESULT" && actionLocationText(event.location)
+                  ? ` · ${actionLocationText(event.location)}`
+                  : ""}
+              </strong>
+              {event.kind !== "ACTION_RESULT" && <ActionLocationLine location={event.location} />}
               {event.detail && !event.kind.startsWith("PLAN_") && (
                 <p>
                   说明：
                   {uiLabel(event.detail)}
                 </p>
               )}
-              {!event.kind.startsWith("PLAN_") && event.result_summary && (
-                <p>{resultLabel(event.result_summary)}</p>
+              {!event.kind.startsWith("PLAN_") && meaningfulResult(event.result_summary) && (
+                <p>{resultLabel(meaningfulResult(event.result_summary))}</p>
               )}
               {!event.kind.startsWith("PLAN_") && event.knowledge_changes.length > 0 && (
                 <ul className="knowledge-gains">
@@ -188,9 +214,11 @@ export function PlanHistory({ task }: { task: PublicTask }) {
                   <li className={step.status.toLowerCase()} key={step.id}>
                     <b>{planStepMark[step.status]}</b>
                     <div>
-                      <strong>{step.action_name}</strong>
-                      <small>{step.assigned_actor_name}</small>
-                      {step.result_summary && <p>{resultLabel(step.result_summary)}</p>}
+                      <strong>{step.assigned_actor_name} · {step.action_name}</strong>
+                      <ActionLocationLine location={step.location} />
+                      {meaningfulResult(step.result_summary) && (
+                        <p>{resultLabel(meaningfulResult(step.result_summary))}</p>
+                      )}
                     </div>
                   </li>
                 ))}
@@ -274,6 +302,7 @@ type KnownWorldAccordionsProps = {
   visibleNodes: PlayerGameState["visible_nodes"];
   actors: PlayerGameState["actors"];
   knownFacts: PlayerGameState["known_facts"];
+  task?: PublicTask | null;
 };
 
 export function KnownWorldAccordions({
@@ -281,6 +310,7 @@ export function KnownWorldAccordions({
   visibleNodes,
   actors,
   knownFacts,
+  task = null,
 }: KnownWorldAccordionsProps) {
   const [expanded, setExpanded] = useState<Record<KnowledgeAccordionKey, boolean>>({
     resources: true,
@@ -291,6 +321,12 @@ export function KnownWorldAccordions({
   const toggle = (id: KnowledgeAccordionKey) => {
     setExpanded((current) => ({ ...current, [id]: !current[id] }));
   };
+  const resourceGroups = groupResourcesByRegion(resources);
+  const locationGroups = groupNodesByRegion(visibleNodes);
+  const factGroups = groupFactsByRegion(knownFacts);
+  const actorGroups = groupActorsByTask(actors, task);
+  const statusTone = (value: string | number | boolean) =>
+    value === false || value === 0 || value === "false" ? "neutral" : "success";
 
   return (
     <div className="knowledge-accordions">
@@ -302,16 +338,30 @@ export function KnownWorldAccordions({
         open={expanded.resources}
         onToggle={() => toggle("resources")}
       >
-        <div className="console-resource-grid">
-          {resources.map((resource) => (
-            <article key={resource.key}>
-              <span>{resource.name.slice(0, 1)}</span>
-              <div>
-                <small>{resource.name}</small>
-                <strong>{resource.value}</strong>
-                {resource.reserved_value > 0 && <em>已预留 {resource.reserved_value}</em>}
+        <div className="console-region-groups">
+          {resourceGroups.map((group) => (
+            <details className="knowledge-region" open key={group.key}>
+              <summary>
+                <span>
+                  <strong>{group.name}</strong>
+                  <small>{group.items.length} 项资源</small>
+                </span>
+              </summary>
+              <div className="knowledge-region-content">
+                <div className="knowledge-entry-list">
+                {group.items.map((resource) => (
+                  <div className="knowledge-entry" key={`${group.key}:${resource.key}`}>
+                    <div className="knowledge-entry-copy">
+                      <strong>{resource.name}</strong>
+                    </div>
+                    <span className={`console-pill ${statusTone(resource.value)} knowledge-status-pill`}>
+                      {resource.value}
+                    </span>
+                  </div>
+                ))}
+                </div>
               </div>
-            </article>
+            </details>
           ))}
         </div>
       </KnowledgeAccordion>
@@ -323,14 +373,31 @@ export function KnownWorldAccordions({
         open={expanded.locations}
         onToggle={() => toggle("locations")}
       >
-        <div className="console-fact-list">
-          {visibleNodes.map((node) => (
-            <div key={node.key}>
-              <div><strong>{node.name}</strong><small>{node.key}</small></div>
-              <span className={`console-pill ${node.accessible ? "success" : "neutral"}`}>
-                {node.accessible ? "可访问" : "已锁定"}
-              </span>
-            </div>
+        <div className="console-region-groups">
+          {locationGroups.map((group) => (
+            <details className="knowledge-region" key={group.key} open={group.key === "__all__"}>
+              <summary>
+                <span>
+                  <strong>{group.name}</strong>
+                  <small>{group.items.length} 个地点</small>
+                </span>
+              </summary>
+              <div className="knowledge-region-content">
+                <div className="knowledge-entry-list">
+                {group.items.map((node) => (
+                  <div className="knowledge-entry" key={node.key}>
+                    <div className="knowledge-entry-copy">
+                      <strong>{node.name}</strong>
+                      <small>{node.key}</small>
+                    </div>
+                    <span className={`console-pill ${node.accessible ? "success" : "neutral"} knowledge-status-pill`}>
+                      {node.accessible ? "可访问" : "已锁定"}
+                    </span>
+                  </div>
+                ))}
+                </div>
+              </div>
+            </details>
           ))}
         </div>
       </KnowledgeAccordion>
@@ -342,12 +409,30 @@ export function KnownWorldAccordions({
         open={expanded.actors}
         onToggle={() => toggle("actors")}
       >
-        <div className="console-fact-list">
-          {actors.map((actor) => (
-            <div key={actor.key}>
-              <div><strong>{actor.name}</strong><small>{actor.role_name}</small></div>
-              <span className="fact-chip">{actor.current_node_name}</span>
-            </div>
+        <div className="console-region-groups">
+          {actorGroups.map((group) => (
+            <details className="knowledge-region actor-group" open key={group.key}>
+              <summary>
+                <span>
+                  <strong>{group.label} · {group.actors.length}</strong>
+                </span>
+              </summary>
+              <div className="knowledge-region-content">
+                <div className="knowledge-entry-list">
+                  {group.actors.map((actor) => (
+                    <div className="knowledge-entry" key={actor.key}>
+                      <div className="knowledge-entry-copy">
+                        <strong>{actor.name}</strong>
+                        <small>{actor.role_name}</small>
+                      </div>
+                      <span className="console-pill success knowledge-status-pill">
+                        {actor.current_node_name}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </details>
           ))}
         </div>
       </KnowledgeAccordion>
@@ -359,12 +444,30 @@ export function KnownWorldAccordions({
         open={expanded.facts}
         onToggle={() => toggle("facts")}
       >
-        <div className="console-fact-list">
-          {knownFacts.map((fact) => (
-            <div key={`${fact.node_key}.${fact.fact_key}`}>
-              <div><strong>{fact.name}</strong><small>{fact.node_key}</small></div>
-              <span className="fact-chip">{typeof fact.value === "string" ? uiLabel(fact.value) : String(fact.value)}</span>
-            </div>
+        <div className="console-region-groups">
+          {factGroups.map((group) => (
+            <details className="knowledge-region" key={group.key} open={group.key === "__all__"}>
+              <summary>
+                <span>
+                  <strong>{group.name}</strong>
+                  <small>{group.facts.length} 条事实</small>
+                </span>
+              </summary>
+              <div className="knowledge-region-content">
+                <div className="knowledge-entry-list">
+                {group.facts.map((fact) => (
+                  <div className="knowledge-entry" key={`${group.key}:${fact.node_key}.${fact.fact_key}`}>
+                    <div className="knowledge-entry-copy">
+                      <strong>{factDisplayName(fact)}</strong>
+                    </div>
+                    <span className={`console-pill ${statusTone(fact.value)} knowledge-status-pill`}>
+                      {typeof fact.value === "string" ? uiLabel(fact.value) : String(fact.value)}
+                    </span>
+                  </div>
+                ))}
+                </div>
+              </div>
+            </details>
           ))}
         </div>
       </KnowledgeAccordion>
@@ -661,6 +764,7 @@ export function GamePage() {
             visibleNodes={play.data.visible_nodes}
             actors={play.data.actors}
             knownFacts={play.data.known_facts}
+            task={task}
           />
         </aside>
         <div className="conversation-column-v2">
@@ -721,6 +825,7 @@ export function GamePage() {
                 <small>下一步行动</small>
                 <h2>{task.briefing.actor_name} 准备执行</h2>
                 <p><strong>{task.briefing.action_name}</strong> · 目标：{task.briefing.target_name}</p>
+                <ActionLocationLine location={task.briefing.location} />
                 <p>{task.briefing.purpose}</p>
                 <button disabled={busy} onClick={() => pacing.mutate({ phase: "action", version: task.pacing_version })}>
                   {pacing.isPending ? "正在执行……" : "知悉，开始执行"}
@@ -731,6 +836,7 @@ export function GamePage() {
               <section className={`player-checkpoint action-debrief ${task.debrief.success ? "success" : "failed"}`}>
                 <small>行动汇报</small>
                 <h2>{task.debrief.success ? "✓" : "✕"} {task.debrief.action_name}</h2>
+                <ActionLocationLine location={task.debrief.location} />
                 <p>{task.debrief.result_summary}</p>
                 {task.debrief.knowledge_changes.length > 0 && <>
                   <h3>新获知识</h3>

@@ -20,8 +20,6 @@ initialization:
   primary_actor_key: electrical_team_beta
   resource_initial_states:
     - {resource_key: electrical_repair_parts, scope_node_key: west_logistics_district, value: 10}
-    - {resource_key: electrical_repair_parts, scope_node_key: north_industrial_district, value: 10}
-    - {resource_key: electrical_repair_parts, scope_node_key: central_district, value: 0}
 world:
   key: linjiang_infrastructure_recovery
   name: 临江市灾后基础设施恢复
@@ -398,7 +396,7 @@ actions:
       hints: [检查不会修改世界事实，只会揭示目标的隐藏 Fact。]
   - key: clear_transport
     name: 清理交通通道
-    description: 由市政抢修队清理受阻交通通道。
+    description: 清理已知阻塞，恢复必要的交通通行。
     required_interaction_key: clearable
     execution_mode: IMMEDIATE
     locality: TRANSPORT_ENDPOINT
@@ -488,10 +486,12 @@ objectives:
         description: 中央医院应急供电已恢复。
     goal_aliases:
       - 恢复中央医院应急供电
+      - 恢复中央医院的应急供电
+      - 恢复中央医院应急电力
       - restore central hospital emergency power
       - Restore emergency power to Central Hospital.
 goal_resolution:
-  allow_llm_fallback: false
+  allow_llm_fallback: true
   clarification_prompt: 当前 Scenario 的目标是恢复中央医院应急供电。
 planning:
   instructions:

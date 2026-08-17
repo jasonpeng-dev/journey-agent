@@ -289,6 +289,14 @@ class GoalSubmissionRequest(ApiModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class PublicActionLocationResponse(ApiModel):
+    """One player-safe location projection shared by all action views."""
+
+    kind: str
+    summary: str
+    detail: str | None = None
+
+
 class PublicPlanStepResponse(ApiModel):
     id: UUID
     sequence: int = Field(ge=1)
@@ -296,6 +304,7 @@ class PublicPlanStepResponse(ApiModel):
     assigned_actor_name: str
     status: PublicStepStatus
     result_summary: str | None = None
+    location: PublicActionLocationResponse | None = None
 
 
 class PublicPlanResponse(ApiModel):
@@ -311,6 +320,7 @@ class PublicPlanHistoryStepResponse(ApiModel):
     assigned_actor_name: str
     status: PublicPlanHistoryStepStatus
     result_summary: str | None = None
+    location: PublicActionLocationResponse | None = None
 
 
 class PublicPlanHistoryResponse(ApiModel):
@@ -348,6 +358,7 @@ class PublicActionBriefingResponse(ApiModel):
     actor_name: str
     target_name: str
     purpose: str
+    location: PublicActionLocationResponse | None = None
 
 
 class PublicActionDebriefResponse(ApiModel):
@@ -358,6 +369,9 @@ class PublicActionDebriefResponse(ApiModel):
     knowledge_changes: list[PublicKnowledgeChangeResponse] = Field(default_factory=list)
     plan_adjusted: bool = False
     plan_adjustment_summary: str | None = None
+    plan_invalidated: bool = False
+    plan_invalidation_reason: str | None = None
+    location: PublicActionLocationResponse | None = None
 
 
 class PublicTimelineEventResponse(ApiModel):
@@ -370,6 +384,7 @@ class PublicTimelineEventResponse(ApiModel):
     success: bool | None = None
     knowledge_changes: list[PublicKnowledgeChangeResponse] = Field(default_factory=list)
     occurred_at: datetime | None = None
+    location: PublicActionLocationResponse | None = None
     # A persisted operation snapshot, never a live client timer.  This is
     # derived from the task's provider/application audit metadata so it stays
     # stable after a page refresh.
@@ -426,12 +441,23 @@ class PublicFactResponse(ApiModel):
     fact_key: str
     name: str
     value: str | int | bool
+    node_name: str | None = None
+    node_type_key: str | None = None
+    region_key: str | None = None
+    region_name: str | None = None
+    endpoint_region_keys: list[str] = Field(default_factory=list)
+    endpoint_region_names: list[str] = Field(default_factory=list)
 
 
 class PublicNodeResponse(ApiModel):
     key: str
     name: str
     accessible: bool
+    node_type_key: str | None = None
+    region_key: str | None = None
+    region_name: str | None = None
+    endpoint_region_keys: list[str] = Field(default_factory=list)
+    endpoint_region_names: list[str] = Field(default_factory=list)
 
 
 class PublicResourceResponse(ApiModel):
@@ -440,6 +466,9 @@ class PublicResourceResponse(ApiModel):
     value: int
     reserved_value: int
     scope_node_key: str | None = None
+    scope_node_name: str | None = None
+    scope_region_key: str | None = None
+    scope_region_name: str | None = None
 
 
 class PublicActorResponse(ApiModel):

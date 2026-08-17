@@ -267,7 +267,14 @@ class PlayOrchestrator:
             if checkpoint.last_action_step_id is not None
             else None
         )
-        if failed_step is None or not self._action_cycle_failed(failed_step):
+        plan_invalidated = self.agent.has_pending_plan_invalidation(task)
+        if plan_invalidated:
+            if failed_step is None or failed_step.status != AgentStepStatus.SUCCEEDED:
+                raise PlayError(
+                    "PLAY_REPLAN_NOT_REQUIRED",
+                    "The current Plan was not invalidated after a successful Action",
+                )
+        elif failed_step is None or not self._action_cycle_failed(failed_step):
             raise PlayError(
                 "PLAY_REPLAN_NOT_REQUIRED",
                 "The current Action did not produce a retryable failure",
@@ -456,6 +463,8 @@ class PlayOrchestrator:
             self.db.flush()
 
     def _ensure_next_plan(self, task: AgentTask) -> None:
+        if self.agent.has_pending_plan_invalidation(task):
+            return
         if task.status != AgentTaskStatus.ACTIVE or self._next_action_step(task) is not None:
             return
         if self.agent.evaluate(task).completed:
@@ -567,6 +576,8 @@ class PlayOrchestrator:
         if task.status == AgentTaskStatus.ABORTED:
             return PlayerExecutionPhase.ABORTED
         if action_step is not None and self._action_cycle_failed(action_step):
+            return PlayerExecutionPhase.AWAITING_REPLAN_ACK
+        if self.agent.has_pending_plan_invalidation(task):
             return PlayerExecutionPhase.AWAITING_REPLAN_ACK
         return PlayerExecutionPhase.AWAITING_DEBRIEF_ACK
 

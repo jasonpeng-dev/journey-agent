@@ -38,6 +38,7 @@ from app.domain.enums import (
 )
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
+    ActionBehavior,
     ActionDefinitionV2,
     ActionExecutionMode,
     ObjectiveDefinitionV2,
@@ -46,6 +47,10 @@ from app.domain.scenario_v2 import (
     normalize_action_parameters,
 )
 from app.domain.world import Visibility
+from app.engine.locality import (
+    LocalityEngineError,
+    validate_action_locality,
+)
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentPlan,
@@ -83,6 +88,9 @@ class GenericAgentError(ValueError):
         self.message = message
 
 
+PLAN_INVALIDATED_BY_NEW_KNOWLEDGE = "PLAN_INVALIDATED_BY_NEW_KNOWLEDGE"
+
+
 @dataclass(frozen=True, slots=True)
 class GenericGoalResolution:
     status: str
@@ -99,6 +107,13 @@ class GenericObjectiveEvaluation:
     objective_keys: tuple[str, ...]
     completed: bool
     requirements: tuple[tuple[str, StrictScalar, bool], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PlanRevalidationResult:
+    invalidated: bool
+    reason: str | None = None
+    diagnostics: tuple[dict[str, object], ...] = ()
 
 
 class GenericGoalResolver:
@@ -387,6 +402,8 @@ class GenericAgentService:
         task.current_plan_version = plan.version
         if reason is not None:
             task.replan_count += 1
+        if task.last_error_code == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE:
+            task.last_error_code = None
         self.db.flush()
         return plan
 
@@ -513,10 +530,218 @@ class GenericAgentService:
             else:
                 step.status = AgentStepStatus.SUCCEEDED
                 step.completed_at = datetime.now(UTC)
+        if step.status == AgentStepStatus.SUCCEEDED:
+            revalidation = self.revalidate_remaining_plan(task, completed_step=step)
+            if revalidation.invalidated and replan_on_failure:
+                self.plan(task, reason=PLAN_INVALIDATED_BY_NEW_KNOWLEDGE)
         if self.evaluate(task).completed:
             self._complete_task(task)
         self.db.flush()
         return step
+
+    def revalidate_remaining_plan(
+        self,
+        task: AgentTask,
+        *,
+        completed_step: AgentStep,
+    ) -> PlanRevalidationResult:
+        """Revalidate only the not-yet-executed suffix after new Knowledge.
+
+        This deliberately uses persisted Knowledge and current Runtime actor
+        state.  It never consults a hidden Truth value to retroactively reject
+        a Plan that was valid when it was generated.
+        """
+
+        if not self._step_has_knowledge_changes(completed_step):
+            return PlanRevalidationResult(False)
+        plan = self.db.scalar(
+            select(AgentPlan).where(
+                AgentPlan.id == completed_step.plan_id,
+                AgentPlan.status == AgentPlanStatus.ACTIVE,
+            )
+        )
+        if plan is None:
+            return PlanRevalidationResult(False)
+        remaining_steps = tuple(
+            self.db.scalars(
+                select(AgentStep)
+                .where(
+                    AgentStep.plan_id == plan.id,
+                    AgentStep.sequence > completed_step.sequence,
+                    AgentStep.status.in_(
+                        (
+                            AgentStepStatus.PENDING,
+                            AgentStepStatus.REQUIRES_PLAYER_DECISION,
+                            AgentStepStatus.WAITING_FOR_WORLD_EVENT,
+                        )
+                    ),
+                )
+                .order_by(AgentStep.sequence)
+            )
+        )
+        diagnostics = tuple(
+            diagnostic
+            for step in remaining_steps
+            if step.execution_type == StepExecutionType.TOOL
+            for diagnostic in (self._known_step_conflict(step),)
+            if diagnostic is not None
+        )
+        if not diagnostics:
+            return PlanRevalidationResult(False)
+
+        knowledge_changes = list(self._step_knowledge_changes(completed_step))
+        plan.status = AgentPlanStatus.SUPERSEDED
+        for step in remaining_steps:
+            step.status = AgentStepStatus.SKIPPED
+        task.last_error_code = PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
+        metadata = dict(task.objective_resolution_metadata or {})
+        metadata["plan_invalidation"] = {
+            "reason": PLAN_INVALIDATED_BY_NEW_KNOWLEDGE,
+            "plan_version": plan.version,
+            "completed_step_sequence": completed_step.sequence,
+            "completed_step_action": completed_step.action_intent,
+            "knowledge_changes": knowledge_changes,
+            "diagnostics": list(diagnostics),
+        }
+        task.objective_resolution_metadata = metadata
+        self.db.flush()
+        return PlanRevalidationResult(
+            True,
+            reason=PLAN_INVALIDATED_BY_NEW_KNOWLEDGE,
+            diagnostics=diagnostics,
+        )
+
+    def has_pending_plan_invalidation(self, task: AgentTask) -> bool:
+        """Return whether Formal Play must obtain a player-approved Replan."""
+
+        if task.last_error_code != PLAN_INVALIDATED_BY_NEW_KNOWLEDGE:
+            return False
+        marker = self._plan_invalidation(task)
+        return (
+            marker is not None
+            and marker.get("plan_version") == task.current_plan_version
+            and self.db.scalar(
+                select(AgentPlan.id).where(
+                    AgentPlan.task_id == task.id,
+                    AgentPlan.status == AgentPlanStatus.ACTIVE,
+                )
+            )
+            is None
+        )
+
+    def _known_step_conflict(self, step: AgentStep) -> dict[str, object] | None:
+        action_key = step.tool_arguments.get("action_key")
+        actor_key = step.assigned_actor_key
+        target_key = step.tool_arguments.get("target_key")
+        if (
+            not isinstance(action_key, str)
+            or not action_key
+            or not isinstance(actor_key, str)
+            or not actor_key
+            or not isinstance(target_key, str)
+            or not target_key
+        ):
+            return {
+                "code": "KNOWN_PLAN_STEP_INVALID",
+                "sequence": step.sequence,
+                "action_key": action_key,
+            }
+        assert isinstance(action_key, str)
+        assert isinstance(target_key, str)
+
+        definition = self._definition()
+        action = next((item for item in definition.actions if item.key == action_key), None)
+        actor = self.db.get(GameInstanceActor, (self.scope.game_instance_id, actor_key))
+        if action is None or actor is None:
+            return {
+                "code": "KNOWN_PLAN_STEP_INVALID",
+                "sequence": step.sequence,
+                "action_key": action_key,
+            }
+        parameters_value = step.tool_arguments.get("parameters", {})
+        parameters = dict(parameters_value) if isinstance(parameters_value, dict) else {}
+        try:
+            parameters = normalize_action_parameters(action, parameters)
+        except ValueError:
+            return {
+                "code": "KNOWN_PLAN_STEP_INVALID",
+                "sequence": step.sequence,
+                "action_key": action.key,
+            }
+        if not self._validate_planning_action(definition, action, actor, target_key):
+            return {
+                "code": "KNOWN_PLAN_STEP_INVALID",
+                "sequence": step.sequence,
+                "action_key": action.key,
+                "target_key": target_key,
+            }
+        try:
+            connector = validate_action_locality(
+                definition,
+                action,
+                actor_current_node_key=actor.current_node_key,
+                target_node_key=target_key,
+                parameters=parameters,
+            )
+        except LocalityEngineError as exc:
+            return {
+                "code": exc.code,
+                "sequence": step.sequence,
+                "action_key": action.key,
+                "target_key": target_key,
+            }
+        if (
+            connector is not None
+            and action.behavior in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE)
+        ):
+            fact_key = definition.metadata.locality.passability_fact_key
+            if fact_key is not None:
+                fact = self.db.get(
+                    GameInstanceFactState,
+                    (self.scope.game_instance_id, connector, fact_key),
+                )
+                # The value is read only after Knowledge is KNOWN.  A hidden
+                # Truth value cannot invalidate an otherwise valid Plan.
+                if (
+                    fact is not None
+                    and fact.visibility == Visibility.KNOWN
+                    and fact.truth_value is False
+                ):
+                    return {
+                        "code": "KNOWN_TRANSPORT_BLOCKED",
+                        "sequence": step.sequence,
+                        "action_key": action.key,
+                        "target_key": target_key,
+                        "transport_key": connector,
+                        "fact_key": fact_key,
+                        "known_value": False,
+                    }
+        return None
+
+    @staticmethod
+    def _step_has_knowledge_changes(step: AgentStep) -> bool:
+        return bool(GenericAgentService._step_knowledge_changes(step))
+
+    @staticmethod
+    def _step_knowledge_changes(step: AgentStep) -> tuple[dict[str, object], ...]:
+        actual_result = step.actual_result
+        if not isinstance(actual_result, dict):
+            return ()
+        outcome = actual_result.get("outcome", actual_result)
+        if not isinstance(outcome, dict):
+            return ()
+        changes = outcome.get("knowledge_changes")
+        if not isinstance(changes, list):
+            return ()
+        return tuple(item for item in changes if isinstance(item, dict))
+
+    @staticmethod
+    def _plan_invalidation(task: AgentTask) -> dict[str, object] | None:
+        metadata = task.objective_resolution_metadata
+        if not isinstance(metadata, dict):
+            return None
+        marker = metadata.get("plan_invalidation")
+        return marker if isinstance(marker, dict) else None
 
     def evaluate(self, task: AgentTask) -> GenericObjectiveEvaluation:
         definition = self._definition()
@@ -1402,11 +1627,13 @@ def proposal_signature(
 
 
 __all__ = [
+    "PLAN_INVALIDATED_BY_NEW_KNOWLEDGE",
     "GenericAgentError",
     "GenericAgentService",
     "GenericGoalResolution",
     "GenericGoalResolver",
     "GenericObjectiveEvaluation",
+    "PlanRevalidationResult",
     "normalize_objective_keys",
     "proposal_signature",
 ]

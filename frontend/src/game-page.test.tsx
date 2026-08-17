@@ -9,8 +9,9 @@ import {
   Timeline,
   WaitingStatus,
 } from "./pages/GamePage";
+import { groupActorsByTask } from "./actorPresentation";
 import { formatDuration, operationBelongsToTask } from "./playPresentation";
-import type { PublicTask } from "./types";
+import type { PublicPlanStep, PublicTask } from "./types";
 
 const task: PublicTask = {
   id: "task",
@@ -50,6 +51,50 @@ const task: PublicTask = {
   debrief: null,
   explanation: null,
 };
+
+const actorFixtures = [
+  { key: "logistics", name: "应急物流一队", role_name: "应急物流队", current_node_name: "中央城区" },
+  { key: "electrical", name: "电力抢修二队", role_name: "电力抢修队", current_node_name: "中央城区" },
+  { key: "municipal", name: "市政抢修一队", role_name: "市政抢修队", current_node_name: "中央城区" },
+];
+
+function actorStep(id: string, actor: string, status: PublicPlanStep["status"]): PublicPlanStep {
+  return {
+    id,
+    sequence: Number(id.replace("step-", "")),
+    description: id,
+    assigned_actor_name: actor,
+    status,
+    result_summary: null,
+    location: null,
+  };
+}
+
+function actorBriefing(actor: string): NonNullable<PublicTask["briefing"]> {
+  return {
+    step_id: "step-1",
+    action_name: "执行行动",
+    actor_name: actor,
+    target_name: "目标地点",
+    purpose: "测试当前行动队伍",
+    location: null,
+  };
+}
+
+function actorTask(
+  executionPhase: PublicTask["execution_phase"],
+  steps: PublicPlanStep[],
+  briefing: PublicTask["briefing"] = null,
+  status = "ACTIVE",
+): PublicTask {
+  return {
+    ...task,
+    status,
+    execution_phase: executionPhase,
+    plan: { strategy_summary: "测试计划", updated: false, steps },
+    briefing,
+  };
+}
 
 describe("Formal Play player projections", () => {
   afterEach(() => {
@@ -139,13 +184,125 @@ describe("Formal Play player projections", () => {
     expect(screen.getByText("可用资源状态")).toBeVisible();
   });
 
+  it("derives actor groups from the current plan and action without persistent Actor status", () => {
+    const initial = groupActorsByTask(actorFixtures, null);
+    expect(initial.map((group) => group.key)).toEqual(["idle"]);
+    expect(initial[0].actors.map((actor) => actor.name)).toEqual([
+      "应急物流一队",
+      "电力抢修二队",
+      "市政抢修一队",
+    ]);
+
+    const planned = groupActorsByTask(
+      actorFixtures,
+      actorTask("AWAITING_ACTION_ACK", [
+        actorStep("step-1", "应急物流一队", "PENDING"),
+        actorStep("step-2", "电力抢修二队", "PENDING"),
+      ]),
+    );
+    expect(planned.map((group) => [group.key, group.actors.map((actor) => actor.name)])).toEqual([
+      ["planned", ["应急物流一队", "电力抢修二队"]],
+      ["idle", ["市政抢修一队"]],
+    ]);
+
+    const active = groupActorsByTask(
+      actorFixtures,
+      actorTask(
+        "AWAITING_ACTION_ACK",
+        [
+          actorStep("step-1", "应急物流一队", "PENDING"),
+          actorStep("step-2", "电力抢修二队", "PENDING"),
+        ],
+        actorBriefing("应急物流一队"),
+      ),
+    );
+    expect(active.map((group) => [group.key, group.actors.map((actor) => actor.name)])).toEqual([
+      ["active", ["应急物流一队"]],
+      ["planned", ["电力抢修二队"]],
+      ["idle", ["市政抢修一队"]],
+    ]);
+
+    const afterActionWithFollowUp = groupActorsByTask(
+      actorFixtures,
+      actorTask(
+        "AWAITING_ACTION_ACK",
+        [
+          actorStep("step-1", "应急物流一队", "COMPLETED"),
+          actorStep("step-2", "应急物流一队", "PENDING"),
+          actorStep("step-3", "电力抢修二队", "PENDING"),
+        ],
+        actorBriefing("电力抢修二队"),
+      ),
+    );
+    expect(afterActionWithFollowUp.map((group) => [group.key, group.actors.map((actor) => actor.name)])).toEqual([
+      ["active", ["电力抢修二队"]],
+      ["planned", ["应急物流一队"]],
+      ["idle", ["市政抢修一队"]],
+    ]);
+
+    const afterActionWithoutFollowUp = groupActorsByTask(
+      actorFixtures,
+      actorTask(
+        "AWAITING_ACTION_ACK",
+        [
+          actorStep("step-1", "应急物流一队", "COMPLETED"),
+          actorStep("step-2", "电力抢修二队", "PENDING"),
+        ],
+        actorBriefing("电力抢修二队"),
+      ),
+    );
+    expect(afterActionWithoutFollowUp.find((group) => group.key === "idle")?.actors.map((actor) => actor.name)).toEqual([
+      "应急物流一队",
+      "市政抢修一队",
+    ]);
+
+    const completed = groupActorsByTask(
+      actorFixtures,
+      actorTask(
+        "COMPLETED",
+        [
+          actorStep("step-1", "应急物流一队", "COMPLETED"),
+          actorStep("step-2", "电力抢修二队", "COMPLETED"),
+        ],
+        null,
+        "COMPLETED",
+      ),
+    );
+    expect(completed.map((group) => group.key)).toEqual(["idle"]);
+    expect(completed[0].actors).toHaveLength(3);
+  });
+
+  it("renders actor groups with the latest current location pill", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        visibleNodes={[]}
+        actors={actorFixtures.map((actor) =>
+          actor.key === "logistics" ? { ...actor, current_node_name: "北部工业区" } : actor,
+        )}
+        knownFacts={[]}
+        task={actorTask(
+          "AWAITING_ACTION_ACK",
+          [actorStep("step-1", "应急物流一队", "PENDING")],
+          actorBriefing("应急物流一队"),
+        )}
+      />,
+    );
+    fireEvent.click(within(screen.getByTestId("knowledge-accordion-actors")).getByRole("button"));
+    expect(screen.getByText("行动中 · 1")).toBeVisible();
+    expect(screen.getByText("应急物流一队")).toBeVisible();
+    expect(screen.getByText("北部工业区")).toHaveClass("knowledge-status-pill");
+    expect(screen.getByText("待命中 · 2")).toBeVisible();
+    expect(screen.queryByText("当前参与者")).not.toBeInTheDocument();
+  });
+
   it("默认展开最新方案、折叠旧方案，并允许查看冻结历史", () => {
     render(<PlanHistory task={task} />);
-    expect(screen.getByText("新行动")).toBeVisible();
-    expect(screen.queryByText("旧行动", { selector: ".plan-history-steps strong" })).not.toBeInTheDocument();
+    expect(screen.getByText("乙 · 新行动")).toBeVisible();
+    expect(screen.queryByText("甲 · 旧行动", { selector: ".plan-history-steps strong" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /初始方案 · 已调整/ }));
-    expect(screen.getByText("旧行动", { selector: ".plan-history-steps strong" })).toBeVisible();
-    expect(screen.getByText("取消行动").closest("li")).toHaveClass("cancelled");
+    expect(screen.getByText("甲 · 旧行动", { selector: ".plan-history-steps strong" })).toBeVisible();
+    expect(screen.getByText("甲 · 取消行动").closest("li")).toHaveClass("cancelled");
   });
 
   it("任务日志只渲染已经进入历史的安全事件", () => {
@@ -200,6 +357,155 @@ describe("Formal Play player projections", () => {
     expect(operationBelongsToTask(null, "task-2")).toBe(false);
     expect(formatDuration(0)).toBe("1s");
     expect(formatDuration(null)).toBeNull();
+  });
+
+  it("groups spatial knowledge and reuses the action location projection", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[
+          { key: "parts-central", name: "Parts", value: 0, reserved_value: 0, scope_region_key: "central", scope_region_name: "Central Region" },
+          { key: "parts-north", name: "Parts", value: 0, reserved_value: 0, scope_region_key: "north", scope_region_name: "North Region" },
+          { key: "parts-west", name: "Parts", value: 10, reserved_value: 0, scope_region_key: "west", scope_region_name: "West Region" },
+        ]}
+        visibleNodes={[
+          { key: "central", name: "Central Region", accessible: true, node_type_key: "region", region_key: "central", region_name: "Central Region" },
+          { key: "west", name: "West Region", accessible: true, node_type_key: "region", region_key: "west", region_name: "West Region" },
+          { key: "hospital", name: "Central Hospital", accessible: true, node_type_key: "facility", region_key: "central", region_name: "Central Region" },
+          { key: "corridor", name: "West Corridor", accessible: true, node_type_key: "transport", endpoint_region_keys: ["central", "west"], endpoint_region_names: ["Central Region", "West Region"] },
+        ]}
+        actors={[]}
+        knownFacts={[{ node_key: "corridor", fact_key: "passable", name: "Passability", value: false, node_name: "West Corridor", endpoint_region_keys: ["central", "west"], endpoint_region_names: ["Central Region", "West Region"] }]}
+      />,
+    );
+    expect(screen.getAllByText("Parts")).toHaveLength(3);
+    fireEvent.click(within(screen.getByTestId("knowledge-accordion-locations")).getByRole("button"));
+    const locations = within(screen.getByTestId("knowledge-accordion-locations"));
+    expect(locations.getByText("Central Region")).toBeVisible();
+    expect(locations.getByText("West Region")).toBeVisible();
+    expect(screen.getByText("Central Hospital")).not.toBeVisible();
+    fireEvent.click(locations.getByText("Central Region"));
+    expect(screen.getByText("Central Hospital")).toBeVisible();
+    expect(screen.getAllByText("West Corridor")).toHaveLength(2);
+
+    cleanup();
+    const location = { kind: "ROUTE", summary: "Central Region → West Region", detail: null };
+    render(
+      <PlanHistory
+        task={{
+          ...task,
+          plan_history: [{ ...task.plan_history[0], steps: [{ ...task.plan_history[0].steps[0], location }] }],
+        }}
+      />,
+    );
+    expect(screen.getByText("Central Region → West Region")).toBeVisible();
+  });
+
+  it("renders only material scoped resource rows and keeps drained rows visible", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[
+          { key: "parts-west", name: "Parts", value: 10, reserved_value: 0, scope_region_key: "west", scope_region_name: "West Region" },
+        ]}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+      />,
+    );
+    const resources = within(screen.getByTestId("knowledge-accordion-resources"));
+    expect(resources.getByText("West Region")).toBeVisible();
+    expect(resources.getByText("10")).toBeVisible();
+    expect(resources.getByText("10")).toHaveClass("knowledge-status-pill");
+    expect(resources.queryByText("Central Region")).not.toBeInTheDocument();
+
+    cleanup();
+    render(
+      <KnownWorldAccordions
+        resources={[
+          { key: "parts-west", name: "Parts", value: 0, reserved_value: 0, scope_region_key: "west", scope_region_name: "West Region" },
+          { key: "parts-central", name: "Parts", value: 0, reserved_value: 0, scope_region_key: "central", scope_region_name: "Central Region" },
+        ]}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+      />,
+    );
+    const updatedResources = within(screen.getByTestId("knowledge-accordion-resources"));
+    expect(updatedResources.getByText("Central Region")).toBeVisible();
+    expect(updatedResources.getAllByText("0")).toHaveLength(2);
+  });
+
+  it("flattens facts by region and uses one compact location format in history and timeline", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[
+          { node_key: "hospital", fact_key: "power", name: "Emergency power", value: true, node_name: "Central Hospital", region_key: "central", region_name: "Central Region" },
+          { node_key: "hospital", fact_key: "water", name: "Water supply", value: false, node_name: "Central Hospital", region_key: "central", region_name: "Central Region" },
+        ]}
+      />,
+    );
+    fireEvent.click(within(screen.getByTestId("knowledge-accordion-facts")).getByRole("button"));
+    const facts = within(screen.getByTestId("knowledge-accordion-facts"));
+    fireEvent.click(facts.getByText("Central Region"));
+    expect(facts.getByText("Central Hospital · Emergency power")).toBeVisible();
+    expect(facts.getByText("Central Hospital · Water supply")).toBeVisible();
+    expect(facts.getByText("true")).toHaveClass("knowledge-status-pill");
+    expect(facts.getByText("false")).toHaveClass("knowledge-status-pill");
+    expect(facts.queryByText("power")).not.toBeInTheDocument();
+
+    cleanup();
+    render(
+      <PlanHistory
+        task={{
+          ...task,
+          plan_history: [{
+            id: "compact-plan",
+            ordinal: 1,
+            status: "COMPLETED",
+            completed_steps: 1,
+            total_steps: 1,
+            failed_step_name: null,
+            steps: [{
+              id: "compact-step",
+              sequence: 1,
+              action_name: "运输维修部件",
+              assigned_actor_name: "应急物流一队",
+              status: "COMPLETED",
+              result_summary: "行动已完成",
+              location: { kind: "ROUTE", summary: "北部工业区 → 中央城区", detail: "电力维修部件 ×10" },
+            }],
+          }],
+        }}
+      />,
+    );
+    expect(screen.getByText("应急物流一队 · 运输维修部件")).toBeVisible();
+    expect(screen.getByText("北部工业区 → 中央城区 · 电力维修部件 ×10")).toBeVisible();
+    expect(screen.getByText("应急物流一队 · 运输维修部件").closest("li")).toHaveClass("completed");
+    expect(screen.queryByText("行动已完成")).not.toBeInTheDocument();
+
+    cleanup();
+    render(
+      <Timeline
+        task={{
+          ...task,
+          timeline: [{
+            ...task.timeline[0],
+            id: "compact-result",
+            kind: "ACTION_RESULT",
+            title: "运输维修部件",
+            actor_name: "应急物流一队",
+            result_summary: "行动已完成",
+            success: true,
+            location: { kind: "ROUTE", summary: "北部工业区 → 中央城区", detail: "电力维修部件 ×10" },
+          }],
+        }}
+      />,
+    );
+    expect(screen.getByText("行动汇报 · 应急物流一队")).toBeVisible();
+    expect(screen.getByText("运输维修部件 · 北部工业区 → 中央城区 · 电力维修部件 ×10")).toBeVisible();
+    expect(screen.queryByText("行动已完成")).not.toBeInTheDocument();
   });
 
   it("shows a local planning timer without requiring a backend heartbeat", () => {

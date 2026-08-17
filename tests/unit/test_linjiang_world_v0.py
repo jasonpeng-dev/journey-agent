@@ -18,7 +18,10 @@ def test_linjiang_v1_preserves_topology_and_adds_gameplay() -> None:
     assert definition.metadata.locality.enabled
     assert len(definition.world.resources) == 1
     assert definition.world.resources[0].key == "electrical_repair_parts"
-    assert len(definition.initialization.resource_initial_states) == 3
+    assert len(definition.initialization.resource_initial_states) == 1
+    assert definition.initialization.resource_initial_states[0].scope_node_key == (
+        "west_logistics_district"
+    )
     assert {item.key for item in definition.actors.actor_profiles} == {
         "electrical_team_beta",
         "logistics_team_alpha",

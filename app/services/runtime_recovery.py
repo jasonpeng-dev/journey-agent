@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.enums import GameInstanceStatus, WorldOperationStatus
-from app.domain.resources import resource_initial_states
+from app.domain.resources import resource_initial_states, valid_resource_state_identity
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
 from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2
 from app.infrastructure.db.models import (
@@ -171,17 +171,23 @@ class RuntimeRecoveryService:
         actor_rows = self.db.scalars(
             select(GameInstanceActor).where(GameInstanceActor.game_instance_id == instance.id)
         ).all()
+        resource_identities = {(row.resource_key, row.scope_node_key) for row in resource_rows}
+        initial_resource_identities = {
+            (item.resource_key, item.scope_node_key)
+            for item in resource_initial_states(definition)
+        }
         if (
             len(node_rows) != len(nodes)
             or len(fact_rows) != sum(len(node.facts) for node in nodes)
-            or {
-                (row.resource_key, row.scope_node_key)
+            or not initial_resource_identities.issubset(resource_identities)
+            or any(
+                not valid_resource_state_identity(
+                    definition,
+                    row.resource_key,
+                    row.scope_node_key,
+                )
                 for row in resource_rows
-            }
-            != {
-                (item.resource_key, item.scope_node_key)
-                for item in resource_initial_states(definition)
-            }
+            )
             or {actor.actor_key for actor in actor_rows} != actor_keys
         ):
             self._corrupt("initialized state")

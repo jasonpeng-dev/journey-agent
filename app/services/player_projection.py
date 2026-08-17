@@ -15,6 +15,7 @@ from app.api.schemas.phase_d import (
     PlayerGameStateResponse,
     PublicActionBriefingResponse,
     PublicActionDebriefResponse,
+    PublicActionLocationResponse,
     PublicActorResponse,
     PublicExecutionPhase,
     PublicFactResponse,
@@ -41,9 +42,10 @@ from app.domain.enums import (
     AgentTaskStatus,
     DecisionStatus,
     StepExecutionType,
+    WorldOperationStatus,
 )
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ActionDefinitionV2, ScenarioDefinitionV2
+from app.domain.scenario_v2 import ActionBehavior, ActionDefinitionV2, ScenarioDefinitionV2
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
@@ -64,6 +66,7 @@ from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
 from app.services.mission_roadmap import MissionRoadmap, MissionRoadmapProjector
 from app.services.player_pacing import PlayerExecutionPhase
+from app.services.spatial_projection import SpatialDisplayProjector, SpatialNodeProjection
 
 
 class PlayerProjectionService:
@@ -83,6 +86,7 @@ class PlayerProjectionService:
         node_definitions = {item.key: item for item in definition.world.nodes}
         resource_definitions = {item.key: item for item in definition.world.resources}
         role_definitions = {item.key: item for item in definition.actors.roles}
+        spatial = SpatialDisplayProjector(definition)
         visible_nodes = tuple(
             self.db.scalars(
                 select(GameInstanceNodeState).where(
@@ -101,6 +105,11 @@ class PlayerProjectionService:
                 )
             )
         )
+        node_projections: dict[str, SpatialNodeProjection] = {}
+        for item in visible_nodes:
+            projection = spatial.node(item.node_key)
+            if projection is not None:
+                node_projections[item.node_key] = projection
         resources = tuple(
             self.db.scalars(
                 select(GameInstanceResourceState).where(
@@ -152,6 +161,31 @@ class PlayerProjectionService:
                     key=item.node_key,
                     name=node_definitions[item.node_key].name,
                     accessible=item.status.value != "LOCKED",
+                    node_type_key=(
+                        node_projections[item.node_key].node_type_key
+                        if node_projections[item.node_key] is not None
+                        else None
+                    ),
+                    region_key=(
+                        node_projections[item.node_key].region_key
+                        if node_projections[item.node_key] is not None
+                        else None
+                    ),
+                    region_name=(
+                        node_projections[item.node_key].region_name
+                        if node_projections[item.node_key] is not None
+                        else None
+                    ),
+                    endpoint_region_keys=list(
+                        node_projections[item.node_key].endpoint_region_keys
+                        if node_projections[item.node_key] is not None
+                        else ()
+                    ),
+                    endpoint_region_names=list(
+                        node_projections[item.node_key].endpoint_region_names
+                        if node_projections[item.node_key] is not None
+                        else ()
+                    ),
                 )
                 for item in visible_nodes
             ],
@@ -165,6 +199,32 @@ class PlayerProjectionService:
                         if fact.key == item.fact_key
                     ),
                     value=item.truth_value,
+                    node_name=node_definitions[item.node_key].name,
+                    node_type_key=(
+                        node_projections[item.node_key].node_type_key
+                        if node_projections[item.node_key] is not None
+                        else None
+                    ),
+                    region_key=(
+                        node_projections[item.node_key].region_key
+                        if node_projections[item.node_key] is not None
+                        else None
+                    ),
+                    region_name=(
+                        node_projections[item.node_key].region_name
+                        if node_projections[item.node_key] is not None
+                        else None
+                    ),
+                    endpoint_region_keys=list(
+                        node_projections[item.node_key].endpoint_region_keys
+                        if node_projections[item.node_key] is not None
+                        else ()
+                    ),
+                    endpoint_region_names=list(
+                        node_projections[item.node_key].endpoint_region_names
+                        if node_projections[item.node_key] is not None
+                        else ()
+                    ),
                 )
                 for item in known_facts
             ],
@@ -175,6 +235,9 @@ class PlayerProjectionService:
                     value=item.value,
                     reserved_value=item.reserved_value,
                     scope_node_key=item.scope_node_key,
+                    scope_node_name=spatial.resource_scope(item.scope_node_key).scope_node_name,
+                    scope_region_key=spatial.resource_scope(item.scope_node_key).scope_region_key,
+                    scope_region_name=spatial.resource_scope(item.scope_node_key).scope_region_name,
                 )
                 for item in resources
             ],
@@ -267,6 +330,14 @@ class PlayerProjectionService:
             )
             for plan in plans
         }
+        spatial = SpatialDisplayProjector(definition)
+        location_by_step = self._locations_by_step(
+            task,
+            definition,
+            spatial,
+            plans,
+            steps_by_plan,
+        )
         latest = plans[-1] if plans else None
         checkpoint = self.db.get(PlayerExecutionCheckpoint, task.id)
         phase = _execution_phase(task, checkpoint)
@@ -284,6 +355,7 @@ class PlayerProjectionService:
                         ),
                         status=_step_status(step.status),
                         result_summary=_result_summary(step),
+                        location=location_by_step.get(step.id),
                     )
                     for step in steps_by_plan[latest.id]
                     if step.execution_type == StepExecutionType.TOOL
@@ -334,6 +406,7 @@ class PlayerProjectionService:
                     steps_by_plan[plan.id],
                     definition,
                     actors,
+                    location_by_step=location_by_step,
                     task_status=task.status,
                     is_latest=plan == latest,
                     current_step_id=(
@@ -350,9 +423,23 @@ class PlayerProjectionService:
                 )
                 for plan in plans
             ],
-            timeline=self._timeline(task, definition, plans, steps_by_plan, actors, checkpoint),
+            timeline=self._timeline(
+                task,
+                definition,
+                plans,
+                steps_by_plan,
+                actors,
+                checkpoint,
+                location_by_step=location_by_step,
+            ),
             briefing=(
-                self._briefing(current_step, definition, actors, roadmap)
+                self._briefing(
+                    current_step,
+                    definition,
+                    actors,
+                    roadmap,
+                    location_by_step=location_by_step,
+                )
                 if current_step is not None
                 and phase
                 in (
@@ -362,7 +449,14 @@ class PlayerProjectionService:
                 else None
             ),
             debrief=(
-                self._debrief(last_action_step, definition, plans, steps_by_plan)
+                self._debrief(
+                    task,
+                    last_action_step,
+                    definition,
+                    plans,
+                    steps_by_plan,
+                    location_by_step=location_by_step,
+                )
                 if last_action_step is not None
                 and phase
                 in (
@@ -378,6 +472,134 @@ class PlayerProjectionService:
             ),
         )
 
+    def _locations_by_step(
+        self,
+        task: AgentTask,
+        definition: ScenarioDefinitionV2,
+        spatial: SpatialDisplayProjector,
+        plans: tuple[AgentPlan, ...],
+        steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
+    ) -> dict[UUID, PublicActionLocationResponse | None]:
+        source_nodes = self._source_nodes_by_step(task, definition, plans, steps_by_plan)
+        locations: dict[UUID, PublicActionLocationResponse | None] = {}
+        for plan in plans:
+            for step in steps_by_plan[plan.id]:
+                if step.execution_type != StepExecutionType.TOOL:
+                    continue
+                action = _action_definition(definition, step)
+                target_key = step.tool_arguments.get("target_key")
+                if not isinstance(target_key, str):
+                    locations[step.id] = None
+                    continue
+                raw_parameters = step.tool_arguments.get("parameters")
+                parameters = raw_parameters if isinstance(raw_parameters, dict) else {}
+                projection = spatial.action_location(
+                    action,
+                    target_node_key=target_key,
+                    source_node_key=source_nodes.get(step.id),
+                    parameters=parameters,
+                )
+                locations[step.id] = (
+                    PublicActionLocationResponse(
+                        kind=projection.kind,
+                        summary=projection.summary,
+                        detail=projection.detail,
+                    )
+                    if projection is not None
+                    else None
+                )
+        return locations
+
+    def _source_nodes_by_step(
+        self,
+        task: AgentTask,
+        definition: ScenarioDefinitionV2,
+        plans: tuple[AgentPlan, ...],
+        steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
+    ) -> dict[UUID, str | None]:
+        """Replay persisted actor movement for display-only source locations.
+
+        The replay consumes only Scenario initial positions and persisted
+        WorldOperation outcomes.  Pending actions in the current Plan are
+        advanced virtually so a Player can read the planned route; that
+        virtual position is never written back to runtime state.
+        """
+
+        positions = {
+            profile.key: profile.initial_node_key
+            for profile in definition.actors.actor_profiles
+        }
+        operations = tuple(
+            self.db.scalars(
+                select(WorldOperation)
+                .where(WorldOperation.game_instance_id == task.game_instance_id)
+                .order_by(WorldOperation.created_at, WorldOperation.id)
+            )
+        )
+        operations_by_step: dict[UUID, list[WorldOperation]] = {}
+        for operation in operations:
+            if operation.source_step_id is not None:
+                operations_by_step.setdefault(operation.source_step_id, []).append(operation)
+        applied_operation_ids: set[UUID] = set()
+        source_nodes: dict[UUID, str | None] = {}
+        latest_plan_id = plans[-1].id if plans else None
+
+        def apply_operation(operation: WorldOperation) -> None:
+            if operation.id in applied_operation_ids:
+                return
+            applied_operation_ids.add(operation.id)
+            if not _operation_succeeded(operation):
+                return
+            destination = (
+                operation.outcome.get("actor_location_update")
+                if isinstance(operation.outcome, dict)
+                else None
+            )
+            if not isinstance(destination, str):
+                action = next(
+                    (item for item in definition.actions if item.key == operation.action_key),
+                    None,
+                )
+                if action is None or action.behavior not in (
+                    ActionBehavior.TRAVEL,
+                    ActionBehavior.TRANSPORT_RESOURCE,
+                ):
+                    return
+                destination = operation.target_key
+            positions[operation.actor_key] = destination
+
+        for plan in plans:
+            for operation in operations:
+                if operation.created_at <= plan.created_at:
+                    apply_operation(operation)
+            plan_steps = steps_by_plan[plan.id]
+            for step in plan_steps:
+                if step.execution_type != StepExecutionType.TOOL:
+                    continue
+                source_nodes[step.id] = positions.get(step.assigned_actor_key)
+                step_operations = operations_by_step.get(step.id, [])
+                if step_operations:
+                    for operation in step_operations:
+                        apply_operation(operation)
+                    continue
+                if plan.id != latest_plan_id or step.status not in (
+                    AgentStepStatus.PENDING,
+                    AgentStepStatus.REQUIRES_PLAYER_DECISION,
+                ):
+                    continue
+                action = _action_definition(definition, step)
+                target_key = step.tool_arguments.get("target_key")
+                if (
+                    action is not None
+                    and action.behavior in (
+                        ActionBehavior.TRAVEL,
+                        ActionBehavior.TRANSPORT_RESOURCE,
+                    )
+                    and isinstance(target_key, str)
+                ):
+                    positions[step.assigned_actor_key] = target_key
+        return source_nodes
+
     def _timeline(
         self,
         task: AgentTask,
@@ -386,6 +608,8 @@ class PlayerProjectionService:
         steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
         actors: dict[str, str],
         checkpoint: PlayerExecutionCheckpoint | None,
+        *,
+        location_by_step: dict[UUID, PublicActionLocationResponse | None],
     ) -> list[PublicTimelineEventResponse]:
         operations = tuple(
             self.db.scalars(
@@ -470,11 +694,19 @@ class PlayerProjectionService:
                             ),
                             actor_name=actors.get(step.assigned_actor_key, step.assigned_actor_key),
                             occurred_at=decision.decided_at or decision.created_at,
+                            location=location_by_step.get(step.id),
                         )
                     )
                 if _action_cycle_finished(step, plan_steps):
                     action_operation = next(iter(operations_by_step.get(step.id, [])), None)
-                    debrief = self._debrief(step, definition, plans, steps_by_plan)
+                    debrief = self._debrief(
+                        task,
+                        step,
+                        definition,
+                        plans,
+                        steps_by_plan,
+                        location_by_step=location_by_step,
+                    )
                     assert debrief is not None
                     events.append(
                         PublicTimelineEventResponse(
@@ -490,6 +722,7 @@ class PlayerProjectionService:
                                 else []
                             ),
                             occurred_at=_action_cycle_completed_at(step, plan_steps),
+                            location=location_by_step.get(step.id),
                         )
                     )
         terminal_kind = {
@@ -516,6 +749,8 @@ class PlayerProjectionService:
         definition: ScenarioDefinitionV2,
         actors: dict[str, str],
         roadmap: MissionRoadmap,
+        *,
+        location_by_step: dict[UUID, PublicActionLocationResponse | None],
     ) -> PublicActionBriefingResponse:
         action = _action_definition(definition, step)
         target_key = str(step.tool_arguments.get("target_key", ""))
@@ -537,14 +772,18 @@ class PlayerProjectionService:
             actor_name=actors.get(step.assigned_actor_key, step.assigned_actor_key),
             target_name=target.name if target is not None else target_key,
             purpose=purpose,
+            location=location_by_step.get(step.id),
         )
 
     def _debrief(
         self,
+        task: AgentTask,
         step: AgentStep,
         definition: ScenarioDefinitionV2,
         plans: tuple[AgentPlan, ...],
         steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
+        *,
+        location_by_step: dict[UUID, PublicActionLocationResponse | None],
     ) -> PublicActionDebriefResponse:
         action = _action_definition(definition, step)
         plan = next(item for item in plans if item.id == step.plan_id)
@@ -564,6 +803,7 @@ class PlayerProjectionService:
             failed = True
         result_summary = _public_result_summary(action, operation, failed)
         newer_plans = [item for item in plans if item.version > plan.version]
+        invalidation = _plan_invalidation_for(task, plan.version)
         return PublicActionDebriefResponse(
             step_id=step.id,
             action_name=action.name if action is not None else step.description,
@@ -576,7 +816,20 @@ class PlayerProjectionService:
                 if newer_plans
                 else None
             ),
+            plan_invalidated=invalidation is not None,
+            plan_invalidation_reason=(
+                str(invalidation["reason"])
+                if invalidation is not None and isinstance(invalidation.get("reason"), str)
+                else None
+            ),
+            location=location_by_step.get(step.id),
         )
+
+
+def _operation_succeeded(operation: WorldOperation) -> bool:
+    return operation.status == WorldOperationStatus.RESOLVED and not (
+        isinstance(operation.outcome, dict) and bool(operation.outcome.get("failure"))
+    )
 
 
 def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskStatus:
@@ -606,6 +859,7 @@ def _plan_history_entry(
     task_status: AgentTaskStatus,
     is_latest: bool,
     current_step_id: UUID | None,
+    location_by_step: dict[UUID, PublicActionLocationResponse | None],
 ) -> PublicPlanHistoryResponse:
     tool_steps = tuple(step for step in steps if step.execution_type == StepExecutionType.TOOL)
     public_steps = [
@@ -630,6 +884,7 @@ def _plan_history_entry(
             result_summary=(
                 "行动未完成" if _plan_action_failed(step, steps) else _result_summary(step)
             ),
+            location=location_by_step.get(step.id),
         )
         for step in tool_steps
     ]
@@ -856,6 +1111,16 @@ def _knowledge_changes(operation: WorldOperation) -> list[PublicKnowledgeChangeR
         except ValueError:
             continue
     return changes
+
+
+def _plan_invalidation_for(task: AgentTask, plan_version: int) -> dict[str, object] | None:
+    metadata = task.objective_resolution_metadata
+    if not isinstance(metadata, dict):
+        return None
+    marker = metadata.get("plan_invalidation")
+    if not isinstance(marker, dict) or marker.get("plan_version") != plan_version:
+        return None
+    return marker
 
 
 def _provider_calls(task: AgentTask) -> tuple[dict[str, object], ...]:

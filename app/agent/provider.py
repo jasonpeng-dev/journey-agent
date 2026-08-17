@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from time import perf_counter
 from typing import Literal, Protocol
 
 import httpx
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.core.config import Settings
 from app.domain.scenario_v2 import StrictScalar
+
+log = structlog.get_logger(__name__)
 
 
 class ProviderModel(BaseModel):
@@ -225,6 +230,11 @@ class OpenAICompatibleGenericProvider:
                 "keep valid parts whenever possible. Every step must directly advance the "
                 "current Objective, satisfy a public prerequisite, obtain Knowledge needed "
                 "for that Objective, or be an explicitly necessary supporting action. Do not "
+                "add speculative or preventive corrective actions solely to guard against "
+                "unobserved or uninferred problems. Every step needs a concrete purpose "
+                "supported by the current Knowledge and task state. Repair, clearing, "
+                "recovery, and remediation actions must address a currently known failure, "
+                "blockage, unmet prerequisite, or other concrete problem. Do not "
                 "expand the ObjectiveScope, add downstream or sibling Objectives, or continue "
                 "with broader work after the current Objective can be completed. Future steps "
                 "may be currently locked or unavailable when earlier steps establish their "
@@ -238,6 +248,11 @@ class OpenAICompatibleGenericProvider:
                 "return steps=[]. Every step must directly advance the current Objective, "
                 "satisfy a public prerequisite, obtain Knowledge needed for completing "
                 "the Objective, or be an explicitly necessary supporting action. Do not "
+                "add speculative or preventive corrective actions solely to guard against "
+                "unobserved or uninferred problems. Every step needs a concrete purpose "
+                "supported by the current Knowledge and task state. Repair, clearing, "
+                "recovery, and remediation actions must address a currently known failure, "
+                "blockage, unmet prerequisite, or other concrete problem. Do not "
                 "expand the ObjectiveScope or include downstream, sibling, broader, or "
                 "unrelated verification work. Once the current Objective can be completed, "
                 "stop planning instead of adding more work. Future steps may be currently "
@@ -253,38 +268,56 @@ class OpenAICompatibleGenericProvider:
                 "currently locked or unavailable when earlier steps are expected "
                 "to establish their prerequisites."
             )
+        request_body = {
+            "model": self._model_name,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        f"Return only valid JSON for generic {purpose}. "
+                        f"Use exactly this response shape: {response_contract}. "
+                        "Select only keys supplied in the user payload; never invent keys. "
+                        "For planning, use only entities supplied in planning_context. "
+                        f"{planning_prompt} "
+                        "Keep purpose and actor reason short, omit chain-of-thought, "
+                        "never infer hidden state, and respect repair_diagnostics."
+                    ),
+                },
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+        }
+        request_size_bytes = len(
+            json.dumps(request_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
         started = perf_counter()
         try:
             response = httpx.post(
                 f"{self._base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self._api_key}"},
-                json={
-                    "model": self._model_name,
-                    "response_format": {"type": "json_object"},
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                f"Return only valid JSON for generic {purpose}. "
-                                f"Use exactly this response shape: {response_contract}. "
-                                "Select only keys supplied in the user payload; never invent keys. "
-                                "For planning, use only entities supplied in planning_context. "
-                                f"{planning_prompt} "
-                                "Keep purpose and actor reason short, omit chain-of-thought, "
-                                "never infer hidden state, and respect repair_diagnostics."
-                            ),
-                        },
-                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                    ],
-                },
+                json=request_body,
                 timeout=self._timeout,
             )
             response.raise_for_status()
         except httpx.TimeoutException as exc:
+            _log_provider_failure(
+                purpose=purpose,
+                model=self._model_name,
+                request_size_bytes=request_size_bytes,
+                error=exc,
+                response=None,
+            )
             raise GenericProviderError(
                 "MODEL_PROVIDER_TIMEOUT", "The model provider request timed out"
             ) from exc
         except httpx.HTTPError as exc:
+            _log_provider_failure(
+                purpose=purpose,
+                model=self._model_name,
+                request_size_bytes=request_size_bytes,
+                error=exc,
+                response=getattr(exc, "response", None),
+            )
             raise GenericProviderError(
                 "MODEL_PROVIDER_HTTP_ERROR", "The model provider request failed"
             ) from exc
@@ -335,6 +368,107 @@ def _optional_int(value: object, key: str) -> int | None:
         return None
     item = value.get(key)
     return item if isinstance(item, int) and not isinstance(item, bool) else None
+
+
+def _log_provider_failure(
+    *,
+    purpose: str,
+    model: str,
+    request_size_bytes: int,
+    error: Exception,
+    response: httpx.Response | None,
+) -> None:
+    """Record bounded, credential-safe upstream diagnostics for Developer logs."""
+
+    log.error(
+        "model_provider_upstream_error",
+        purpose=purpose,
+        model=model,
+        error_type=type(error).__name__,
+        upstream_status_code=response.status_code if response is not None else None,
+        request_size_bytes=request_size_bytes,
+        provider_request_id=_provider_request_id(response),
+        response_body_summary=_response_body_summary(response),
+    )
+
+
+def _provider_request_id(response: httpx.Response | None) -> str | None:
+    if response is None:
+        return None
+    for header_name in ("x-request-id", "x-deepseek-request-id", "request-id"):
+        value = response.headers.get(header_name)
+        if value:
+            return _safe_text(value, limit=160)
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, dict):
+        for key in ("request_id", "requestId", "id"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return _safe_text(value, limit=160)
+        error = body.get("error")
+        if isinstance(error, dict):
+            for key in ("request_id", "requestId", "id"):
+                value = error.get(key)
+                if isinstance(value, str) and value:
+                    return _safe_text(value, limit=160)
+    return None
+
+
+def _response_body_summary(response: httpx.Response | None) -> dict[str, object]:
+    if response is None:
+        return {"available": False}
+
+    raw_body = response.content
+    summary: dict[str, object] = {
+        "available": True,
+        "bytes": len(raw_body),
+        "sha256": hashlib.sha256(raw_body).hexdigest(),
+    }
+    try:
+        body = response.json()
+    except ValueError:
+        summary["format"] = "text"
+        summary["content_type"] = response.headers.get("content-type")
+        return summary
+
+    summary["format"] = "json"
+    if isinstance(body, dict):
+        summary["top_level_keys"] = sorted(str(key) for key in body)[:20]
+        error = body.get("error")
+        if isinstance(error, dict):
+            summary["error"] = {
+                key: _safe_text(value, limit=240)
+                for key, value in error.items()
+                if key in {"type", "code", "message"}
+                and isinstance(value, (str, int, float, bool))
+            }
+        else:
+            summary["fields"] = {
+                key: _safe_text(value, limit=240)
+                for key, value in body.items()
+                if key in {"type", "code", "message", "detail"}
+                and isinstance(value, (str, int, float, bool))
+            }
+    else:
+        summary["value_type"] = type(body).__name__
+    return summary
+
+
+_SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"(?i)\b(?:api[_-]?key|token|secret|password)\b\s*[:=]\s*[^\s,;]+"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]+\b"),
+)
+
+
+def _safe_text(value: object, *, limit: int) -> str:
+    text = str(value)
+    for pattern in _SENSITIVE_TEXT_PATTERNS:
+        text = pattern.sub("<redacted>", text)
+    return text[:limit]
 
 
 PlanningContextV1 = PlanningContext
