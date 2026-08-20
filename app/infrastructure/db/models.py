@@ -20,7 +20,7 @@ from sqlalchemy import (
     inspect,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from app.domain.enums import (
     AgentPlanStatus,
@@ -31,6 +31,9 @@ from app.domain.enums import (
     MessageRole,
     NodeStatus,
     PlayerStatus,
+    ResourceInventoryVisibility,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
     SessionStatus,
     StepExecutionType,
     WorldOperationStatus,
@@ -239,8 +242,54 @@ class GameInstanceResourceState(TimestampMixin, Base):
     resource_identity: Mapped[str] = mapped_column(String(161), primary_key=True)
     resource_key: Mapped[str] = mapped_column(String(80), index=True)
     scope_node_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    region_key = synonym("scope_node_key")
+    pool_key: Mapped[str] = mapped_column(String(80), default="default", server_default="default")
+    facility_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     value: Mapped[int] = mapped_column(Integer)
     reserved_value: Mapped[int] = mapped_column(Integer, default=0)
+    visibility: Mapped[ResourcePoolVisibility] = mapped_column(
+        Enum(ResourcePoolVisibility, native_enum=False),
+        default=ResourcePoolVisibility.VISIBLE,
+        server_default=ResourcePoolVisibility.VISIBLE.value,
+        nullable=False,
+    )
+    availability: Mapped[ResourcePoolAvailability] = mapped_column(
+        Enum(ResourcePoolAvailability, native_enum=False),
+        default=ResourcePoolAvailability.AVAILABLE,
+        server_default=ResourcePoolAvailability.AVAILABLE.value,
+        nullable=False,
+    )
+    survey_discoverable: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
+    availability_requirement: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceRegionResourceKnowledge(TimestampMixin, Base):
+    """Instance-owned Region resource intelligence, separate from Pool state."""
+
+    __tablename__ = "game_instance_region_resource_knowledge"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    region_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    resource_inventory_visibility: Mapped[ResourceInventoryVisibility] = mapped_column(
+        Enum(ResourceInventoryVisibility, native_enum=False),
+        default=ResourceInventoryVisibility.VISIBLE,
+        server_default=ResourceInventoryVisibility.VISIBLE.value,
+        nullable=False,
+    )
+    resource_survey_completed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="1",
+        nullable=False,
+    )
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 

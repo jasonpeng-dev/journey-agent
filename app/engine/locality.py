@@ -196,7 +196,15 @@ def validate_action_locality(
             )
         return _require_connector(definition, actor_region, target_region)
 
-    if action.locality == ActionLocality.FACILITY_REGION:
+    if action.locality == ActionLocality.REGION:
+        target_region = _require_region(definition, target_node_key)
+        if actor_region != target_region:
+            raise LocalityEngineError(
+                "LOCALITY_ACTOR_REGION_INVALID",
+                "The Actor must be in the target Region",
+                retryable=True,
+            )
+    elif action.locality == ActionLocality.FACILITY_REGION:
         target_region = _require_facility_region(definition, target_node_key)
         if actor_region != target_region:
             raise LocalityEngineError(

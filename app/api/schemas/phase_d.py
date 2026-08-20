@@ -359,7 +359,7 @@ class MissionRoadmapResponse(ApiModel):
 
 
 class PublicKnowledgeChangeResponse(ApiModel):
-    kind: Literal["NODE_REVEALED", "FACT_REVEALED"]
+    kind: Literal["NODE_REVEALED", "FACT_REVEALED", "RESOURCE_DISCOVERED"]
     key: str
     name: str
     value: str | int | bool | None = None
@@ -472,6 +472,7 @@ class PublicNodeResponse(ApiModel):
     region_name: str | None = None
     endpoint_region_keys: list[str] = Field(default_factory=list)
     endpoint_region_names: list[str] = Field(default_factory=list)
+    associated_known_resources: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PublicResourceResponse(ApiModel):
@@ -479,6 +480,11 @@ class PublicResourceResponse(ApiModel):
     name: str
     value: int
     reserved_value: int
+    pool_key: str = "default"
+    facility_key: str | None = None
+    availability: Literal["AVAILABLE", "UNAVAILABLE"] = "AVAILABLE"
+    availability_requirement: dict[str, Any] | None = None
+    availability_requirement_status: Literal["KNOWN", "UNKNOWN"] | None = None
     scope_node_key: str | None = None
     scope_node_name: str | None = None
     scope_region_key: str | None = None
@@ -498,6 +504,7 @@ class PlayerGameStateResponse(ApiModel):
     visible_nodes: list[PublicNodeResponse]
     known_facts: list[PublicFactResponse]
     resources: list[PublicResourceResponse]
+    resource_intelligence: dict[str, Any] = Field(default_factory=dict)
     actors: list[PublicActorResponse] = Field(default_factory=list)
     current_task: PublicTaskResponse | None
     task_history: list[PublicTaskSummaryResponse] = Field(default_factory=list)
@@ -514,6 +521,7 @@ class DraftSandboxResponse(ApiModel):
     visible_nodes: list[PublicNodeResponse] = Field(default_factory=list)
     known_facts: list[PublicFactResponse] = Field(default_factory=list)
     resources: list[PublicResourceResponse] = Field(default_factory=list)
+    resource_intelligence: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeveloperGameSnapshotResponse(ApiModel):

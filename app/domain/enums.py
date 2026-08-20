@@ -42,6 +42,27 @@ class CommandReachability(StrEnum):
     DISCONNECTED = "DISCONNECTED"
 
 
+class ResourceInventoryVisibility(StrEnum):
+    """Whether ordinary inventory information for a Region is known."""
+
+    HIDDEN = "HIDDEN"
+    VISIBLE = "VISIBLE"
+
+
+class ResourcePoolVisibility(StrEnum):
+    """Whether a concrete Resource Pool is known to the player/Planner."""
+
+    HIDDEN = "HIDDEN"
+    VISIBLE = "VISIBLE"
+
+
+class ResourcePoolAvailability(StrEnum):
+    """Whether a known Resource Pool can currently be consumed."""
+
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 class SessionStatus(StrEnum):
     ACTIVE = "ACTIVE"
     CLOSED = "CLOSED"

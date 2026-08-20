@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.enums import CommandReachability, GameInstanceStatus, WorldOperationStatus
-from app.domain.resources import resource_initial_states, valid_resource_state_identity
+from app.domain.resources import resource_pool_initial_states, valid_resource_state_identity
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
 from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2
 from app.infrastructure.db.models import (
@@ -20,6 +20,7 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceMemoryEvent,
     GameInstanceNodeState,
+    GameInstanceRegionResourceKnowledge,
     GameInstanceResourceState,
     WorldOperation,
 )
@@ -168,12 +169,26 @@ class RuntimeRecoveryService:
                 GameInstanceResourceState.game_instance_id == instance.id
             )
         ).all()
+        region_knowledge_rows = self.db.scalars(
+            select(GameInstanceRegionResourceKnowledge).where(
+                GameInstanceRegionResourceKnowledge.game_instance_id == instance.id
+            )
+        ).all()
         actor_rows = self.db.scalars(
             select(GameInstanceActor).where(GameInstanceActor.game_instance_id == instance.id)
         ).all()
-        resource_identities = {(row.resource_key, row.scope_node_key) for row in resource_rows}
+        resource_identities = {
+            (row.resource_key, row.scope_node_key, row.pool_key) for row in resource_rows
+        }
         initial_resource_identities = {
-            (item.resource_key, item.scope_node_key) for item in resource_initial_states(definition)
+            (item.resource_key, item.region_key, item.pool_key)
+            for item in resource_pool_initial_states(definition)
+        }
+        region_keys = {
+            node.key
+            for node in nodes
+            if definition.metadata.locality.enabled
+            and node.node_type_key == definition.metadata.locality.region_node_type_key
         }
         if (
             len(node_rows) != len(nodes)
@@ -184,8 +199,14 @@ class RuntimeRecoveryService:
                     definition,
                     row.resource_key,
                     row.scope_node_key,
+                    row.pool_key,
                 )
                 for row in resource_rows
+            )
+            or region_keys != {row.region_key for row in region_knowledge_rows}
+            or any(
+                row.resource_inventory_visibility not in {"HIDDEN", "VISIBLE"}
+                for row in region_knowledge_rows
             )
             or {actor.actor_key for actor in actor_rows} != actor_keys
             or any(

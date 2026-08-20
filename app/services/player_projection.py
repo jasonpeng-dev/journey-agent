@@ -48,7 +48,6 @@ from app.domain.enums import (
 )
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ActionBehavior, ActionDefinitionV2, ScenarioDefinitionV2
-from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentPlan,
@@ -56,8 +55,6 @@ from app.infrastructure.db.models import (
     AgentTask,
     GameInstance,
     GameInstanceActor,
-    GameInstanceFactState,
-    GameInstanceNodeState,
     GameInstanceResourceState,
     PlayerExecutionCheckpoint,
     ScenarioVersion,
@@ -66,6 +63,7 @@ from app.infrastructure.db.models import (
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
+from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.mission_roadmap import MissionRoadmap, MissionRoadmapProjector
 from app.services.player_pacing import PlayerExecutionPhase
 from app.services.spatial_projection import SpatialDisplayProjector, SpatialNodeProjection
@@ -89,24 +87,14 @@ class PlayerProjectionService:
         resource_definitions = {item.key: item for item in definition.world.resources}
         role_definitions = {item.key: item for item in definition.actors.roles}
         spatial = SpatialDisplayProjector(definition)
-        visible_nodes = tuple(
-            self.db.scalars(
-                select(GameInstanceNodeState).where(
-                    GameInstanceNodeState.game_instance_id == game.id,
-                    GameInstanceNodeState.visibility == Visibility.KNOWN,
-                )
-            )
-        )
+        knowledge_projection = SharedKnowledgeProjection(self.db, scope, definition)
+        visible_resource_identities = {
+            (item.resource_key, item.region_key, item.pool_key)
+            for item in knowledge_projection.visible_resource_pools()
+        }
+        visible_nodes = knowledge_projection.known_node_rows()
         visible_node_keys = {item.node_key for item in visible_nodes}
-        known_facts = tuple(
-            self.db.scalars(
-                select(GameInstanceFactState).where(
-                    GameInstanceFactState.game_instance_id == game.id,
-                    GameInstanceFactState.visibility == Visibility.KNOWN,
-                    GameInstanceFactState.node_key.in_(visible_node_keys),
-                )
-            )
-        )
+        known_facts = knowledge_projection.known_fact_rows()
         node_projections: dict[str, SpatialNodeProjection] = {}
         for item in visible_nodes:
             projection = spatial.node(item.node_key)
@@ -119,14 +107,13 @@ class PlayerProjectionService:
                 )
             )
         )
-        actors = tuple(
-            self.db.scalars(
-                select(GameInstanceActor).where(
-                    GameInstanceActor.game_instance_id == game.id,
-                    GameInstanceActor.status == "ACTIVE",
-                )
-            )
+        resources = tuple(
+            item
+            for item in resources
+            if (item.resource_key, item.scope_node_key, item.pool_key)
+            in visible_resource_identities
         )
+        actors = knowledge_projection.actor_rows()
         task_query = (
             select(AgentTask)
             .where(AgentTask.game_instance_id == game.id)
@@ -189,6 +176,16 @@ class PlayerProjectionService:
                         if node_projections[item.node_key] is not None
                         else ()
                     ),
+                    associated_known_resources=(
+                        knowledge_projection.associated_known_resources(item.node_key)
+                        if (
+                            definition.metadata.locality.enabled
+                            and definition.metadata.locality.facility_node_type_key
+                            and node_definitions[item.node_key].node_type_key
+                            == definition.metadata.locality.facility_node_type_key
+                        )
+                        else []
+                    ),
                 )
                 for item in visible_nodes
             ],
@@ -237,6 +234,19 @@ class PlayerProjectionService:
                     name=resource_definitions[item.resource_key].name,
                     value=item.value,
                     reserved_value=item.reserved_value,
+                    pool_key=item.pool_key,
+                    facility_key=item.facility_key,
+                    availability=(
+                        item.availability.value
+                        if hasattr(item.availability, "value")
+                        else item.availability
+                    ),
+                    availability_requirement=knowledge_projection.known_requirement(
+                        item.availability_requirement
+                    ),
+                    availability_requirement_status=knowledge_projection.requirement_status(
+                        item.availability_requirement
+                    ),
                     scope_node_key=item.scope_node_key,
                     scope_node_name=spatial.resource_scope(item.scope_node_key).scope_node_name,
                     scope_region_key=spatial.resource_scope(item.scope_node_key).scope_region_key,
@@ -244,6 +254,7 @@ class PlayerProjectionService:
                 )
                 for item in resources
             ],
+            resource_intelligence=knowledge_projection.resource_intelligence(),
             actors=[
                 PublicActorResponse(
                     key=item.actor_key,
@@ -251,9 +262,7 @@ class PlayerProjectionService:
                     role_name=role_definitions[item.role_key].name,
                     current_node_name=node_definitions[item.current_node_key].name,
                     command_reachability=(
-                        "DISCONNECTED"
-                        if item.command_reachability == "DISCONNECTED"
-                        else "ONLINE"
+                        "DISCONNECTED" if item.command_reachability == "DISCONNECTED" else "ONLINE"
                     ),
                 )
                 for item in actors

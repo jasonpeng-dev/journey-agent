@@ -30,6 +30,7 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     WorldOperation,
 )
+from app.services.knowledge_projection import SharedKnowledgeProjection
 
 PlanningContextV1 = PlanningContext
 
@@ -209,6 +210,11 @@ class PlanningContextBuilder:
                     "key": item.key,
                     "display": item.name,
                     "description": item.description,
+                    **(
+                        {"planning_guidance": item.planning_guidance}
+                        if item.planning_guidance is not None
+                        else {}
+                    ),
                 }
                 for item in objectives
             ],
@@ -279,8 +285,20 @@ class PlanningContextBuilder:
                 "locality": action.locality.value,
                 "target_kind": action.target_kind.value,
             }
-            if action.planning.hints:
-                action_context["soft_signals"] = {"hints": list(action.planning.hints)}
+            hints = list(action.planning.hints)
+            if action.behavior == ActionBehavior.SURVEY_RESOURCES:
+                hints.extend(
+                    [
+                        "Use when ordinary Region inventory is unknown.",
+                        "A visible inventory can still have an incomplete full survey.",
+                        "A survey may discover Facility-bound hidden stock.",
+                        "Discovered stock may remain unavailable until its "
+                        "requirement is satisfied.",
+                        "Do not repeat a survey after resource_survey_completed is true.",
+                    ]
+                )
+            if hints:
+                action_context["soft_signals"] = {"hints": hints}
             result.append(action_context)
         return result
 
@@ -290,12 +308,7 @@ class PlanningContextBuilder:
         action_keys: set[str],
     ) -> list[dict[str, object]]:
         roles = {item.key: item for item in definition.actors.roles}
-        actors = self.db.scalars(
-            select(GameInstanceActor).where(
-                GameInstanceActor.game_instance_id == self.scope.game_instance_id,
-                GameInstanceActor.status == "ACTIVE",
-            )
-        )
+        actors = SharedKnowledgeProjection(self.db, self.scope, definition).actor_rows()
         result: list[dict[str, object]] = []
         for actor in sorted(actors, key=lambda item: item.actor_key):
             role = roles.get(actor.role_key)
@@ -361,12 +374,7 @@ class PlanningContextBuilder:
             result.extend(
                 {"target_key": actor.actor_key}
                 for actor in sorted(
-                    self.db.scalars(
-                        select(GameInstanceActor).where(
-                            GameInstanceActor.game_instance_id == self.scope.game_instance_id,
-                            GameInstanceActor.status == "ACTIVE",
-                        )
-                    ),
+                    SharedKnowledgeProjection(self.db, self.scope, definition).actor_rows(),
                     key=lambda item: item.actor_key,
                 )
             )
@@ -578,30 +586,29 @@ class PlanningActionCatalogBuilder:
         return tuple(candidates)
 
     def known_world(self, definition: ScenarioDefinitionV2) -> dict[str, object]:
-        node_states = tuple(
-            self.db.scalars(
-                select(GameInstanceNodeState).where(
-                    GameInstanceNodeState.game_instance_id == self.scope.game_instance_id,
-                    GameInstanceNodeState.visibility == Visibility.KNOWN,
-                )
-            )
-        )
+        knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
+        node_states = knowledge_projection.known_node_rows()
         known_keys = {item.node_key for item in node_states}
-        facts = tuple(
-            self.db.scalars(
-                select(GameInstanceFactState).where(
-                    GameInstanceFactState.game_instance_id == self.scope.game_instance_id,
-                    GameInstanceFactState.visibility == Visibility.KNOWN,
-                )
-            )
-        )
-        resources = tuple(
-            self.db.scalars(
-                select(GameInstanceResourceState).where(
-                    GameInstanceResourceState.game_instance_id == self.scope.game_instance_id
-                )
-            )
-        )
+        facts = knowledge_projection.known_fact_rows()
+        resource_projection = knowledge_projection.planner_resources()
+        resources: dict[str, object] = {}
+        for resource_key, summary in resource_projection["resources"].items():
+            scopes = {
+                region_key: {
+                    "value": region_summary["known_total"],
+                    "known_total": region_summary["known_total"],
+                    "known_available": region_summary["known_available"],
+                    "pools": region_summary["pools"],
+                }
+                for region_key, region_summary in summary.get("regions", {}).items()
+            }
+            if "global" in summary:
+                scopes["global"] = summary["global"]
+            resources[resource_key] = {
+                "known_total": summary["known_total"],
+                "known_available": summary["known_available"],
+                "scopes": scopes,
+            }
         return {
             "nodes": [
                 _node_context(definition, item)
@@ -612,15 +619,9 @@ class PlanningActionCatalogBuilder:
                 for item in facts
                 if item.node_key in known_keys
             },
-            "relations": [
-                item.model_dump(mode="json")
-                for item in definition.world.relations
-                if item.source_node_key in known_keys and item.target_node_key in known_keys
-            ],
-            "resources": {
-                resource_key: _resource_context(rows)
-                for resource_key, rows in _group_resources(resources).items()
-            },
+            "relations": list(knowledge_projection.known_relations()),
+            "resources": {resource_key: value for resource_key, value in resources.items()},
+            "region_resource_knowledge": resource_projection["regions"],
             **(
                 {"locality": definition.metadata.locality.model_dump(mode="json")}
                 if definition.metadata.locality.enabled
@@ -670,6 +671,11 @@ def objective_context(
             "key": objective.key,
             "name": objective.name,
             "description": objective.description,
+            **(
+                {"planning_guidance": objective.planning_guidance}
+                if objective.planning_guidance is not None
+                else {}
+            ),
             "completion_requirements": [
                 item.model_dump(mode="json")
                 for item in objective.completion_requirements

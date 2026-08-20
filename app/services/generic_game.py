@@ -8,10 +8,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
-from app.domain.enums import AuthorityOutcome, CommandReachability, NodeStatus
+from app.domain.enums import (
+    AuthorityOutcome,
+    CommandReachability,
+    NodeStatus,
+    ResourceInventoryVisibility,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
+)
 from app.domain.resources import (
     resource_identity,
-    resource_initial_states,
+    resource_pool_initial_states,
     resource_state_key,
     valid_resource_state_identity,
 )
@@ -38,11 +45,17 @@ from app.engine.rules import (
     DeclarativeRuleState,
     FactVisibilityMutation,
     GenericRuleOutcome,
+    RegionResourceSurveyMutation,
+    RegionResourceVisibilityMutation,
     ResourceMutation,
+    ResourcePoolVisibilityMutation,
     RuleActorState,
+    RuleEngineError,
     RuleFactState,
     RuleFailure,
     RuleNodeState,
+    RuleRegionResourceKnowledgeState,
+    RuleResourcePoolState,
 )
 from app.infrastructure.db.models import (
     GameInstance,
@@ -50,6 +63,7 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceMemoryEvent,
     GameInstanceNodeState,
+    GameInstanceRegionResourceKnowledge,
     GameInstanceResourceState,
 )
 from app.scenarios.versions import ScenarioVersionRepository
@@ -170,7 +184,21 @@ class GenericGameService:
                 outcome=preflight,
                 runtime_revision=self._instance().runtime_revision,
             )
-        outcome = engine.evaluate_resolution(state, context)
+        try:
+            outcome = engine.evaluate_resolution(state, context)
+        except RuleEngineError as exc:
+            if (
+                action.behavior != ActionBehavior.SURVEY_RESOURCES
+                or exc.code != "RULE_RESOLUTION_NOT_FOUND"
+            ):
+                raise GenericGameError(exc.code, exc.message) from exc
+            outcome = GenericRuleOutcome(
+                selected_rule_key=f"generic:{action.key}",
+                outcome_code=next(
+                    (item.code for item in action.expected_outcomes if item.success),
+                    None,
+                ),
+            )
         outcome = self._apply_behavior(
             definition,
             action,
@@ -193,6 +221,16 @@ class GenericGameService:
             if item.visibility == Visibility.KNOWN
             and state.nodes[item.node_key].visibility != Visibility.KNOWN
         }
+        newly_known_pools = tuple(
+            pool
+            for pool in state.resource_pools.values()
+            if pool.visibility == ResourcePoolVisibility.HIDDEN
+            and any(
+                update.pool_key == pool.pool_key
+                and update.visibility == ResourcePoolVisibility.VISIBLE
+                for update in outcome.resource_pool_visibility_updates
+            )
+        )
         self._apply(definition, actor_key, outcome)
         instance = self._instance()
         instance.runtime_revision += 1
@@ -219,6 +257,19 @@ class GenericGameService:
                     key=f"{node_key}.{fact_key}",
                     name=fact.name,
                     value=row.truth_value,
+                )
+            )
+        resource_names = {item.key: item.name for item in definition.world.resources}
+        for pool in sorted(
+            newly_known_pools,
+            key=lambda item: (item.region_key or "", item.resource_key, item.pool_key),
+        ):
+            knowledge_changes.append(
+                PlayerKnowledgeChange(
+                    kind="RESOURCE_DISCOVERED",
+                    key=resource_state_key(pool.resource_key, pool.region_key, pool.pool_key),
+                    name=resource_names.get(pool.resource_key, pool.resource_key),
+                    value=pool.quantity,
                 )
             )
         return AppliedRuleResult(
@@ -446,6 +497,52 @@ class GenericGameService:
                 fact_visibility_updates=outcome.fact_visibility_updates
                 + self._inspect_reveals(target_node_key, definition, state),
             )
+        if action.behavior == ActionBehavior.SURVEY_RESOURCES:
+            region = target_node_key
+            knowledge = state.region_resource_knowledge.get(region)
+            if knowledge is None:
+                raise GenericGameError(
+                    "RESOURCE_REGION_KNOWLEDGE_MISSING",
+                    "The target Region resource knowledge state is missing",
+                )
+            if knowledge.resource_survey_completed:
+                return self._blocked_outcome(
+                    outcome,
+                    code="RESOURCE_SURVEY_ALREADY_COMPLETED",
+                    message="The target Region has already completed a resource survey",
+                    retryable=False,
+                )
+            reveal_pools = tuple(
+                ResourcePoolVisibilityMutation(
+                    pool_key=pool.pool_key,
+                    visibility=ResourcePoolVisibility.VISIBLE,
+                )
+                for pool in state.resource_pools.values()
+                if (
+                    pool.region_key == region
+                    and pool.facility_key is not None
+                    and pool.visibility == ResourcePoolVisibility.HIDDEN
+                    and pool.survey_discoverable
+                )
+            )
+            return replace(
+                outcome,
+                region_resource_visibility_updates=(
+                    *outcome.region_resource_visibility_updates,
+                    RegionResourceVisibilityMutation(
+                        region_key=region,
+                        visibility=ResourceInventoryVisibility.VISIBLE,
+                    ),
+                ),
+                region_resource_survey_updates=(
+                    *outcome.region_resource_survey_updates,
+                    RegionResourceSurveyMutation(region_key=region, completed=True),
+                ),
+                resource_pool_visibility_updates=(
+                    *outcome.resource_pool_visibility_updates,
+                    *reveal_pools,
+                ),
+            )
         if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
             connector = self._connector(definition, actor.current_node_key, target_node_key)
             if not self._is_passable(definition, connector, state):
@@ -464,29 +561,82 @@ class GenericGameService:
                 )
             source_region = region_for_node(definition, actor.current_node_key)
             target_region = region_for_node(definition, target_node_key)
-            source_balance = state.resources.get(resource_state_key(resource_key, source_region))
-            if source_balance is None:
-                raise GenericGameError(
-                    "TRANSPORT_RESOURCE_MISSING",
-                    "The scoped source Resource balance is missing",
+            source_pools = self._known_source_pools(state, source_region, resource_key)
+            if not source_pools:
+                return self._blocked_outcome(
+                    outcome,
+                    code="TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
+                    message="The source Region Resource inventory is not known",
+                    retryable=True,
                 )
-            if source_balance < amount:
+            available = sum(pool.quantity for pool in source_pools)
+            if available < amount:
                 return self._blocked_outcome(
                     outcome,
                     code="TRANSPORT_RESOURCE_INSUFFICIENT",
                     message="The source Region lacks the requested Resource amount",
                     retryable=True,
                 )
+            remaining = amount
+            mutations: list[ResourceMutation] = []
+            for pool in source_pools:
+                if remaining <= 0:
+                    break
+                consumed = min(pool.quantity, remaining)
+                mutations.append(
+                    ResourceMutation(
+                        resource_key,
+                        -consumed,
+                        source_region,
+                        pool.pool_key,
+                    )
+                )
+                remaining -= consumed
+            mutations.append(
+                ResourceMutation(
+                    resource_key,
+                    amount,
+                    target_region,
+                    "default",
+                )
+            )
             return replace(
                 outcome,
-                resource_mutations=(
-                    *outcome.resource_mutations,
-                    ResourceMutation(resource_key, -amount, source_region),
-                    ResourceMutation(resource_key, amount, target_region),
-                ),
+                resource_mutations=(*outcome.resource_mutations, *mutations),
                 actor_location_update=target_region,
             )
         return outcome
+
+    @staticmethod
+    def _known_source_pools(
+        state: DeclarativeRuleState,
+        source_region: str,
+        resource_key: str,
+    ) -> tuple[RuleResourcePoolState, ...]:
+        knowledge = state.region_resource_knowledge.get(source_region)
+        return tuple(
+            sorted(
+                (
+                    pool
+                    for pool in state.resource_pools.values()
+                    if (
+                        pool.region_key == source_region
+                        and pool.resource_key == resource_key
+                        and pool.visibility == ResourcePoolVisibility.VISIBLE
+                        and pool.availability == ResourcePoolAvailability.AVAILABLE
+                        and (
+                            pool.facility_key is not None
+                            or (
+                                knowledge is not None
+                                and knowledge.resource_inventory_visibility
+                                == ResourceInventoryVisibility.VISIBLE
+                            )
+                        )
+                    )
+                ),
+                key=lambda item: item.pool_key,
+            )
+        )
 
     @staticmethod
     def _blocked_outcome(
@@ -593,6 +743,9 @@ class GenericGameService:
         resource_query = select(GameInstanceResourceState).where(
             GameInstanceResourceState.game_instance_id == self.scope.game_instance_id
         )
+        region_knowledge_query = select(GameInstanceRegionResourceKnowledge).where(
+            GameInstanceRegionResourceKnowledge.game_instance_id == self.scope.game_instance_id
+        )
         actor_query = select(GameInstanceActor).where(
             GameInstanceActor.game_instance_id == self.scope.game_instance_id
         )
@@ -600,15 +753,26 @@ class GenericGameService:
             node_query = node_query.with_for_update()
             fact_query = fact_query.with_for_update()
             resource_query = resource_query.with_for_update()
+            region_knowledge_query = region_knowledge_query.with_for_update()
             actor_query = actor_query.with_for_update()
         nodes = self.db.scalars(node_query).all()
         facts = self.db.scalars(fact_query).all()
         resources = self.db.scalars(resource_query).all()
+        region_knowledge = self.db.scalars(region_knowledge_query).all()
         actors = self.db.scalars(actor_query).all()
         expected_initial_resources = {
-            (item.resource_key, item.scope_node_key) for item in resource_initial_states(definition)
+            (item.resource_key, item.region_key, item.pool_key)
+            for item in resource_pool_initial_states(definition)
         }
-        actual_resources = {(row.resource_key, row.scope_node_key) for row in resources}
+        actual_resources = {
+            (row.resource_key, row.scope_node_key, row.pool_key) for row in resources
+        }
+        expected_regions = {
+            node.key
+            for node in definition.world.nodes
+            if definition.metadata.locality.enabled
+            and node.node_type_key == definition.metadata.locality.region_node_type_key
+        }
         if (
             {row.node_key for row in nodes} != {node.key for node in definition.world.nodes}
             or {(row.node_key, row.fact_key) for row in facts}
@@ -619,9 +783,11 @@ class GenericGameService:
                     definition,
                     row.resource_key,
                     row.scope_node_key,
+                    row.pool_key,
                 )
                 for row in resources
             )
+            or {row.region_key for row in region_knowledge} != expected_regions
         ):
             raise GenericGameError(
                 "RUNTIME_STATE_INCOMPLETE",
@@ -647,12 +813,44 @@ class GenericGameService:
                 for row in facts
             },
             resources={
-                resource_state_key(row.resource_key, row.scope_node_key): row.value
+                resource_state_key(row.resource_key, row.scope_node_key, row.pool_key): row.value
                 for row in resources
+                if (
+                    ResourcePoolVisibility(row.visibility) == ResourcePoolVisibility.VISIBLE
+                    and ResourcePoolAvailability(row.availability)
+                    == ResourcePoolAvailability.AVAILABLE
+                )
             },
             resource_reservations={
-                resource_state_key(row.resource_key, row.scope_node_key): row.reserved_value
+                resource_state_key(
+                    row.resource_key, row.scope_node_key, row.pool_key
+                ): row.reserved_value
                 for row in resources
+            },
+            resource_pools={
+                resource_state_key(
+                    row.resource_key, row.scope_node_key, row.pool_key
+                ): RuleResourcePoolState(
+                    pool_key=row.pool_key,
+                    resource_key=row.resource_key,
+                    region_key=row.scope_node_key,
+                    facility_key=row.facility_key,
+                    quantity=row.value,
+                    visibility=ResourcePoolVisibility(row.visibility),
+                    availability=ResourcePoolAvailability(row.availability),
+                    survey_discoverable=row.survey_discoverable,
+                    availability_requirement=row.availability_requirement,
+                )
+                for row in resources
+            },
+            region_resource_knowledge={
+                row.region_key: RuleRegionResourceKnowledgeState(
+                    resource_inventory_visibility=ResourceInventoryVisibility(
+                        row.resource_inventory_visibility
+                    ),
+                    resource_survey_completed=row.resource_survey_completed,
+                )
+                for row in region_knowledge
             },
             actors={
                 row.actor_key: RuleActorState(
@@ -670,15 +868,20 @@ class GenericGameService:
         outcome: GenericRuleOutcome,
     ) -> None:
         resources = {item.key: item for item in definition.world.resources}
+        resource_mutations = self._expand_resource_mutations(outcome.resource_mutations)
         resource_rows: dict[str, GameInstanceResourceState] = {}
         balance_mutations_by_identity: dict[str, list[ResourceMutation]] = {}
-        for mutation in outcome.resource_mutations:
+        for mutation in resource_mutations:
             balance_mutations_by_identity.setdefault(
-                resource_state_key(mutation.resource_key, mutation.scope_node_key),
+                resource_state_key(
+                    mutation.resource_key,
+                    mutation.scope_node_key,
+                    mutation.pool_key,
+                ),
                 [],
             ).append(mutation)
         reservation_identities = {
-            resource_state_key(item.resource_key, item.scope_node_key)
+            resource_state_key(item.resource_key, item.scope_node_key, item.pool_key)
             for item in outcome.resource_reservations
         }
         resource_keys = set(balance_mutations_by_identity) | reservation_identities
@@ -699,6 +902,7 @@ class GenericGameService:
                     definition,
                     candidate_mutation.resource_key,
                     candidate_mutation.scope_node_key,
+                    candidate_mutation.pool_key,
                 )
             ):
                 raise GenericGameError(
@@ -709,9 +913,14 @@ class GenericGameService:
                 resource_identity=resource_identity(
                     candidate_mutation.resource_key,
                     candidate_mutation.scope_node_key,
+                    candidate_mutation.pool_key,
                 ),
                 resource_key=candidate_mutation.resource_key,
                 scope_node_key=candidate_mutation.scope_node_key,
+                pool_key=candidate_mutation.pool_key,
+                visibility=ResourcePoolVisibility.VISIBLE,
+                availability=ResourcePoolAvailability.AVAILABLE,
+                survey_discoverable=False,
                 value=0,
                 reserved_value=0,
                 version=1,
@@ -720,16 +929,18 @@ class GenericGameService:
             resource_rows[identity] = resource_row
         projected_values = {key: row.value for key, row in resource_rows.items()}
         projected_reserved = {key: row.reserved_value for key, row in resource_rows.items()}
-        for balance_mutation in outcome.resource_mutations:
+        for balance_mutation in resource_mutations:
             identity = resource_state_key(
                 balance_mutation.resource_key,
                 balance_mutation.scope_node_key,
+                balance_mutation.pool_key,
             )
             projected_values[identity] += balance_mutation.amount
         for reserve_mutation in outcome.resource_reservations:
             identity = resource_state_key(
                 reserve_mutation.resource_key,
                 reserve_mutation.scope_node_key,
+                reserve_mutation.pool_key,
             )
             projected_reserved[identity] += reserve_mutation.amount
         for key, value in projected_values.items():
@@ -772,6 +983,59 @@ class GenericGameService:
             persisted_resource.value = projected_values[key]
             persisted_resource.reserved_value = projected_reserved[key]
             persisted_resource.version += 1
+        for visibility_mutation in outcome.region_resource_visibility_updates:
+            knowledge_row = self.db.get(
+                GameInstanceRegionResourceKnowledge,
+                (self.scope.game_instance_id, visibility_mutation.region_key),
+            )
+            if knowledge_row is None:
+                raise GenericGameError(
+                    "RESOURCE_REGION_KNOWLEDGE_MISSING",
+                    "A Rule referenced missing Region Resource Knowledge",
+                )
+            knowledge_row.resource_inventory_visibility = visibility_mutation.visibility
+            knowledge_row.version += 1
+        for survey_mutation in outcome.region_resource_survey_updates:
+            knowledge_row = self.db.get(
+                GameInstanceRegionResourceKnowledge,
+                (self.scope.game_instance_id, survey_mutation.region_key),
+            )
+            if knowledge_row is None:
+                raise GenericGameError(
+                    "RESOURCE_REGION_KNOWLEDGE_MISSING",
+                    "A Rule referenced missing Region Resource Knowledge",
+                )
+            knowledge_row.resource_survey_completed = survey_mutation.completed
+            knowledge_row.version += 1
+        pool_rows = self.db.scalars(
+            select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == self.scope.game_instance_id
+            )
+        ).all()
+        for visibility_pool_mutation in outcome.resource_pool_visibility_updates:
+            matching = [
+                row for row in pool_rows if row.pool_key == visibility_pool_mutation.pool_key
+            ]
+            if not matching:
+                raise GenericGameError(
+                    "RUNTIME_RESOURCE_POOL_MISSING",
+                    "A Rule referenced missing Resource Pool state",
+                )
+            for pool_row in matching:
+                pool_row.visibility = visibility_pool_mutation.visibility
+                pool_row.version += 1
+        for availability_pool_mutation in outcome.resource_pool_availability_updates:
+            matching = [
+                row for row in pool_rows if row.pool_key == availability_pool_mutation.pool_key
+            ]
+            if not matching:
+                raise GenericGameError(
+                    "RUNTIME_RESOURCE_POOL_MISSING",
+                    "A Rule referenced missing Resource Pool state",
+                )
+            for pool_row in matching:
+                pool_row.availability = availability_pool_mutation.availability
+                pool_row.version += 1
         if outcome.actor_location_update is not None:
             actor = self._actor(actor_key)
             actor.current_node_key = outcome.actor_location_update
@@ -790,6 +1054,71 @@ class GenericGameService:
                     source_rule_key=outcome.selected_rule_key,
                 )
             )
+
+    def _expand_resource_mutations(
+        self,
+        mutations: tuple[ResourceMutation, ...],
+    ) -> tuple[ResourceMutation, ...]:
+        expanded: list[ResourceMutation] = []
+        for mutation in mutations:
+            if mutation.amount >= 0 or mutation.pool_key != "default":
+                expanded.append(mutation)
+                continue
+            remaining = -mutation.amount
+            rows = sorted(
+                self.db.scalars(
+                    select(GameInstanceResourceState).where(
+                        GameInstanceResourceState.game_instance_id == self.scope.game_instance_id,
+                        GameInstanceResourceState.resource_key == mutation.resource_key,
+                        GameInstanceResourceState.scope_node_key == mutation.scope_node_key,
+                        GameInstanceResourceState.visibility == ResourcePoolVisibility.VISIBLE,
+                        GameInstanceResourceState.availability
+                        == ResourcePoolAvailability.AVAILABLE,
+                    )
+                ).all(),
+                key=lambda row: row.pool_key,
+            )
+            knowledge = self.db.get(
+                GameInstanceRegionResourceKnowledge,
+                (self.scope.game_instance_id, mutation.scope_node_key),
+            )
+            rows = [
+                row
+                for row in rows
+                if mutation.scope_node_key is None
+                or row.facility_key is not None
+                or (
+                    knowledge is not None
+                    and ResourceInventoryVisibility(knowledge.resource_inventory_visibility)
+                    == ResourceInventoryVisibility.VISIBLE
+                )
+            ]
+            if not rows:
+                raise GenericGameError(
+                    "RESOURCE_INVENTORY_UNKNOWN",
+                    "The Resource inventory is not known or available",
+                    retryable=True,
+                )
+            available = sum(row.value for row in rows)
+            if available < remaining:
+                raise GenericGameError(
+                    "RULE_OUTCOME_RESOURCE_INVALID",
+                    "The complete Resource outcome would violate Resource bounds",
+                )
+            for row in rows:
+                if remaining <= 0:
+                    break
+                consumed = min(row.value, remaining)
+                expanded.append(
+                    ResourceMutation(
+                        mutation.resource_key,
+                        -consumed,
+                        mutation.scope_node_key,
+                        row.pool_key,
+                    )
+                )
+                remaining -= consumed
+        return tuple(expanded)
 
     def _fact_row(self, node_key: str, fact_key: str) -> GameInstanceFactState:
         row = self.db.get(

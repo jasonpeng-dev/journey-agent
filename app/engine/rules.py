@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from app.domain.enums import CommandReachability
+from app.domain.enums import (
+    CommandReachability,
+    ResourceInventoryVisibility,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
+)
 from app.domain.resources import resource_state_key
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
@@ -58,12 +63,35 @@ class RuleActorState:
 
 
 @dataclass(frozen=True, slots=True)
+class RuleResourcePoolState:
+    pool_key: str
+    resource_key: str
+    region_key: str | None
+    facility_key: str | None
+    quantity: int
+    visibility: ResourcePoolVisibility
+    availability: ResourcePoolAvailability
+    survey_discoverable: bool
+    availability_requirement: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuleRegionResourceKnowledgeState:
+    resource_inventory_visibility: ResourceInventoryVisibility
+    resource_survey_completed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class DeclarativeRuleState:
     nodes: Mapping[str, RuleNodeState]
     facts: Mapping[FactRef, RuleFactState]
     resources: Mapping[str, int]
     resource_reservations: Mapping[str, int]
     actors: Mapping[str, RuleActorState] = field(default_factory=dict)
+    resource_pools: Mapping[str, RuleResourcePoolState] = field(default_factory=dict)
+    region_resource_knowledge: Mapping[str, RuleRegionResourceKnowledgeState] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +136,7 @@ class ResourceMutation:
     resource_key: str
     amount: int
     scope_node_key: str | None = None
+    pool_key: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +144,31 @@ class ResourceReservationMutation:
     resource_key: str
     amount: int
     scope_node_key: str | None = None
+    pool_key: str = "default"
+
+
+@dataclass(frozen=True, slots=True)
+class RegionResourceVisibilityMutation:
+    region_key: str
+    visibility: ResourceInventoryVisibility
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcePoolVisibilityMutation:
+    pool_key: str
+    visibility: ResourcePoolVisibility
+
+
+@dataclass(frozen=True, slots=True)
+class ResourcePoolAvailabilityMutation:
+    pool_key: str
+    availability: ResourcePoolAvailability
+
+
+@dataclass(frozen=True, slots=True)
+class RegionResourceSurveyMutation:
+    region_key: str
+    completed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +204,10 @@ class GenericRuleOutcome:
     memory_events: tuple[MemoryEvent, ...] = ()
     actor_location_update: str | None = None
     actor_command_reachability_updates: tuple[ActorCommandReachabilityMutation, ...] = ()
+    region_resource_visibility_updates: tuple[RegionResourceVisibilityMutation, ...] = ()
+    region_resource_survey_updates: tuple[RegionResourceSurveyMutation, ...] = ()
+    resource_pool_visibility_updates: tuple[ResourcePoolVisibilityMutation, ...] = ()
+    resource_pool_availability_updates: tuple[ResourcePoolAvailabilityMutation, ...] = ()
 
 
 class DeclarativeRuleEngine:
@@ -198,13 +256,19 @@ class DeclarativeRuleEngine:
         *,
         required: bool,
     ) -> RuleDefinitionV2 | None:
-        matches = [
-            rule
-            for rule in self.definition.rules
-            if rule.phase == phase
-            and rule.action_key == context.action_key
-            and (rule.condition is None or self._condition(rule.condition, state, context))
-        ]
+        matches: list[RuleDefinitionV2] = []
+        for rule in self.definition.rules:
+            if rule.phase != phase or rule.action_key != context.action_key:
+                continue
+            if rule.condition is None:
+                matches.append(rule)
+                continue
+            try:
+                if self._condition(rule.condition, state, context):
+                    matches.append(rule)
+            except RuleEngineError as exc:
+                if exc.code != "RULE_RESOURCE_MISSING":
+                    raise
         if not matches:
             if required:
                 raise RuleEngineError(
@@ -258,10 +322,10 @@ class DeclarativeRuleEngine:
         if kind == ConditionKind.RESOURCE_COMPARE:
             assert condition.resource_key and condition.operator and condition.value is not None
             key = self._resource_key(condition.resource_scope, context)
-            value = _required(
-                state.resources,
-                key_for_resource(condition.resource_key, key),
-                "RULE_RESOURCE_MISSING",
+            value = self._resource_value(
+                state,
+                condition.resource_key,
+                key,
             )
             return _compare(value, condition.operator, condition.value)
         if kind == ConditionKind.PARAMETER_COMPARE:
@@ -301,6 +365,9 @@ class DeclarativeRuleEngine:
         reservations: list[ResourceReservationMutation] = []
         memories: list[MemoryEvent] = []
         actor_reachability: list[ActorCommandReachabilityMutation] = []
+        region_resource_visibility: list[RegionResourceVisibilityMutation] = []
+        resource_pool_visibility: list[ResourcePoolVisibilityMutation] = []
+        resource_pool_availability: list[ResourcePoolAvailabilityMutation] = []
         outcome_code: str | None = None
         failure: RuleFailure | None = None
         for effect in rule.effects:
@@ -373,6 +440,27 @@ class DeclarativeRuleEngine:
                 actor_reachability.append(
                     ActorCommandReachabilityMutation(actor_key, effect.command_reachability)
                 )
+            elif effect.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY:
+                assert effect.region_key is not None and effect.visibility is not None
+                region_resource_visibility.append(
+                    RegionResourceVisibilityMutation(
+                        effect.region_key,
+                        ResourceInventoryVisibility(effect.visibility.value),
+                    )
+                )
+            elif effect.kind == EffectKind.SET_RESOURCE_POOL_VISIBILITY:
+                assert effect.pool_key is not None and effect.visibility is not None
+                resource_pool_visibility.append(
+                    ResourcePoolVisibilityMutation(
+                        effect.pool_key,
+                        ResourcePoolVisibility(effect.visibility.value),
+                    )
+                )
+            elif effect.kind == EffectKind.SET_RESOURCE_POOL_AVAILABILITY:
+                assert effect.pool_key is not None and effect.availability is not None
+                resource_pool_availability.append(
+                    ResourcePoolAvailabilityMutation(effect.pool_key, effect.availability)
+                )
         return GenericRuleOutcome(
             selected_rule_key=rule.key,
             outcome_code=outcome_code,
@@ -385,6 +473,9 @@ class DeclarativeRuleEngine:
             resource_reservations=tuple(reservations),
             memory_events=tuple(memories),
             actor_command_reachability_updates=tuple(actor_reachability),
+            region_resource_visibility_updates=tuple(region_resource_visibility),
+            resource_pool_visibility_updates=tuple(resource_pool_visibility),
+            resource_pool_availability_updates=tuple(resource_pool_availability),
         )
 
     def _effect_nodes(
@@ -505,6 +596,48 @@ class DeclarativeRuleEngine:
         return self._resource_scope(scope, context)
 
     @staticmethod
+    def _resource_value(
+        state: DeclarativeRuleState,
+        resource_key: str,
+        scope_node_key: str | None,
+    ) -> int:
+        visible_pools = [
+            pool
+            for pool in state.resource_pools.values()
+            if (
+                pool.resource_key == resource_key
+                and pool.region_key == scope_node_key
+                and pool.visibility == ResourcePoolVisibility.VISIBLE
+                and (
+                    scope_node_key is None
+                    or pool.facility_key is not None
+                    or (
+                        state.region_resource_knowledge.get(scope_node_key) is not None
+                        and state.region_resource_knowledge[
+                            scope_node_key
+                        ].resource_inventory_visibility
+                        == ResourceInventoryVisibility.VISIBLE
+                    )
+                )
+            )
+        ]
+        if not visible_pools:
+            # Keep the legacy, unpooled DeclarativeRuleState contract usable
+            # for callers that do not provide pool metadata.
+            direct = state.resources.get(resource_state_key(resource_key, scope_node_key))
+            if direct is not None and not state.resource_pools:
+                return direct
+            raise RuleEngineError(
+                "RULE_RESOURCE_MISSING",
+                "The known available Resource state is missing",
+            )
+        return sum(
+            pool.quantity
+            for pool in visible_pools
+            if pool.availability == ResourcePoolAvailability.AVAILABLE
+        )
+
+    @staticmethod
     def _validate_context(action: ActionDefinitionV2, context: ActionRuleContext) -> None:
         definitions = {parameter.key: parameter for parameter in action.parameters}
         if set(context.parameters).difference(definitions):
@@ -553,8 +686,12 @@ def _required[Key, Value](mapping: Mapping[Key, Value], key: Key, code: str) -> 
         raise RuleEngineError(code, f"Required rule state is missing: {key}") from None
 
 
-def key_for_resource(resource_key: str, scope_node_key: str | None) -> str:
-    return resource_state_key(resource_key, scope_node_key)
+def key_for_resource(
+    resource_key: str,
+    scope_node_key: str | None,
+    pool_key: str = "default",
+) -> str:
+    return resource_state_key(resource_key, scope_node_key, pool_key)
 
 
 def _compare(left: StrictScalar, operator: ComparisonOperator, right: StrictScalar) -> bool:
@@ -584,8 +721,14 @@ __all__ = [
     "DeclarativeRuleEngine",
     "DeclarativeRuleState",
     "GenericRuleOutcome",
+    "RegionResourceSurveyMutation",
+    "RegionResourceVisibilityMutation",
+    "ResourcePoolAvailabilityMutation",
+    "ResourcePoolVisibilityMutation",
     "RuleActorState",
     "RuleEngineError",
     "RuleFactState",
     "RuleNodeState",
+    "RuleRegionResourceKnowledgeState",
+    "RuleResourcePoolState",
 ]

@@ -21,7 +21,12 @@ from pydantic import (
     model_validator,
 )
 
-from app.domain.enums import CommandReachability
+from app.domain.enums import (
+    CommandReachability,
+    ResourceInventoryVisibility,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
+)
 from app.domain.world import AccessState, FactValueType, Visibility
 
 type StableKey = Annotated[
@@ -70,6 +75,7 @@ class ActionBehavior(StrEnum):
     INSPECT = "INSPECT"
     TRANSPORT_RESOURCE = "TRANSPORT_RESOURCE"
     RELAY_MESSAGE = "RELAY_MESSAGE"
+    SURVEY_RESOURCES = "SURVEY_RESOURCES"
 
 
 class ActionLocality(StrEnum):
@@ -78,6 +84,7 @@ class ActionLocality(StrEnum):
     FACILITY_REGION = "FACILITY_REGION"
     TRANSPORT_ENDPOINT = "TRANSPORT_ENDPOINT"
     ACTOR_REGION = "ACTOR_REGION"
+    REGION = "REGION"
 
 
 class ActionTargetKind(StrEnum):
@@ -162,6 +169,9 @@ class EffectKind(StrEnum):
     EMIT_FAILURE = "EMIT_FAILURE"
     WRITE_MEMORY_EVENT = "WRITE_MEMORY_EVENT"
     SET_ACTOR_COMMAND_REACHABILITY = "SET_ACTOR_COMMAND_REACHABILITY"
+    SET_REGION_RESOURCE_VISIBILITY = "SET_REGION_RESOURCE_VISIBILITY"
+    SET_RESOURCE_POOL_VISIBILITY = "SET_RESOURCE_POOL_VISIBILITY"
+    SET_RESOURCE_POOL_AVAILABILITY = "SET_RESOURCE_POOL_AVAILABILITY"
 
 
 class ResourceInitialStateV2(FrozenDefinitionModel):
@@ -177,6 +187,46 @@ class ResourceInitialStateV2(FrozenDefinitionModel):
         if self.reserved_value > self.value:
             raise ValueError("Resource initial reserved_value cannot exceed value")
         return self
+
+
+class ResourceAvailabilityRequirementV2(FrozenDefinitionModel):
+    """Known Fact that can unlock a currently unavailable Resource Pool."""
+
+    node_key: StableKey
+    fact_key: StableKey
+    value: StrictScalar
+
+
+class ResourcePoolDefinitionV2(FrozenDefinitionModel):
+    """One author-declared initial Resource Pool."""
+
+    pool_key: StableKey
+    resource_key: StableKey
+    region_key: StableKey | None = None
+    facility_key: StableKey | None = None
+    quantity: int = Field(ge=0)
+    reserved_value: int = Field(default=0, ge=0)
+    visibility: ResourcePoolVisibility = ResourcePoolVisibility.VISIBLE
+    availability: ResourcePoolAvailability = ResourcePoolAvailability.AVAILABLE
+    survey_discoverable: bool = False
+    availability_requirement: ResourceAvailabilityRequirementV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def validate_reservation(self) -> ResourcePoolDefinitionV2:
+        if self.reserved_value > self.quantity:
+            raise ValueError("Resource Pool reserved_value cannot exceed quantity")
+        return self
+
+
+class RegionResourceKnowledgeInitialStateV2(FrozenDefinitionModel):
+    """Optional initial Region resource intelligence state."""
+
+    region_key: StableKey
+    resource_inventory_visibility: ResourceInventoryVisibility = ResourceInventoryVisibility.VISIBLE
+    resource_survey_completed: bool = True
 
 
 class LocalityContractV2(FrozenDefinitionModel):
@@ -241,6 +291,14 @@ class InitializationV2(FrozenDefinitionModel):
     start_node_key: StableKey
     primary_actor_key: StableKey
     resource_initial_states: tuple[ResourceInitialStateV2, ...] = ()
+    resource_pools: tuple[ResourcePoolDefinitionV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+    region_resource_knowledge: tuple[RegionResourceKnowledgeInitialStateV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
 
 
 class NodeTypeDefinitionV2(FrozenDefinitionModel):
@@ -513,6 +571,11 @@ class ActionDefinitionV2(FrozenDefinitionModel):
             and self.target_kind != ActionTargetKind.ACTOR
         ):
             raise ValueError("RELAY_MESSAGE Actions require an ACTOR target")
+        if (
+            self.behavior == ActionBehavior.SURVEY_RESOURCES
+            and self.locality != ActionLocality.REGION
+        ):
+            raise ValueError("SURVEY_RESOURCES Actions require REGION locality")
         return self
 
 
@@ -655,6 +718,16 @@ class EffectV2(FrozenDefinitionModel):
         default=None,
         exclude_if=lambda value: value is None,
     )
+    region_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    pool_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    visibility: ResourceInventoryVisibility | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    availability: ResourcePoolAvailability | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_shape(self) -> EffectV2:
@@ -692,6 +765,18 @@ class EffectV2(FrozenDefinitionModel):
             and self.command_reachability is None
         ):
             raise ValueError("SET_ACTOR_COMMAND_REACHABILITY requires command_reachability")
+        elif self.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY and (
+            self.region_key is None or self.visibility is None
+        ):
+            raise ValueError("SET_REGION_RESOURCE_VISIBILITY requires region_key/visibility")
+        elif self.kind == EffectKind.SET_RESOURCE_POOL_VISIBILITY and (
+            self.pool_key is None or self.visibility is None
+        ):
+            raise ValueError("SET_RESOURCE_POOL_VISIBILITY requires pool_key/visibility")
+        elif self.kind == EffectKind.SET_RESOURCE_POOL_AVAILABILITY and (
+            self.pool_key is None or self.availability is None
+        ):
+            raise ValueError("SET_RESOURCE_POOL_AVAILABILITY requires pool_key/availability")
         return self
 
 
@@ -741,6 +826,11 @@ class ObjectiveDefinitionV2(FrozenDefinitionModel):
     subsumes: tuple[StableKey, ...] = ()
     goal_aliases: tuple[str, ...] = ()
     goal_examples: tuple[str, ...] = ()
+    planning_guidance: str | None = Field(
+        default=None,
+        max_length=4000,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_objective_keys(self) -> ObjectiveDefinitionV2:
@@ -899,6 +989,8 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
 
     _validate_locality_contract(definition, nodes, node_types)
     _validate_resource_initial_states(definition, nodes)
+    _validate_resource_pools(definition, nodes)
+    _validate_region_resource_knowledge(definition, nodes)
 
     _require_key(nodes, definition.initialization.start_node_key, "start Node")
     primary = _require_key(
@@ -988,6 +1080,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 parameters,
                 action,
                 definition.metadata.locality,
+                {item.pool_key for item in definition.initialization.resource_pools},
             )
 
     aliases: set[str] = set()
@@ -1065,6 +1158,7 @@ def _validate_effect_refs(
     parameters: dict[str, ActionParameterV2],
     action: ActionDefinitionV2,
     locality: LocalityContractV2,
+    pool_keys: set[str],
 ) -> None:
     if effect.actor_key is not None:
         _require_key(actors, effect.actor_key, "Effect Actor")
@@ -1078,6 +1172,22 @@ def _validate_effect_refs(
             resource.reservation_supported
         ):
             raise ValueError("Resource reservation Effect requires reservation_supported")
+    if effect.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY:
+        assert effect.region_key is not None
+        if not locality.enabled or not locality.scoped_resources:
+            raise ValueError("Region Resource Visibility requires scoped locality")
+        region = _require_key(nodes, effect.region_key, "Region Resource Visibility Region")
+        if region.node_type_key != locality.region_node_type_key:
+            raise ValueError("Region Resource Visibility must target a Region Node")
+    if effect.kind in {
+        EffectKind.SET_RESOURCE_POOL_VISIBILITY,
+        EffectKind.SET_RESOURCE_POOL_AVAILABILITY,
+    }:
+        assert effect.pool_key is not None
+        if not locality.enabled or not locality.scoped_resources:
+            raise ValueError("Resource Pool Effects require scoped locality")
+        if effect.pool_key != "default" and effect.pool_key not in pool_keys:
+            raise ValueError(f"Resource Pool Effect references unknown Pool {effect.pool_key}")
     expressions = [effect.value, effect.amount]
     for expression in expressions:
         if expression is not None and expression.parameter_key is not None:
@@ -1191,8 +1301,98 @@ def _validate_resource_initial_states(
             raise ValueError("Initial Resource state value is outside its Resource bounds")
         if state.reserved_value > state.value:
             raise ValueError("Initial Resource reserved_value cannot exceed value")
-    if {item.resource_key for item in states} != set(resources):
+    # When Pool authoring is present, resources not listed in either section
+    # still receive the backward-compatible default Pool at runtime.  The
+    # legacy balance-only form retains its original "initialize every
+    # Resource" contract.
+    if not definition.initialization.resource_pools and {
+        item.resource_key for item in states
+    } != set(resources):
         raise ValueError("Initial Resource states must initialize every Resource definition")
+
+
+def _validate_resource_pools(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+) -> None:
+    pools = definition.initialization.resource_pools
+    if not pools:
+        return
+    locality = definition.metadata.locality
+    resources = {item.key: item for item in definition.world.resources}
+    seen_pool_keys: set[str] = set()
+    seen_identities: set[tuple[str, str, str | None]] = set()
+    for pool in pools:
+        if pool.pool_key in seen_pool_keys:
+            raise ValueError("Resource Pool keys must be globally unique")
+        seen_pool_keys.add(pool.pool_key)
+        resource = _require_key(resources, pool.resource_key, "Resource Pool Resource")
+        if pool.quantity < resource.minimum or (
+            resource.maximum is not None and pool.quantity > resource.maximum
+        ):
+            raise ValueError("Resource Pool quantity is outside its Resource bounds")
+        if pool.reserved_value > pool.quantity:
+            raise ValueError("Resource Pool reserved_value cannot exceed quantity")
+        if pool.region_key is not None:
+            if not locality.enabled or not locality.scoped_resources:
+                raise ValueError("Region Resource Pools require locality.scoped_resources")
+            region = _require_key(nodes, pool.region_key, "Resource Pool Region")
+            if region.node_type_key != locality.region_node_type_key:
+                raise ValueError("Resource Pool region_key must target a Region Node")
+        if pool.facility_key is not None:
+            if not locality.enabled or pool.region_key is None:
+                raise ValueError("A Facility-bound Resource Pool requires a Region")
+            facility = _require_key(nodes, pool.facility_key, "Resource Pool Facility")
+            if facility.node_type_key != locality.facility_node_type_key:
+                raise ValueError("Resource Pool facility_key must target a Facility Node")
+            if (
+                region_for_node_key := _static_facility_region(definition, pool.facility_key)
+            ) and region_for_node_key != pool.region_key:
+                raise ValueError("Resource Pool Facility must belong to its Region")
+        identity = (pool.resource_key, pool.region_key or "", pool.pool_key)
+        if identity in seen_identities:
+            raise ValueError("Resource Pool identities must be unique")
+        seen_identities.add(identity)
+        if pool.availability_requirement is not None:
+            _require_fact(
+                nodes,
+                pool.availability_requirement.node_key,
+                pool.availability_requirement.fact_key,
+                "Resource Pool availability requirement",
+            )
+
+
+def _validate_region_resource_knowledge(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+) -> None:
+    states = definition.initialization.region_resource_knowledge
+    if not states:
+        return
+    locality = definition.metadata.locality
+    seen: set[str] = set()
+    for state in states:
+        if state.region_key in seen:
+            raise ValueError("Region Resource Knowledge keys must be unique")
+        seen.add(state.region_key)
+        if not locality.enabled or not locality.scoped_resources:
+            raise ValueError("Region Resource Knowledge requires locality.scoped_resources")
+        node = _require_key(nodes, state.region_key, "Region Resource Knowledge Region")
+        if node.node_type_key != locality.region_node_type_key:
+            raise ValueError("Region Resource Knowledge must target a Region Node")
+
+
+def _static_facility_region(definition: ScenarioDefinitionV2, facility_key: str) -> str | None:
+    locality = definition.metadata.locality
+    relation_key = locality.located_in_relation_type_key
+    if relation_key is None:
+        return None
+    matches = [
+        item.target_node_key
+        for item in definition.world.relations
+        if item.source_node_key == facility_key and item.relation_type_key == relation_key
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _validate_resource_scope(
@@ -1271,7 +1471,10 @@ __all__ = [
     "EffectKind",
     "EngineCapability",
     "LocalityContractV2",
+    "RegionResourceKnowledgeInitialStateV2",
+    "ResourceAvailabilityRequirementV2",
     "ResourceInitialStateV2",
+    "ResourcePoolDefinitionV2",
     "ResourceScopeKind",
     "ResourceScopeV2",
     "RulePhase",

@@ -14,9 +14,10 @@ from sqlalchemy.orm import Session
 from app.domain.enums import GameInstanceStatus, NodeStatus
 from app.domain.resources import (
     resource_identity,
-    resource_initial_states,
+    resource_pool_initial_states,
     valid_resource_state_identity,
 )
+from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2
 from app.domain.world import AccessState
 from app.infrastructure.db.models import (
     ConversationSession,
@@ -24,6 +25,7 @@ from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
+    GameInstanceRegionResourceKnowledge,
     GameInstanceResourceState,
     Player,
 )
@@ -132,30 +134,50 @@ class RuntimeInitializationService:
                         visibility=fact.initial_visibility,
                     )
                 )
-        resource_states = resource_initial_states(definition)
-        if self._supports_scoped_resource_schema():
-            for resource_state in resource_states:
+        resource_pools = resource_pool_initial_states(definition)
+        supports_scoped_resources = self._supports_scoped_resource_schema()
+        supports_resource_pools = self._supports_resource_pool_schema()
+        if supports_scoped_resources and supports_resource_pools:
+            for pool in resource_pools:
                 self.db.add(
                     GameInstanceResourceState(
                         game_instance_id=instance.id,
                         resource_identity=resource_identity(
-                            resource_state.resource_key,
-                            resource_state.scope_node_key,
+                            pool.resource_key,
+                            pool.region_key,
+                            pool.pool_key,
                         ),
-                        resource_key=resource_state.resource_key,
-                        scope_node_key=resource_state.scope_node_key,
-                        value=resource_state.value,
-                        reserved_value=resource_state.reserved_value,
+                        resource_key=pool.resource_key,
+                        scope_node_key=pool.region_key,
+                        pool_key=pool.pool_key,
+                        facility_key=pool.facility_key,
+                        value=pool.quantity,
+                        reserved_value=pool.reserved_value,
+                        visibility=pool.visibility,
+                        availability=pool.availability,
+                        survey_discoverable=pool.survey_discoverable,
+                        availability_requirement=(
+                            pool.availability_requirement.model_dump(mode="json")
+                            if pool.availability_requirement is not None
+                            else None
+                        ),
                     )
                 )
         else:
-            if any(item.scope_node_key is not None for item in resource_states):
+            if any(
+                item.region_key is not None
+                or item.pool_key != "default"
+                or item.facility_key is not None
+                or item.visibility.value != "VISIBLE"
+                or item.availability.value != "AVAILABLE"
+                for item in resource_pools
+            ):
                 raise RuntimeInitializationError(
-                    "RUNTIME_SCOPED_RESOURCE_SCHEMA_REQUIRED",
-                    "This database must be upgraded before a scoped Resource Scenario can start",
+                    "RUNTIME_RESOURCE_POOL_SCHEMA_REQUIRED",
+                    "This database must be upgraded before a Resource Pool Scenario can start",
                 )
             now = datetime.now(UTC)
-            for resource_state in resource_states:
+            for pool in resource_pools:
                 self.db.execute(
                     text(
                         """
@@ -168,13 +190,34 @@ class RuntimeInitializationService:
                     ),
                     {
                         "game_instance_id": instance.id.hex,
-                        "resource_key": resource_state.resource_key,
-                        "value": resource_state.value,
-                        "reserved_value": resource_state.reserved_value,
+                        "resource_key": pool.resource_key,
+                        "value": pool.quantity,
+                        "reserved_value": pool.reserved_value,
                         "version": 1,
                         "created_at": now,
                         "updated_at": now,
                     },
+                )
+        if self._supports_region_resource_knowledge_schema():
+            configured_knowledge = {
+                item.region_key: item
+                for item in definition.initialization.region_resource_knowledge
+            }
+            for region in self._region_nodes(definition):
+                initial = configured_knowledge.get(region.key)
+                self.db.add(
+                    GameInstanceRegionResourceKnowledge(
+                        game_instance_id=instance.id,
+                        region_key=region.key,
+                        resource_inventory_visibility=(
+                            initial.resource_inventory_visibility.value
+                            if initial is not None
+                            else "VISIBLE"
+                        ),
+                        resource_survey_completed=(
+                            initial.resource_survey_completed if initial is not None else True
+                        ),
+                    )
                 )
         roles = {role.key: role for role in definition.actors.roles}
         primary_key = definition.initialization.primary_actor_key
@@ -261,6 +304,29 @@ class RuntimeInitializationService:
         columns = inspect(self.db.connection()).get_columns("game_instance_resource_states")
         return "resource_identity" in {str(item["name"]) for item in columns}
 
+    def _supports_resource_pool_schema(self) -> bool:
+        columns = inspect(self.db.connection()).get_columns("game_instance_resource_states")
+        names = {str(item["name"]) for item in columns}
+        return {"pool_key", "visibility", "availability"}.issubset(names)
+
+    def _supports_region_resource_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns("game_instance_region_resource_knowledge")
+        except Exception:
+            return False
+        return True
+
+    @staticmethod
+    def _region_nodes(definition: ScenarioDefinitionV2) -> tuple[NodeDefinitionV2, ...]:
+        locality = definition.metadata.locality
+        if not locality.enabled or locality.region_node_type_key is None:
+            return ()
+        return tuple(
+            node
+            for node in definition.world.nodes
+            if node.node_type_key == locality.region_node_type_key
+        )
+
     def _supports_actor_reachability_schema(self) -> bool:
         columns = inspect(self.db.connection()).get_columns("game_instance_actors")
         return "command_reachability" in {str(item["name"]) for item in columns}
@@ -285,6 +351,11 @@ class RuntimeInitializationService:
         resource_rows = self.db.scalars(
             select(GameInstanceResourceState).where(
                 GameInstanceResourceState.game_instance_id == instance.id
+            )
+        ).all()
+        region_knowledge_rows = self.db.scalars(
+            select(GameInstanceRegionResourceKnowledge).where(
+                GameInstanceRegionResourceKnowledge.game_instance_id == instance.id
             )
         ).all()
         counts = tuple(
@@ -313,18 +384,29 @@ class RuntimeInitializationService:
             len(definition.actors.actor_profiles),
         )
         expected_resources = {
-            (item.resource_key, item.scope_node_key) for item in resource_initial_states(definition)
+            (item.resource_key, item.region_key, item.pool_key)
+            for item in resource_pool_initial_states(definition)
         }
-        actual_resources = {(row.resource_key, row.scope_node_key) for row in resource_rows}
+        actual_resources = {
+            (row.resource_key, row.scope_node_key, row.pool_key) for row in resource_rows
+        }
+        expected_regions = {
+            node.key
+            for node in definition.world.nodes
+            if definition.metadata.locality.enabled
+            and node.node_type_key == definition.metadata.locality.region_node_type_key
+        }
         resources_valid = expected_resources.issubset(actual_resources) and all(
             valid_resource_state_identity(
                 definition,
                 row.resource_key,
                 row.scope_node_key,
+                row.pool_key,
             )
             for row in resource_rows
         )
-        if len(sessions) != 1 or counts != expected or not resources_valid:
+        knowledge_valid = {row.region_key for row in region_knowledge_rows} == expected_regions
+        if len(sessions) != 1 or counts != expected or not resources_valid or not knowledge_valid:
             raise RuntimeInitializationError(
                 "RUNTIME_INITIALIZATION_INCOMPLETE",
                 "The idempotent GameInstance runtime graph is incomplete",

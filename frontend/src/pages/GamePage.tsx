@@ -9,6 +9,7 @@ import type {
   PublicPlanHistory,
   PublicPlanHistoryStep,
   PlayerGameState,
+  ResourceIntelligence,
   PublicTask,
   PublicTimelineEvent,
 } from "../types";
@@ -323,6 +324,7 @@ type KnowledgeAccordionProps = {
   id: KnowledgeAccordionKey;
   title: string;
   count: number;
+  countLabel?: string;
   summary: string;
   open: boolean;
   onToggle: () => void;
@@ -333,6 +335,7 @@ export function KnowledgeAccordion({
   id,
   title,
   count,
+  countLabel,
   summary,
   open,
   onToggle,
@@ -349,7 +352,7 @@ export function KnowledgeAccordion({
         onClick={onToggle}
       >
         <span className="knowledge-accordion-heading">
-          <strong>{title} · {count}</strong>
+          <strong>{title} · {countLabel ?? count}</strong>
           <small>{summary}</small>
         </span>
         <span className="knowledge-accordion-action">{open ? "收起" : "展开"}</span>
@@ -361,6 +364,7 @@ export function KnowledgeAccordion({
 
 type KnownWorldAccordionsProps = {
   resources: PlayerGameState["resources"];
+  resourceIntelligence?: ResourceIntelligence;
   visibleNodes: PlayerGameState["visible_nodes"];
   actors: PlayerGameState["actors"];
   knownFacts: PlayerGameState["known_facts"];
@@ -369,6 +373,7 @@ type KnownWorldAccordionsProps = {
 
 export function KnownWorldAccordions({
   resources,
+  resourceIntelligence,
   visibleNodes,
   actors,
   knownFacts,
@@ -394,14 +399,87 @@ export function KnownWorldAccordions({
     <div className="knowledge-accordions">
       <KnowledgeAccordion
         id="resources"
+        countLabel={
+          resourceIntelligence
+            ? resourceIntelligence.visible_region_count + " / " + resourceIntelligence.total_regions
+            : undefined
+        }
         title="资源"
         count={resources.length}
         summary="可用资源状态"
         open={expanded.resources}
         onToggle={() => toggle("resources")}
       >
+        {resourceIntelligence && (
+          <div className="console-region-groups">
+            {Object.entries(resourceIntelligence.regions)
+              .filter(
+                ([, region]) =>
+                  region.resource_inventory_visibility === "VISIBLE" ||
+                  Object.keys(region.resources).length > 0,
+              )
+              .map(([regionKey, region]) => (
+                <details className="knowledge-region" open key={regionKey}>
+                  <summary>
+                    <span>
+                      <strong>{region.region_name ?? regionKey}</strong>
+                      <small>{region.resource_survey_completed ? "已完成查探" : "可进行完整查探"}</small>
+                    </span>
+                  </summary>
+                  <div className="knowledge-region-content">
+                    <div className="knowledge-entry-list">
+                      {Object.entries(region.resources).length === 0 ? (
+                        <div className="knowledge-entry-empty">当前无已记录资源</div>
+                      ) : (
+                        Object.entries(region.resources).map(([resourceKey, resource]) => (
+                          <div className="knowledge-entry" key={regionKey + ":" + resourceKey}>
+                            <div className="knowledge-entry-copy">
+                              <strong>{resource.resource_name}</strong>
+                              {resource.pools
+                                .filter((pool) => pool.availability === "UNAVAILABLE")
+                                .map((pool, index) => (
+                                  <small key={index}>
+                                    暂不可用 {pool.quantity}
+                                    {pool.facility_name ? ` · ${pool.facility_name}` : ""}
+                                    {pool.availability_requirement
+                                      ? " · 修复后可调用"
+                                      : pool.availability_requirement_status === "UNKNOWN"
+                                        ? " · 解锁条件未知"
+                                        : ""}
+                                  </small>
+                                ))}
+                            </div>
+                            <span className="console-pill success knowledge-status-pill">
+                              {resource.known_available} / {resource.known_total}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </details>
+              ))}
+            {Object.entries(resourceIntelligence.global_resources).length > 0 && (
+              <details className="knowledge-region" open>
+                <summary><span><strong>全局资源</strong></span></summary>
+                <div className="knowledge-region-content">
+                  <div className="knowledge-entry-list">
+                    {Object.entries(resourceIntelligence.global_resources).map(([resourceKey, resource]) => (
+                      <div className="knowledge-entry" key={"global:" + resourceKey}>
+                        <div className="knowledge-entry-copy"><strong>{resource.resource_name}</strong></div>
+                        <span className="console-pill success knowledge-status-pill">
+                          {resource.known_available} / {resource.known_total}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </details>
+            )}
+          </div>
+        )}
         <div className="console-region-groups">
-          {resourceGroups.map((group) => (
+          {(resourceIntelligence ? [] : resourceGroups).map((group) => (
             <details className="knowledge-region" open key={group.key}>
               <summary>
                 <span>
@@ -451,6 +529,17 @@ export function KnownWorldAccordions({
                     <div className="knowledge-entry-copy">
                       <strong>{node.name}</strong>
                       <small>{node.key}</small>
+                      {node.associated_known_resources?.map((resource, index) => (
+                        <small key={index}>
+                          关联资源：{String(resource.resource_name ?? resource.resource_key ?? "")} ×{String(resource.quantity ?? "")}
+                          {resource.availability === "UNAVAILABLE" ? " · 暂不可用" : ""}
+                          {resource.availability_requirement
+                            ? " · 修复后可调用"
+                            : resource.availability_requirement_status === "UNKNOWN"
+                              ? " · 解锁条件未知"
+                              : ""}
+                        </small>
+                      ))}
                     </div>
                     <span className={`console-pill ${node.accessible ? "success" : "neutral"} knowledge-status-pill`}>
                       {node.accessible ? "可访问" : "已锁定"}

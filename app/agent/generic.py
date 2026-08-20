@@ -35,9 +35,13 @@ from app.domain.enums import (
     CommandReachability,
     DecisionStatus,
     NodeStatus,
+    ResourceInventoryVisibility,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
     StepExecutionType,
     WorldOperationStatus,
 )
+from app.domain.resources import resource_state_key
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
@@ -56,6 +60,8 @@ from app.domain.scenario_v2 import (
 from app.domain.world import Visibility
 from app.engine.locality import (
     LocalityEngineError,
+    region_for_node,
+    resolve_resource_scope,
     validate_action_locality,
 )
 from app.infrastructure.db.models import (
@@ -67,6 +73,7 @@ from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
+    GameInstanceResourceState,
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
@@ -77,8 +84,28 @@ from app.services.generic_actions import (
     GenericActionService,
     GenericApprovalRequired,
 )
+from app.services.knowledge_projection import SharedKnowledgeProjection
 
 ObjectiveSelector = Callable[[str, tuple[ObjectiveDefinitionV2, ...]], str | None]
+
+
+@dataclass(slots=True)
+class _ProjectedResourcePool:
+    pool_key: str
+    resource_key: str
+    region_key: str | None
+    facility_key: str | None
+    quantity: int | None
+    visibility: ResourcePoolVisibility
+    availability: ResourcePoolAvailability
+    survey_discoverable: bool
+
+
+@dataclass(slots=True)
+class _ProjectedRegionResourceKnowledge:
+    visibility: ResourceInventoryVisibility
+    survey_completed: bool
+
 
 _NON_TERMINAL_TASK_STATUSES = (
     AgentTaskStatus.ACTIVE,
@@ -663,6 +690,9 @@ class GenericAgentService:
             actor_key: _actor_command_reachability(actor) for actor_key, actor in actors.items()
         }
         projected_known_passability = self._known_passability(definition)
+        projected_resource_pools, projected_region_resource_knowledge = (
+            self._projected_resource_state(definition)
+        )
         actions = {action.key: action for action in definition.actions}
 
         for step in remaining_steps:
@@ -736,6 +766,16 @@ class GenericAgentService:
                     projected_known_passability,
                     actors=actors,
                     projected_command_reachability=projected_command_reachability,
+                )
+                self._validate_and_advance_projected_resources(
+                    definition,
+                    action,
+                    actor_key,
+                    target_key,
+                    parameters,
+                    projected_actor_locations,
+                    projected_resource_pools,
+                    projected_region_resource_knowledge,
                 )
             except GenericAgentError as exc:
                 diagnostic: dict[str, object] = {
@@ -1091,6 +1131,9 @@ class GenericAgentService:
             actor_key: _actor_command_reachability(actor) for actor_key, actor in actors.items()
         }
         projected_known_passability = self._known_passability(definition)
+        projected_resource_pools, projected_region_resource_knowledge = (
+            self._projected_resource_state(definition)
+        )
         target_keys = {
             str(item.get("target_key"))
             for item in planning_context.relevant_targets
@@ -1202,6 +1245,16 @@ class GenericAgentService:
                     projected_known_passability,
                     actors=actors,
                     projected_command_reachability=projected_command_reachability,
+                )
+                self._validate_and_advance_projected_resources(
+                    definition,
+                    action,
+                    actor_key,
+                    target_key,
+                    parameters,
+                    projected_actor_locations,
+                    projected_resource_pools,
+                    projected_region_resource_knowledge,
                 )
             except GenericAgentError as exc:
                 diagnostics.append(
@@ -1474,6 +1527,318 @@ class GenericAgentService:
                 "The proposed route is known to be blocked",
             )
         return connector
+
+    def _projected_resource_state(
+        self,
+        definition: ScenarioDefinitionV2,
+    ) -> tuple[
+        dict[str, _ProjectedResourcePool],
+        dict[str, _ProjectedRegionResourceKnowledge],
+    ]:
+        projection = SharedKnowledgeProjection(self.db, self.scope, definition)
+        known_pools = projection.visible_resource_pools()
+        known_identities = {
+            resource_state_key(item.resource_key, item.region_key, item.pool_key)
+            for item in known_pools
+        }
+        pools = {
+            resource_state_key(
+                item.resource_key, item.region_key, item.pool_key
+            ): _ProjectedResourcePool(
+                pool_key=item.pool_key,
+                resource_key=item.resource_key,
+                region_key=item.region_key,
+                facility_key=item.facility_key,
+                quantity=item.quantity,
+                visibility=ResourcePoolVisibility.VISIBLE,
+                availability=item.availability,
+                survey_discoverable=False,
+            )
+            for item in known_pools
+        }
+        for row in self.db.scalars(
+            select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == self.scope.game_instance_id
+            )
+        ):
+            identity = resource_state_key(row.resource_key, row.scope_node_key, row.pool_key)
+            if identity in pools:
+                continue
+            visibility = ResourcePoolVisibility(row.visibility)
+            pools[identity] = _ProjectedResourcePool(
+                pool_key=row.pool_key,
+                resource_key=row.resource_key,
+                region_key=row.scope_node_key,
+                facility_key=row.facility_key,
+                quantity=(row.value if identity in known_identities else None),
+                visibility=visibility,
+                availability=ResourcePoolAvailability(row.availability),
+                survey_discoverable=row.survey_discoverable,
+            )
+        region_knowledge = {
+            key: _ProjectedRegionResourceKnowledge(
+                visibility=value.resource_inventory_visibility,
+                survey_completed=value.resource_survey_completed,
+            )
+            for key, value in projection.region_states().items()
+        }
+        return pools, region_knowledge
+
+    def _validate_and_advance_projected_resources(
+        self,
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor_key: str,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_actor_locations: dict[str, str],
+        projected_pools: dict[str, _ProjectedResourcePool],
+        projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+    ) -> None:
+        if action.behavior == ActionBehavior.SURVEY_RESOURCES:
+            knowledge = projected_region_knowledge.get(target_key)
+            if knowledge is None:
+                raise GenericAgentError(
+                    "RESOURCE_REGION_KNOWLEDGE_MISSING",
+                    "The target Region resource knowledge is missing",
+                )
+            if knowledge.survey_completed:
+                raise GenericAgentError(
+                    "RESOURCE_SURVEY_ALREADY_COMPLETED",
+                    "The target Region has already completed a resource survey",
+                )
+            knowledge.visibility = ResourceInventoryVisibility.VISIBLE
+            knowledge.survey_completed = True
+            for pool in projected_pools.values():
+                if (
+                    pool.region_key == target_key
+                    and pool.facility_key is not None
+                    and pool.visibility == ResourcePoolVisibility.HIDDEN
+                    and pool.survey_discoverable
+                ):
+                    pool.visibility = ResourcePoolVisibility.VISIBLE
+            self._apply_projected_resource_effects(
+                definition,
+                action,
+                actor_key,
+                target_key,
+                parameters,
+                projected_actor_locations,
+                projected_pools,
+                projected_region_knowledge,
+            )
+            return
+
+        if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+            resource_key = parameters.get("resource_key")
+            amount = parameters.get("amount")
+            if not isinstance(resource_key, str) or not isinstance(amount, int):
+                raise GenericAgentError(
+                    "TRANSPORT_PARAMETERS_INVALID",
+                    "Transport requires a Resource key and integer amount",
+                )
+            source_node_key = projected_actor_locations.get(actor_key)
+            if source_node_key is None:
+                raise GenericAgentError(
+                    "LOCALITY_ACTOR_REGION_REQUIRED",
+                    "The Actor has no projected current location",
+                )
+            source_region = region_for_node(definition, source_node_key)
+            destination_region = region_for_node(definition, target_key)
+            consumed = self._consume_projected_resource(
+                source_region,
+                resource_key,
+                amount,
+                projected_pools,
+                projected_region_knowledge,
+            )
+            if consumed:
+                self._add_projected_resource(
+                    destination_region,
+                    resource_key,
+                    amount,
+                    projected_pools,
+                )
+
+        self._apply_projected_resource_effects(
+            definition,
+            action,
+            actor_key,
+            target_key,
+            parameters,
+            projected_actor_locations,
+            projected_pools,
+            projected_region_knowledge,
+        )
+
+    def _consume_projected_resource(
+        self,
+        region_key: str | None,
+        resource_key: str,
+        amount: int,
+        projected_pools: dict[str, _ProjectedResourcePool],
+        projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+        *,
+        require_known: bool = True,
+    ) -> bool:
+        if amount < 0:
+            raise GenericAgentError(
+                "RESOURCE_AMOUNT_INVALID",
+                "A Resource operation amount cannot be negative",
+            )
+        candidates = [
+            pool
+            for pool in projected_pools.values()
+            if (
+                pool.resource_key == resource_key
+                and pool.region_key == region_key
+                and pool.visibility == ResourcePoolVisibility.VISIBLE
+                and (
+                    region_key is None
+                    or pool.facility_key is not None
+                    or (
+                        region_key in projected_region_knowledge
+                        and projected_region_knowledge[region_key].visibility
+                        == ResourceInventoryVisibility.VISIBLE
+                    )
+                )
+            )
+        ]
+        available = [
+            pool for pool in candidates if pool.availability == ResourcePoolAvailability.AVAILABLE
+        ]
+        if not candidates:
+            if require_known:
+                raise GenericAgentError(
+                    "RESOURCE_INVENTORY_UNKNOWN",
+                    "The source Region Resource inventory is not known",
+                )
+            return False
+        known_available = sum(pool.quantity for pool in available if pool.quantity is not None)
+        has_unknown_available = any(pool.quantity is None for pool in available)
+        if known_available < amount and not has_unknown_available:
+            raise GenericAgentError(
+                "KNOWN_RESOURCE_INSUFFICIENT",
+                "Known available Resource quantity is insufficient",
+            )
+        if known_available < amount:
+            return False
+        remaining = amount
+        for pool in sorted(available, key=lambda item: item.pool_key):
+            if remaining <= 0:
+                break
+            if pool.quantity is None:
+                continue
+            consumed = min(pool.quantity, remaining)
+            pool.quantity -= consumed
+            remaining -= consumed
+        return True
+
+    @staticmethod
+    def _add_projected_resource(
+        region_key: str | None,
+        resource_key: str,
+        amount: int,
+        projected_pools: dict[str, _ProjectedResourcePool],
+    ) -> None:
+        identity = resource_state_key(resource_key, region_key, "default")
+        pool = projected_pools.get(identity)
+        if pool is None:
+            pool = _ProjectedResourcePool(
+                pool_key="default",
+                resource_key=resource_key,
+                region_key=region_key,
+                facility_key=None,
+                quantity=0,
+                visibility=ResourcePoolVisibility.VISIBLE,
+                availability=ResourcePoolAvailability.AVAILABLE,
+                survey_discoverable=False,
+            )
+            projected_pools[identity] = pool
+        if pool.quantity is not None:
+            pool.quantity += amount
+
+    def _apply_projected_resource_effects(
+        self,
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor_key: str,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_actor_locations: dict[str, str],
+        projected_pools: dict[str, _ProjectedResourcePool],
+        projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+    ) -> None:
+        actor_node_key = projected_actor_locations.get(actor_key)
+        for rule in definition.rules:
+            if rule.phase != RulePhase.RESOLVE or rule.action_key != action.key:
+                continue
+            for effect in rule.effects:
+                if effect.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY:
+                    if effect.region_key is not None and effect.visibility is not None:
+                        region = projected_region_knowledge.get(effect.region_key)
+                        if region is not None:
+                            region.visibility = ResourceInventoryVisibility(effect.visibility.value)
+                elif effect.kind == EffectKind.SET_RESOURCE_POOL_VISIBILITY:
+                    if effect.pool_key is not None and effect.visibility is not None:
+                        for pool in projected_pools.values():
+                            if pool.pool_key == effect.pool_key:
+                                pool.visibility = ResourcePoolVisibility(effect.visibility.value)
+                elif effect.kind == EffectKind.SET_RESOURCE_POOL_AVAILABILITY:
+                    if effect.pool_key is not None and effect.availability is not None:
+                        for pool in projected_pools.values():
+                            if pool.pool_key == effect.pool_key:
+                                pool.availability = effect.availability
+                elif effect.kind == EffectKind.ADJUST_RESOURCE:
+                    if (
+                        effect.resource_key is None
+                        or effect.amount is None
+                        or actor_node_key is None
+                    ):
+                        continue
+                    amount = self._projected_integer_effect(effect.amount, parameters)
+                    try:
+                        scope = resolve_resource_scope(
+                            definition,
+                            effect.resource_scope,
+                            actor_current_node_key=actor_node_key,
+                            target_node_key=target_key,
+                        )
+                    except LocalityEngineError as exc:
+                        raise GenericAgentError(exc.code, exc.message) from exc
+                    if amount < 0:
+                        self._consume_projected_resource(
+                            scope,
+                            effect.resource_key,
+                            -amount,
+                            projected_pools,
+                            projected_region_knowledge,
+                            require_known=False,
+                        )
+                    elif amount > 0:
+                        self._add_projected_resource(
+                            scope,
+                            effect.resource_key,
+                            amount,
+                            projected_pools,
+                        )
+
+    @staticmethod
+    def _projected_integer_effect(expression: object, parameters: dict[str, StrictScalar]) -> int:
+        source = getattr(expression, "source", None)
+        multiplier = getattr(expression, "multiplier", 1)
+        if getattr(source, "value", source) == ValueSource.LITERAL.value:
+            literal = getattr(expression, "literal", None)
+            if isinstance(literal, int) and not isinstance(literal, bool):
+                return literal * multiplier
+        parameter_key = getattr(expression, "parameter_key", None)
+        value = parameters.get(parameter_key) if isinstance(parameter_key, str) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value * multiplier
+        raise GenericAgentError(
+            "RESOURCE_EFFECT_PARAMETER_UNKNOWN",
+            "A Resource effect parameter is not available for Plan validation",
+        )
 
     @staticmethod
     def _advance_projected_action_state(

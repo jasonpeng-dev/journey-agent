@@ -254,6 +254,7 @@ def test_draft_in_sandbox(
         visible_nodes=state.visible_nodes,
         known_facts=state.known_facts,
         resources=state.resources,
+        resource_intelligence=state.resource_intelligence,
     )
 
 
