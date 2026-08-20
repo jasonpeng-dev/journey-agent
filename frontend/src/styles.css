@@ -115,6 +115,8 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .knowledge-entry-copy strong { font-size: 11px; font-weight: 700; }
 .knowledge-entry-copy small { margin-top: 2px; color: var(--console-soft); font-size: 9px; }
 .knowledge-entry > .knowledge-status-pill { max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actor-status-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: flex-end; }
+.actor-status-pills .knowledge-status-pill { max-width: 10rem; }
 .knowledge-status-pill { min-width: 42px; height: 26px; justify-content: center; padding: 4px 8px; font-variant-numeric: tabular-nums; text-align: center; }
 .action-location-line { margin-top: 4px; color: var(--console-soft); font-size: 11px; line-height: 1.35; }
 .action-location-line strong { font-weight: 500; }

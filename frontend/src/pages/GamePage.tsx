@@ -487,9 +487,16 @@ export function KnownWorldAccordions({
                         <strong>{actor.name}</strong>
                         <small>{actor.role_name}</small>
                       </div>
-                      <span className="console-pill success knowledge-status-pill">
-                        {actor.current_node_name}
-                      </span>
+                      <div className="actor-status-pills">
+                        <span className="console-pill success knowledge-status-pill">
+                          {actor.current_node_name}
+                        </span>
+                        <span
+                          className={`console-pill ${actor.command_reachability === "DISCONNECTED" ? "danger" : "success"} knowledge-status-pill`}
+                        >
+                          {actor.command_reachability === "DISCONNECTED" ? "失联" : "在线"}
+                        </span>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -560,7 +567,7 @@ export function TaskTabs({
           onClick={() => onSelect(item.id)}
         >
           <span>任务 {item.sequence}</span>
-          <strong>{item.goal}</strong>
+          <strong>{item.objective_names.join(" · ")}</strong>
           <em className={taskTone[item.status] ?? "neutral"}>{uiLabel(item.status)}</em>
         </button>
       ))}

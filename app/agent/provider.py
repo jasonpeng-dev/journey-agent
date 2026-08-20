@@ -75,6 +75,7 @@ class PlanningActionCandidate(ProviderModel):
     actor_name: str
     target_key: str
     target_name: str
+    target_kind: str = "NODE"
     parameter_domain: tuple[dict[str, object], ...] = ()
     public_effects: tuple[dict[str, object], ...] = ()
     objective_relevance: tuple[dict[str, object], ...] = ()

@@ -11,7 +11,7 @@ import {
 } from "./pages/GamePage";
 import { groupActorsByTask } from "./actorPresentation";
 import { formatDuration, operationBelongsToTask } from "./playPresentation";
-import type { PublicPlanStep, PublicTask } from "./types";
+import type { PlayerGameState, PublicPlanStep, PublicTask } from "./types";
 
 const task: PublicTask = {
   id: "task",
@@ -52,10 +52,10 @@ const task: PublicTask = {
   explanation: null,
 };
 
-const actorFixtures = [
-  { key: "logistics", name: "应急物流一队", role_name: "应急物流队", current_node_name: "中央城区" },
-  { key: "electrical", name: "电力抢修二队", role_name: "电力抢修队", current_node_name: "中央城区" },
-  { key: "municipal", name: "市政抢修一队", role_name: "市政抢修队", current_node_name: "中央城区" },
+const actorFixtures: PlayerGameState["actors"] = [
+  { key: "logistics", name: "应急物流一队", role_name: "应急物流队", current_node_name: "中央城区", command_reachability: "ONLINE" },
+  { key: "electrical", name: "电力抢修二队", role_name: "电力抢修队", current_node_name: "中央城区", command_reachability: "ONLINE" },
+  { key: "municipal", name: "市政抢修一队", role_name: "市政抢修队", current_node_name: "中央城区", command_reachability: "ONLINE" },
 ];
 
 function actorStep(id: string, actor: string, status: PublicPlanStep["status"]): PublicPlanStep {
@@ -155,7 +155,7 @@ describe("Formal Play player projections", () => {
           { key: "capital", name: "首都议事厅", accessible: true },
           { key: "valley", name: "北部山谷", accessible: false },
         ]}
-        actors={[{ key: "han", name: "韩烈", role_name: "将军", current_node_name: "首都议事厅" }]}
+        actors={[{ key: "han", name: "韩烈", role_name: "将军", current_node_name: "首都议事厅", command_reachability: "ONLINE" }]}
         knownFacts={[{ node_key: "valley", fact_key: "security", name: "山谷安全", value: "UNSAFE" }]}
       />,
     );
@@ -786,10 +786,13 @@ describe("Formal Play player projections", () => {
   it("switches task tabs using the task history read model", () => {
     const onSelect = vi.fn();
     render(<TaskTabs tasks={[
-      { id: "task-1", sequence: 1, goal: "第一个目标", status: "COMPLETED", execution_phase: "COMPLETED", created_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T00:01:00Z" },
-      { id: "task-2", sequence: 2, goal: "第二个目标", status: "ACTIVE", execution_phase: "AWAITING_ACTION_ACK", created_at: "2026-01-01T00:02:00Z", completed_at: null },
+      { id: "task-1", sequence: 1, goal: "让中央医院恢复电力", objective_names: ["恢复中央医院应急供电"], status: "COMPLETED", execution_phase: "COMPLETED", created_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T00:01:00Z" },
+      { id: "task-2", sequence: 2, goal: "第二个目标", objective_names: ["目标二A", "目标二B"], status: "ACTIVE", execution_phase: "AWAITING_ACTION_ACK", created_at: "2026-01-01T00:02:00Z", completed_at: null },
     ]} selectedTaskId="task-2" onSelect={onSelect} />);
     expect(screen.getByTestId("task-tab-task-2")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("task-tab-task-1")).toHaveTextContent("恢复中央医院应急供电");
+    expect(screen.queryByText("让中央医院恢复电力")).not.toBeInTheDocument();
+    expect(screen.getByTestId("task-tab-task-2")).toHaveTextContent("目标二A · 目标二B");
     fireEvent.click(screen.getByTestId("task-tab-task-1"));
     expect(onSelect).toHaveBeenCalledWith("task-1");
   });

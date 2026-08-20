@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.domain.enums import GameInstanceStatus, WorldOperationStatus
+from app.domain.enums import CommandReachability, GameInstanceStatus, WorldOperationStatus
 from app.domain.resources import resource_initial_states, valid_resource_state_identity
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
 from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2
@@ -188,6 +188,10 @@ class RuntimeRecoveryService:
                 for row in resource_rows
             )
             or {actor.actor_key for actor in actor_rows} != actor_keys
+            or any(
+                row.command_reachability not in {item.value for item in CommandReachability}
+                for row in actor_rows
+            )
         ):
             self._corrupt("initialized state")
 

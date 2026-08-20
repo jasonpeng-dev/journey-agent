@@ -35,6 +35,13 @@ class NodeStatus(StrEnum):
     COMPLETED = "COMPLETED"
 
 
+class CommandReachability(StrEnum):
+    """Whether an Actor can currently receive ordinary commands."""
+
+    ONLINE = "ONLINE"
+    DISCONNECTED = "DISCONNECTED"
+
+
 class SessionStatus(StrEnum):
     ACTIVE = "ACTIVE"
     CLOSED = "CLOSED"

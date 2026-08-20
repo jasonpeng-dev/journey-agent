@@ -32,6 +32,7 @@ from app.domain.enums import (
     AgentStepStatus,
     AgentTaskStatus,
     AuthorityOutcome,
+    CommandReachability,
     DecisionStatus,
     NodeStatus,
     StepExecutionType,
@@ -42,6 +43,7 @@ from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionDefinitionV2,
     ActionExecutionMode,
+    ActionTargetKind,
     EffectKind,
     NodeSelectorKind,
     ObjectiveDefinitionV2,
@@ -657,6 +659,9 @@ class GenericAgentService:
         projected_actor_locations = {
             actor_key: actor.current_node_key for actor_key, actor in actors.items()
         }
+        projected_command_reachability = {
+            actor_key: _actor_command_reachability(actor) for actor_key, actor in actors.items()
+        }
         projected_known_passability = self._known_passability(definition)
         actions = {action.key: action for action in definition.actions}
 
@@ -714,6 +719,13 @@ class GenericAgentService:
                     },
                 )
             try:
+                self._validate_projected_command_reachability(
+                    action,
+                    actor_key,
+                    target_key,
+                    actors,
+                    projected_command_reachability,
+                )
                 self._validate_projected_action_state(
                     definition,
                     action,
@@ -722,6 +734,8 @@ class GenericAgentService:
                     parameters,
                     projected_actor_locations,
                     projected_known_passability,
+                    actors=actors,
+                    projected_command_reachability=projected_command_reachability,
                 )
             except GenericAgentError as exc:
                 diagnostic: dict[str, object] = {
@@ -741,6 +755,8 @@ class GenericAgentService:
                             target_key,
                             parameters,
                             projected_actor_locations,
+                            actors=actors,
+                            projected_command_reachability=projected_command_reachability,
                         )
                     diagnostic.update(
                         {
@@ -758,6 +774,7 @@ class GenericAgentService:
                 target_key,
                 projected_actor_locations,
                 projected_known_passability,
+                projected_command_reachability=projected_command_reachability,
             )
         return ()
 
@@ -1070,6 +1087,9 @@ class GenericAgentService:
         projected_actor_locations = {
             actor_key: actor.current_node_key for actor_key, actor in actors.items()
         }
+        projected_command_reachability = {
+            actor_key: _actor_command_reachability(actor) for actor_key, actor in actors.items()
+        }
         projected_known_passability = self._known_passability(definition)
         target_keys = {
             str(item.get("target_key"))
@@ -1164,27 +1184,35 @@ class GenericAgentService:
                     }
                 )
                 continue
-            if action.behavior in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE):
-                try:
-                    self._validate_projected_action_state(
-                        definition,
-                        action,
-                        actor_key,
-                        target_key,
-                        parameters,
-                        projected_actor_locations,
-                        projected_known_passability,
-                    )
-                except GenericAgentError as exc:
-                    diagnostics.append(
-                        {
-                            "code": _safe_provider_diagnostic(exc.code),
-                            "step": index,
-                            "action_key": action_key,
-                            "target_key": target_key,
-                        }
-                    )
-                    continue
+            try:
+                self._validate_projected_command_reachability(
+                    action,
+                    actor_key,
+                    target_key,
+                    actors,
+                    projected_command_reachability,
+                )
+                self._validate_projected_action_state(
+                    definition,
+                    action,
+                    actor_key,
+                    target_key,
+                    parameters,
+                    projected_actor_locations,
+                    projected_known_passability,
+                    actors=actors,
+                    projected_command_reachability=projected_command_reachability,
+                )
+            except GenericAgentError as exc:
+                diagnostics.append(
+                    {
+                        "code": _safe_provider_diagnostic(exc.code),
+                        "step": index,
+                        "action_key": action_key,
+                        "target_key": target_key,
+                    }
+                )
+                continue
             signature = proposal_signature(actor_key, action_key, target_key, parameters)
             if signature in set(task.rejected_proposal_signatures):
                 diagnostics.append(
@@ -1200,7 +1228,16 @@ class GenericAgentService:
                 )
                 continue
             target_definition = definition.world.node(target_key)
-            target_name = target_definition.name if target_definition is not None else target_key
+            target_actor = (
+                actors.get(target_key) if action.target_kind == ActionTargetKind.ACTOR else None
+            )
+            target_name = (
+                target_definition.name
+                if target_definition is not None
+                else target_actor.name
+                if target_actor is not None
+                else target_key
+            )
             binding = PlanningActionCandidate(
                 candidate_id=(
                     candidate.candidate_id
@@ -1213,6 +1250,7 @@ class GenericAgentService:
                 actor_name=actor.name,
                 target_key=target_key,
                 target_name=target_name,
+                target_kind=action.target_kind.value,
                 parameter_domain=tuple(item.model_dump(mode="json") for item in action.parameters),
                 public_effects=tuple(
                     {
@@ -1263,6 +1301,7 @@ class GenericAgentService:
                 target_key,
                 projected_actor_locations,
                 projected_known_passability,
+                projected_command_reachability=projected_command_reachability,
             )
 
         if diagnostics:
@@ -1332,6 +1371,33 @@ class GenericAgentService:
         return refs
 
     @staticmethod
+    def _validate_projected_command_reachability(
+        action: ActionDefinitionV2,
+        actor_key: str,
+        target_key: str,
+        actors: dict[str, GameInstanceActor],
+        projected_command_reachability: dict[str, CommandReachability],
+    ) -> None:
+        if projected_command_reachability.get(actor_key) != CommandReachability.ONLINE:
+            raise GenericAgentError(
+                "ACTOR_COMMAND_DISCONNECTED",
+                "A disconnected Actor cannot receive an ordinary Action",
+            )
+        if action.target_kind == ActionTargetKind.ACTOR:
+            if target_key not in actors:
+                raise GenericAgentError(
+                    "RELAY_TARGET_INVALID",
+                    "The proposed Actor target does not exist",
+                )
+            if action.behavior == ActionBehavior.RELAY_MESSAGE and (
+                projected_command_reachability.get(target_key) != CommandReachability.DISCONNECTED
+            ):
+                raise GenericAgentError(
+                    "RELAY_TARGET_NOT_DISCONNECTED",
+                    "Relay requires a disconnected target Actor",
+                )
+
+    @staticmethod
     def _validate_projected_plan_locality(
         definition: ScenarioDefinitionV2,
         action: ActionDefinitionV2,
@@ -1339,6 +1405,8 @@ class GenericAgentService:
         target_key: str,
         parameters: dict[str, StrictScalar],
         projected_actor_locations: dict[str, str],
+        actors: dict[str, GameInstanceActor] | None = None,
+        projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> str | None:
         source_node_key = projected_actor_locations.get(actor_key)
         if source_node_key is None:
@@ -1353,6 +1421,11 @@ class GenericAgentService:
                 actor_current_node_key=source_node_key,
                 target_node_key=target_key,
                 parameters=parameters,
+                target_actor_node_key=(
+                    projected_actor_locations.get(target_key)
+                    if action.target_kind == ActionTargetKind.ACTOR
+                    else None
+                ),
             )
         except LocalityEngineError as exc:
             raise GenericAgentError(exc.code, exc.message) from exc
@@ -1366,8 +1439,24 @@ class GenericAgentService:
         parameters: dict[str, StrictScalar],
         projected_actor_locations: dict[str, str],
         projected_known_passability: dict[str, bool],
+        *,
+        actors: dict[str, GameInstanceActor] | None = None,
+        projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> str | None:
-        if action.behavior not in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE):
+        if (
+            action.target_kind == ActionTargetKind.ACTOR
+            and actors is not None
+            and target_key not in actors
+        ):
+            raise GenericAgentError("RELAY_TARGET_INVALID", "The Actor target does not exist")
+        if (
+            action.behavior
+            not in (
+                ActionBehavior.TRAVEL,
+                ActionBehavior.TRANSPORT_RESOURCE,
+            )
+            and action.target_kind != ActionTargetKind.ACTOR
+        ):
             return None
         connector = self._validate_projected_plan_locality(
             definition,
@@ -1376,6 +1465,8 @@ class GenericAgentService:
             target_key,
             parameters,
             projected_actor_locations,
+            actors=actors,
+            projected_command_reachability=projected_command_reachability,
         )
         if connector is not None and projected_known_passability.get(connector) is False:
             raise GenericAgentError(
@@ -1392,6 +1483,8 @@ class GenericAgentService:
         target_key: str,
         projected_actor_locations: dict[str, str],
         projected_known_passability: dict[str, bool],
+        *,
+        projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> None:
         if action.behavior in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE):
             projected_actor_locations[actor_key] = target_key
@@ -1401,6 +1494,16 @@ class GenericAgentService:
             target_key,
             projected_known_passability,
         )
+        if projected_command_reachability is not None:
+            GenericAgentService._apply_projected_actor_reachability_effect(
+                definition,
+                action,
+                actor_key,
+                target_key,
+                projected_command_reachability,
+            )
+            if action.behavior == ActionBehavior.RELAY_MESSAGE:
+                projected_command_reachability[target_key] = CommandReachability.ONLINE
 
     def _known_passability(self, definition: ScenarioDefinitionV2) -> dict[str, bool]:
         fact_key = definition.metadata.locality.passability_fact_key
@@ -1445,6 +1548,27 @@ class GenericAgentService:
                     values.add(effect.value.literal)
         if len(values) == 1:
             projected_known_passability[target_key] = values.pop()
+
+    @staticmethod
+    def _apply_projected_actor_reachability_effect(
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor_key: str,
+        target_key: str,
+        projected_command_reachability: dict[str, CommandReachability],
+    ) -> None:
+        for rule in definition.rules:
+            if rule.phase != RulePhase.RESOLVE or rule.action_key != action.key:
+                continue
+            for effect in rule.effects:
+                if (
+                    effect.kind == EffectKind.SET_ACTOR_COMMAND_REACHABILITY
+                    and effect.command_reachability is not None
+                ):
+                    recipient = effect.actor_key or (
+                        target_key if action.target_kind == ActionTargetKind.ACTOR else actor_key
+                    )
+                    projected_command_reachability[recipient] = effect.command_reachability
 
     def _record_provider_plan_call(
         self,
@@ -1627,14 +1751,30 @@ class GenericAgentService:
     ) -> bool:
         """Validate static Plan membership without applying current runtime access gates."""
 
-        target = definition.world.node(target_key)
-        node_state = self.db.get(GameInstanceNodeState, (self.scope.game_instance_id, target_key))
+        if action.target_kind == ActionTargetKind.ACTOR:
+            target_actor = self.db.get(
+                GameInstanceActor,
+                (self.scope.game_instance_id, target_key),
+            )
+            target_valid = target_actor is not None and target_actor.status == "ACTIVE"
+            target_interaction_valid = True
+            target_visible = True
+        else:
+            target = definition.world.node(target_key)
+            node_state = self.db.get(
+                GameInstanceNodeState,
+                (self.scope.game_instance_id, target_key),
+            )
+            target_valid = target is not None
+            target_interaction_valid = bool(
+                target is not None and action.required_interaction_key in target.interaction_keys
+            )
+            target_visible = bool(node_state and node_state.visibility == Visibility.KNOWN)
         return bool(
-            target
-            and node_state
+            target_valid
             and actor_binding_matches(definition, actor)
-            and node_state.visibility == Visibility.KNOWN
-            and action.required_interaction_key in target.interaction_keys
+            and target_visible
+            and target_interaction_valid
             and action.key in actor.allowed_action_keys
             and {item.value for item in action.allowed_actor_capabilities}.issubset(
                 set(actor.capabilities)
@@ -1790,6 +1930,16 @@ def _normalize(value: str) -> str:
     return " ".join(value.casefold().replace("_", " ").split())
 
 
+def _actor_command_reachability(actor: GameInstanceActor) -> CommandReachability:
+    try:
+        return CommandReachability(actor.command_reachability)
+    except ValueError as exc:
+        raise GenericAgentError(
+            "RUNTIME_ACTOR_REACHABILITY_INVALID",
+            "The Actor command reachability value is invalid",
+        ) from exc
+
+
 def _safe_provider_diagnostic(code: str) -> str:
     if code == "KNOWN_TRANSPORT_BLOCKED":
         return code
@@ -1802,6 +1952,8 @@ def _safe_provider_diagnostic(code: str) -> str:
         "ACTION_APPROVAL_REQUIRED": "AUTHORITY_REQUIRED",
         "ACTION_NOT_ALLOWED": "ACTOR_NOT_ALLOWED",
         "ACTOR_CAPABILITY_MISSING": "ACTOR_NOT_ALLOWED",
+        "ACTOR_COMMAND_DISCONNECTED": "ACTOR_COMMAND_DISCONNECTED",
+        "RELAY_TARGET_NOT_DISCONNECTED": "RELAY_TARGET_NOT_DISCONNECTED",
         "GENERIC_PROVIDER_PLAN_INVALID": "OBJECTIVE_IRRELEVANT",
     }.get(code, "PROPOSAL_INVALID")
 

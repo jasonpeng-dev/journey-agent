@@ -9,6 +9,7 @@ from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionDefinitionV2,
     ActionLocality,
+    ActionTargetKind,
     ResourceScopeKind,
     ResourceScopeV2,
     ScenarioDefinitionV2,
@@ -143,6 +144,7 @@ def validate_action_locality(
     actor_current_node_key: str,
     target_node_key: str,
     parameters: Mapping[str, StrictScalar],
+    target_actor_node_key: str | None = None,
 ) -> str | None:
     """Validate static locality and return a connector for travel-like actions.
 
@@ -154,6 +156,25 @@ def validate_action_locality(
     if not locality_enabled(definition):
         return None
     actor_region = _require_region(definition, actor_current_node_key)
+    if action.target_kind == ActionTargetKind.ACTOR:
+        if target_actor_node_key is None:
+            raise LocalityEngineError(
+                "LOCALITY_ACTOR_TARGET_REQUIRED",
+                "An Actor target must have a current location",
+            )
+        if action.locality != ActionLocality.ACTOR_REGION:
+            raise LocalityEngineError(
+                "LOCALITY_ACTOR_TARGET_INVALID",
+                "An Actor target requires ACTOR_REGION locality",
+            )
+        target_actor_region = region_for_node(definition, target_actor_node_key)
+        if actor_region != target_actor_region:
+            raise LocalityEngineError(
+                "LOCALITY_ACTOR_REGION_INVALID",
+                "The command relay Actor must be in the target Actor's Region",
+                retryable=True,
+            )
+        return None
     target = definition.world.node(target_node_key)
     if target is None:
         raise LocalityEngineError("LOCALITY_TARGET_NOT_FOUND", "The locality target does not exist")

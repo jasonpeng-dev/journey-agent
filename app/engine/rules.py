@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from app.domain.enums import CommandReachability
 from app.domain.resources import resource_state_key
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
@@ -51,11 +52,18 @@ class RuleFactState:
 
 
 @dataclass(frozen=True, slots=True)
+class RuleActorState:
+    command_reachability: CommandReachability
+    current_node_key: str
+
+
+@dataclass(frozen=True, slots=True)
 class DeclarativeRuleState:
     nodes: Mapping[str, RuleNodeState]
     facts: Mapping[FactRef, RuleFactState]
     resources: Mapping[str, int]
     resource_reservations: Mapping[str, int]
+    actors: Mapping[str, RuleActorState] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +72,7 @@ class ActionRuleContext:
     target_node_key: str
     parameters: Mapping[str, StrictScalar]
     actor_key: str | None = None
+    target_actor_key: str | None = None
     operation_status: str | None = None
     actor_current_node_key: str | None = None
 
@@ -109,6 +118,12 @@ class ResourceReservationMutation:
 
 
 @dataclass(frozen=True, slots=True)
+class ActorCommandReachabilityMutation:
+    actor_key: str
+    command_reachability: CommandReachability
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryEvent:
     key: str
     content: str
@@ -134,6 +149,7 @@ class GenericRuleOutcome:
     resource_reservations: tuple[ResourceReservationMutation, ...] = ()
     memory_events: tuple[MemoryEvent, ...] = ()
     actor_location_update: str | None = None
+    actor_command_reachability_updates: tuple[ActorCommandReachabilityMutation, ...] = ()
 
 
 class DeclarativeRuleEngine:
@@ -284,6 +300,7 @@ class DeclarativeRuleEngine:
         resources: list[ResourceMutation] = []
         reservations: list[ResourceReservationMutation] = []
         memories: list[MemoryEvent] = []
+        actor_reachability: list[ActorCommandReachabilityMutation] = []
         outcome_code: str | None = None
         failure: RuleFailure | None = None
         for effect in rule.effects:
@@ -340,6 +357,22 @@ class DeclarativeRuleEngine:
             elif effect.kind == EffectKind.WRITE_MEMORY_EVENT:
                 assert effect.memory_key and effect.memory_content
                 memories.append(MemoryEvent(effect.memory_key, effect.memory_content))
+            elif effect.kind == EffectKind.SET_ACTOR_COMMAND_REACHABILITY:
+                assert effect.command_reachability is not None
+                actor_key = effect.actor_key or context.target_actor_key or context.actor_key
+                if actor_key is None:
+                    raise RuleEngineError(
+                        "RULE_ACTOR_TARGET_MISSING",
+                        "Actor reachability Effect has no target Actor",
+                    )
+                if actor_key not in state.actors:
+                    raise RuleEngineError(
+                        "RULE_ACTOR_STATE_MISSING",
+                        "Actor reachability Effect references missing Actor state",
+                    )
+                actor_reachability.append(
+                    ActorCommandReachabilityMutation(actor_key, effect.command_reachability)
+                )
         return GenericRuleOutcome(
             selected_rule_key=rule.key,
             outcome_code=outcome_code,
@@ -351,6 +384,7 @@ class DeclarativeRuleEngine:
             resource_mutations=tuple(resources),
             resource_reservations=tuple(reservations),
             memory_events=tuple(memories),
+            actor_command_reachability_updates=tuple(actor_reachability),
         )
 
     def _effect_nodes(
@@ -546,9 +580,11 @@ def _compare(left: StrictScalar, operator: ComparisonOperator, right: StrictScal
 
 __all__ = [
     "ActionRuleContext",
+    "ActorCommandReachabilityMutation",
     "DeclarativeRuleEngine",
     "DeclarativeRuleState",
     "GenericRuleOutcome",
+    "RuleActorState",
     "RuleEngineError",
     "RuleFactState",
     "RuleNodeState",

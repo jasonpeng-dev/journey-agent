@@ -619,6 +619,10 @@ def test_play_state_exposes_task_history_and_scopes_selected_task(
     assert latest.status_code == 200
     latest_state = latest.json()
     assert [item["id"] for item in latest_state["task_history"]] == [first["id"], second["id"]]
+    assert latest_state["task_history"][0]["goal"] == "gather valley intelligence"
+    assert latest_state["task_history"][0]["objective_names"] == ["收集北部山谷情报"]
+    assert latest_state["task_history"][1]["goal"] == "restore the starfire outpost"
+    assert latest_state["task_history"][1]["objective_names"] == ["恢复星火前哨"]
     assert latest_state["current_task"]["id"] == second["id"]
     assert latest_state["game"]["active_task_id"] == second["id"]
 

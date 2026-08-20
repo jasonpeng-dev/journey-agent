@@ -270,6 +270,9 @@ class GameInstanceActor(TimestampMixin, Base):
     allowed_action_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
     authority_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     capabilities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    command_reachability: Mapped[str] = mapped_column(
+        String(20), default="ONLINE", server_default="ONLINE", nullable=False
+    )
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
     version: Mapped[int] = mapped_column(Integer, default=1)

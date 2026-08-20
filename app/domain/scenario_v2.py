@@ -21,6 +21,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.domain.enums import CommandReachability
 from app.domain.world import AccessState, FactValueType, Visibility
 
 type StableKey = Annotated[
@@ -68,6 +69,7 @@ class ActionBehavior(StrEnum):
     TRAVEL = "TRAVEL"
     INSPECT = "INSPECT"
     TRANSPORT_RESOURCE = "TRANSPORT_RESOURCE"
+    RELAY_MESSAGE = "RELAY_MESSAGE"
 
 
 class ActionLocality(StrEnum):
@@ -75,6 +77,12 @@ class ActionLocality(StrEnum):
     LOCAL_TARGET = "LOCAL_TARGET"
     FACILITY_REGION = "FACILITY_REGION"
     TRANSPORT_ENDPOINT = "TRANSPORT_ENDPOINT"
+    ACTOR_REGION = "ACTOR_REGION"
+
+
+class ActionTargetKind(StrEnum):
+    NODE = "NODE"
+    ACTOR = "ACTOR"
 
 
 class ResourceScopeKind(StrEnum):
@@ -153,6 +161,7 @@ class EffectKind(StrEnum):
     EMIT_OUTCOME = "EMIT_OUTCOME"
     EMIT_FAILURE = "EMIT_FAILURE"
     WRITE_MEMORY_EVENT = "WRITE_MEMORY_EVENT"
+    SET_ACTOR_COMMAND_REACHABILITY = "SET_ACTOR_COMMAND_REACHABILITY"
 
 
 class ResourceInitialStateV2(FrozenDefinitionModel):
@@ -391,6 +400,10 @@ class ActorProfileV2(FrozenDefinitionModel):
     initial_node_key: StableKey
     allowed_action_keys: tuple[StableKey, ...]
     authority_policy: AuthorityPolicyV2 = Field(default_factory=AuthorityPolicyV2)
+    command_reachability: CommandReachability = Field(
+        default=CommandReachability.ONLINE,
+        exclude_if=lambda value: value == CommandReachability.ONLINE,
+    )
 
     @model_validator(mode="after")
     def validate_actor_keys(self) -> ActorProfileV2:
@@ -469,6 +482,10 @@ class ActionDefinitionV2(FrozenDefinitionModel):
     planning: ActionPlanningProjectionV2 = Field(default_factory=ActionPlanningProjectionV2)
     behavior: ActionBehavior = ActionBehavior.RULE
     locality: ActionLocality = ActionLocality.NONE
+    target_kind: ActionTargetKind = Field(
+        default=ActionTargetKind.NODE,
+        exclude_if=lambda value: value == ActionTargetKind.NODE,
+    )
 
     @model_validator(mode="after")
     def validate_action(self) -> ActionDefinitionV2:
@@ -486,6 +503,16 @@ class ActionDefinitionV2(FrozenDefinitionModel):
             self.planning.wait_success_outcome_codes
         ):
             raise ValueError("An IMMEDIATE Action cannot define WAIT success outcomes")
+        if (
+            self.target_kind == ActionTargetKind.ACTOR
+            and self.locality != ActionLocality.ACTOR_REGION
+        ):
+            raise ValueError("ACTOR Actions require ACTOR_REGION locality")
+        if (
+            self.behavior == ActionBehavior.RELAY_MESSAGE
+            and self.target_kind != ActionTargetKind.ACTOR
+        ):
+            raise ValueError("RELAY_MESSAGE Actions require an ACTOR target")
         return self
 
 
@@ -623,6 +650,11 @@ class EffectV2(FrozenDefinitionModel):
     retryable: bool = False
     memory_key: StableKey | None = None
     memory_content: str | None = Field(default=None, max_length=4000)
+    actor_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    command_reachability: CommandReachability | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_shape(self) -> EffectV2:
@@ -655,6 +687,11 @@ class EffectV2(FrozenDefinitionModel):
             self.memory_key is None or not self.memory_content
         ):
             raise ValueError("WRITE_MEMORY_EVENT requires memory_key/content")
+        elif (
+            self.kind == EffectKind.SET_ACTOR_COMMAND_REACHABILITY
+            and self.command_reachability is None
+        ):
+            raise ValueError("SET_ACTOR_COMMAND_REACHABILITY requires command_reachability")
         return self
 
 
@@ -947,6 +984,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 effect,
                 nodes,
                 resources,
+                actors,
                 parameters,
                 action,
                 definition.metadata.locality,
@@ -1023,10 +1061,13 @@ def _validate_effect_refs(
     effect: EffectV2,
     nodes: dict[str, NodeDefinitionV2],
     resources: dict[str, ResourceDefinitionV2],
+    actors: dict[str, ActorProfileV2],
     parameters: dict[str, ActionParameterV2],
     action: ActionDefinitionV2,
     locality: LocalityContractV2,
 ) -> None:
+    if effect.actor_key is not None:
+        _require_key(actors, effect.actor_key, "Effect Actor")
     _validate_selector(effect.node, nodes)
     if effect.node is not None and effect.fact_key is not None:
         _validate_selector_fact(effect.node, effect.fact_key, nodes)

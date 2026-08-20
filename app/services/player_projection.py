@@ -133,6 +133,7 @@ class PlayerProjectionService:
             .order_by(AgentTask.created_at)
         )
         task_rows = tuple(self.db.scalars(task_query))
+        objective_names_by_key = {item.key: item.name for item in definition.objectives}
         active_task = next(
             (item for item in reversed(task_rows) if item.status in _PUBLIC_ACTIVE_TASKS),
             None,
@@ -249,6 +250,11 @@ class PlayerProjectionService:
                     name=item.name,
                     role_name=role_definitions[item.role_key].name,
                     current_node_name=node_definitions[item.current_node_key].name,
+                    command_reachability=(
+                        "DISCONNECTED"
+                        if item.command_reachability == "DISCONNECTED"
+                        else "ONLINE"
+                    ),
                 )
                 for item in actors
                 if item.current_node_key in visible_node_keys
@@ -265,17 +271,32 @@ class PlayerProjectionService:
                 else None
             ),
             task_history=[
-                self._task_summary(item, sequence=index)
+                self._task_summary(
+                    item,
+                    sequence=index,
+                    objective_names_by_key=objective_names_by_key,
+                )
                 for index, item in enumerate(task_rows, start=1)
             ],
             pending_approval_id=pending,
         )
 
-    def _task_summary(self, task: AgentTask, *, sequence: int) -> PublicTaskSummaryResponse:
+    def _task_summary(
+        self,
+        task: AgentTask,
+        *,
+        sequence: int,
+        objective_names_by_key: dict[str, str],
+    ) -> PublicTaskSummaryResponse:
         return PublicTaskSummaryResponse(
             id=task.id,
             sequence=sequence,
             goal=task.goal_description,
+            objective_names=[
+                objective_names_by_key[key]
+                for key in task.objective_scope_keys or ()
+                if key in objective_names_by_key
+            ],
             status=_task_status(task.status, task.last_error_code),
             execution_phase=PublicExecutionPhase(
                 _execution_phase(task, self.db.get(PlayerExecutionCheckpoint, task.id)).value

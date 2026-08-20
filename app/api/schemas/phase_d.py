@@ -427,6 +427,7 @@ class PublicTaskSummaryResponse(ApiModel):
     id: UUID
     sequence: int = Field(ge=1)
     goal: str
+    objective_names: list[str]
     status: PublicTaskStatus
     execution_phase: PublicExecutionPhase
     created_at: datetime
@@ -489,6 +490,7 @@ class PublicActorResponse(ApiModel):
     name: str
     role_name: str
     current_node_name: str
+    command_reachability: Literal["ONLINE", "DISCONNECTED"] = "ONLINE"
 
 
 class PlayerGameStateResponse(ApiModel):

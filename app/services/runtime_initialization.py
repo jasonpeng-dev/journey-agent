@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -177,23 +178,62 @@ class RuntimeInitializationService:
                 )
         roles = {role.key: role for role in definition.actors.roles}
         primary_key = definition.initialization.primary_actor_key
+        supports_actor_reachability = self._supports_actor_reachability_schema()
+        now = datetime.now(UTC)
         for actor in definition.actors.actor_profiles:
             role = roles[actor.role_key]
-            self.db.add(
-                GameInstanceActor(
-                    game_instance_id=instance.id,
-                    actor_key=actor.key,
-                    role_key=actor.role_key,
-                    name=actor.name,
-                    persona=actor.persona,
-                    doctrine={item.key: item.value for item in actor.doctrine},
-                    current_node_key=actor.initial_node_key,
-                    allowed_action_keys=list(actor.allowed_action_keys),
-                    authority_policy=actor.authority_policy.model_dump(mode="json"),
-                    capabilities=[capability.value for capability in role.capabilities],
-                    is_primary=actor.key == primary_key,
+            doctrine = {item.key: item.value for item in actor.doctrine}
+            authority_policy = actor.authority_policy.model_dump(mode="json")
+            capabilities = [capability.value for capability in role.capabilities]
+            if supports_actor_reachability:
+                self.db.add(
+                    GameInstanceActor(
+                        game_instance_id=instance.id,
+                        actor_key=actor.key,
+                        role_key=actor.role_key,
+                        name=actor.name,
+                        persona=actor.persona,
+                        doctrine=doctrine,
+                        current_node_key=actor.initial_node_key,
+                        allowed_action_keys=list(actor.allowed_action_keys),
+                        authority_policy=authority_policy,
+                        capabilities=capabilities,
+                        command_reachability=actor.command_reachability.value,
+                        is_primary=actor.key == primary_key,
+                    )
                 )
-            )
+            else:
+                self.db.execute(
+                    text(
+                        """
+                        INSERT INTO game_instance_actors
+                            (game_instance_id, actor_key, role_key, name, persona, doctrine,
+                             current_node_key, allowed_action_keys, authority_policy,
+                             capabilities, is_primary, status, version, created_at, updated_at)
+                        VALUES (:game_instance_id, :actor_key, :role_key, :name, :persona,
+                                :doctrine, :current_node_key, :allowed_action_keys,
+                                :authority_policy, :capabilities, :is_primary, :status,
+                                :version, :created_at, :updated_at)
+                        """
+                    ),
+                    {
+                        "game_instance_id": instance.id.hex,
+                        "actor_key": actor.key,
+                        "role_key": actor.role_key,
+                        "name": actor.name,
+                        "persona": actor.persona,
+                        "doctrine": json.dumps(doctrine, ensure_ascii=False),
+                        "current_node_key": actor.initial_node_key,
+                        "allowed_action_keys": json.dumps(list(actor.allowed_action_keys)),
+                        "authority_policy": json.dumps(authority_policy, ensure_ascii=False),
+                        "capabilities": json.dumps(capabilities),
+                        "is_primary": actor.key == primary_key,
+                        "status": "ACTIVE",
+                        "version": 1,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
         session = ConversationSession(
             player_id=player_id,
             game_instance_id=instance.id,
@@ -220,6 +260,10 @@ class RuntimeInitializationService:
         # initialization savepoint.
         columns = inspect(self.db.connection()).get_columns("game_instance_resource_states")
         return "resource_identity" in {str(item["name"]) for item in columns}
+
+    def _supports_actor_reachability_schema(self) -> bool:
+        columns = inspect(self.db.connection()).get_columns("game_instance_actors")
+        return "command_reachability" in {str(item["name"]) for item in columns}
 
     def _replay(self, instance: GameInstance, requested_version_id: UUID) -> InitializedRuntime:
         if instance.scenario_version_id != requested_version_id:

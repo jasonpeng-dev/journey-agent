@@ -15,6 +15,7 @@ from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionLocality,
+    ActionTargetKind,
     ObjectiveDefinitionV2,
     ScenarioDefinitionV2,
 )
@@ -113,6 +114,12 @@ class PlanningContextBuilder:
                 )
             )
         }
+        active_actor_count = self.db.scalar(
+            select(GameInstanceActor.actor_key).where(
+                GameInstanceActor.game_instance_id == self.scope.game_instance_id,
+                GameInstanceActor.status == "ACTIVE",
+            )
+        )
         for _hop in range(self.retrieval_hops):
             changed = False
             for action in definition.actions:
@@ -129,11 +136,14 @@ class PlanningContextBuilder:
                     and action.locality == ActionLocality.NONE
                 ):
                     continue
-                if not any(
+                has_known_target = any(
                     node.key in known_nodes
                     and action.required_interaction_key in node.interaction_keys
                     for node in definition.world.nodes
-                ):
+                ) or (
+                    action.target_kind == ActionTargetKind.ACTOR and active_actor_count is not None
+                )
+                if not has_known_target:
                     continue
                 if action.key not in selected and (not frontier or visible_effects & frontier):
                     selected.add(action.key)
@@ -149,7 +159,7 @@ class PlanningContextBuilder:
             known_target = any(
                 node.key in known_nodes and action.required_interaction_key in node.interaction_keys
                 for node in definition.world.nodes
-            )
+            ) or (action.target_kind == ActionTargetKind.ACTOR and active_actor_count is not None)
             visible_effect = any(
                 (effect.node_key, effect.fact_key) in known_refs
                 for effect in (
@@ -267,6 +277,7 @@ class PlanningContextBuilder:
                 "execution_mode": action.execution_mode.value,
                 "behavior": action.behavior.value,
                 "locality": action.locality.value,
+                "target_kind": action.target_kind.value,
             }
             if action.planning.hints:
                 action_context["soft_signals"] = {"hints": list(action.planning.hints)}
@@ -287,9 +298,22 @@ class PlanningContextBuilder:
         )
         result: list[dict[str, object]] = []
         for actor in sorted(actors, key=lambda item: item.actor_key):
-            if not set(actor.allowed_action_keys).intersection(action_keys):
-                continue
             role = roles.get(actor.role_key)
+            current_region: str | None = None
+            if definition.metadata.locality.enabled:
+                from app.engine.locality import LocalityEngineError, region_for_node
+
+                try:
+                    current_region = region_for_node(definition, actor.current_node_key)
+                except LocalityEngineError:
+                    current_region = None
+            current_known_state: dict[str, object] = {
+                "availability": actor.status,
+                "current_node_key": actor.current_node_key,
+                "command_reachability": actor.command_reachability,
+            }
+            if current_region is not None:
+                current_known_state["current_region"] = current_region
             result.append(
                 {
                     "actor_key": actor.actor_key,
@@ -298,10 +322,7 @@ class PlanningContextBuilder:
                     "role_display": role.name if role is not None else actor.role_key,
                     "capabilities": list(actor.capabilities),
                     "static_authority": actor.authority_policy,
-                    "current_known_state": {
-                        "availability": actor.status,
-                        "current_node_key": actor.current_node_key,
-                    },
+                    "current_known_state": current_known_state,
                     "allowed_action_keys": [
                         key for key in actor.allowed_action_keys if key in action_keys
                     ],
@@ -319,7 +340,7 @@ class PlanningContextBuilder:
         interaction_keys = {
             action.required_interaction_key
             for action in definition.actions
-            if action.key in action_keys
+            if action.key in action_keys and action.target_kind == ActionTargetKind.NODE
         }
         raw_nodes = known_world.get("nodes", [])
         node_rows = cast(list[dict[str, object]], raw_nodes) if isinstance(raw_nodes, list) else []
@@ -331,6 +352,24 @@ class PlanningContextBuilder:
             ):
                 continue
             result.append({"target_key": node.key})
+        actor_target_actions = {
+            action.key
+            for action in definition.actions
+            if action.key in action_keys and action.target_kind == ActionTargetKind.ACTOR
+        }
+        if actor_target_actions:
+            result.extend(
+                {"target_key": actor.actor_key}
+                for actor in sorted(
+                    self.db.scalars(
+                        select(GameInstanceActor).where(
+                            GameInstanceActor.game_instance_id == self.scope.game_instance_id,
+                            GameInstanceActor.status == "ACTIVE",
+                        )
+                    ),
+                    key=lambda item: item.actor_key,
+                )
+            )
         return result
 
     def _previous_execution(self, task: AgentTask, replan_reason: str | None) -> dict[str, object]:
@@ -505,6 +544,7 @@ class PlanningActionCatalogBuilder:
                             actor_name=actor.name,
                             target_key=target.key,
                             target_name=target.name,
+                            target_kind=action.target_kind.value,
                             parameter_domain=tuple(
                                 item.model_dump(mode="json") for item in action.parameters
                             ),

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
-from app.domain.enums import AuthorityOutcome, NodeStatus
+from app.domain.enums import AuthorityOutcome, CommandReachability, NodeStatus
 from app.domain.resources import (
     resource_identity,
     resource_initial_states,
@@ -18,6 +18,7 @@ from app.domain.resources import (
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
+    ActionTargetKind,
     ScenarioDefinitionV2,
     StrictScalar,
     normalize_action_parameters,
@@ -32,11 +33,13 @@ from app.engine.locality import (
 )
 from app.engine.rules import (
     ActionRuleContext,
+    ActorCommandReachabilityMutation,
     DeclarativeRuleEngine,
     DeclarativeRuleState,
     FactVisibilityMutation,
     GenericRuleOutcome,
     ResourceMutation,
+    RuleActorState,
     RuleFactState,
     RuleFailure,
     RuleNodeState,
@@ -112,36 +115,51 @@ class GenericGameService:
             parameters = normalize_action_parameters(action, parameters)
         except ValueError as exc:
             raise GenericGameError("ACTION_PARAMETERS_INVALID", str(exc)) from exc
+        target_actor = None
+        if action.target_kind == ActionTargetKind.ACTOR:
+            target_actor = self._actor(target_node_key)
+            if not actor_binding_matches(definition, target_actor):
+                raise GenericGameError(
+                    "RUNTIME_ACTOR_BINDING_INVALID",
+                    "The target Actor authority drifted from the exact ScenarioVersion",
+                )
+        else:
+            target = definition.world.node(target_node_key)
+            if target is None or action.required_interaction_key not in target.interaction_keys:
+                raise GenericGameError(
+                    "ACTION_TARGET_INVALID",
+                    "The target does not support the Action's required Interaction",
+                )
+        self._require_command_reachability(actor, action, target_actor)
         self._require_authority(actor, action, parameters, approval_granted)
-        target = definition.world.node(target_node_key)
-        if target is None or action.required_interaction_key not in target.interaction_keys:
-            raise GenericGameError(
-                "ACTION_TARGET_INVALID",
-                "The target does not support the Action's required Interaction",
-            )
         self._validate_locality(
             definition,
             action,
             actor.current_node_key,
             target_node_key,
             parameters,
+            target_actor_current_node_key=(
+                target_actor.current_node_key if target_actor is not None else None
+            ),
         )
         state = self._locked_state(definition)
-        target_state = state.nodes[target_node_key]
-        if (
-            target_state.visibility != Visibility.KNOWN
-            or target_state.access != AccessState.AVAILABLE
-        ):
-            raise GenericGameError(
-                "ACTION_TARGET_UNAVAILABLE",
-                "The target is not known and accessible in this Instance",
-                retryable=True,
-            )
+        if action.target_kind == ActionTargetKind.NODE:
+            target_state = state.nodes[target_node_key]
+            if (
+                target_state.visibility != Visibility.KNOWN
+                or target_state.access != AccessState.AVAILABLE
+            ):
+                raise GenericGameError(
+                    "ACTION_TARGET_UNAVAILABLE",
+                    "The target is not known and accessible in this Instance",
+                    retryable=True,
+                )
         context = ActionRuleContext(
             action_key=action_key,
             target_node_key=target_node_key,
             parameters=parameters,
             actor_key=actor_key,
+            target_actor_key=(target_actor.actor_key if target_actor is not None else None),
             operation_status=operation_status,
             actor_current_node_key=actor.current_node_key,
         )
@@ -161,6 +179,7 @@ class GenericGameService:
             state,
             outcome,
             parameters,
+            target_actor=target_actor,
         )
         newly_known_facts = {
             (item.node_key, item.fact_key)
@@ -234,31 +253,45 @@ class GenericGameService:
             parameters = normalize_action_parameters(action, parameters)
         except ValueError as exc:
             raise GenericGameError("ACTION_PARAMETERS_INVALID", str(exc)) from exc
+        target_actor = None
+        if action.target_kind == ActionTargetKind.ACTOR:
+            target_actor = self._actor(target_node_key)
+            if not actor_binding_matches(definition, target_actor):
+                raise GenericGameError(
+                    "RUNTIME_ACTOR_BINDING_INVALID",
+                    "The target Actor authority drifted from the exact ScenarioVersion",
+                )
+        else:
+            target = definition.world.node(target_node_key)
+            if target is None or action.required_interaction_key not in target.interaction_keys:
+                raise GenericGameError(
+                    "ACTION_TARGET_INVALID",
+                    "The target does not support the Action's required Interaction",
+                )
+        self._require_command_reachability(actor, action, target_actor)
         self._require_authority(actor, action, parameters, approval_granted)
-        target = definition.world.node(target_node_key)
-        if target is None or action.required_interaction_key not in target.interaction_keys:
-            raise GenericGameError(
-                "ACTION_TARGET_INVALID",
-                "The target does not support the Action's required Interaction",
-            )
         self._validate_locality(
             definition,
             action,
             actor.current_node_key,
             target_node_key,
             parameters,
+            target_actor_current_node_key=(
+                target_actor.current_node_key if target_actor is not None else None
+            ),
         )
         state = self._locked_state(definition, lock=False)
-        target_state = state.nodes[target_node_key]
-        if (
-            target_state.visibility != Visibility.KNOWN
-            or target_state.access != AccessState.AVAILABLE
-        ):
-            raise GenericGameError(
-                "ACTION_TARGET_UNAVAILABLE",
-                "The target is not known and accessible in this Instance",
-                retryable=True,
-            )
+        if action.target_kind == ActionTargetKind.NODE:
+            target_state = state.nodes[target_node_key]
+            if (
+                target_state.visibility != Visibility.KNOWN
+                or target_state.access != AccessState.AVAILABLE
+            ):
+                raise GenericGameError(
+                    "ACTION_TARGET_UNAVAILABLE",
+                    "The target is not known and accessible in this Instance",
+                    retryable=True,
+                )
         return DeclarativeRuleEngine(definition).evaluate_preflight(
             state,
             ActionRuleContext(
@@ -266,6 +299,7 @@ class GenericGameService:
                 target_node_key=target_node_key,
                 parameters=parameters,
                 actor_key=actor_key,
+                target_actor_key=(target_actor.actor_key if target_actor is not None else None),
                 actor_current_node_key=actor.current_node_key,
             ),
         )
@@ -305,6 +339,7 @@ class GenericGameService:
         actor_current_node_key: str,
         target_node_key: str,
         parameters: dict[str, StrictScalar],
+        target_actor_current_node_key: str | None = None,
     ) -> None:
         from app.domain.scenario_v2 import ActionDefinitionV2
 
@@ -316,9 +351,52 @@ class GenericGameService:
                 actor_current_node_key=actor_current_node_key,
                 target_node_key=target_node_key,
                 parameters=parameters,
+                target_actor_node_key=target_actor_current_node_key,
             )
         except LocalityEngineError as exc:
             raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+
+    @staticmethod
+    def _require_command_reachability(
+        actor: GameInstanceActor,
+        action: object,
+        target_actor: GameInstanceActor | None,
+    ) -> None:
+        from app.domain.scenario_v2 import ActionDefinitionV2
+
+        assert isinstance(action, ActionDefinitionV2)
+        try:
+            reachability = CommandReachability(actor.command_reachability)
+        except ValueError as exc:
+            raise GenericGameError(
+                "RUNTIME_ACTOR_REACHABILITY_INVALID",
+                "The Actor command reachability value is invalid",
+            ) from exc
+        if reachability != CommandReachability.ONLINE:
+            raise GenericGameError(
+                "ACTOR_COMMAND_DISCONNECTED",
+                "A disconnected Actor cannot receive an ordinary Action",
+                retryable=True,
+            )
+        if action.behavior == ActionBehavior.RELAY_MESSAGE:
+            if target_actor is None:
+                raise GenericGameError(
+                    "RELAY_TARGET_INVALID",
+                    "Relay requires an active target Actor",
+                )
+            try:
+                target_reachability = CommandReachability(target_actor.command_reachability)
+            except ValueError as exc:
+                raise GenericGameError(
+                    "RUNTIME_ACTOR_REACHABILITY_INVALID",
+                    "The target Actor command reachability value is invalid",
+                ) from exc
+            if target_reachability != CommandReachability.DISCONNECTED:
+                raise GenericGameError(
+                    "RELAY_TARGET_NOT_DISCONNECTED",
+                    "Relay requires a disconnected target Actor",
+                    retryable=True,
+                )
 
     def _apply_behavior(
         self,
@@ -329,10 +407,29 @@ class GenericGameService:
         state: DeclarativeRuleState,
         outcome: GenericRuleOutcome,
         parameters: dict[str, StrictScalar],
+        target_actor: GameInstanceActor | None = None,
     ) -> GenericRuleOutcome:
         from app.domain.scenario_v2 import ActionDefinitionV2
 
         assert isinstance(action, ActionDefinitionV2)
+        if action.behavior == ActionBehavior.RELAY_MESSAGE:
+            if target_actor is None:
+                raise GenericGameError(
+                    "RELAY_TARGET_INVALID",
+                    "Relay requires an active target Actor",
+                )
+            updates = [
+                item
+                for item in outcome.actor_command_reachability_updates
+                if item.actor_key != target_actor.actor_key
+            ]
+            updates.append(
+                ActorCommandReachabilityMutation(
+                    target_actor.actor_key,
+                    CommandReachability.ONLINE,
+                )
+            )
+            return replace(outcome, actor_command_reachability_updates=tuple(updates))
         if action.behavior == ActionBehavior.TRAVEL:
             connector = self._connector(definition, actor.current_node_key, target_node_key)
             if not self._is_passable(definition, connector, state):
@@ -496,13 +593,18 @@ class GenericGameService:
         resource_query = select(GameInstanceResourceState).where(
             GameInstanceResourceState.game_instance_id == self.scope.game_instance_id
         )
+        actor_query = select(GameInstanceActor).where(
+            GameInstanceActor.game_instance_id == self.scope.game_instance_id
+        )
         if lock:
             node_query = node_query.with_for_update()
             fact_query = fact_query.with_for_update()
             resource_query = resource_query.with_for_update()
+            actor_query = actor_query.with_for_update()
         nodes = self.db.scalars(node_query).all()
         facts = self.db.scalars(fact_query).all()
         resources = self.db.scalars(resource_query).all()
+        actors = self.db.scalars(actor_query).all()
         expected_initial_resources = {
             (item.resource_key, item.scope_node_key) for item in resource_initial_states(definition)
         }
@@ -551,6 +653,13 @@ class GenericGameService:
             resource_reservations={
                 resource_state_key(row.resource_key, row.scope_node_key): row.reserved_value
                 for row in resources
+            },
+            actors={
+                row.actor_key: RuleActorState(
+                    command_reachability=CommandReachability(row.command_reachability),
+                    current_node_key=row.current_node_key,
+                )
+                for row in actors
             },
         )
 
@@ -667,6 +776,10 @@ class GenericGameService:
             actor = self._actor(actor_key)
             actor.current_node_key = outcome.actor_location_update
             actor.version += 1
+        for reachability_mutation in outcome.actor_command_reachability_updates:
+            target_actor = self._actor(reachability_mutation.actor_key)
+            target_actor.command_reachability = reachability_mutation.command_reachability.value
+            target_actor.version += 1
         for event in outcome.memory_events:
             self.db.add(
                 GameInstanceMemoryEvent(
