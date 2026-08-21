@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agent.dependency_closure import DependencyClosureError, build_dependency_closure
 from app.agent.generic import GenericAgentService, _ProjectedFact
 from app.agent.planner_contract import (
     action_planner_constraints,
@@ -410,12 +412,13 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
         initialize_plan=False,
     )
     definition = agent._definition()
-    planner_input = PlanningContextBuilder(session, scope).build_v2(
+    closure = PlanningContextBuilder(session, scope).build_v2_closure(
         definition,
         agent._objectives(task, definition),
         task=task,
         replan_reason=None,
     )
+    planner_input = closure.planner_input
     payload = planner_input.model_dump(mode="json")
     serialized = json.dumps(payload, ensure_ascii=False)
 
@@ -434,6 +437,29 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     assert communications["command_reachability"] == "DISCONNECTED"
     assert communications["execution_state"]["status"] == "KNOWN_BLOCKED"
     assert "north_heavy_equipment_stock" not in serialized
+    action_keys = {item["action_key"] for item in payload["action_contracts"]}
+    assert "transport_resource" not in action_keys, closure.relevance_reason.get(
+        "transport_resource"
+    )
+    assert action_keys == {
+        "repair_communications",
+        "relay_message",
+        "survey_resources",
+        "travel",
+    }, closure.relevance_reason
+    assert any(
+        item.get("dimension") == "TRANSPORT_PASSABILITY"
+        and item.get("status") == "UNKNOWN"
+        and item.get("attempt_policy") == "MAY_ATTEMPT"
+        for item in payload["known_world"]["unknown_dependencies"]
+    )
+    assert {item["actor_key"] for item in payload["actors"]} == {
+        "communications_repair_team_alpha",
+        "logistics_team_alpha",
+    }
+    assert "repair_communications" in closure.relevance_reason
+    assert "relevance_reason" not in serialized
+    assert len(serialized.encode("utf-8")) < 30_000
     for duplicate in (
         "planner_constraints",
         "planner_effects",
@@ -444,6 +470,32 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
         "target_contracts",
     ):
         assert duplicate not in serialized
+
+    with pytest.raises(DependencyClosureError, match="dependency closure bound"):
+        build_dependency_closure(
+            definition,
+            agent._objectives(task, definition),
+            planner_input,
+            dependency_limit=0,
+        )
+
+    route = session.get(
+        GameInstanceFactState,
+        (scope.game_instance_id, "central_river_tunnel", "passable"),
+    )
+    assert route is not None
+    route.visibility = Visibility.KNOWN
+    route.truth_value = False
+    session.flush()
+    replanned = PlanningContextBuilder(session, scope).build_v2_closure(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason="TRAVEL_BLOCKED",
+    )
+    assert "clear_transport" in {
+        item.action_key for item in replanned.planner_input.action_contracts
+    }
 
 
 def test_linjiang_v10_all_regions_have_the_generic_travel_target_contract() -> None:

@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches
+from app.agent.dependency_closure import DependencyClosureResult, build_dependency_closure
 from app.agent.planner_contract import (
     action_planner_constraints,
     action_planner_effects,
@@ -305,7 +306,24 @@ class PlanningContextBuilder:
     ) -> PlannerInput:
         """Build canonical V2 while V1 remains an internal Validator adapter."""
 
-        return _canonical_planner_input(
+        return self.build_v2_closure(
+            definition,
+            objectives,
+            task=task,
+            replan_reason=replan_reason,
+        ).planner_input
+
+    def build_v2_closure(
+        self,
+        definition: ScenarioDefinitionV2,
+        objectives: tuple[ObjectiveDefinitionV2, ...],
+        *,
+        task: AgentTask,
+        replan_reason: str | None,
+    ) -> DependencyClosureResult:
+        """Build the typed, bounded dependency closure and its internal audit."""
+
+        base = _canonical_planner_input(
             self.build(
                 definition,
                 objectives,
@@ -313,6 +331,7 @@ class PlanningContextBuilder:
                 replan_reason=replan_reason,
             )
         )
+        return build_dependency_closure(definition, objectives, base)
 
     def _retrieve_action_keys(
         self,
