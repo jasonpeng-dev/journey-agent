@@ -31,6 +31,7 @@ from app.domain.enums import (
     MessageRole,
     NodeStatus,
     PlayerStatus,
+    RelationVisibility,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
@@ -288,6 +289,24 @@ class GameInstanceRegionResourceKnowledge(TimestampMixin, Base):
         Boolean,
         default=True,
         server_default="1",
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceRelationKnowledge(TimestampMixin, Base):
+    """Instance-owned visibility for immutable Scenario Relations."""
+
+    __tablename__ = "game_instance_relation_knowledge"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    relation_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    visibility: Mapped[RelationVisibility] = mapped_column(
+        Enum(RelationVisibility, native_enum=False),
+        default=RelationVisibility.VISIBLE,
+        server_default=RelationVisibility.VISIBLE.value,
         nullable=False,
     )
     version: Mapped[int] = mapped_column(Integer, default=1)

@@ -32,6 +32,7 @@ def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
             item["source_node_key"],
             item["relation_type_key"],
             item["target_node_key"],
+            item.get("key") or "",
         )
     )
     world["resources"].sort(key=lambda item: item["key"])

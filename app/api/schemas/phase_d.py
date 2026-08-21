@@ -359,7 +359,12 @@ class MissionRoadmapResponse(ApiModel):
 
 
 class PublicKnowledgeChangeResponse(ApiModel):
-    kind: Literal["NODE_REVEALED", "FACT_REVEALED", "RESOURCE_DISCOVERED"]
+    kind: Literal[
+        "NODE_REVEALED",
+        "FACT_REVEALED",
+        "RESOURCE_DISCOVERED",
+        "RELATION_REVEALED",
+    ]
     key: str
     name: str
     value: str | int | bool | None = None
@@ -476,6 +481,7 @@ class PublicNodeResponse(ApiModel):
 
 
 class PublicRelationResponse(ApiModel):
+    relation_key: str | None = None
     source_node_key: str
     relation_type_key: str
     target_node_key: str

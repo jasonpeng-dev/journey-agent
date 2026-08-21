@@ -36,6 +36,7 @@ from app.domain.enums import (
     CommandReachability,
     DecisionStatus,
     NodeStatus,
+    RelationVisibility,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
@@ -62,6 +63,7 @@ from app.domain.scenario_v2 import (
     ValueExpressionV2,
     ValueSource,
     normalize_action_parameters,
+    relation_identity,
 )
 from app.domain.world import Visibility
 from app.engine.locality import (
@@ -704,6 +706,7 @@ class GenericAgentService:
         projected_known_passability = self._known_passability(definition)
         projected_known_facts = self._known_fact_projection()
         projected_known_nodes = self._known_node_keys()
+        projected_known_relations = self._known_relation_keys(definition)
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
@@ -780,6 +783,7 @@ class GenericAgentService:
                     projected_known_passability,
                     projected_known_facts,
                     projected_known_nodes,
+                    projected_known_relations,
                     actors=actors,
                     projected_command_reachability=projected_command_reachability,
                 )
@@ -833,6 +837,7 @@ class GenericAgentService:
                 projected_known_passability,
                 projected_known_facts,
                 projected_known_nodes,
+                projected_known_relations,
                 projected_command_reachability=projected_command_reachability,
             )
         return ()
@@ -1156,6 +1161,7 @@ class GenericAgentService:
         projected_known_passability = self._known_passability(definition)
         projected_known_facts = self._known_fact_projection()
         projected_known_nodes = self._known_node_keys()
+        projected_known_relations = self._known_relation_keys(definition)
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
@@ -1270,6 +1276,7 @@ class GenericAgentService:
                     projected_known_passability,
                     projected_known_facts,
                     projected_known_nodes,
+                    projected_known_relations,
                     actors=actors,
                     projected_command_reachability=projected_command_reachability,
                 )
@@ -1384,6 +1391,7 @@ class GenericAgentService:
                 projected_known_passability,
                 projected_known_facts,
                 projected_known_nodes,
+                projected_known_relations,
                 projected_command_reachability=projected_command_reachability,
             )
 
@@ -1524,6 +1532,7 @@ class GenericAgentService:
         projected_known_passability: dict[str, bool],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
+        projected_known_relations: set[str],
         *,
         actors: dict[str, GameInstanceActor] | None = None,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
@@ -1565,6 +1574,7 @@ class GenericAgentService:
                 parameters,
                 projected_known_facts,
                 projected_known_nodes,
+                projected_known_relations,
             )
             if known_failure is not None:
                 raise GenericAgentError(
@@ -1579,6 +1589,7 @@ class GenericAgentService:
                 parameters,
                 projected_known_facts,
                 projected_known_nodes,
+                projected_known_relations,
             )
         if (
             action.behavior
@@ -1616,6 +1627,7 @@ class GenericAgentService:
         parameters: dict[str, StrictScalar],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
+        projected_known_relations: set[str],
     ) -> None:
         source_key = parameters.get("source_key")
         if not isinstance(source_key, str) or source_key not in projected_known_nodes:
@@ -1629,7 +1641,8 @@ class GenericAgentService:
                 "The proposed power target is not currently known",
             )
         if not any(
-            relation.source_node_key == source_key
+            relation_identity(relation) in projected_known_relations
+            and relation.source_node_key == source_key
             and relation.relation_type_key == action.source_relation_type_key
             and relation.target_node_key == target_key
             and relation.source_node_key in projected_known_nodes
@@ -1660,6 +1673,7 @@ class GenericAgentService:
         parameters: dict[str, StrictScalar],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
+        projected_known_relations: set[str],
     ) -> str | None:
         matches: list[tuple[int, str]] = []
         for rule in definition.rules:
@@ -1672,6 +1686,7 @@ class GenericAgentService:
                 parameters,
                 projected_known_facts,
                 projected_known_nodes,
+                projected_known_relations,
             )
             if status is not True:
                 continue
@@ -1694,6 +1709,7 @@ class GenericAgentService:
         parameters: dict[str, StrictScalar],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
+        projected_known_relations: set[str],
     ) -> bool | None:
         if condition is None:
             return True
@@ -1707,6 +1723,7 @@ class GenericAgentService:
                     parameters,
                     projected_known_facts,
                     projected_known_nodes,
+                    projected_known_relations,
                 )
                 for child in condition.conditions
             ]
@@ -1722,6 +1739,7 @@ class GenericAgentService:
                     parameters,
                     projected_known_facts,
                     projected_known_nodes,
+                    projected_known_relations,
                 )
                 for child in condition.conditions
             ]
@@ -1736,6 +1754,7 @@ class GenericAgentService:
                 parameters,
                 projected_known_facts,
                 projected_known_nodes,
+                projected_known_relations,
             )
             return None if status is None else not status
         node_key = cls._projected_selector_key(
@@ -1745,6 +1764,7 @@ class GenericAgentService:
             parameters,
             projected_known_facts,
             projected_known_nodes,
+            projected_known_relations,
         )
         if kind.value in {"FACT_EQUALS", "FACT_NOT_EQUALS", "FACT_IN", "FACT_COMPARE"}:
             if node_key is None or not isinstance(condition.fact_key, str):
@@ -1796,6 +1816,7 @@ class GenericAgentService:
                     )
                 )
                 for relation in definition.world.relations
+                if relation_identity(relation) in projected_known_relations
             )
         if kind.value == "NODE_VISIBLE":
             if node_key is None or condition.visibility is None:
@@ -1838,6 +1859,7 @@ class GenericAgentService:
         parameters: dict[str, StrictScalar],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
+        projected_known_relations: set[str],
     ) -> str | None:
         if selector is None:
             return None
@@ -1858,6 +1880,8 @@ class GenericAgentService:
         direction = selector.direction.value if selector.direction is not None else None
         candidates = []
         for relation in definition.world.relations:
+            if relation_identity(relation) not in projected_known_relations:
+                continue
             if relation.relation_type_key != selector.relation_type_key:
                 continue
             if direction == "SOURCE" and relation.source_node_key == anchor:
@@ -2199,6 +2223,7 @@ class GenericAgentService:
         projected_known_passability: dict[str, bool],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
+        projected_known_relations: set[str],
         *,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> None:
@@ -2218,6 +2243,7 @@ class GenericAgentService:
             parameters,
             projected_known_facts,
             projected_known_nodes,
+            projected_known_relations,
         )
         if projected_command_reachability is not None:
             GenericAgentService._apply_projected_actor_reachability_effect(
@@ -2270,6 +2296,17 @@ class GenericAgentService:
             )
         }
 
+    def _known_relation_keys(self, definition: ScenarioDefinitionV2) -> set[str]:
+        return {
+            key
+            for item in SharedKnowledgeProjection(
+                self.db,
+                self.scope,
+                definition,
+            ).known_relations()
+            if isinstance((key := item.get("relation_key")), str)
+        }
+
     @staticmethod
     def _apply_projected_fact_effects(
         definition: ScenarioDefinitionV2,
@@ -2279,6 +2316,7 @@ class GenericAgentService:
         parameters: dict[str, StrictScalar],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
+        projected_known_relations: set[str],
     ) -> None:
         if action.behavior == ActionBehavior.INSPECT:
             target = definition.world.node(target_key)
@@ -2291,6 +2329,7 @@ class GenericAgentService:
         fact_values: dict[tuple[str, str], set[StrictScalar]] = {}
         fact_visibility: dict[tuple[str, str], set[Visibility]] = {}
         node_visibility: dict[str, set[Visibility]] = {}
+        relation_visibility: dict[str, set[RelationVisibility]] = {}
         rules = [
             rule
             for rule in definition.rules
@@ -2303,6 +2342,7 @@ class GenericAgentService:
             parameters,
             projected_known_facts,
             projected_known_nodes,
+            projected_known_relations,
         )
         for rule in projected_rules:
             for effect in rule.effects:
@@ -2328,6 +2368,14 @@ class GenericAgentService:
                         if effect.kind == EffectKind.REVEAL_NODE
                         else Visibility.HIDDEN
                     )
+                elif (
+                    effect.kind == EffectKind.SET_RELATION_VISIBILITY
+                    and effect.relation_key is not None
+                    and effect.visibility is not None
+                ):
+                    relation_visibility.setdefault(effect.relation_key, set()).add(
+                        RelationVisibility(effect.visibility.value)
+                    )
 
         for identity, fact_value_options in fact_values.items():
             if len(fact_value_options) != 1:
@@ -2348,6 +2396,13 @@ class GenericAgentService:
                 projected_known_nodes.add(node_key)
             else:
                 projected_known_nodes.discard(node_key)
+        for relation_key, relation_visibility_options in relation_visibility.items():
+            if len(relation_visibility_options) != 1:
+                continue
+            if relation_visibility_options.pop() == RelationVisibility.VISIBLE:
+                projected_known_relations.add(relation_key)
+            else:
+                projected_known_relations.discard(relation_key)
 
     @classmethod
     def _projected_resolution_rules(
@@ -2358,6 +2413,7 @@ class GenericAgentService:
         parameters: dict[str, StrictScalar],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
+        projected_known_relations: set[str],
     ) -> list[RuleDefinitionV2]:
         potential: list[tuple[RuleDefinitionV2, bool | None]] = []
         for rule in rules:
@@ -2368,6 +2424,7 @@ class GenericAgentService:
                 parameters,
                 projected_known_facts,
                 projected_known_nodes,
+                projected_known_relations,
             )
             if status is not False:
                 potential.append((rule, status))

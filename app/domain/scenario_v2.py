@@ -23,6 +23,7 @@ from pydantic import (
 
 from app.domain.enums import (
     CommandReachability,
+    RelationVisibility,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
@@ -172,6 +173,7 @@ class EffectKind(StrEnum):
     EMIT_FAILURE = "EMIT_FAILURE"
     WRITE_MEMORY_EVENT = "WRITE_MEMORY_EVENT"
     SET_ACTOR_COMMAND_REACHABILITY = "SET_ACTOR_COMMAND_REACHABILITY"
+    SET_RELATION_VISIBILITY = "SET_RELATION_VISIBILITY"
     SET_REGION_RESOURCE_VISIBILITY = "SET_REGION_RESOURCE_VISIBILITY"
     SET_RESOURCE_POOL_VISIBILITY = "SET_RESOURCE_POOL_VISIBILITY"
     SET_RESOURCE_POOL_AVAILABILITY = "SET_RESOURCE_POOL_AVAILABILITY"
@@ -369,9 +371,24 @@ class NodeDefinitionV2(FrozenDefinitionModel):
 
 
 class RelationDefinitionV2(FrozenDefinitionModel):
+    # Legacy relation documents omit both fields.  The defaults are excluded
+    # from canonical serialization so old Scenario hashes remain unchanged.
+    key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
     source_node_key: StableKey
     relation_type_key: StableKey
     target_node_key: StableKey
+    initial_visibility: RelationVisibility = Field(
+        default=RelationVisibility.VISIBLE,
+        exclude_if=lambda value: value == RelationVisibility.VISIBLE,
+    )
+
+
+def relation_identity(relation: RelationDefinitionV2) -> str:
+    """Return the stable runtime identity of one immutable Relation Truth."""
+
+    return relation.key or (
+        f"{relation.source_node_key}__{relation.relation_type_key}__{relation.target_node_key}"
+    )
 
 
 class ResourceDefinitionV2(FrozenDefinitionModel):
@@ -749,6 +766,7 @@ class EffectV2(FrozenDefinitionModel):
     memory_key: StableKey | None = None
     memory_content: str | None = Field(default=None, max_length=4000)
     actor_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    relation_key: str | None = Field(default=None, exclude_if=lambda value: value is None)
     command_reachability: CommandReachability | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -800,6 +818,10 @@ class EffectV2(FrozenDefinitionModel):
             and self.command_reachability is None
         ):
             raise ValueError("SET_ACTOR_COMMAND_REACHABILITY requires command_reachability")
+        elif self.kind == EffectKind.SET_RELATION_VISIBILITY and (
+            self.relation_key is None or self.visibility is None
+        ):
+            raise ValueError("SET_RELATION_VISIBILITY requires relation_key/visibility")
         elif self.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY and (
             self.region_key is None or self.visibility is None
         ):
@@ -1012,6 +1034,10 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     _require_unique((item.key for item in definition.actions), "Action keys")
     _require_unique((item.key for item in definition.rules), "Rule keys")
     _require_unique((item.key for item in definition.objectives), "Objective keys")
+    _require_unique(
+        (relation_identity(item) for item in world.relations),
+        "World Relation identities",
+    )
 
     node_types = {item.key for item in world.node_types}
     nodes = {item.key: item for item in world.nodes}
@@ -1046,6 +1072,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
         _require_key(nodes, relation.target_node_key, "Relation target Node")
     if len(set(world.relations)) != len(world.relations):
         raise ValueError("World Relations must be unique")
+    relation_keys = {relation_identity(item) for item in world.relations}
 
     for actor in definition.actors.actor_profiles:
         _require_key(roles, actor.role_key, f"Actor {actor.key} Role")
@@ -1122,6 +1149,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 action,
                 definition.metadata.locality,
                 {item.pool_key for item in definition.initialization.resource_pools},
+                relation_keys,
             )
 
     aliases: set[str] = set()
@@ -1200,9 +1228,13 @@ def _validate_effect_refs(
     action: ActionDefinitionV2,
     locality: LocalityContractV2,
     pool_keys: set[str],
+    relation_keys: set[str],
 ) -> None:
     if effect.actor_key is not None:
         _require_key(actors, effect.actor_key, "Effect Actor")
+    if effect.kind == EffectKind.SET_RELATION_VISIBILITY:
+        assert effect.relation_key is not None
+        _require_key(relation_keys, effect.relation_key, "Relation Visibility Relation")
     _validate_selector(effect.node, nodes)
     if effect.node is not None and effect.fact_key is not None:
         _validate_selector_fact(effect.node, effect.fact_key, nodes)

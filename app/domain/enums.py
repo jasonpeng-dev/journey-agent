@@ -56,6 +56,13 @@ class ResourcePoolVisibility(StrEnum):
     VISIBLE = "VISIBLE"
 
 
+class RelationVisibility(StrEnum):
+    """Whether a Scenario-defined Relation is known to the player/Planner."""
+
+    HIDDEN = "HIDDEN"
+    VISIBLE = "VISIBLE"
+
+
 class ResourcePoolAvailability(StrEnum):
     """Whether a known Resource Pool can currently be consumed."""
 

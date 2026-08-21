@@ -52,7 +52,7 @@ export type GameHistory = {
 };
 
 export type ActionLocation = { kind: string; summary: string; detail: string | null };
-export type PublicRelation = { source_node_key: string; relation_type_key: string; target_node_key: string; source_node_name?: string | null; target_node_name?: string | null };
+export type PublicRelation = { relation_key?: string | null; source_node_key: string; relation_type_key: string; target_node_key: string; source_node_name?: string | null; target_node_name?: string | null };
 export type PublicActionRequirement = { action_key: string; action_name: string; required_actor_role_key?: string | null; required_actor_role_name?: string | null; source_relation_type_key?: string | null; known_preconditions: Array<{ node_key: string; fact_key: string; selector: string; current_value: string | number | boolean; failure_condition?: Record<string, unknown> }> };
 export type PublicPlanStep = { id: string; sequence: number; description: string; assigned_actor_name: string; status: "PENDING" | "CURRENT" | "COMPLETED" | "FAILED" | "BLOCKED"; result_summary: string | null; location?: ActionLocation | null };
 export type PublicPlan = { strategy_summary: string; updated: boolean; steps: PublicPlanStep[] };
@@ -61,7 +61,7 @@ export type PlanInterruption = { kind: "FAILURE" | "KNOWLEDGE_CONFLICT"; step_id
 export type PublicPlanHistory = { id: string; ordinal: number; status: "EXECUTING" | "ADJUSTED" | "COMPLETED" | "BLOCKED"; completed_steps: number; total_steps: number; failed_step_name: string | null; interruption?: PlanInterruption | null; steps: PublicPlanHistoryStep[] };
 export type MissionRoadmapStage = { key: string; name: string; description: string; status: "COMPLETED" | "CURRENT" | "PENDING"; objective_key: string | null };
 export type TimelineEventKind = "GOAL_ACCEPTED" | "PLAN_CREATED" | "TASK_STARTED" | "ACTION_BRIEFING" | "ACTION_RESULT" | "PLAN_UPDATED" | "APPROVAL_REQUIRED" | "APPROVAL_APPROVED" | "APPROVAL_REJECTED" | "TASK_COMPLETED" | "TASK_BLOCKED" | "TASK_ABORTED";
-export type KnowledgeChange = { kind: "NODE_REVEALED" | "FACT_REVEALED" | "RESOURCE_DISCOVERED"; key: string; name: string; value: string | number | boolean | null };
+export type KnowledgeChange = { kind: "NODE_REVEALED" | "FACT_REVEALED" | "RESOURCE_DISCOVERED" | "RELATION_REVEALED"; key: string; name: string; value: string | number | boolean | null };
 export type PublicTimelineEvent = { id: string; kind: TimelineEventKind; title: string; detail: string | null; actor_name: string | null; result_summary: string | null; success: boolean | null; knowledge_changes: KnowledgeChange[]; occurred_at: string | null; duration_ms?: number | null; location?: ActionLocation | null };
 export type ExecutionPhase = "AWAITING_PLAN_START" | "AWAITING_ACTION_ACK" | "AWAITING_DEBRIEF_ACK" | "AWAITING_REPLAN_ACK" | "APPROVAL_REQUIRED" | "COMPLETED" | "BLOCKED" | "ABORTED";
 export type ActionBriefing = { step_id: string; action_name: string; actor_name: string; target_name: string; purpose: string; location?: ActionLocation | null };

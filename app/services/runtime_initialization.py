@@ -11,13 +11,13 @@ from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.domain.enums import GameInstanceStatus, NodeStatus
+from app.domain.enums import GameInstanceStatus, NodeStatus, RelationVisibility
 from app.domain.resources import (
     resource_identity,
     resource_pool_initial_states,
     valid_resource_state_identity,
 )
-from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2
+from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2, relation_identity
 from app.domain.world import AccessState
 from app.infrastructure.db.models import (
     ConversationSession,
@@ -26,6 +26,7 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceNodeState,
     GameInstanceRegionResourceKnowledge,
+    GameInstanceRelationKnowledge,
     GameInstanceResourceState,
     Player,
 )
@@ -219,6 +220,24 @@ class RuntimeInitializationService:
                         ),
                     )
                 )
+        supports_relation_knowledge = self._supports_relation_knowledge_schema()
+        if supports_relation_knowledge:
+            for relation in definition.world.relations:
+                self.db.add(
+                    GameInstanceRelationKnowledge(
+                        game_instance_id=instance.id,
+                        relation_key=relation_identity(relation),
+                        visibility=relation.initial_visibility.value,
+                    )
+                )
+        elif any(
+            relation.initial_visibility != RelationVisibility.VISIBLE
+            for relation in definition.world.relations
+        ):
+            raise RuntimeInitializationError(
+                "RUNTIME_RELATION_KNOWLEDGE_SCHEMA_REQUIRED",
+                "This database must be upgraded before a hidden Relation Scenario can start",
+            )
         roles = {role.key: role for role in definition.actors.roles}
         primary_key = definition.initialization.primary_actor_key
         supports_actor_reachability = self._supports_actor_reachability_schema()
@@ -316,6 +335,13 @@ class RuntimeInitializationService:
             return False
         return True
 
+    def _supports_relation_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns("game_instance_relation_knowledge")
+        except Exception:
+            return False
+        return True
+
     @staticmethod
     def _region_nodes(definition: ScenarioDefinitionV2) -> tuple[NodeDefinitionV2, ...]:
         locality = definition.metadata.locality
@@ -353,11 +379,24 @@ class RuntimeInitializationService:
                 GameInstanceResourceState.game_instance_id == instance.id
             )
         ).all()
-        region_knowledge_rows = self.db.scalars(
-            select(GameInstanceRegionResourceKnowledge).where(
-                GameInstanceRegionResourceKnowledge.game_instance_id == instance.id
-            )
-        ).all()
+        region_knowledge_rows = (
+            self.db.scalars(
+                select(GameInstanceRegionResourceKnowledge).where(
+                    GameInstanceRegionResourceKnowledge.game_instance_id == instance.id
+                )
+            ).all()
+            if self._supports_region_resource_knowledge_schema()
+            else []
+        )
+        relation_knowledge_rows = (
+            self.db.scalars(
+                select(GameInstanceRelationKnowledge).where(
+                    GameInstanceRelationKnowledge.game_instance_id == instance.id
+                )
+            ).all()
+            if self._supports_relation_knowledge_schema()
+            else []
+        )
         counts = tuple(
             int(value or 0)
             for value in (
@@ -396,6 +435,9 @@ class RuntimeInitializationService:
             if definition.metadata.locality.enabled
             and node.node_type_key == definition.metadata.locality.region_node_type_key
         }
+        expected_relations = {
+            relation_identity(relation) for relation in definition.world.relations
+        }
         resources_valid = expected_resources.issubset(actual_resources) and all(
             valid_resource_state_identity(
                 definition,
@@ -406,7 +448,26 @@ class RuntimeInitializationService:
             for row in resource_rows
         )
         knowledge_valid = {row.region_key for row in region_knowledge_rows} == expected_regions
-        if len(sessions) != 1 or counts != expected or not resources_valid or not knowledge_valid:
+        relation_knowledge_valid = (
+            not self._supports_relation_knowledge_schema()
+            and all(
+                relation.initial_visibility == RelationVisibility.VISIBLE
+                for relation in definition.world.relations
+            )
+        ) or (
+            {row.relation_key for row in relation_knowledge_rows} == expected_relations
+            and all(
+                row.visibility in {item.value for item in RelationVisibility}
+                for row in relation_knowledge_rows
+            )
+        )
+        if (
+            len(sessions) != 1
+            or counts != expected
+            or not resources_valid
+            or not knowledge_valid
+            or not relation_knowledge_valid
+        ):
             raise RuntimeInitializationError(
                 "RUNTIME_INITIALIZATION_INCOMPLETE",
                 "The idempotent GameInstance runtime graph is incomplete",

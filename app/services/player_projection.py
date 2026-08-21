@@ -234,6 +234,9 @@ class PlayerProjectionService:
             ],
             known_relations=[
                 PublicRelationResponse(
+                    relation_key=(
+                        str(item["relation_key"]) if item.get("relation_key") is not None else None
+                    ),
                     source_node_key=str(item["source_node_key"]),
                     relation_type_key=str(item["relation_type_key"]),
                     target_node_key=str(item["target_node_key"]),

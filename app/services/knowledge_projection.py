@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import (
+    RelationVisibility,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
@@ -22,6 +23,7 @@ from app.domain.scenario_v2 import (
     ConditionV2,
     NodeSelectorKind,
     ScenarioDefinitionV2,
+    relation_identity,
 )
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
@@ -29,6 +31,7 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceNodeState,
     GameInstanceRegionResourceKnowledge,
+    GameInstanceRelationKnowledge,
     GameInstanceResourceState,
 )
 
@@ -100,11 +103,31 @@ class SharedKnowledgeProjection:
 
     def known_relations(self) -> tuple[dict[str, Any], ...]:
         known_nodes = {row.node_key for row in self.known_node_rows()}
-        return tuple(
-            item.model_dump(mode="json")
-            for item in self.definition.world.relations
-            if item.source_node_key in known_nodes and item.target_node_key in known_nodes
-        )
+        try:
+            relation_rows = tuple(
+                self.db.scalars(
+                    select(GameInstanceRelationKnowledge).where(
+                        GameInstanceRelationKnowledge.game_instance_id
+                        == self.scope.game_instance_id
+                    )
+                )
+            )
+        except SQLAlchemyError:
+            relation_rows = ()
+        visibility_by_key = {row.relation_key: row.visibility for row in relation_rows}
+        known: list[dict[str, Any]] = []
+        for item in self.definition.world.relations:
+            if (
+                visibility_by_key.get(relation_identity(item), item.initial_visibility)
+                != RelationVisibility.VISIBLE
+                or item.source_node_key not in known_nodes
+                or item.target_node_key not in known_nodes
+            ):
+                continue
+            projection = item.model_dump(mode="json")
+            projection["relation_key"] = relation_identity(item)
+            known.append(projection)
+        return tuple(known)
 
     def known_action_requirements(self) -> tuple[dict[str, Any], ...]:
         """Expose action requirements that are already supported by Knowledge.

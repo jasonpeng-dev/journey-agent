@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
@@ -12,6 +12,7 @@ from app.domain.enums import (
     AuthorityOutcome,
     CommandReachability,
     NodeStatus,
+    RelationVisibility,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
@@ -29,6 +30,7 @@ from app.domain.scenario_v2 import (
     ScenarioDefinitionV2,
     StrictScalar,
     normalize_action_parameters,
+    relation_identity,
 )
 from app.domain.world import AccessState, Visibility
 from app.engine.locality import (
@@ -55,6 +57,7 @@ from app.engine.rules import (
     RuleFailure,
     RuleNodeState,
     RuleRegionResourceKnowledgeState,
+    RuleRelationKnowledgeState,
     RuleResourcePoolState,
 )
 from app.infrastructure.db.models import (
@@ -64,6 +67,7 @@ from app.infrastructure.db.models import (
     GameInstanceMemoryEvent,
     GameInstanceNodeState,
     GameInstanceRegionResourceKnowledge,
+    GameInstanceRelationKnowledge,
     GameInstanceResourceState,
 )
 from app.scenarios.versions import ScenarioVersionRepository
@@ -246,6 +250,20 @@ class GenericGameService:
                 for update in outcome.resource_pool_visibility_updates
             )
         )
+        newly_known_relations = tuple(
+            relation
+            for relation in definition.world.relations
+            if any(
+                update.relation_key == relation_identity(relation)
+                and update.visibility == RelationVisibility.VISIBLE
+                for update in outcome.relation_visibility_updates
+            )
+            and state.relation_knowledge.get(
+                relation_identity(relation),
+                RuleRelationKnowledgeState(RelationVisibility.VISIBLE),
+            ).visibility
+            != RelationVisibility.VISIBLE
+        )
         self._apply(definition, actor_key, outcome)
         instance = self._instance()
         instance.runtime_revision += 1
@@ -285,6 +303,14 @@ class GenericGameService:
                     key=resource_state_key(pool.resource_key, pool.region_key, pool.pool_key),
                     name=resource_names.get(pool.resource_key, pool.resource_key),
                     value=pool.quantity,
+                )
+            )
+        for relation in sorted(newly_known_relations, key=relation_identity):
+            knowledge_changes.append(
+                PlayerKnowledgeChange(
+                    kind="RELATION_REVEALED",
+                    key=relation_identity(relation),
+                    name=relation.relation_type_key,
                 )
             )
         return AppliedRuleResult(
@@ -657,11 +683,23 @@ class GenericGameService:
                 "SUPPLY_POWER_RELATION_UNKNOWN",
                 "The power source and target are not both known",
             )
-        if not any(
-            relation.source_node_key == source_node_key
-            and relation.relation_type_key == action.source_relation_type_key
-            and relation.target_node_key == target_node_key
-            for relation in definition.world.relations
+        relation = next(
+            (
+                item
+                for item in definition.world.relations
+                if item.source_node_key == source_node_key
+                and item.relation_type_key == action.source_relation_type_key
+                and item.target_node_key == target_node_key
+            ),
+            None,
+        )
+        if (
+            relation is None
+            or state.relation_knowledge.get(
+                relation_identity(relation),
+                RuleRelationKnowledgeState(RelationVisibility.VISIBLE),
+            ).visibility
+            != RelationVisibility.VISIBLE
         ):
             return GenericGameService._behavior_failure(
                 action.key,
@@ -822,6 +860,9 @@ class GenericGameService:
         region_knowledge_query = select(GameInstanceRegionResourceKnowledge).where(
             GameInstanceRegionResourceKnowledge.game_instance_id == self.scope.game_instance_id
         )
+        relation_knowledge_query = select(GameInstanceRelationKnowledge).where(
+            GameInstanceRelationKnowledge.game_instance_id == self.scope.game_instance_id
+        )
         actor_query = select(GameInstanceActor).where(
             GameInstanceActor.game_instance_id == self.scope.game_instance_id
         )
@@ -830,11 +871,17 @@ class GenericGameService:
             fact_query = fact_query.with_for_update()
             resource_query = resource_query.with_for_update()
             region_knowledge_query = region_knowledge_query.with_for_update()
+            relation_knowledge_query = relation_knowledge_query.with_for_update()
             actor_query = actor_query.with_for_update()
         nodes = self.db.scalars(node_query).all()
         facts = self.db.scalars(fact_query).all()
         resources = self.db.scalars(resource_query).all()
         region_knowledge = self.db.scalars(region_knowledge_query).all()
+        relation_knowledge = (
+            self.db.scalars(relation_knowledge_query).all()
+            if self._supports_relation_knowledge_schema()
+            else []
+        )
         actors = self.db.scalars(actor_query).all()
         expected_initial_resources = {
             (item.resource_key, item.region_key, item.pool_key)
@@ -849,6 +896,7 @@ class GenericGameService:
             if definition.metadata.locality.enabled
             and node.node_type_key == definition.metadata.locality.region_node_type_key
         }
+        expected_relations = {relation_identity(item) for item in definition.world.relations}
         if (
             {row.node_key for row in nodes} != {node.key for node in definition.world.nodes}
             or {(row.node_key, row.fact_key) for row in facts}
@@ -864,6 +912,14 @@ class GenericGameService:
                 for row in resources
             )
             or {row.region_key for row in region_knowledge} != expected_regions
+            or (
+                self._supports_relation_knowledge_schema()
+                and {row.relation_key for row in relation_knowledge} != expected_relations
+            )
+            or any(
+                row.visibility not in {item.value for item in RelationVisibility}
+                for row in relation_knowledge
+            )
         ):
             raise GenericGameError(
                 "RUNTIME_STATE_INCOMPLETE",
@@ -927,6 +983,21 @@ class GenericGameService:
                     resource_survey_completed=row.resource_survey_completed,
                 )
                 for row in region_knowledge
+            },
+            relation_knowledge={
+                relation_identity(relation): RuleRelationKnowledgeState(
+                    visibility=(
+                        next(
+                            (
+                                RelationVisibility(row.visibility)
+                                for row in relation_knowledge
+                                if row.relation_key == relation_identity(relation)
+                            ),
+                            relation.initial_visibility,
+                        )
+                    )
+                )
+                for relation in definition.world.relations
             },
             actors={
                 row.actor_key: RuleActorState(
@@ -1083,6 +1154,18 @@ class GenericGameService:
                 )
             knowledge_row.resource_survey_completed = survey_mutation.completed
             knowledge_row.version += 1
+        for relation_mutation in outcome.relation_visibility_updates:
+            relation_row = self.db.get(
+                GameInstanceRelationKnowledge,
+                (self.scope.game_instance_id, relation_mutation.relation_key),
+            )
+            if relation_row is None:
+                raise GenericGameError(
+                    "RELATION_KNOWLEDGE_MISSING",
+                    "A Rule referenced missing Relation Knowledge",
+                )
+            relation_row.visibility = relation_mutation.visibility
+            relation_row.version += 1
         pool_rows = self.db.scalars(
             select(GameInstanceResourceState).where(
                 GameInstanceResourceState.game_instance_id == self.scope.game_instance_id
@@ -1210,6 +1293,13 @@ class GenericGameService:
         if row is None:
             raise GenericGameError("RUNTIME_NODE_MISSING", "Rule Node state is missing")
         return row
+
+    def _supports_relation_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns("game_instance_relation_knowledge")
+        except Exception:
+            return False
+        return True
 
 
 __all__ = [

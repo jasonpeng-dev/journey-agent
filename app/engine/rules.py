@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from app.domain.enums import (
     CommandReachability,
+    RelationVisibility,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
@@ -82,6 +83,11 @@ class RuleRegionResourceKnowledgeState:
 
 
 @dataclass(frozen=True, slots=True)
+class RuleRelationKnowledgeState:
+    visibility: RelationVisibility
+
+
+@dataclass(frozen=True, slots=True)
 class DeclarativeRuleState:
     nodes: Mapping[str, RuleNodeState]
     facts: Mapping[FactRef, RuleFactState]
@@ -92,6 +98,7 @@ class DeclarativeRuleState:
     region_resource_knowledge: Mapping[str, RuleRegionResourceKnowledgeState] = field(
         default_factory=dict
     )
+    relation_knowledge: Mapping[str, RuleRelationKnowledgeState] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +180,12 @@ class RegionResourceSurveyMutation:
 
 
 @dataclass(frozen=True, slots=True)
+class RelationVisibilityMutation:
+    relation_key: str
+    visibility: RelationVisibility
+
+
+@dataclass(frozen=True, slots=True)
 class ActorCommandReachabilityMutation:
     actor_key: str
     command_reachability: CommandReachability
@@ -209,6 +222,7 @@ class GenericRuleOutcome:
     region_resource_survey_updates: tuple[RegionResourceSurveyMutation, ...] = ()
     resource_pool_visibility_updates: tuple[ResourcePoolVisibilityMutation, ...] = ()
     resource_pool_availability_updates: tuple[ResourcePoolAvailabilityMutation, ...] = ()
+    relation_visibility_updates: tuple[RelationVisibilityMutation, ...] = ()
 
 
 class DeclarativeRuleEngine:
@@ -369,6 +383,7 @@ class DeclarativeRuleEngine:
         region_resource_visibility: list[RegionResourceVisibilityMutation] = []
         resource_pool_visibility: list[ResourcePoolVisibilityMutation] = []
         resource_pool_availability: list[ResourcePoolAvailabilityMutation] = []
+        relation_visibility: list[RelationVisibilityMutation] = []
         outcome_code: str | None = None
         failure: RuleFailure | None = None
         for effect in rule.effects:
@@ -441,6 +456,14 @@ class DeclarativeRuleEngine:
                 actor_reachability.append(
                     ActorCommandReachabilityMutation(actor_key, effect.command_reachability)
                 )
+            elif effect.kind == EffectKind.SET_RELATION_VISIBILITY:
+                assert effect.relation_key is not None and effect.visibility is not None
+                relation_visibility.append(
+                    RelationVisibilityMutation(
+                        effect.relation_key,
+                        RelationVisibility(effect.visibility.value),
+                    )
+                )
             elif effect.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY:
                 assert effect.region_key is not None and effect.visibility is not None
                 region_resource_visibility.append(
@@ -477,6 +500,7 @@ class DeclarativeRuleEngine:
             region_resource_visibility_updates=tuple(region_resource_visibility),
             resource_pool_visibility_updates=tuple(resource_pool_visibility),
             resource_pool_availability_updates=tuple(resource_pool_availability),
+            relation_visibility_updates=tuple(relation_visibility),
         )
 
     def _effect_nodes(
@@ -731,6 +755,7 @@ __all__ = [
     "GenericRuleOutcome",
     "RegionResourceSurveyMutation",
     "RegionResourceVisibilityMutation",
+    "RelationVisibilityMutation",
     "ResourcePoolAvailabilityMutation",
     "ResourcePoolVisibilityMutation",
     "RuleActorState",
@@ -738,5 +763,6 @@ __all__ = [
     "RuleFactState",
     "RuleNodeState",
     "RuleRegionResourceKnowledgeState",
+    "RuleRelationKnowledgeState",
     "RuleResourcePoolState",
 ]
