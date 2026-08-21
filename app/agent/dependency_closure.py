@@ -188,6 +188,11 @@ def build_dependency_closure(
                     "dimension": "RESOURCE_SOURCE",
                     "resource_key": dependency.subject,
                     "status": "UNKNOWN",
+                    "blocks": "SOURCE_SELECTION",
+                    "resolvable_by_effect_types": [
+                        "REGION_RESOURCE_KNOWLEDGE",
+                        "RESOURCE_POOL_KNOWLEDGE",
+                    ],
                 }
                 for action_key, contract in contracts.items():
                     if action_key == consumer_action:

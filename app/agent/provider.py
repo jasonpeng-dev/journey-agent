@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from threading import Lock
 from time import perf_counter
 from typing import Literal, Protocol
+from uuid import uuid4
 
 import httpx
 import structlog
@@ -149,6 +150,7 @@ class PlanningActionCandidate(ProviderModel):
 
 
 class PlanStepProposal(ProviderModel):
+    step_id: str = Field(default_factory=lambda: f"step-{uuid4().hex[:12]}")
     purpose: str = ""
     action_key: str | None = None
     actor_key: str | None = None
@@ -220,9 +222,17 @@ class PlanRequest(ProviderModel):
         return self.model_dump(mode="json")
 
 
-class PlanProposal(ProviderModel):
+class PlanSegment(ProviderModel):
+    stop_reason: Literal["OBJECTIVE_COMPLETION", "INFORMATION_BOUNDARY", "BLOCKED"] = (
+        "OBJECTIVE_COMPLETION"
+    )
+    boundary_dependency: dict[str, object] | None = None
     plan_summary: str = ""
     steps: tuple[PlanStepProposal, ...]
+
+
+class PlanProposal(PlanSegment):
+    """Compatibility name for the canonical PlanSegment response."""
 
 
 class ProviderCallMetadata(ProviderModel):
@@ -436,7 +446,10 @@ class OpenAICompatibleGenericProvider:
             if purpose == "goal_selection"
             else (
                 '{"plan_summary":"short summary",'
-                '"steps":[{"purpose":"goal-directed step",'
+                '"stop_reason":"OBJECTIVE_COMPLETION|INFORMATION_BOUNDARY|BLOCKED",'
+                '"boundary_dependency":null,'
+                '"steps":[{"step_id":"segment-local-stable-id",'
+                '"purpose":"goal-directed step",'
                 '"action_key":"existing_action_key",'
                 '"actor_key":"existing_actor_key",'
                 '"target_key":"existing_target_key",'
@@ -446,8 +459,7 @@ class OpenAICompatibleGenericProvider:
         if purpose == "repair":
             planning_prompt = (
                 "You are repairing a rejected plan for the same frozen ObjectiveScope. "
-                "Return one complete corrected plan for that exact scope. The steps array "
-                "MUST contain at least one step; never return an empty steps array. Use the "
+                "Return one complete corrected PlanSegment for that exact scope. Use the "
                 "validator diagnostics in the user payload to fix the rejected parts, and "
                 "keep valid parts whenever possible. Every step must directly advance the "
                 "current Objective, satisfy a public prerequisite, obtain Knowledge needed "
@@ -465,9 +477,8 @@ class OpenAICompatibleGenericProvider:
             )
         elif purpose in {"initial_plan", "replan"}:
             planning_prompt = (
-                "Produce one complete plan for exactly the frozen ObjectiveScope in the "
-                "user payload. The steps array MUST contain at least one step; never "
-                "return steps=[]. Every step must directly advance the current Objective, "
+                "Produce one PlanSegment for exactly the frozen ObjectiveScope in the "
+                "user payload. Every step must directly advance the current Objective, "
                 "satisfy a public prerequisite, obtain Knowledge needed for completing "
                 "the Objective, or be an explicitly necessary supporting action. Do not "
                 "add speculative or preventive corrective actions solely to guard against "
@@ -958,6 +969,7 @@ __all__ = [
     "OpenAICompatibleGenericProvider",
     "PlanProposal",
     "PlanRequest",
+    "PlanSegment",
     "PlanStepProposal",
     "PlannerActionContract",
     "PlannerActorState",

@@ -26,8 +26,10 @@ from app.agent.provider import (
     GenericModelProvider,
     GenericProviderError,
     GoalSelectionRequest,
+    PlannerInput,
     PlanningActionCandidate,
     PlanningContext,
+    PlanProposal,
     PlanRequest,
     provider_call_metadata,
     provider_call_start_metadata,
@@ -300,6 +302,7 @@ class GenericAgentService:
         self.provider_call_observer = provider_call_observer
         self._provider_call_started_at: dict[str, float] = {}
         self._last_provider_plan_summary: str | None = None
+        self._last_provider_stop_reason: str | None = None
 
     def create_task(
         self,
@@ -407,9 +410,14 @@ class GenericAgentService:
             reason=reason,
             plan_version=next_version,
         )
+        self._last_provider_stop_reason = None
         if self.provider is not None:
             steps = self._provider_steps(task, definition, objectives, reason, next_version)
-        if not steps and not self.evaluate(task).completed:
+        if (
+            not steps
+            and not self.evaluate(task).completed
+            and getattr(self, "_last_provider_stop_reason", None) != "BLOCKED"
+        ):
             raise GenericAgentError(
                 "GENERIC_PLAN_NOT_FOUND",
                 "No exact-Version Action can advance the frozen Objective from current Knowledge",
@@ -443,7 +451,14 @@ class GenericAgentService:
                     execution_type=candidate["execution_type"],
                     assigned_actor_key=str(candidate["actor_key"]),
                     action_intent=candidate["action_intent"],
-                    constraints={"scenario_version_id": str(self.scope.scenario_version_id)},
+                    constraints={
+                        "scenario_version_id": str(self.scope.scenario_version_id),
+                        **(
+                            {"planner_step_id": candidate["planner_step_id"]}
+                            if candidate.get("planner_step_id")
+                            else {}
+                        ),
+                    },
                     allowed_tool_names=(
                         ["execute_action"]
                         if candidate["execution_type"] == StepExecutionType.TOOL
@@ -460,6 +475,9 @@ class GenericAgentService:
                 )
             )
         task.current_plan_version = plan.version
+        if getattr(self, "_last_provider_stop_reason", None) == "BLOCKED":
+            task.status = AgentTaskStatus.BLOCKED
+            task.last_error_code = "PLAN_SEGMENT_BLOCKED"
         if reason is not None:
             task.replan_count += 1
         if task.last_error_code == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE:
@@ -1163,16 +1181,21 @@ class GenericAgentService:
                 )
                 self._provider_call_started_at.pop(audit_id, None)
                 raise
-            steps, diagnostics = self._validate_provider_proposal_v1(
-                task,
-                definition,
-                objectives,
-                reason,
-                plan_version,
-                catalog,
-                proposal.steps,
-                planning_context,
-            )
+            diagnostics = _validate_plan_segment_contract(proposal, planner_input)
+            if diagnostics:
+                steps: list[dict[str, object]] = []
+            else:
+                steps, diagnostics = self._validate_provider_proposal_v1(
+                    task,
+                    definition,
+                    objectives,
+                    reason,
+                    plan_version,
+                    catalog,
+                    proposal.steps,
+                    planning_context,
+                    stop_reason=proposal.stop_reason,
+                )
             self._record_provider_plan_call(
                 task,
                 request=request,
@@ -1187,6 +1210,7 @@ class GenericAgentService:
             self._provider_call_started_at.pop(audit_id, None)
             if not diagnostics:
                 self._last_provider_plan_summary = proposal.plan_summary.strip() or None
+                self._last_provider_stop_reason = proposal.stop_reason
                 return steps
         raise GenericAgentError(
             "MODEL_PLAN_REJECTED",
@@ -1213,6 +1237,8 @@ class GenericAgentService:
         catalog: tuple[PlanningActionCandidate, ...],
         proposed_steps: tuple[object, ...],
         planning_context: PlanningContext,
+        *,
+        stop_reason: str = "OBJECTIVE_COMPLETION",
     ) -> tuple[list[dict[str, object]], tuple[dict[str, object], ...]]:
         """Validate direct V1 bindings while accepting legacy candidate IDs.
 
@@ -1280,8 +1306,10 @@ class GenericAgentService:
             if self._known_requirement_public(requirement)
             and not self._known_requirement_satisfied(requirement)
         }
-        if not proposed_steps:
+        if not proposed_steps and stop_reason != "BLOCKED":
             return [], ({"code": "NO_STEPS", "message": "Proposal contains no steps"},)
+        if not proposed_steps:
+            return [], ()
 
         for index, raw_step in enumerate(proposed_steps, start=1):
             candidate_id = getattr(raw_step, "candidate_id", None)
@@ -1469,6 +1497,8 @@ class GenericAgentService:
             purpose = getattr(raw_step, "purpose", "")
             if isinstance(purpose, str) and purpose.strip() and generated:
                 generated[0]["description"] = purpose.strip()[:400]
+            if generated:
+                generated[0]["planner_step_id"] = getattr(raw_step, "step_id", "")
             result.extend(generated)
             step_effects.append(effect_refs)
             self._advance_projected_action_state(
@@ -1518,7 +1548,7 @@ class GenericAgentService:
                     )
             covered_before.update(effects)
         missing_refs = objective_needed - set().union(*step_effects)
-        if missing_refs:
+        if missing_refs and stop_reason == "OBJECTIVE_COMPLETION":
             return [], (
                 {
                     "code": "OBJECTIVE_COVERAGE_INCOMPLETE",
@@ -3179,6 +3209,88 @@ def _known_recovery_effects(
             if matches:
                 result.append({"action_key": action_key, "effect": effect})
     return result
+
+
+def _validate_plan_segment_contract(
+    segment: PlanProposal,
+    planner_input: PlannerInput,
+) -> tuple[dict[str, object], ...]:
+    """Validate segment termination without planning a recovery path."""
+
+    step_ids = [step.step_id for step in segment.steps]
+    if any(not step_id.strip() for step_id in step_ids):
+        return ({"code": "STEP_ID_INVALID", "message": "step_id cannot be blank"},)
+    if len(step_ids) != len(set(step_ids)):
+        return ({"code": "STEP_ID_DUPLICATE", "step_ids": step_ids},)
+    if segment.stop_reason == "OBJECTIVE_COMPLETION":
+        if not segment.steps:
+            return ({"code": "NO_STEPS", "message": "Completion segment has no steps"},)
+        return ()
+    if segment.stop_reason == "BLOCKED":
+        if segment.steps:
+            return ({"code": "BLOCKED_SEGMENT_HAS_STEPS"},)
+        if planner_input.action_contracts:
+            return (
+                {
+                    "code": "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS",
+                    "action_keys": [item.action_key for item in planner_input.action_contracts],
+                },
+            )
+        return ()
+
+    dependency = segment.boundary_dependency
+    if not isinstance(dependency, dict):
+        return ({"code": "INFORMATION_BOUNDARY_DEPENDENCY_MISSING"},)
+    matching = next(
+        (
+            item
+            for item in planner_input.known_world.unknown_dependencies
+            if _same_unknown_dependency(item, dependency)
+        ),
+        None,
+    )
+    if matching is None or matching.get("status") != "UNKNOWN" or not matching.get("blocks"):
+        return ({"code": "INFORMATION_BOUNDARY_NOT_RELEVANT", "actual": dependency},)
+    resolvers = matching.get("resolvable_by_effect_types")
+    resolver_types = (
+        {str(item) for item in resolvers}
+        if isinstance(resolvers, list) and all(isinstance(item, str) for item in resolvers)
+        else set()
+    )
+    action_contracts = {item.action_key: item for item in planner_input.action_contracts}
+    scheduled_effects = {
+        str(effect.get("type"))
+        for step in segment.steps
+        if step.action_key in action_contracts
+        for effect in action_contracts[str(step.action_key)].deterministic_effects
+        if isinstance(effect.get("type"), str)
+    }
+    if not resolver_types or not resolver_types.intersection(scheduled_effects):
+        return (
+            {
+                "code": "INFORMATION_BOUNDARY_ACQUISITION_MISSING",
+                "required_effect_types": sorted(resolver_types),
+            },
+        )
+    if not segment.steps:
+        return ({"code": "NO_STEPS", "message": "Information boundary has no steps"},)
+    return ()
+
+
+def _same_unknown_dependency(
+    known: dict[str, object], proposed: dict[str, object]
+) -> bool:
+    if known.get("dimension") != proposed.get("dimension"):
+        return False
+    identity_keys = ("resource_key", "subject_key", "fact_key")
+    compared = False
+    for key in identity_keys:
+        if key not in known:
+            continue
+        compared = True
+        if proposed.get(key) != known.get(key):
+            return False
+    return compared
 
 
 def _safe_provider_diagnostic(code: str) -> str:

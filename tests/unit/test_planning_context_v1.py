@@ -5,12 +5,18 @@ import httpx
 from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
-from app.agent.generic import GenericAgentService, PlanningActionCatalogBuilder
+from app.agent.generic import (
+    GenericAgentService,
+    PlanningActionCatalogBuilder,
+    _validate_plan_segment_contract,
+)
 from app.agent.provider import (
     GoalSelection,
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
+    PlannerActionContract,
     PlannerInput,
+    PlannerKnownWorldSlice,
     PlanningActionCandidate,
     PlanningContext,
     PlanProposal,
@@ -471,3 +477,108 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
     assert provider.last_call_metadata.reasoning_tokens == 3
     assert provider.last_call_metadata.final_content_bytes == len(response_content.encode("utf-8"))
     assert provider.last_call_metadata.finish_reason == "stop"
+
+
+def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
+    planner_input = PlannerInput(
+        action_contracts=(
+            PlannerActionContract(
+                action_key="survey",
+                deterministic_effects=(
+                    {"type": "REGION_RESOURCE_KNOWLEDGE", "target": "target_region"},
+                ),
+            ),
+        ),
+        known_world=PlannerKnownWorldSlice(
+            unknown_dependencies=(
+                {
+                    "dimension": "RESOURCE_SOURCE",
+                    "resource_key": "repair_parts",
+                    "status": "UNKNOWN",
+                    "blocks": "SOURCE_SELECTION",
+                    "resolvable_by_effect_types": ["REGION_RESOURCE_KNOWLEDGE"],
+                },
+            )
+        ),
+    )
+    dependency = {"dimension": "RESOURCE_SOURCE", "resource_key": "repair_parts"}
+    acquisition = PlanStepProposal(
+        step_id="survey-1",
+        action_key="survey",
+        actor_key="actor",
+        target_key="region",
+    )
+    valid = PlanProposal(
+        stop_reason="INFORMATION_BOUNDARY",
+        boundary_dependency=dependency,
+        steps=(acquisition,),
+    )
+    assert _validate_plan_segment_contract(valid, planner_input) == ()
+    assert _validate_plan_segment_contract(
+        PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=(acquisition,)),
+        planner_input,
+    ) == ()
+
+    missing_acquisition = PlanProposal(
+        stop_reason="INFORMATION_BOUNDARY",
+        boundary_dependency=dependency,
+        steps=(
+            PlanStepProposal(
+                step_id="inspect-1",
+                action_key="inspect",
+                actor_key="actor",
+                target_key="region",
+            ),
+        ),
+    )
+    assert _validate_plan_segment_contract(missing_acquisition, planner_input)[0]["code"] == (
+        "INFORMATION_BOUNDARY_ACQUISITION_MISSING"
+    )
+    assert _validate_plan_segment_contract(
+        valid,
+        planner_input.model_copy(
+            update={"known_world": PlannerKnownWorldSlice(unknown_dependencies=())}
+        ),
+    )[0]["code"] == "INFORMATION_BOUNDARY_NOT_RELEVANT"
+
+    blocked = PlanProposal(stop_reason="BLOCKED", steps=())
+    assert _validate_plan_segment_contract(blocked, PlannerInput()) == ()
+    assert _validate_plan_segment_contract(blocked, planner_input)[0]["code"] == (
+        "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS"
+    )
+    unknown_route = planner_input.model_copy(
+        update={
+            "known_world": PlannerKnownWorldSlice(
+                unknown_dependencies=(
+                    {
+                        "dimension": "TRANSPORT_PASSABILITY",
+                        "subject_key": "connector",
+                        "fact_key": "passable",
+                        "status": "UNKNOWN",
+                        "attempt_policy": "MAY_ATTEMPT",
+                    },
+                )
+            )
+        }
+    )
+    route_boundary = PlanProposal(
+        stop_reason="INFORMATION_BOUNDARY",
+        boundary_dependency={
+            "dimension": "TRANSPORT_PASSABILITY",
+            "subject_key": "connector",
+            "fact_key": "passable",
+        },
+        steps=(acquisition,),
+    )
+    assert _validate_plan_segment_contract(route_boundary, unknown_route)[0]["code"] == (
+        "INFORMATION_BOUNDARY_NOT_RELEVANT"
+    )
+    duplicate = PlanProposal(
+        steps=(
+            acquisition,
+            acquisition.model_copy(update={"action_key": "another"}),
+        )
+    )
+    assert _validate_plan_segment_contract(duplicate, planner_input)[0]["code"] == (
+        "STEP_ID_DUPLICATE"
+    )
