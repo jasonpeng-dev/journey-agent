@@ -439,6 +439,7 @@ class GenericAgentService:
             planner_model=(self.provider.model_name if self.provider is not None else None),
             validation_status="PASSED",
             validation_errors=[],
+            stop_reason=self._last_provider_stop_reason or "OBJECTIVE_COMPLETION",
         )
         self.db.add(plan)
         self.db.flush()
@@ -447,6 +448,11 @@ class GenericAgentService:
                 AgentStep(
                     plan_id=plan.id,
                     sequence=sequence,
+                    planner_step_id=(
+                        str(candidate["planner_step_id"])
+                        if candidate.get("planner_step_id")
+                        else None
+                    ),
                     description=candidate["description"],
                     execution_type=candidate["execution_type"],
                     assigned_actor_key=str(candidate["actor_key"]),
@@ -507,7 +513,14 @@ class GenericAgentService:
             .order_by(AgentStep.sequence)
         )
         if step is None:
-            self.plan(task, reason="PLAN_EXHAUSTED")
+            self.plan(
+                task,
+                reason=(
+                    "INFORMATION_BOUNDARY"
+                    if plan.stop_reason == "INFORMATION_BOUNDARY"
+                    else "PLAN_EXHAUSTED"
+                ),
+            )
             return self.execute_next(task, replan_on_failure=replan_on_failure)
         if step.execution_type == StepExecutionType.WAIT_FOR_WORLD_EVENT:
             operation = self.db.scalar(

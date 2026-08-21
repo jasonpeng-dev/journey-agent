@@ -24,8 +24,9 @@ from app.agent.provider import (
     PlanStepProposal,
 )
 from app.core.config import Settings
+from app.domain.enums import AgentPlanStatus
 from app.domain.runtime_scope import GameInstanceId
-from app.infrastructure.db.models import Player
+from app.infrastructure.db.models import AgentPlan, Player
 from app.scenarios.builtin import STARFIRE_V2, require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
@@ -587,3 +588,40 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     assert _validate_plan_segment_contract(duplicate, planner_input)[0]["code"] == (
         "STEP_ID_DUPLICATE"
     )
+
+
+def test_information_boundary_exhaustion_generates_replan_from_latest_state(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(session)
+    provider = DirectBindingProvider()
+    agent = GenericAgentService(session, scope, provider=provider)
+    task = agent.create_task(
+        runtime.session,
+        "open the northern trade route",
+        initialize_plan=False,
+    )
+    exhausted = AgentPlan(
+        task_id=task.id,
+        version=1,
+        status=AgentPlanStatus.ACTIVE,
+        strategy_summary="knowledge acquisition boundary",
+        replan_reason=None,
+        created_by_actor_key=task.owner_actor_key,
+        source="PROVIDER",
+        validation_status="PASSED",
+        validation_errors=[],
+        stop_reason="INFORMATION_BOUNDARY",
+    )
+    session.add(exhausted)
+    task.current_plan_version = 1
+    session.flush()
+
+    executed = agent.execute_next(task, replan_on_failure=False)
+
+    assert executed is not None
+    assert len(provider.requests) == 1
+    assert provider.requests[0].call_type == "REPLAN"
+    assert provider.requests[0].replan_reason == "INFORMATION_BOUNDARY"
+    assert provider.requests[0].planner_input is not None
+    assert provider.requests[0].planner_input.schema_version == 2

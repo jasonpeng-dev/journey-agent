@@ -515,6 +515,7 @@ class AgentPlan(UUIDPrimaryKey, Base):
     planner_model: Mapped[str | None] = mapped_column(String(100))
     validation_status: Mapped[str] = mapped_column(String(30), default="PASSED")
     validation_errors: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    stop_reason: Mapped[str] = mapped_column(String(40), default="OBJECTIVE_COMPLETION")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -527,6 +528,7 @@ class AgentStep(UUIDPrimaryKey, Base):
 
     plan_id: Mapped[UUID] = mapped_column(ForeignKey("agent_plans.id", ondelete="CASCADE"))
     sequence: Mapped[int] = mapped_column(Integer)
+    planner_step_id: Mapped[str | None] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(Text)
     execution_type: Mapped[StepExecutionType] = mapped_column(
         Enum(StepExecutionType, native_enum=False, length=30)
