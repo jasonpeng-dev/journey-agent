@@ -62,14 +62,28 @@ class PlanningContextBuilder:
         legacy = PlanningActionCatalogBuilder(self.db, self.scope)
         known_refs = legacy.known_fact_refs()
         known_world = legacy.known_world(definition)
+        knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
+        known_action_requirements = knowledge_projection.known_action_requirements()
+        known_action_requirements_by_key = {
+            item["action_key"]: item
+            for item in known_action_requirements
+            if isinstance(item.get("action_key"), str)
+        }
         relevant_action_keys = self._retrieve_action_keys(definition, objectives, known_refs)
         relevant_targets = self._targets(definition, relevant_action_keys, known_world)
-        relevant_actions = self._actions(definition, objectives, relevant_action_keys, known_refs)
+        relevant_actions = self._actions(
+            definition,
+            objectives,
+            relevant_action_keys,
+            known_refs,
+            known_action_requirements_by_key,
+        )
         relevant_actors = self._actors(definition, relevant_action_keys)
         return PlanningContext(
             goal=self._goal(definition, objectives, known_refs),
             current_knowledge={
                 **known_world,
+                "known_action_requirements": list(known_action_requirements),
                 "observations": self._observations(task),
             },
             relevant_actions=tuple(relevant_actions),
@@ -228,6 +242,7 @@ class PlanningContextBuilder:
         objectives: tuple[ObjectiveDefinitionV2, ...],
         action_keys: set[str],
         known_refs: set[tuple[str, str]],
+        known_action_requirements: dict[str, dict[str, object]],
     ) -> list[dict[str, object]]:
         objective_refs = _objective_refs(objectives)
         objective_nodes = {node_key for node_key, _fact_key in objective_refs}
@@ -269,6 +284,11 @@ class PlanningContextBuilder:
                 "objective_relevance": relevance,
                 "target_requirements": {
                     "required_interaction_key": action.required_interaction_key,
+                    **(
+                        {"source_relation_type_key": action.source_relation_type_key}
+                        if action.source_relation_type_key is not None
+                        else {}
+                    ),
                 },
                 "parameter_schema": [item.model_dump(mode="json") for item in action.parameters],
                 "parameter_defaults": {
@@ -278,6 +298,11 @@ class PlanningContextBuilder:
                     "required_actor_capabilities": [
                         item.value for item in action.allowed_actor_capabilities
                     ],
+                    **(
+                        {"required_actor_role_key": action.required_actor_role_key}
+                        if action.required_actor_role_key is not None
+                        else {}
+                    ),
                     "static_authority": action.authority_policy.model_dump(mode="json"),
                 },
                 "execution_mode": action.execution_mode.value,
@@ -285,6 +310,13 @@ class PlanningContextBuilder:
                 "locality": action.locality.value,
                 "target_kind": action.target_kind.value,
             }
+            if action.key in known_action_requirements:
+                requirement = known_action_requirements[action.key]
+                action_context["known_requirements"] = {
+                    key: value
+                    for key, value in requirement.items()
+                    if key not in {"action_key", "action_name"}
+                }
             hints = list(action.planning.hints)
             if action.behavior == ActionBehavior.SURVEY_RESOURCES:
                 hints.extend(
@@ -295,6 +327,33 @@ class PlanningContextBuilder:
                         "Discovered stock may remain unavailable until its "
                         "requirement is satisfied.",
                         "Do not repeat a survey after resource_survey_completed is true.",
+                    ]
+                )
+            elif action.behavior == ActionBehavior.SUPPLY_POWER:
+                hints.extend(
+                    [
+                        (
+                            "Choose the explicit source_key and target for one known direct "
+                            "power relation."
+                        ),
+                        (
+                            "Use only a source whose known power requirements are satisfied; "
+                            "do not infer hidden power state."
+                        ),
+                        "Do not search for or invent an automatic power route.",
+                    ]
+                )
+            elif action.behavior == ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT:
+                hints.extend(
+                    [
+                        (
+                            "Use only when the known heavy engineering support capability is "
+                            "available."
+                        ),
+                        (
+                            "Deploy at the explicit Facility or Transport target before "
+                            "specialist repair."
+                        ),
                     ]
                 )
             if hints:

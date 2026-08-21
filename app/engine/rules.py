@@ -103,6 +103,7 @@ class ActionRuleContext:
     target_actor_key: str | None = None
     operation_status: str | None = None
     actor_current_node_key: str | None = None
+    source_node_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -496,6 +497,13 @@ class DeclarativeRuleEngine:
     ) -> str:
         if selector.kind == NodeSelectorKind.CURRENT_TARGET:
             key = context.target_node_key
+        elif selector.kind == NodeSelectorKind.ACTION_SOURCE:
+            if context.source_node_key is None:
+                raise RuleEngineError(
+                    "RULE_ACTION_SOURCE_MISSING",
+                    "An ACTION_SOURCE selector needs a source Node parameter",
+                )
+            key = context.source_node_key
         elif selector.kind == NodeSelectorKind.EXPLICIT:
             assert selector.node_key is not None
             key = selector.node_key

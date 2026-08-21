@@ -168,6 +168,8 @@ class GenericGameService:
                     "The target is not known and accessible in this Instance",
                     retryable=True,
                 )
+        source_parameter = parameters.get("source_key")
+        source_node_key = source_parameter if isinstance(source_parameter, str) else None
         context = ActionRuleContext(
             action_key=action_key,
             target_node_key=target_node_key,
@@ -176,12 +178,25 @@ class GenericGameService:
             target_actor_key=(target_actor.actor_key if target_actor is not None else None),
             operation_status=operation_status,
             actor_current_node_key=actor.current_node_key,
+            source_node_key=source_node_key,
         )
         engine = DeclarativeRuleEngine(definition)
         preflight = engine.evaluate_preflight(state, context)
         if preflight is not None:
             return AppliedRuleResult(
                 outcome=preflight,
+                runtime_revision=self._instance().runtime_revision,
+            )
+        behavior_precondition = self._behavior_precondition(
+            definition,
+            action,
+            target_node_key,
+            state,
+            parameters,
+        )
+        if behavior_precondition is not None:
+            return AppliedRuleResult(
+                outcome=behavior_precondition,
                 runtime_revision=self._instance().runtime_revision,
             )
         try:
@@ -343,6 +358,8 @@ class GenericGameService:
                     "The target is not known and accessible in this Instance",
                     retryable=True,
                 )
+        source_parameter = parameters.get("source_key")
+        source_node_key = source_parameter if isinstance(source_parameter, str) else None
         return DeclarativeRuleEngine(definition).evaluate_preflight(
             state,
             ActionRuleContext(
@@ -352,6 +369,7 @@ class GenericGameService:
                 actor_key=actor_key,
                 target_actor_key=(target_actor.actor_key if target_actor is not None else None),
                 actor_current_node_key=actor.current_node_key,
+                source_node_key=source_node_key,
             ),
         )
 
@@ -606,6 +624,64 @@ class GenericGameService:
                 actor_location_update=target_region,
             )
         return outcome
+
+    @staticmethod
+    def _behavior_precondition(
+        definition: ScenarioDefinitionV2,
+        action: object,
+        target_node_key: str,
+        state: DeclarativeRuleState,
+        parameters: dict[str, StrictScalar],
+    ) -> GenericRuleOutcome | None:
+        from app.domain.scenario_v2 import ActionDefinitionV2
+
+        assert isinstance(action, ActionDefinitionV2)
+        if action.behavior != ActionBehavior.SUPPLY_POWER:
+            return None
+        source_node_key = parameters.get("source_key")
+        if not isinstance(source_node_key, str) or source_node_key not in state.nodes:
+            return GenericGameService._behavior_failure(
+                action.key,
+                "SUPPLY_POWER_SOURCE_INVALID",
+                "The declared power source does not exist",
+            )
+        source_state = state.nodes[source_node_key]
+        target_state = state.nodes.get(target_node_key)
+        if (
+            source_state.visibility != Visibility.KNOWN
+            or target_state is None
+            or target_state.visibility != Visibility.KNOWN
+        ):
+            return GenericGameService._behavior_failure(
+                action.key,
+                "SUPPLY_POWER_RELATION_UNKNOWN",
+                "The power source and target are not both known",
+            )
+        if not any(
+            relation.source_node_key == source_node_key
+            and relation.relation_type_key == action.source_relation_type_key
+            and relation.target_node_key == target_node_key
+            for relation in definition.world.relations
+        ):
+            return GenericGameService._behavior_failure(
+                action.key,
+                "SUPPLY_POWER_RELATION_UNKNOWN",
+                "No known direct power relation connects the source and target",
+            )
+        # Source qualification is intentionally declarative.  Scenario data
+        # expresses operational, generation-capability, relay, or other
+        # source-specific requirements through PREFLIGHT rules and Facts.
+        # This behavior layer only owns the generic source/target relation
+        # contract and must not infer meaning from Facility names or fixed Fact
+        # keys.
+        return None
+
+    @staticmethod
+    def _behavior_failure(action_key: str, code: str, message: str) -> GenericRuleOutcome:
+        return GenericRuleOutcome(
+            selected_rule_key=f"generic:{action_key}",
+            failure=RuleFailure(code=code, message=message, retryable=True),
+        )
 
     @staticmethod
     def _known_source_pools(

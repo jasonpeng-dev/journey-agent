@@ -475,6 +475,23 @@ class PublicNodeResponse(ApiModel):
     associated_known_resources: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class PublicRelationResponse(ApiModel):
+    source_node_key: str
+    relation_type_key: str
+    target_node_key: str
+    source_node_name: str | None = None
+    target_node_name: str | None = None
+
+
+class PublicActionRequirementResponse(ApiModel):
+    action_key: str
+    action_name: str
+    required_actor_role_key: str | None = None
+    required_actor_role_name: str | None = None
+    source_relation_type_key: str | None = None
+    known_preconditions: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class PublicResourceResponse(ApiModel):
     key: str
     name: str
@@ -503,6 +520,8 @@ class PlayerGameStateResponse(ApiModel):
     game: GameSummaryResponse
     visible_nodes: list[PublicNodeResponse]
     known_facts: list[PublicFactResponse]
+    known_relations: list[PublicRelationResponse] = Field(default_factory=list)
+    known_action_requirements: list[PublicActionRequirementResponse] = Field(default_factory=list)
     resources: list[PublicResourceResponse]
     resource_intelligence: dict[str, Any] = Field(default_factory=dict)
     actors: list[PublicActorResponse] = Field(default_factory=list)
@@ -571,6 +590,7 @@ __all__ = [
     "PlayerPacingRequest",
     "PublicActionBriefingResponse",
     "PublicActionDebriefResponse",
+    "PublicActionRequirementResponse",
     "PublicExecutionPhase",
     "PublicGameStatus",
     "PublicPlanResponse",

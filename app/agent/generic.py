@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -48,12 +49,17 @@ from app.domain.scenario_v2 import (
     ActionDefinitionV2,
     ActionExecutionMode,
     ActionTargetKind,
+    ComparisonOperator,
+    ConditionV2,
     EffectKind,
     NodeSelectorKind,
+    NodeSelectorV2,
     ObjectiveDefinitionV2,
+    RuleDefinitionV2,
     RulePhase,
     ScenarioDefinitionV2,
     StrictScalar,
+    ValueExpressionV2,
     ValueSource,
     normalize_action_parameters,
 )
@@ -105,6 +111,12 @@ class _ProjectedResourcePool:
 class _ProjectedRegionResourceKnowledge:
     visibility: ResourceInventoryVisibility
     survey_completed: bool
+
+
+@dataclass(slots=True)
+class _ProjectedFact:
+    value: StrictScalar
+    visibility: Visibility
 
 
 _NON_TERMINAL_TASK_STATUSES = (
@@ -690,6 +702,8 @@ class GenericAgentService:
             actor_key: _actor_command_reachability(actor) for actor_key, actor in actors.items()
         }
         projected_known_passability = self._known_passability(definition)
+        projected_known_facts = self._known_fact_projection()
+        projected_known_nodes = self._known_node_keys()
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
@@ -764,6 +778,8 @@ class GenericAgentService:
                     parameters,
                     projected_actor_locations,
                     projected_known_passability,
+                    projected_known_facts,
+                    projected_known_nodes,
                     actors=actors,
                     projected_command_reachability=projected_command_reachability,
                 )
@@ -812,8 +828,11 @@ class GenericAgentService:
                 action,
                 actor_key,
                 target_key,
+                parameters,
                 projected_actor_locations,
                 projected_known_passability,
+                projected_known_facts,
+                projected_known_nodes,
                 projected_command_reachability=projected_command_reachability,
             )
         return ()
@@ -991,6 +1010,10 @@ class GenericAgentService:
             and {item.value for item in action.allowed_actor_capabilities}.issubset(
                 set(actor.capabilities)
             )
+            and (
+                action.required_actor_role_key is None
+                or actor.role_key == action.required_actor_role_key
+            )
         )
 
     def _delegate_actor(
@@ -1131,6 +1154,8 @@ class GenericAgentService:
             actor_key: _actor_command_reachability(actor) for actor_key, actor in actors.items()
         }
         projected_known_passability = self._known_passability(definition)
+        projected_known_facts = self._known_fact_projection()
+        projected_known_nodes = self._known_node_keys()
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
@@ -1243,6 +1268,8 @@ class GenericAgentService:
                     parameters,
                     projected_actor_locations,
                     projected_known_passability,
+                    projected_known_facts,
+                    projected_known_nodes,
                     actors=actors,
                     projected_command_reachability=projected_command_reachability,
                 )
@@ -1352,8 +1379,11 @@ class GenericAgentService:
                 action,
                 actor_key,
                 target_key,
+                parameters,
                 projected_actor_locations,
                 projected_known_passability,
+                projected_known_facts,
+                projected_known_nodes,
                 projected_command_reachability=projected_command_reachability,
             )
 
@@ -1492,6 +1522,8 @@ class GenericAgentService:
         parameters: dict[str, StrictScalar],
         projected_actor_locations: dict[str, str],
         projected_known_passability: dict[str, bool],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
         *,
         actors: dict[str, GameInstanceActor] | None = None,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
@@ -1502,11 +1534,59 @@ class GenericAgentService:
             and target_key not in actors
         ):
             raise GenericAgentError("RELAY_TARGET_INVALID", "The Actor target does not exist")
+        actor = actors.get(actor_key) if actors is not None else None
+        if (
+            actor is not None
+            and action.required_actor_role_key is not None
+            and actor.role_key != action.required_actor_role_key
+        ):
+            raise GenericAgentError(
+                "ACTOR_ROLE_MISSING",
+                "The proposed Actor does not have the Action's required Role",
+            )
+        # Existing rule preconditions remain execution-time guards unless an
+        # action opts into proposal-time known-state validation.  The new
+        # capability actions always opt in; a declared actor-role contract also
+        # opts in so declarative specialist actions can reject known-invalid
+        # plans without changing legacy Starfire/Medical sequencing behavior.
+        validates_known_preflight = (
+            action.behavior
+            in {
+                ActionBehavior.SUPPLY_POWER,
+                ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT,
+            }
+            or action.required_actor_role_key is not None
+        )
+        if validates_known_preflight:
+            known_failure = self._known_preflight_failure(
+                definition,
+                action,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+            )
+            if known_failure is not None:
+                raise GenericAgentError(
+                    known_failure,
+                    "A known Action requirement is not satisfied",
+                )
+        if action.behavior == ActionBehavior.SUPPLY_POWER:
+            self._validate_projected_supply_power(
+                definition,
+                action,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+            )
         if (
             action.behavior
             not in (
                 ActionBehavior.TRAVEL,
                 ActionBehavior.TRANSPORT_RESOURCE,
+                ActionBehavior.SUPPLY_POWER,
+                ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT,
             )
             and action.target_kind != ActionTargetKind.ACTOR
         ):
@@ -1527,6 +1607,274 @@ class GenericAgentService:
                 "The proposed route is known to be blocked",
             )
         return connector
+
+    @staticmethod
+    def _validate_projected_supply_power(
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+    ) -> None:
+        source_key = parameters.get("source_key")
+        if not isinstance(source_key, str) or source_key not in projected_known_nodes:
+            raise GenericAgentError(
+                "SUPPLY_POWER_RELATION_UNKNOWN",
+                "The proposed power source is not currently known",
+            )
+        if target_key not in projected_known_nodes:
+            raise GenericAgentError(
+                "SUPPLY_POWER_RELATION_UNKNOWN",
+                "The proposed power target is not currently known",
+            )
+        if not any(
+            relation.source_node_key == source_key
+            and relation.relation_type_key == action.source_relation_type_key
+            and relation.target_node_key == target_key
+            and relation.source_node_key in projected_known_nodes
+            and relation.target_node_key in projected_known_nodes
+            for relation in definition.world.relations
+        ):
+            raise GenericAgentError(
+                "SUPPLY_POWER_RELATION_UNKNOWN",
+                "No known direct power relation connects the source and target",
+            )
+        for fact_key, expected, code in (
+            ("operational", True, "SUPPLY_POWER_SOURCE_NOT_OPERATIONAL"),
+            ("power_supply", "AVAILABLE", "SUPPLY_POWER_SOURCE_UNAVAILABLE"),
+        ):
+            fact = projected_known_facts.get((source_key, fact_key))
+            if fact is not None and fact.visibility == Visibility.KNOWN and fact.value != expected:
+                raise GenericAgentError(
+                    code,
+                    "The power source does not satisfy its known power requirement",
+                )
+
+    @classmethod
+    def _known_preflight_failure(
+        cls,
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+    ) -> str | None:
+        matches: list[tuple[int, str]] = []
+        for rule in definition.rules:
+            if rule.phase != RulePhase.PREFLIGHT or rule.action_key != action.key:
+                continue
+            status = cls._known_condition_status(
+                definition,
+                rule.condition,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+            )
+            if status is not True:
+                continue
+            failure = next(
+                (effect.failure_code for effect in rule.effects if effect.failure_code),
+                None,
+            )
+            if failure is not None:
+                matches.append((rule.priority, failure))
+        if not matches:
+            return None
+        return max(matches, key=lambda item: item[0])[1]
+
+    @classmethod
+    def _known_condition_status(
+        cls,
+        definition: ScenarioDefinitionV2,
+        condition: ConditionV2 | None,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+    ) -> bool | None:
+        if condition is None:
+            return True
+        kind = condition.kind
+        if kind.value == "ALL":
+            statuses = [
+                cls._known_condition_status(
+                    definition,
+                    child,
+                    target_key,
+                    parameters,
+                    projected_known_facts,
+                    projected_known_nodes,
+                )
+                for child in condition.conditions
+            ]
+            if any(status is False for status in statuses):
+                return False
+            return True if all(status is True for status in statuses) else None
+        if kind.value == "ANY":
+            statuses = [
+                cls._known_condition_status(
+                    definition,
+                    child,
+                    target_key,
+                    parameters,
+                    projected_known_facts,
+                    projected_known_nodes,
+                )
+                for child in condition.conditions
+            ]
+            if any(status is True for status in statuses):
+                return True
+            return False if all(status is False for status in statuses) else None
+        if kind.value == "NOT":
+            status = cls._known_condition_status(
+                definition,
+                condition.condition,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+            )
+            return None if status is None else not status
+        node_key = cls._projected_selector_key(
+            definition,
+            condition.node,
+            target_key,
+            parameters,
+            projected_known_facts,
+            projected_known_nodes,
+        )
+        if kind.value in {"FACT_EQUALS", "FACT_NOT_EQUALS", "FACT_IN", "FACT_COMPARE"}:
+            if node_key is None or not isinstance(condition.fact_key, str):
+                return None
+            fact = projected_known_facts.get((node_key, condition.fact_key))
+            if fact is None or fact.visibility != Visibility.KNOWN:
+                return None
+            if kind.value == "FACT_EQUALS":
+                return fact.value == condition.value
+            if kind.value == "FACT_NOT_EQUALS":
+                return fact.value != condition.value
+            if kind.value == "FACT_IN":
+                return fact.value in condition.values
+            return cls._compare_projected(
+                fact.value,
+                condition.operator,
+                condition.value,
+            )
+        if kind.value == "PARAMETER_COMPARE":
+            if not isinstance(condition.parameter_key, str):
+                return None
+            return cls._compare_projected(
+                parameters.get(condition.parameter_key),
+                condition.operator,
+                condition.value,
+            )
+        if kind.value == "RELATION_EXISTS":
+            if (
+                node_key is None
+                or condition.relation_type_key is None
+                or condition.relation_direction is None
+            ):
+                return None
+            relation_direction = condition.relation_direction
+            return any(
+                (
+                    relation.relation_type_key == condition.relation_type_key
+                    and (
+                        (
+                            relation_direction.value == "SOURCE"
+                            and relation.source_node_key == node_key
+                            and relation.target_node_key in projected_known_nodes
+                        )
+                        or (
+                            relation_direction.value == "TARGET"
+                            and relation.target_node_key == node_key
+                            and relation.source_node_key in projected_known_nodes
+                        )
+                    )
+                )
+                for relation in definition.world.relations
+            )
+        if kind.value == "NODE_VISIBLE":
+            if node_key is None or condition.visibility is None:
+                return None
+            return (node_key in projected_known_nodes) == (condition.visibility == Visibility.KNOWN)
+        return None
+
+    @staticmethod
+    def _compare_projected(
+        actual: object,
+        operator: ComparisonOperator | None,
+        expected: object,
+    ) -> bool | None:
+        if operator is None or actual is None:
+            return None
+        if not isinstance(actual, (bool, int, str)) or not isinstance(expected, (bool, int, str)):
+            return None
+        actual_value = cast(Any, actual)
+        expected_value = cast(Any, expected)
+        try:
+            if operator == ComparisonOperator.EQ:
+                return bool(actual_value == expected_value)
+            if operator == ComparisonOperator.NE:
+                return bool(actual_value != expected_value)
+            if operator == ComparisonOperator.LT:
+                return bool(actual_value < expected_value)
+            if operator == ComparisonOperator.LTE:
+                return bool(actual_value <= expected_value)
+            if operator == ComparisonOperator.GT:
+                return bool(actual_value > expected_value)
+            return bool(actual_value >= expected_value)
+        except TypeError:
+            return None
+
+    @staticmethod
+    def _projected_selector_key(
+        definition: ScenarioDefinitionV2,
+        selector: NodeSelectorV2 | None,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+    ) -> str | None:
+        if selector is None:
+            return None
+        kind = selector.kind
+        if kind == NodeSelectorKind.CURRENT_TARGET:
+            return target_key
+        if kind == NodeSelectorKind.ACTION_SOURCE:
+            source = parameters.get("source_key")
+            return source if isinstance(source, str) else None
+        if kind == NodeSelectorKind.EXPLICIT:
+            node_key = selector.node_key
+            return node_key if isinstance(node_key, str) else None
+        if kind != NodeSelectorKind.RELATED:
+            return None
+        if selector.relation_type_key is None:
+            return None
+        anchor = selector.anchor_node_key or target_key
+        direction = selector.direction.value if selector.direction is not None else None
+        candidates = []
+        for relation in definition.world.relations:
+            if relation.relation_type_key != selector.relation_type_key:
+                continue
+            if direction == "SOURCE" and relation.source_node_key == anchor:
+                candidate = relation.target_node_key
+            elif direction == "TARGET" and relation.target_node_key == anchor:
+                candidate = relation.source_node_key
+            else:
+                continue
+            if candidate not in projected_known_nodes:
+                continue
+            if selector.required_fact_key is not None:
+                fact = projected_known_facts.get((candidate, selector.required_fact_key))
+                if fact is None:
+                    continue
+            candidates.append(candidate)
+        unique = sorted(set(candidates))
+        return unique[0] if len(unique) == 1 else None
 
     def _projected_resource_state(
         self,
@@ -1846,8 +2194,11 @@ class GenericAgentService:
         action: ActionDefinitionV2,
         actor_key: str,
         target_key: str,
+        parameters: dict[str, StrictScalar],
         projected_actor_locations: dict[str, str],
         projected_known_passability: dict[str, bool],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
         *,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> None:
@@ -1858,6 +2209,15 @@ class GenericAgentService:
             action,
             target_key,
             projected_known_passability,
+        )
+        GenericAgentService._apply_projected_fact_effects(
+            definition,
+            action,
+            actor_key,
+            target_key,
+            parameters,
+            projected_known_facts,
+            projected_known_nodes,
         )
         if projected_command_reachability is not None:
             GenericAgentService._apply_projected_actor_reachability_effect(
@@ -1885,6 +2245,172 @@ class GenericAgentService:
             )
             if isinstance(row.truth_value, bool)
         }
+
+    def _known_fact_projection(self) -> dict[tuple[str, str], _ProjectedFact]:
+        return {
+            (row.node_key, row.fact_key): _ProjectedFact(
+                value=row.truth_value,
+                visibility=row.visibility,
+            )
+            for row in self.db.scalars(
+                select(GameInstanceFactState).where(
+                    GameInstanceFactState.game_instance_id == self.scope.game_instance_id
+                )
+            )
+        }
+
+    def _known_node_keys(self) -> set[str]:
+        return {
+            row.node_key
+            for row in self.db.scalars(
+                select(GameInstanceNodeState).where(
+                    GameInstanceNodeState.game_instance_id == self.scope.game_instance_id,
+                    GameInstanceNodeState.visibility == Visibility.KNOWN,
+                )
+            )
+        }
+
+    @staticmethod
+    def _apply_projected_fact_effects(
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor_key: str,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+    ) -> None:
+        if action.behavior == ActionBehavior.INSPECT:
+            target = definition.world.node(target_key)
+            if target is not None:
+                for fact in target.facts:
+                    current = projected_known_facts.get((target_key, fact.key))
+                    if current is not None:
+                        current.visibility = Visibility.KNOWN
+
+        fact_values: dict[tuple[str, str], set[StrictScalar]] = {}
+        fact_visibility: dict[tuple[str, str], set[Visibility]] = {}
+        node_visibility: dict[str, set[Visibility]] = {}
+        rules = [
+            rule
+            for rule in definition.rules
+            if rule.phase == RulePhase.RESOLVE and rule.action_key == action.key
+        ]
+        projected_rules = GenericAgentService._projected_resolution_rules(
+            definition,
+            rules,
+            target_key,
+            parameters,
+            projected_known_facts,
+            projected_known_nodes,
+        )
+        for rule in projected_rules:
+            for effect in rule.effects:
+                node_key = GenericAgentService._projected_effect_node_key(
+                    effect.node,
+                    target_key,
+                    parameters,
+                )
+                if effect.kind == EffectKind.SET_FACT and node_key is not None:
+                    value = GenericAgentService._projected_value(effect.value, parameters)
+                    if value is not None and effect.fact_key is not None:
+                        fact_values.setdefault((node_key, effect.fact_key), set()).add(value)
+                elif effect.kind in {EffectKind.REVEAL_FACT, EffectKind.HIDE_FACT} and node_key:
+                    if effect.fact_key is not None:
+                        fact_visibility.setdefault((node_key, effect.fact_key), set()).add(
+                            Visibility.KNOWN
+                            if effect.kind == EffectKind.REVEAL_FACT
+                            else Visibility.HIDDEN
+                        )
+                elif effect.kind in {EffectKind.REVEAL_NODE, EffectKind.HIDE_NODE} and node_key:
+                    node_visibility.setdefault(node_key, set()).add(
+                        Visibility.KNOWN
+                        if effect.kind == EffectKind.REVEAL_NODE
+                        else Visibility.HIDDEN
+                    )
+
+        for identity, fact_value_options in fact_values.items():
+            if len(fact_value_options) != 1:
+                continue
+            current = projected_known_facts.get(identity)
+            visibility = current.visibility if current is not None else Visibility.HIDDEN
+            projected_known_facts[identity] = _ProjectedFact(fact_value_options.pop(), visibility)
+        for identity, visibility_options in fact_visibility.items():
+            if len(visibility_options) != 1:
+                continue
+            current = projected_known_facts.get(identity)
+            if current is not None:
+                current.visibility = visibility_options.pop()
+        for node_key, node_visibility_options in node_visibility.items():
+            if len(node_visibility_options) != 1:
+                continue
+            if node_visibility_options.pop() == Visibility.KNOWN:
+                projected_known_nodes.add(node_key)
+            else:
+                projected_known_nodes.discard(node_key)
+
+    @classmethod
+    def _projected_resolution_rules(
+        cls,
+        definition: ScenarioDefinitionV2,
+        rules: Sequence[RuleDefinitionV2],
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+    ) -> list[RuleDefinitionV2]:
+        potential: list[tuple[RuleDefinitionV2, bool | None]] = []
+        for rule in rules:
+            status = cls._known_condition_status(
+                definition,
+                rule.condition,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+            )
+            if status is not False:
+                potential.append((rule, status))
+        known_true = [item for item in potential if item[1] is True]
+        if not known_true:
+            return [item[0] for item in potential]
+        highest_true_priority = max(item[0].priority for item in known_true)
+        if any(
+            status is None and rule.priority >= highest_true_priority for rule, status in potential
+        ):
+            return [item[0] for item in potential]
+        return [rule for rule, status in known_true if rule.priority == highest_true_priority]
+
+    @staticmethod
+    def _projected_effect_node_key(
+        selector: NodeSelectorV2 | None,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+    ) -> str | None:
+        if selector is None:
+            return None
+        kind = selector.kind
+        if kind == NodeSelectorKind.CURRENT_TARGET:
+            return target_key
+        if kind == NodeSelectorKind.ACTION_SOURCE:
+            source = parameters.get("source_key")
+            return source if isinstance(source, str) else None
+        if kind == NodeSelectorKind.EXPLICIT:
+            return selector.node_key if isinstance(selector.node_key, str) else None
+        return None
+
+    @staticmethod
+    def _projected_value(
+        expression: ValueExpressionV2 | None,
+        parameters: dict[str, StrictScalar],
+    ) -> StrictScalar | None:
+        if expression is None:
+            return None
+        if getattr(getattr(expression, "source", None), "value", None) == ValueSource.LITERAL.value:
+            return getattr(expression, "literal", None)
+        parameter_key = getattr(expression, "parameter_key", None)
+        value = parameters.get(parameter_key) if isinstance(parameter_key, str) else None
+        return value
 
     @staticmethod
     def _apply_projected_passability_effect(
@@ -2317,8 +2843,12 @@ def _safe_provider_diagnostic(code: str) -> str:
         "ACTION_APPROVAL_REQUIRED": "AUTHORITY_REQUIRED",
         "ACTION_NOT_ALLOWED": "ACTOR_NOT_ALLOWED",
         "ACTOR_CAPABILITY_MISSING": "ACTOR_NOT_ALLOWED",
+        "ACTOR_ROLE_MISSING": "ACTOR_NOT_ALLOWED",
         "ACTOR_COMMAND_DISCONNECTED": "ACTOR_COMMAND_DISCONNECTED",
         "RELAY_TARGET_NOT_DISCONNECTED": "RELAY_TARGET_NOT_DISCONNECTED",
+        "SUPPLY_POWER_RELATION_UNKNOWN": "SUPPLY_POWER_REQUIREMENT_UNKNOWN",
+        "SUPPLY_POWER_SOURCE_NOT_OPERATIONAL": "SUPPLY_POWER_SOURCE_INVALID",
+        "SUPPLY_POWER_SOURCE_UNAVAILABLE": "SUPPLY_POWER_SOURCE_INVALID",
         "GENERIC_PROVIDER_PLAN_INVALID": "OBJECTIVE_IRRELEVANT",
     }.get(code, "PROPOSAL_INVALID")
 

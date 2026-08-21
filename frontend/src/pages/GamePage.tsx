@@ -318,7 +318,7 @@ export function WaitingStatus({
   );
 }
 
-type KnowledgeAccordionKey = "resources" | "locations" | "actors" | "facts";
+type KnowledgeAccordionKey = "resources" | "locations" | "actors" | "facts" | "relations" | "requirements";
 
 type KnowledgeAccordionProps = {
   id: KnowledgeAccordionKey;
@@ -368,6 +368,8 @@ type KnownWorldAccordionsProps = {
   visibleNodes: PlayerGameState["visible_nodes"];
   actors: PlayerGameState["actors"];
   knownFacts: PlayerGameState["known_facts"];
+  knownRelations?: NonNullable<PlayerGameState["known_relations"]>;
+  knownActionRequirements?: NonNullable<PlayerGameState["known_action_requirements"]>;
   task?: PublicTask | null;
 };
 
@@ -377,6 +379,8 @@ export function KnownWorldAccordions({
   visibleNodes,
   actors,
   knownFacts,
+  knownRelations = [],
+  knownActionRequirements = [],
   task = null,
 }: KnownWorldAccordionsProps) {
   const [expanded, setExpanded] = useState<Record<KnowledgeAccordionKey, boolean>>({
@@ -384,6 +388,8 @@ export function KnownWorldAccordions({
     locations: false,
     actors: false,
     facts: false,
+    relations: false,
+    requirements: false,
   });
   const toggle = (id: KnowledgeAccordionKey) => {
     setExpanded((current) => ({ ...current, [id]: !current[id] }));
@@ -626,6 +632,57 @@ export function KnownWorldAccordions({
                 </div>
               </div>
             </details>
+          ))}
+        </div>
+      </KnowledgeAccordion>
+      <KnowledgeAccordion
+        id="relations"
+        title="Known relations"
+        count={knownRelations.length}
+        summary="Knowledge-safe direct world relations"
+        open={expanded.relations}
+        onToggle={() => toggle("relations")}
+      >
+        <div className="knowledge-entry-list">
+          {knownRelations.map((relation) => (
+            <div className="knowledge-entry" key={`${relation.source_node_key}:${relation.relation_type_key}:${relation.target_node_key}`}>
+              <div className="knowledge-entry-copy">
+                <strong>{relation.source_node_name ?? relation.source_node_key}</strong>
+                <small>{relation.relation_type_key}</small>
+              </div>
+              <span className="console-pill success knowledge-status-pill">
+                {relation.target_node_name ?? relation.target_node_key}
+              </span>
+            </div>
+          ))}
+        </div>
+      </KnowledgeAccordion>
+      <KnowledgeAccordion
+        id="requirements"
+        title="Known action requirements"
+        count={knownActionRequirements.length}
+        summary="Knowledge-safe role, power, and heavy-support requirements"
+        open={expanded.requirements}
+        onToggle={() => toggle("requirements")}
+      >
+        <div className="knowledge-entry-list">
+          {knownActionRequirements.map((requirement) => (
+            <div className="knowledge-entry" key={requirement.action_key}>
+              <div className="knowledge-entry-copy">
+                <strong>{requirement.action_name}</strong>
+                {requirement.required_actor_role_name && (
+                  <small>Role: {requirement.required_actor_role_name}</small>
+                )}
+                {requirement.source_relation_type_key && (
+                  <small>Source relation: {requirement.source_relation_type_key}</small>
+                )}
+                {requirement.known_preconditions.map((precondition) => (
+                  <small key={`${precondition.node_key}:${precondition.fact_key}`}>
+                    {precondition.node_key} · {precondition.fact_key} = {String(precondition.current_value)}
+                  </small>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       </KnowledgeAccordion>
@@ -922,6 +979,8 @@ export function GamePage() {
             visibleNodes={play.data.visible_nodes}
             actors={play.data.actors}
             knownFacts={play.data.known_facts}
+            knownRelations={play.data.known_relations}
+            knownActionRequirements={play.data.known_action_requirements}
             task={task}
           />
         </aside>

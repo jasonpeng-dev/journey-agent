@@ -60,6 +60,14 @@ def evaluate_authority(
     required = {capability.value for capability in action.allowed_actor_capabilities}
     if not required.issubset(actor_capabilities):
         return _deny("ACTOR_CAPABILITY_MISSING", required=sorted(required))
+    if (
+        action.required_actor_role_key is not None
+        and actor.role_key != action.required_actor_role_key
+    ):
+        return _deny(
+            "ACTOR_ROLE_MISSING",
+            required_role=action.required_actor_role_key,
+        )
 
     try:
         policies = [

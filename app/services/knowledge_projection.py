@@ -16,7 +16,13 @@ from app.domain.enums import (
     ResourcePoolVisibility,
 )
 from app.domain.runtime_scope import RuntimeScope
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import (
+    ActionBehavior,
+    ConditionKind,
+    ConditionV2,
+    NodeSelectorKind,
+    ScenarioDefinitionV2,
+)
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     GameInstanceActor,
@@ -99,6 +105,116 @@ class SharedKnowledgeProjection:
             for item in self.definition.world.relations
             if item.source_node_key in known_nodes and item.target_node_key in known_nodes
         )
+
+    def known_action_requirements(self) -> tuple[dict[str, Any], ...]:
+        """Expose action requirements that are already supported by Knowledge.
+
+        Static role/relation contracts are public Scenario metadata.  Dynamic
+        Fact requirements are included only for Facts whose current visibility
+        is KNOWN; hidden Facts and their values are omitted entirely.  The same
+        projection is consumed by both PlanningContext and Player API.
+        """
+
+        known_nodes = {row.node_key for row in self.known_node_rows()}
+        known_facts = {
+            (row.node_key, row.fact_key): row.truth_value for row in self.known_fact_rows()
+        }
+        role_names = {role.key: role.name for role in self.definition.actors.roles}
+        result: list[dict[str, Any]] = []
+        for action in sorted(self.definition.actions, key=lambda item: item.key):
+            if not (
+                action.required_actor_role_key is not None
+                or action.source_relation_type_key is not None
+                or action.behavior
+                in {
+                    ActionBehavior.SUPPLY_POWER,
+                    ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT,
+                }
+            ):
+                continue
+            entry: dict[str, Any] = {
+                "action_key": action.key,
+                "action_name": action.name,
+            }
+            if action.required_actor_role_key is not None:
+                entry["required_actor_role_key"] = action.required_actor_role_key
+                entry["required_actor_role_name"] = role_names.get(
+                    action.required_actor_role_key,
+                    action.required_actor_role_key,
+                )
+            if action.source_relation_type_key is not None:
+                entry["source_relation_type_key"] = action.source_relation_type_key
+            known_preconditions: list[dict[str, Any]] = []
+            for rule in self.definition.rules:
+                if rule.action_key != action.key or rule.phase.value != "PREFLIGHT":
+                    continue
+                for condition in self._condition_leaves(rule.condition):
+                    if condition.kind not in {
+                        ConditionKind.FACT_EQUALS,
+                        ConditionKind.FACT_NOT_EQUALS,
+                        ConditionKind.FACT_IN,
+                        ConditionKind.FACT_COMPARE,
+                    }:
+                        continue
+                    if condition.node is None or condition.fact_key is None:
+                        continue
+                    for node_key in self._known_condition_nodes(
+                        condition.node.kind,
+                        condition.node.node_key,
+                        known_nodes,
+                    ):
+                        current_value = known_facts.get((node_key, condition.fact_key))
+                        if current_value is None:
+                            continue
+                        projection = {
+                            "node_key": node_key,
+                            "fact_key": condition.fact_key,
+                            "selector": condition.node.kind.value,
+                            "current_value": current_value,
+                            "failure_condition": self._condition_summary(condition),
+                        }
+                        if projection not in known_preconditions:
+                            known_preconditions.append(projection)
+            if known_preconditions:
+                entry["known_preconditions"] = known_preconditions
+            result.append(entry)
+        return tuple(result)
+
+    @staticmethod
+    def _condition_leaves(condition: ConditionV2 | None) -> tuple[ConditionV2, ...]:
+        if condition is None:
+            return ()
+        if condition.kind in {ConditionKind.ALL, ConditionKind.ANY}:
+            leaves: list[ConditionV2] = []
+            for child in condition.conditions:
+                leaves.extend(SharedKnowledgeProjection._condition_leaves(child))
+            return tuple(leaves)
+        if condition.kind == ConditionKind.NOT:
+            return SharedKnowledgeProjection._condition_leaves(condition.condition)
+        return (condition,)
+
+    @staticmethod
+    def _known_condition_nodes(
+        selector_kind: NodeSelectorKind,
+        explicit_node_key: str | None,
+        known_nodes: set[str],
+    ) -> tuple[str, ...]:
+        if selector_kind == NodeSelectorKind.EXPLICIT:
+            return (explicit_node_key,) if explicit_node_key in known_nodes else ()
+        if selector_kind in {NodeSelectorKind.CURRENT_TARGET, NodeSelectorKind.ACTION_SOURCE}:
+            return tuple(sorted(known_nodes))
+        return ()
+
+    @staticmethod
+    def _condition_summary(condition: ConditionV2) -> dict[str, Any]:
+        result: dict[str, Any] = {"kind": condition.kind.value}
+        if condition.value is not None:
+            result["value"] = condition.value
+        if condition.values:
+            result["values"] = list(condition.values)
+        if condition.operator is not None:
+            result["operator"] = condition.operator.value
+        return result
 
     def actor_rows(self) -> tuple[GameInstanceActor, ...]:
         """Return the shared active-Actor identity/location projection source."""

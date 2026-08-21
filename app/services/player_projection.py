@@ -16,6 +16,7 @@ from app.api.schemas.phase_d import (
     PublicActionBriefingResponse,
     PublicActionDebriefResponse,
     PublicActionLocationResponse,
+    PublicActionRequirementResponse,
     PublicActorResponse,
     PublicExecutionPhase,
     PublicFactResponse,
@@ -30,6 +31,7 @@ from app.api.schemas.phase_d import (
     PublicPlanInterruptionResponse,
     PublicPlanResponse,
     PublicPlanStepResponse,
+    PublicRelationResponse,
     PublicResourceResponse,
     PublicStepStatus,
     PublicTaskResponse,
@@ -95,6 +97,8 @@ class PlayerProjectionService:
         visible_nodes = knowledge_projection.known_node_rows()
         visible_node_keys = {item.node_key for item in visible_nodes}
         known_facts = knowledge_projection.known_fact_rows()
+        known_relations = knowledge_projection.known_relations()
+        known_action_requirements = knowledge_projection.known_action_requirements()
         node_projections: dict[str, SpatialNodeProjection] = {}
         for item in visible_nodes:
             projection = spatial.node(item.node_key)
@@ -227,6 +231,27 @@ class PlayerProjectionService:
                     ),
                 )
                 for item in known_facts
+            ],
+            known_relations=[
+                PublicRelationResponse(
+                    source_node_key=str(item["source_node_key"]),
+                    relation_type_key=str(item["relation_type_key"]),
+                    target_node_key=str(item["target_node_key"]),
+                    source_node_name=(
+                        node_definitions[str(item["source_node_key"])].name
+                        if str(item["source_node_key"]) in node_definitions
+                        else None
+                    ),
+                    target_node_name=(
+                        node_definitions[str(item["target_node_key"])].name
+                        if str(item["target_node_key"]) in node_definitions
+                        else None
+                    ),
+                )
+                for item in known_relations
+            ],
+            known_action_requirements=[
+                PublicActionRequirementResponse(**item) for item in known_action_requirements
             ],
             resources=[
                 PublicResourceResponse(

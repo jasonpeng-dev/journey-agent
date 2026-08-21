@@ -76,6 +76,8 @@ class ActionBehavior(StrEnum):
     TRANSPORT_RESOURCE = "TRANSPORT_RESOURCE"
     RELAY_MESSAGE = "RELAY_MESSAGE"
     SURVEY_RESOURCES = "SURVEY_RESOURCES"
+    SUPPLY_POWER = "SUPPLY_POWER"
+    DEPLOY_HEAVY_ENGINEERING_SUPPORT = "DEPLOY_HEAVY_ENGINEERING_SUPPORT"
 
 
 class ActionLocality(StrEnum):
@@ -126,6 +128,7 @@ class ComparisonOperator(StrEnum):
 
 class NodeSelectorKind(StrEnum):
     CURRENT_TARGET = "CURRENT_TARGET"
+    ACTION_SOURCE = "ACTION_SOURCE"
     EXPLICIT = "EXPLICIT"
     RELATED = "RELATED"
 
@@ -535,6 +538,14 @@ class ActionDefinitionV2(FrozenDefinitionModel):
     execution_mode: ActionExecutionMode
     parameters: tuple[ActionParameterV2, ...] = ()
     allowed_actor_capabilities: tuple[EngineCapability, ...]
+    required_actor_role_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    source_relation_type_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     authority_policy: AuthorityPolicyV2 = Field(default_factory=AuthorityPolicyV2)
     expected_outcomes: tuple[ExpectedOutcomeV2, ...]
     planning: ActionPlanningProjectionV2 = Field(default_factory=ActionPlanningProjectionV2)
@@ -576,6 +587,27 @@ class ActionDefinitionV2(FrozenDefinitionModel):
             and self.locality != ActionLocality.REGION
         ):
             raise ValueError("SURVEY_RESOURCES Actions require REGION locality")
+        parameters = {item.key: item for item in self.parameters}
+        if self.behavior == ActionBehavior.SUPPLY_POWER:
+            source = parameters.get("source_key")
+            if (
+                source is None
+                or source.value_type != ActionParameterType.STRING
+                or not source.required
+            ):
+                raise ValueError(
+                    "SUPPLY_POWER Actions require a required STRING source_key parameter"
+                )
+            if self.target_kind != ActionTargetKind.NODE or self.locality == ActionLocality.NONE:
+                raise ValueError("SUPPLY_POWER Actions require a localized Node target")
+            if self.source_relation_type_key is None:
+                raise ValueError("SUPPLY_POWER Actions require a source_relation_type_key")
+        if self.behavior == ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT and (
+            self.target_kind != ActionTargetKind.NODE or self.locality == ActionLocality.NONE
+        ):
+            raise ValueError(
+                "DEPLOY_HEAVY_ENGINEERING_SUPPORT Actions require a localized Node target"
+            )
         return self
 
 
@@ -598,6 +630,9 @@ class NodeSelectorV2(FrozenDefinitionModel):
         if self.kind == NodeSelectorKind.CURRENT_TARGET:
             if self.node_key is not None or any(value is not None for value in related_fields):
                 raise ValueError("CURRENT_TARGET selector cannot define reference fields")
+        elif self.kind == NodeSelectorKind.ACTION_SOURCE:
+            if self.node_key is not None or any(value is not None for value in related_fields):
+                raise ValueError("ACTION_SOURCE selector cannot define reference fields")
         elif self.kind == NodeSelectorKind.EXPLICIT:
             if self.node_key is None or any(value is not None for value in related_fields):
                 raise ValueError("EXPLICIT selector requires only node_key")
@@ -1028,6 +1063,12 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 )
 
     for action in definition.actions:
+        if action.required_actor_role_key is not None:
+            _require_key(
+                roles,
+                action.required_actor_role_key,
+                f"Action {action.key} required Actor Role",
+            )
         if (
             action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
         ) and not definition.metadata.locality.enabled:
