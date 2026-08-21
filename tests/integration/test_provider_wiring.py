@@ -550,9 +550,13 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert provider.plan_requests[1].repair_diagnostics == (
         {
             "code": "UNKNOWN_CANDIDATE",
-            "step": 1,
             "candidate_id": "candidate_invented",
+            "step_id": unknown[0].step_id,
         },
+    )
+    assert provider.plan_requests[1].rejected_segment is not None
+    assert provider.plan_requests[1].rejected_segment["steps"][0]["step_id"] == (
+        unknown[0].step_id
     )
     assert provider.plan_requests[2].repair_diagnostics[0]["code"] == "PARAMETER_INVALID"
     diagnostic_text = str(provider.plan_requests[1].repair_diagnostics)
