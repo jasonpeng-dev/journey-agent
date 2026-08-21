@@ -10,6 +10,7 @@ from app.agent.provider import (
     GoalSelection,
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
+    PlannerInput,
     PlanningActionCandidate,
     PlanningContext,
     PlanProposal,
@@ -173,7 +174,8 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     assert "replan_reason" not in initial_payload
     assert "repair_attempt" not in initial_payload
     assert "repair_diagnostics" not in initial_payload
-    assert "previous_execution_context" not in initial_payload["planning_context"]
+    assert initial_payload["planner_input"]["schema_version"] == 2
+    assert "planning_context" not in initial_payload
     assert task.current_plan_version == 1
 
 
@@ -185,20 +187,23 @@ def test_legacy_catalog_is_not_in_canonical_provider_payload(session: Session) -
     )
     request = provider.requests[0]
     payload = json.dumps(request.provider_payload(), ensure_ascii=False)
-    assert "planning_context" in payload
+    assert "planner_input" in payload
+    assert "planning_context" not in payload
     assert "candidate_id" not in payload
     assert request.planning_action_catalog
 
 
 def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
     initial_context = PlanningContext(previous_execution_context={})
+    planner_input = PlannerInput()
     initial_payload = PlanRequest(
         call_type="INITIAL_PLAN",
         goal="goal",
         planning_context=initial_context,
+        planner_input=planner_input,
     ).provider_payload()
-    assert set(initial_payload) == {"call_type", "goal", "planning_context"}
-    assert "previous_execution_context" not in initial_payload["planning_context"]
+    assert set(initial_payload) == {"call_type", "planner_input"}
+    assert initial_payload["planner_input"]["schema_version"] == 2
 
     replan_context = PlanningContext(
         previous_execution_context={"previous_plan_version": 1},
@@ -208,9 +213,10 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
         goal="goal",
         replan_reason="TRAVEL_BLOCKED",
         planning_context=replan_context,
+        planner_input=PlannerInput(execution_context={"previous_plan_version": 1}),
     ).provider_payload()
     assert replan_payload["replan_reason"] == "TRAVEL_BLOCKED"
-    assert replan_payload["planning_context"]["previous_execution_context"] == {
+    assert replan_payload["planner_input"]["execution_context"] == {
         "previous_plan_version": 1
     }
     assert "repair_attempt" not in replan_payload
@@ -222,6 +228,7 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
         repair_attempt=0,
         repair_diagnostics=({"code": "PLAN_REJECTED"},),
         planning_context=initial_context,
+        planner_input=planner_input,
     ).provider_payload()
     assert repair_payload["repair_attempt"] == 0
     assert repair_payload["repair_diagnostics"] == [{"code": "PLAN_REJECTED"}]
@@ -413,6 +420,9 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
     )
     request = PlanRequest(
         call_type="INITIAL_PLAN",
+        planner_input=PlannerInput(
+            objective={"exact_scenario_version": "version-1"},
+        ),
         planning_context=PlanningContext(
             goal={"exact_scenario_version": "version-1"},
             relevant_actions=({"action_key": "inspect"},),
@@ -442,7 +452,8 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
             if item["role"] == "user"
         )
     )
-    assert "planning_context" in user_payload
+    assert user_payload["planner_input"]["schema_version"] == 2
+    assert "planning_context" not in user_payload
     assert "candidate_id" not in json.dumps(user_payload)
     assert captured["json"]["thinking"] == {"type": "enabled"}  # type: ignore[index]
     assert captured["json"]["reasoning_effort"] == "low"  # type: ignore[index]

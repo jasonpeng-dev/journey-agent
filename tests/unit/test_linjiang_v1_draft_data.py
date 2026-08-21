@@ -399,6 +399,53 @@ def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
     assert all(item["target_key"] != "water_treatment_plant" for item in sparse)
 
 
+def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-planner-input-v2")
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "\u6062\u590d\u4e2d\u592e\u901a\u4fe1\u80fd\u529b",
+        initialize_plan=False,
+    )
+    definition = agent._definition()
+    planner_input = PlanningContextBuilder(session, scope).build_v2(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason=None,
+    )
+    payload = planner_input.model_dump(mode="json")
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert payload["schema_version"] == 2
+    assert payload["objective"]["objective_scope"] == [
+        "restore_central_communication_capability"
+    ]
+    assert payload["objective"]["completion_requirements"][0]["node_key"] == (
+        "central_telecom_hub"
+    )
+    actors = {item["actor_key"]: item for item in payload["actors"]}
+    assert actors["logistics_team_alpha"]["current_region"] == "central_district"
+    assert actors["logistics_team_alpha"]["command_reachability"] == "ONLINE"
+    communications = actors["communications_repair_team_alpha"]
+    assert communications["current_region"] == "east_residential_district"
+    assert communications["command_reachability"] == "DISCONNECTED"
+    assert communications["execution_state"]["status"] == "KNOWN_BLOCKED"
+    assert "north_heavy_equipment_stock" not in serialized
+    for duplicate in (
+        "planner_constraints",
+        "planner_effects",
+        "target_requirements",
+        "known_action_requirements",
+        "declared_world_effects",
+        "declared_knowledge_effects",
+        "target_contracts",
+    ):
+        assert duplicate not in serialized
+
+
 def test_linjiang_v10_all_regions_have_the_generic_travel_target_contract() -> None:
     definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
     regions = {node.key: node for node in definition.world.nodes if node.node_type_key == "region"}

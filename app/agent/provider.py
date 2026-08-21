@@ -65,6 +65,62 @@ class PlanningContext(ProviderModel):
         return payload
 
 
+class PlannerActorState(ProviderModel):
+    """Canonical current Knowledge about one Actor."""
+
+    actor_key: str
+    role_key: str
+    availability: str
+    current_region: str | None
+    command_reachability: str
+    execution_state: dict[str, object] = Field(default_factory=dict)
+
+
+class PlannerActionContract(ProviderModel):
+    """One authoritative Planner-facing contract for an Action."""
+
+    action_key: str
+    executor_requirements: dict[str, object] = Field(default_factory=dict)
+    target_contract: dict[str, object] = Field(default_factory=dict)
+    locality: dict[str, object] = Field(default_factory=dict)
+    parameters: tuple[dict[str, object], ...] = ()
+    known_preconditions: tuple[dict[str, object], ...] = ()
+    deterministic_effects: tuple[dict[str, object], ...] = ()
+    knowledge_semantics: tuple[dict[str, object], ...] = ()
+
+
+class PlannerTargetBinding(ProviderModel):
+    """Sparse target-specific contract differences for one Action/Target."""
+
+    action_key: str
+    target_key: str
+    requirements: tuple[dict[str, object], ...] = ()
+    deterministic_effects: tuple[dict[str, object], ...] = ()
+
+
+class PlannerKnownWorldSlice(ProviderModel):
+    """Knowledge-safe world entities selected for the current dependency closure."""
+
+    nodes: tuple[dict[str, object], ...] = ()
+    facts: dict[str, object] = Field(default_factory=dict)
+    relations: tuple[dict[str, object], ...] = ()
+    resources: dict[str, object] = Field(default_factory=dict)
+    resource_knowledge: tuple[dict[str, object], ...] = ()
+    unknown_dependencies: tuple[dict[str, object], ...] = ()
+
+
+class PlannerInput(ProviderModel):
+    """Canonical schema shared by INITIAL, REPAIR, and REPLAN."""
+
+    schema_version: Literal[2] = 2
+    objective: dict[str, object] = Field(default_factory=dict)
+    actors: tuple[PlannerActorState, ...] = ()
+    action_contracts: tuple[PlannerActionContract, ...] = ()
+    target_bindings: tuple[PlannerTargetBinding, ...] = ()
+    known_world: PlannerKnownWorldSlice = Field(default_factory=PlannerKnownWorldSlice)
+    execution_context: dict[str, object] = Field(default_factory=dict)
+
+
 class PlanningActionCandidate(ProviderModel):
     """Deprecated compatibility view of an Actor x Action x Target binding.
 
@@ -124,6 +180,7 @@ class PlanRequest(ProviderModel):
     planning_metadata: dict[str, object] = Field(default_factory=dict)
     planning_action_catalog: tuple[PlanningActionCandidate, ...] = ()
     planning_context: PlanningContext | None = None
+    planner_input: PlannerInput | None = None
     repair_attempt: int = 0
     repair_diagnostics: tuple[dict[str, object], ...] = ()
 
@@ -135,8 +192,20 @@ class PlanRequest(ProviderModel):
         omitted from this payload whenever a PlanningContext is available.
         """
 
-        if self.planning_context is not None:
+        if self.planner_input is not None:
             payload: dict[str, object] = {
+                "call_type": self.call_type,
+                "planner_input": self.planner_input.model_dump(mode="json"),
+            }
+            if self.replan_reason:
+                payload["replan_reason"] = self.replan_reason
+            if self.call_type == "REPAIR" or self.repair_attempt != 0:
+                payload["repair_attempt"] = self.repair_attempt
+            if self.repair_diagnostics:
+                payload["repair_diagnostics"] = list(self.repair_diagnostics)
+            return payload
+        if self.planning_context is not None:
+            payload = {
                 "call_type": self.call_type,
                 "goal": self.goal,
                 "planning_context": self.planning_context.compact_dump(),
@@ -443,7 +512,7 @@ class OpenAICompatibleGenericProvider:
                         f"Return only valid JSON for generic {purpose}. "
                         f"Use exactly this response shape: {response_contract}. "
                         "Select only keys supplied in the user payload; never invent keys. "
-                        "For planning, use only entities supplied in planning_context. "
+                        "For planning, use only entities supplied in planner_input. "
                         f"{planning_prompt} {generic_guidance}"
                         "Keep purpose and actor reason short, omit chain-of-thought, "
                         "never infer hidden state, and respect repair_diagnostics."
@@ -657,17 +726,7 @@ class OpenAICompatibleGenericProvider:
             **telemetry.snapshot(),
             wall_clock_latency_ms=round((perf_counter() - started) * 1000),
             outcome="SUCCESS",
-            context_bytes=(
-                len(
-                    json.dumps(
-                        payload.get("planning_context", {}),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                )
-                if "planning_context" in payload
-                else None
-            ),
+            context_bytes=_planning_context_bytes(payload),
             request_size_bytes=request_size_bytes,
             prompt_tokens=_optional_int(usage, "prompt_tokens"),
             prompt_cache_hit_tokens=_optional_int(usage, "prompt_cache_hit_tokens"),
@@ -759,11 +818,12 @@ def provider_call_start_metadata(
 
 
 def _planning_context_bytes(payload: dict[str, object]) -> int | None:
-    if "planning_context" not in payload:
+    context_key = "planner_input" if "planner_input" in payload else "planning_context"
+    if context_key not in payload:
         return None
     return len(
         json.dumps(
-            payload.get("planning_context", {}), ensure_ascii=False, separators=(",", ":")
+            payload.get(context_key, {}), ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
     )
 
@@ -899,6 +959,11 @@ __all__ = [
     "PlanProposal",
     "PlanRequest",
     "PlanStepProposal",
+    "PlannerActionContract",
+    "PlannerActorState",
+    "PlannerInput",
+    "PlannerKnownWorldSlice",
+    "PlannerTargetBinding",
     "PlanningActionCandidate",
     "PlanningContext",
     "PlanningContextV1",

@@ -1070,6 +1070,12 @@ class GenericAgentService:
             task=task,
             replan_reason=reason,
         )
+        planner_input = context_builder.build_v2(
+            definition,
+            objectives,
+            task=task,
+            replan_reason=reason,
+        )
         # The old catalog is retained only as a compatibility projection for
         # existing in-process FakeProviders.  It is never serialized by the
         # OpenAI-compatible provider when ``planning_context`` is present.
@@ -1102,6 +1108,7 @@ class GenericAgentService:
                 planning_metadata=definition.planning.model_dump(mode="json"),
                 planning_action_catalog=catalog,
                 planning_context=planning_context,
+                planner_input=planner_input,
                 repair_attempt=repair_attempt,
                 repair_diagnostics=diagnostics,
             )

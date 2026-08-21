@@ -17,7 +17,15 @@ from app.agent.planner_contract import (
     planner_known_preconditions,
     planner_target_contracts,
 )
-from app.agent.provider import PlanningActionCandidate, PlanningContext
+from app.agent.provider import (
+    PlannerActionContract,
+    PlannerActorState,
+    PlannerInput,
+    PlannerKnownWorldSlice,
+    PlannerTargetBinding,
+    PlanningActionCandidate,
+    PlanningContext,
+)
 from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
@@ -41,6 +49,158 @@ from app.infrastructure.db.models import (
 from app.services.knowledge_projection import SharedKnowledgeProjection
 
 PlanningContextV1 = PlanningContext
+
+
+def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
+    """Normalize the internal V1 view into one Provider-facing semantic source."""
+
+    actors: list[PlannerActorState] = []
+    for raw in context.relevant_actors:
+        current = raw.get("current_known_state")
+        state = current if isinstance(current, dict) else {}
+        actors.append(
+            PlannerActorState(
+                actor_key=str(raw["actor_key"]),
+                role_key=str(raw.get("role_key", "")),
+                availability=str(state.get("availability", "UNKNOWN")),
+                current_region=(
+                    str(state["current_region"])
+                    if isinstance(state.get("current_region"), str)
+                    else None
+                ),
+                command_reachability=str(state.get("command_reachability", "UNKNOWN")),
+                execution_state=(
+                    dict(cast(dict[str, object], raw["execution_state"]))
+                    if isinstance(raw.get("execution_state"), dict)
+                    else {"status": "UNKNOWN"}
+                ),
+            )
+        )
+
+    action_contracts: list[PlannerActionContract] = []
+    bindings: dict[tuple[str, str], dict[str, list[dict[str, object]]]] = {}
+    for raw in context.relevant_actions:
+        constraints = raw.get("planner_constraints")
+        contract = constraints if isinstance(constraints, dict) else {}
+        effects = raw.get("planner_effects")
+        action_key = str(raw["action_key"])
+        action_contracts.append(
+            PlannerActionContract(
+                action_key=action_key,
+                executor_requirements=(
+                    dict(cast(dict[str, object], contract["executor"]))
+                    if isinstance(contract.get("executor"), dict)
+                    else {}
+                ),
+                target_contract=(
+                    dict(cast(dict[str, object], contract["target"]))
+                    if isinstance(contract.get("target"), dict)
+                    else {}
+                ),
+                locality=(
+                    dict(cast(dict[str, object], contract["locality"]))
+                    if isinstance(contract.get("locality"), dict)
+                    else {}
+                ),
+                parameters=tuple(
+                    dict(item)
+                    for item in cast(list[object], raw.get("parameter_schema", []))
+                    if isinstance(item, dict)
+                ),
+                known_preconditions=tuple(
+                    dict(item)
+                    for item in cast(list[object], contract.get("known_preconditions", []))
+                    if isinstance(item, dict)
+                ),
+                deterministic_effects=tuple(
+                    dict(item)
+                    for item in cast(list[object], effects or [])
+                    if isinstance(item, dict)
+                ),
+                knowledge_semantics=tuple(
+                    dict(item)
+                    for item in cast(list[object], contract.get("knowledge", []))
+                    if isinstance(item, dict)
+                ),
+            )
+        )
+        raw_contracts = raw.get("target_contracts")
+        if isinstance(raw_contracts, dict):
+            for target_key, target_contract in raw_contracts.items():
+                if not isinstance(target_key, str) or not isinstance(target_contract, dict):
+                    continue
+                entry = bindings.setdefault(
+                    (action_key, target_key), {"requirements": [], "effects": []}
+                )
+                entry["effects"].extend(
+                    dict(item)
+                    for item in cast(list[object], target_contract.get("effects", []))
+                    if isinstance(item, dict)
+                )
+
+    current = context.current_knowledge
+    raw_requirements = current.get("known_action_requirements", [])
+    if isinstance(raw_requirements, list):
+        for target in raw_requirements:
+            if not isinstance(target, dict) or not isinstance(target.get("target_key"), str):
+                continue
+            for requirement in cast(list[object], target.get("requirements", [])):
+                if not isinstance(requirement, dict) or not isinstance(
+                    requirement.get("action_key"), str
+                ):
+                    continue
+                action_key = str(requirement["action_key"])
+                target_key = str(target["target_key"])
+                entry = bindings.setdefault(
+                    (action_key, target_key), {"requirements": [], "effects": []}
+                )
+                entry["requirements"].append(
+                    {key: value for key, value in requirement.items() if key != "action_key"}
+                )
+
+    target_bindings = tuple(
+        PlannerTargetBinding(
+            action_key=action_key,
+            target_key=target_key,
+            requirements=tuple(value["requirements"]),
+            deterministic_effects=tuple(value["effects"]),
+        )
+        for (action_key, target_key), value in sorted(bindings.items())
+    )
+    return PlannerInput(
+        objective=dict(context.goal),
+        actors=tuple(actors),
+        action_contracts=tuple(action_contracts),
+        target_bindings=target_bindings,
+        known_world=PlannerKnownWorldSlice(
+            nodes=tuple(
+                dict(item)
+                for item in cast(list[object], current.get("nodes", []))
+                if isinstance(item, dict)
+            ),
+            facts=(
+                dict(cast(dict[str, object], current["facts"]))
+                if isinstance(current.get("facts"), dict)
+                else {}
+            ),
+            relations=tuple(
+                dict(item)
+                for item in cast(list[object], current.get("relations", []))
+                if isinstance(item, dict)
+            ),
+            resources=(
+                dict(cast(dict[str, object], current["resources"]))
+                if isinstance(current.get("resources"), dict)
+                else {}
+            ),
+            resource_knowledge=tuple(
+                dict(item)
+                for item in cast(list[object], current.get("region_resource_knowledge", []))
+                if isinstance(item, dict)
+            ),
+        ),
+        execution_context=dict(context.previous_execution_context),
+    )
 
 
 class PlanningContextBuilder:
@@ -134,6 +294,25 @@ class PlanningContextBuilder:
         )
 
     build_context = build
+
+    def build_v2(
+        self,
+        definition: ScenarioDefinitionV2,
+        objectives: tuple[ObjectiveDefinitionV2, ...],
+        *,
+        task: AgentTask,
+        replan_reason: str | None,
+    ) -> PlannerInput:
+        """Build canonical V2 while V1 remains an internal Validator adapter."""
+
+        return _canonical_planner_input(
+            self.build(
+                definition,
+                objectives,
+                task=task,
+                replan_reason=replan_reason,
+            )
+        )
 
     def _retrieve_action_keys(
         self,
