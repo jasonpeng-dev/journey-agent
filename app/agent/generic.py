@@ -8,7 +8,9 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from time import perf_counter
 from typing import Any, cast
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,11 +24,13 @@ from app.agent.planning_context import (
 )
 from app.agent.provider import (
     GenericModelProvider,
+    GenericProviderError,
     GoalSelectionRequest,
     PlanningActionCandidate,
     PlanningContext,
     PlanRequest,
     provider_call_metadata,
+    provider_call_start_metadata,
 )
 from app.domain.enums import (
     AgentPlanStatus,
@@ -95,6 +99,11 @@ from app.services.generic_actions import (
 from app.services.knowledge_projection import SharedKnowledgeProjection
 
 ObjectiveSelector = Callable[[str, tuple[ObjectiveDefinitionV2, ...]], str | None]
+
+ProviderCallObserver = Callable[
+    [str, AgentTask, PlanRequest, dict[str, object]],
+    None,
+]
 
 
 @dataclass(slots=True)
@@ -282,11 +291,14 @@ class GenericAgentService:
         *,
         goal_resolver: GenericGoalResolver | None = None,
         provider: GenericModelProvider | None = None,
+        provider_call_observer: ProviderCallObserver | None = None,
     ) -> None:
         self.db = db
         self.scope = scope
         self.provider = provider
         self.goal_resolver = goal_resolver or GenericGoalResolver(provider=provider)
+        self.provider_call_observer = provider_call_observer
+        self._provider_call_started_at: dict[str, float] = {}
         self._last_provider_plan_summary: str | None = None
 
     def create_task(
@@ -387,8 +399,6 @@ class GenericAgentService:
                 AgentPlan.status == AgentPlanStatus.ACTIVE,
             )
         )
-        if old_plan is not None:
-            old_plan.status = AgentPlanStatus.SUPERSEDED
         next_version = task.current_plan_version + 1
         steps = self._candidate_steps(
             definition,
@@ -404,6 +414,8 @@ class GenericAgentService:
                 "GENERIC_PLAN_NOT_FOUND",
                 "No exact-Version Action can advance the frozen Objective from current Knowledge",
             )
+        if old_plan is not None:
+            old_plan.status = AgentPlanStatus.SUPERSEDED
         plan = AgentPlan(
             task_id=task.id,
             version=next_version,
@@ -1093,7 +1105,57 @@ class GenericAgentService:
                 repair_attempt=repair_attempt,
                 repair_diagnostics=diagnostics,
             )
-            proposal = self.provider.propose_plan(request)
+            audit_id = str(uuid4())
+            provider_started_at = perf_counter()
+            self._provider_call_started_at[audit_id] = provider_started_at
+            start_metadata = provider_call_start_metadata(self.provider, request)
+            start_metadata.update(
+                {
+                    "audit_id": audit_id,
+                    "repair_attempt": repair_attempt,
+                    "started_at": datetime.now(UTC).isoformat(),
+                    "outcome": "RUNNING",
+                }
+            )
+            self._notify_provider_call("STARTED", task, request, start_metadata)
+            try:
+                proposal = self.provider.propose_plan(request)
+            except GenericProviderError as exc:
+                self._notify_provider_call(
+                    "FINISHED",
+                    task,
+                    request,
+                    {
+                        **provider_call_metadata(self.provider),
+                        "audit_id": audit_id,
+                        "finished_at": datetime.now(UTC).isoformat(),
+                        "latency_ms": _duration_ms(provider_started_at),
+                        "wall_clock_latency_ms": _duration_ms(provider_started_at),
+                        "outcome": ("TIMEOUT" if exc.code == "MODEL_PROVIDER_TIMEOUT" else "ERROR"),
+                        "error_code": exc.code,
+                        "error_category": _provider_error_category(exc),
+                    },
+                )
+                self._provider_call_started_at.pop(audit_id, None)
+                raise
+            except Exception as exc:
+                self._notify_provider_call(
+                    "FINISHED",
+                    task,
+                    request,
+                    {
+                        **provider_call_metadata(self.provider),
+                        "audit_id": audit_id,
+                        "finished_at": datetime.now(UTC).isoformat(),
+                        "latency_ms": _duration_ms(provider_started_at),
+                        "wall_clock_latency_ms": _duration_ms(provider_started_at),
+                        "outcome": "ERROR",
+                        "error_code": "MODEL_PROVIDER_ERROR",
+                        "error_category": type(exc).__name__,
+                    },
+                )
+                self._provider_call_started_at.pop(audit_id, None)
+                raise
             steps, diagnostics = self._validate_provider_proposal_v1(
                 task,
                 definition,
@@ -1113,7 +1175,9 @@ class GenericAgentService:
                 ),
                 diagnostics=diagnostics,
                 accepted=not diagnostics,
+                audit_id=audit_id,
             )
+            self._provider_call_started_at.pop(audit_id, None)
             if not diagnostics:
                 self._last_provider_plan_summary = proposal.plan_summary.strip() or None
                 return steps
@@ -1121,6 +1185,16 @@ class GenericAgentService:
             "MODEL_PLAN_REJECTED",
             "The model provider could not produce a backend-valid current Plan",
         )
+
+    def _notify_provider_call(
+        self,
+        event: str,
+        task: AgentTask,
+        request: PlanRequest,
+        details: dict[str, object],
+    ) -> None:
+        if self.provider_call_observer is not None:
+            self.provider_call_observer(event, task, request, details)
 
     def _validate_provider_proposal_v1(
         self,
@@ -1292,12 +1366,16 @@ class GenericAgentService:
                 )
             except GenericAgentError as exc:
                 diagnostics.append(
-                    {
-                        "code": _safe_provider_diagnostic(exc.code),
-                        "step": index,
-                        "action_key": action_key,
-                        "target_key": target_key,
-                    }
+                    _structured_plan_diagnostic(
+                        exc,
+                        action=action,
+                        step=index,
+                        actor_key=actor_key,
+                        target_key=target_key,
+                        projected_actor_locations=projected_actor_locations,
+                        projected_command_reachability=projected_command_reachability,
+                        planning_context=planning_context,
+                    )
                 )
                 continue
             signature = proposal_signature(actor_key, action_key, target_key, parameters)
@@ -1369,11 +1447,16 @@ class GenericAgentService:
                 )
             except GenericAgentError as exc:
                 diagnostics.append(
-                    {
-                        "code": _safe_provider_diagnostic(exc.code),
-                        "step": index,
-                        "action_key": action_key,
-                    }
+                    _structured_plan_diagnostic(
+                        exc,
+                        action=action,
+                        step=index,
+                        actor_key=actor_key,
+                        target_key=target_key,
+                        projected_actor_locations=projected_actor_locations,
+                        projected_command_reachability=projected_command_reachability,
+                        planning_context=planning_context,
+                    )
                 )
                 continue
             purpose = getattr(raw_step, "purpose", "")
@@ -2527,59 +2610,83 @@ class GenericAgentService:
         proposal_candidate_ids: tuple[str, ...],
         diagnostics: tuple[dict[str, object], ...],
         accepted: bool,
+        audit_id: str | None = None,
     ) -> None:
         assert self.provider is not None
         metadata = dict(task.objective_resolution_metadata or {})
         calls = list(metadata.get("provider_calls", []))
-        calls.append(
-            {
-                "call_type": request.call_type,
-                "model": self.provider.model_name,
-                "repair_attempt": request.repair_attempt,
-                "planning_context": (
-                    request.planning_context.compact_dump()
-                    if request.planning_context is not None
-                    else None
-                ),
-                "planning_context_bytes": (
-                    len(
-                        json.dumps(
-                            request.planning_context.compact_dump(),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ).encode("utf-8")
-                    )
-                    if request.planning_context is not None
-                    else None
-                ),
-                "candidate_catalog": [
-                    {
-                        "candidate_id": item.candidate_id,
-                        "action_key": item.action_key,
-                        "actor_key": item.actor_key,
-                        "target_key": item.target_key,
-                        "currently_executable": item.currently_executable,
-                        "known_blockers": list(item.known_blockers),
-                    }
-                    for item in request.planning_action_catalog
-                ],
-                "proposal_steps": [
-                    {
-                        "purpose": getattr(item, "purpose", ""),
-                        "action_key": getattr(item, "action_key", None),
-                        "actor_key": getattr(item, "actor_key", None),
-                        "target_key": getattr(item, "target_key", None),
-                        "parameters": dict(getattr(item, "parameters", {}) or {}),
-                        "order": index,
-                    }
-                    for index, item in enumerate(proposal_steps, start=1)
-                ],
-                "proposal_candidate_ids": list(proposal_candidate_ids),
-                "validation": "ACCEPTED" if accepted else "REJECTED",
-                "diagnostics": list(diagnostics),
-                **provider_call_metadata(self.provider),
-            }
+        provider_metadata = provider_call_metadata(self.provider)
+        started_at = self._provider_call_started_at.get(audit_id or "")
+        call_record: dict[str, object] = {
+            "audit_id": audit_id,
+            "call_type": request.call_type,
+            "model": self.provider.model_name,
+            "repair_attempt": request.repair_attempt,
+            "planning_context": (
+                request.planning_context.compact_dump()
+                if request.planning_context is not None
+                else None
+            ),
+            "planning_context_bytes": (
+                len(
+                    json.dumps(
+                        request.planning_context.compact_dump(),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+                if request.planning_context is not None
+                else None
+            ),
+            "candidate_catalog": [
+                {
+                    "candidate_id": item.candidate_id,
+                    "action_key": item.action_key,
+                    "actor_key": item.actor_key,
+                    "target_key": item.target_key,
+                    "currently_executable": item.currently_executable,
+                    "known_blockers": list(item.known_blockers),
+                }
+                for item in request.planning_action_catalog
+            ],
+            "proposal_steps": [
+                {
+                    "purpose": getattr(item, "purpose", ""),
+                    "action_key": getattr(item, "action_key", None),
+                    "actor_key": getattr(item, "actor_key", None),
+                    "target_key": getattr(item, "target_key", None),
+                    "parameters": dict(getattr(item, "parameters", {}) or {}),
+                    "order": index,
+                }
+                for index, item in enumerate(proposal_steps, start=1)
+            ],
+            "proposal_candidate_ids": list(proposal_candidate_ids),
+            "validation": "ACCEPTED" if accepted else "REJECTED",
+            "outcome": "SUCCESS",
+            "finished_at": datetime.now(UTC).isoformat(),
+            "wall_clock_latency_ms": (
+                provider_metadata.get("wall_clock_latency_ms")
+                if isinstance(provider_metadata.get("wall_clock_latency_ms"), int)
+                else (_duration_ms(started_at) if started_at is not None else None)
+            ),
+            **provider_metadata,
+        }
+        existing_index = next(
+            (
+                index
+                for index, item in enumerate(calls)
+                if isinstance(item, dict) and item.get("audit_id") == audit_id
+            ),
+            None,
         )
+        if existing_index is None:
+            calls.append(call_record)
+        else:
+            existing = calls[existing_index]
+            calls[existing_index] = {
+                **(existing if isinstance(existing, dict) else {}),
+                **call_record,
+            }
         task.objective_resolution_metadata = {**metadata, "provider_calls": calls}
         self.db.flush()
 
@@ -2628,6 +2735,17 @@ class GenericAgentService:
             parameters = normalize_action_parameters(action, parameters)
         except ValueError as exc:
             raise GenericAgentError("GENERIC_PLAN_PARAMETER_INVALID", str(exc)) from exc
+        planning_failure_code = self._planning_action_failure_code(
+            definition,
+            action,
+            actor,
+            candidate.target_key,
+        )
+        if planning_failure_code is not None:
+            raise GenericAgentError(
+                planning_failure_code,
+                "The Action target does not satisfy the declared planning contract",
+            )
         if not self._validate_planning_action(definition, action, actor, candidate.target_key):
             raise GenericAgentError("GENERIC_PROVIDER_PLAN_INVALID", "Action assignment is invalid")
         objective_refs = {
@@ -2699,6 +2817,26 @@ class GenericAgentService:
     ) -> bool:
         """Validate static Plan membership without applying current runtime access gates."""
 
+        return self._planning_action_failure_code(definition, action, actor, target_key) is None
+
+    def _planning_action_failure_code(
+        self,
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor: GameInstanceActor,
+        target_key: str,
+    ) -> str | None:
+        """Return a safe static-contract diagnostic, when one is available.
+
+        The validator deliberately keeps the public boolean contract used by
+        runtime and test callers.  Provider-facing plan validation needs one
+        additional distinction, though: a real target interaction mismatch is
+        actionable repair feedback and must not be mislabeled as an objective
+        relevance failure.  This helper reports only non-sensitive static
+        contract information; dynamic accessibility and hidden Truth stay in
+        the existing boolean/knowledge-aware validation paths.
+        """
+
         if action.target_kind == ActionTargetKind.ACTOR:
             target_actor = self.db.get(
                 GameInstanceActor,
@@ -2718,7 +2856,9 @@ class GenericAgentService:
                 target is not None and action.required_interaction_key in target.interaction_keys
             )
             target_visible = bool(node_state and node_state.visibility == Visibility.KNOWN)
-        return bool(
+            if target_valid and target_visible and not target_interaction_valid:
+                return "TARGET_INTERACTION_INVALID"
+        valid = bool(
             target_valid
             and actor_binding_matches(definition, actor)
             and target_visible
@@ -2728,6 +2868,7 @@ class GenericAgentService:
                 set(actor.capabilities)
             )
         )
+        return None if valid else "GENERIC_PROVIDER_PLAN_INVALID"
 
     @staticmethod
     def _default_parameters(action: ActionDefinitionV2) -> dict[str, StrictScalar]:
@@ -2888,6 +3029,151 @@ def _actor_command_reachability(actor: GameInstanceActor) -> CommandReachability
         ) from exc
 
 
+def _structured_plan_diagnostic(
+    exc: GenericAgentError,
+    *,
+    action: ActionDefinitionV2,
+    step: int,
+    actor_key: str,
+    target_key: str,
+    projected_actor_locations: dict[str, str],
+    projected_command_reachability: dict[str, CommandReachability],
+    planning_context: PlanningContext,
+) -> dict[str, object]:
+    """Keep repair diagnostics actionable without exposing hidden Truth."""
+
+    diagnostic: dict[str, object] = {
+        "code": _safe_provider_diagnostic(exc.code),
+        "failure_code": exc.code,
+        "step": step,
+        "action_key": action.key,
+        "actor_key": actor_key,
+        "target_key": target_key,
+        "reason": exc.message,
+    }
+    known_state: dict[str, object] = {}
+    location = projected_actor_locations.get(actor_key)
+    if location is not None:
+        known_state["current_node_key"] = location
+    reachability = projected_command_reachability.get(actor_key)
+    if reachability is not None:
+        known_state["command_reachability"] = reachability.value
+    if known_state:
+        diagnostic["known_state"] = known_state
+
+    blocker = _diagnostic_blocker(exc.code, action)
+    if blocker:
+        diagnostic["blocker"] = blocker
+    recovery = _known_recovery_effects(planning_context, exc.code)
+    if recovery:
+        diagnostic["known_recovery_effects"] = recovery
+    return diagnostic
+
+
+def _diagnostic_blocker(
+    failure_code: str,
+    action: ActionDefinitionV2,
+) -> dict[str, object] | None:
+    if failure_code == "ACTOR_COMMAND_DISCONNECTED":
+        return {
+            "type": "COMMAND_REACHABILITY",
+            "current_value": CommandReachability.DISCONNECTED.value,
+            "required_value": CommandReachability.ONLINE.value,
+        }
+    if failure_code in {
+        "RESOURCE_INVENTORY_UNKNOWN",
+        "TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
+    }:
+        return {
+            "type": "RESOURCE_KNOWLEDGE",
+            "required_value": "KNOWN_VISIBLE_AVAILABLE",
+            "unknown_value": "NOT_USABLE",
+        }
+    if failure_code in {"KNOWN_RESOURCE_INSUFFICIENT", "TRANSPORT_RESOURCE_INSUFFICIENT"}:
+        return {
+            "type": "RESOURCE_QUANTITY",
+            "current_value": "KNOWN_INSUFFICIENT",
+            "required_value": "REQUESTED_AMOUNT",
+        }
+    if failure_code in {"KNOWN_TRANSPORT_BLOCKED", "TRAVEL_BLOCKED", "TRANSPORT_BLOCKED"}:
+        return {
+            "type": "TRANSPORT_PASSABILITY",
+            "current_value": "KNOWN_BLOCKED",
+            "required_value": "PASSABLE",
+            "unknown_value": "MAY_ATTEMPT",
+        }
+    if failure_code.startswith("LOCALITY_"):
+        return {
+            "type": "LOCALITY",
+            "contract": action.locality.value,
+        }
+    if failure_code == "ACTOR_ROLE_MISSING":
+        return {
+            "type": "ACTOR_ROLE",
+            "required_value": action.required_actor_role_key,
+        }
+    if failure_code in {
+        "SUPPLY_POWER_RELATION_UNKNOWN",
+        "SUPPLY_POWER_SOURCE_NOT_OPERATIONAL",
+        "SUPPLY_POWER_SOURCE_UNAVAILABLE",
+    }:
+        return {
+            "type": "POWER_SOURCE_REQUIREMENT",
+            "required_value": "KNOWN_VALID_SOURCE",
+        }
+    return {"type": "ACTION_PRECONDITION", "failure_code": failure_code}
+
+
+def _known_recovery_effects(
+    planning_context: PlanningContext,
+    failure_code: str,
+) -> list[dict[str, object]]:
+    """Discover generic recovery effects from the current Action catalog."""
+
+    wanted: set[tuple[str, object]] = set()
+    if failure_code == "ACTOR_COMMAND_DISCONNECTED":
+        wanted.add(("ACTOR_COMMAND_REACHABILITY", CommandReachability.ONLINE.value))
+    elif failure_code in {
+        "RESOURCE_INVENTORY_UNKNOWN",
+        "TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
+    }:
+        wanted.add(("REGION_RESOURCE_KNOWLEDGE", "VISIBLE"))
+    elif failure_code in {"KNOWN_TRANSPORT_BLOCKED", "TRAVEL_BLOCKED", "TRANSPORT_BLOCKED"}:
+        wanted.add(("FACT_MUTATION", "passable"))
+    elif failure_code in {"HEAVY_SUPPORT_UNAVAILABLE", "WATER_TREATMENT_HEAVY_SUPPORT_REQUIRED"}:
+        wanted.add(("FACT_MUTATION", "heavy_engineering_support"))
+
+    result: list[dict[str, object]] = []
+    for action in planning_context.relevant_actions:
+        action_key = action.get("action_key")
+        if not isinstance(action_key, str):
+            continue
+        effects: list[dict[str, object]] = []
+        raw_effects = action.get("planner_effects")
+        if isinstance(raw_effects, list):
+            effects.extend(item for item in raw_effects if isinstance(item, dict))
+        raw_contracts = action.get("target_contracts")
+        if isinstance(raw_contracts, dict):
+            for contract in raw_contracts.values():
+                if isinstance(contract, dict) and isinstance(contract.get("effects"), list):
+                    effects.extend(item for item in contract["effects"] if isinstance(item, dict))
+        for effect in effects:
+            effect_type = effect.get("type")
+            matches = False
+            for wanted_type, wanted_value in wanted:
+                if effect_type != wanted_type:
+                    continue
+                if wanted_type == "FACT_MUTATION":
+                    matches = effect.get("fact_key") == wanted_value
+                else:
+                    matches = effect.get("value", effect.get("visibility")) == wanted_value
+                if matches:
+                    break
+            if matches:
+                result.append({"action_key": action_key, "effect": effect})
+    return result
+
+
 def _safe_provider_diagnostic(code: str) -> str:
     if code == "KNOWN_TRANSPORT_BLOCKED":
         return code
@@ -2902,12 +3188,22 @@ def _safe_provider_diagnostic(code: str) -> str:
         "ACTOR_CAPABILITY_MISSING": "ACTOR_NOT_ALLOWED",
         "ACTOR_ROLE_MISSING": "ACTOR_NOT_ALLOWED",
         "ACTOR_COMMAND_DISCONNECTED": "ACTOR_COMMAND_DISCONNECTED",
+        "TARGET_INTERACTION_INVALID": "TARGET_INTERACTION_INVALID",
         "RELAY_TARGET_NOT_DISCONNECTED": "RELAY_TARGET_NOT_DISCONNECTED",
         "SUPPLY_POWER_RELATION_UNKNOWN": "SUPPLY_POWER_REQUIREMENT_UNKNOWN",
         "SUPPLY_POWER_SOURCE_NOT_OPERATIONAL": "SUPPLY_POWER_SOURCE_INVALID",
         "SUPPLY_POWER_SOURCE_UNAVAILABLE": "SUPPLY_POWER_SOURCE_INVALID",
         "GENERIC_PROVIDER_PLAN_INVALID": "OBJECTIVE_IRRELEVANT",
     }.get(code, "PROPOSAL_INVALID")
+
+
+def _provider_error_category(error: GenericProviderError) -> str:
+    cause = error.__cause__
+    return type(cause).__name__ if cause is not None else type(error).__name__
+
+
+def _duration_ms(started_at: float) -> int:
+    return max(0, round((perf_counter() - started_at) * 1000))
 
 
 def proposal_signature(

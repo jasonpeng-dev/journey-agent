@@ -37,6 +37,12 @@ export type ScenarioVersion = {
   content_hash: string; published_at: string; definition_document?: Record<string, unknown>;
 };
 
+export type ScenarioVersionDetail = ScenarioVersion & {
+  definition_document: Record<string, unknown> & {
+    objectives?: Array<{ key?: unknown; name?: unknown }>;
+  };
+};
+
 export type ScenarioExample = { key: string; name: string; description: string; maturity: string };
 
 export type GameSummary = {
@@ -53,7 +59,7 @@ export type GameHistory = {
 
 export type ActionLocation = { kind: string; summary: string; detail: string | null };
 export type PublicRelation = { relation_key?: string | null; source_node_key: string; relation_type_key: string; target_node_key: string; source_node_name?: string | null; target_node_name?: string | null };
-export type PublicActionRequirement = { action_key: string; action_name: string; required_actor_role_key?: string | null; required_actor_role_name?: string | null; source_relation_type_key?: string | null; known_preconditions: Array<{ node_key: string; fact_key: string; selector: string; current_value: string | number | boolean; failure_condition?: Record<string, unknown> }> };
+export type PublicActionRequirement = { action_key: string; action_name: string; required_actor_role_key?: string | null; required_actor_role_name?: string | null; source_relation_type_key?: string | null; known_preconditions: Array<{ node_key: string; fact_key: string; selector: string; current_value: string | number | boolean; failure_condition?: Record<string, unknown> }>; cost?: Record<string, number>; resource_costs?: Record<string, number> };
 export type PublicPlanStep = { id: string; sequence: number; description: string; assigned_actor_name: string; status: "PENDING" | "CURRENT" | "COMPLETED" | "FAILED" | "BLOCKED"; result_summary: string | null; location?: ActionLocation | null };
 export type PublicPlan = { strategy_summary: string; updated: boolean; steps: PublicPlanStep[] };
 export type PublicPlanHistoryStep = { id: string; sequence: number; action_name: string; assigned_actor_name: string; status: "PLANNED" | "CURRENT" | "COMPLETED" | "FAILED" | "CANCELLED"; result_summary: string | null; location?: ActionLocation | null };

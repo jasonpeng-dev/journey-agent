@@ -5,7 +5,8 @@ import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { groupActorsByTask } from "../actorPresentation";
 import {
-  displayActionRequirements,
+  factDisplayLabel,
+  factDisplayValue,
   knownRelationDescription,
   meaningfulKnownRelations,
   relationDisplayKey,
@@ -18,12 +19,12 @@ import type {
   ResourceIntelligence,
   PublicTask,
   PublicTimelineEvent,
+  ScenarioVersionDetail,
 } from "../types";
 import { errorText, resultLabel, stepDescription, uiLabel } from "../ui";
 import { formatDuration, type ActivePlayOperation } from "../playPresentation";
 import {
   actionLocationText,
-  factDisplayName,
   groupFactsByRegion,
   groupNodesByRegion,
   groupResourcesByRegion,
@@ -37,6 +38,8 @@ const taskTone: Record<string, string> = {
   BLOCKED_BY_PLAYER_DECISION: "danger",
   UNREACHABLE_IN_CURRENT_STATE: "danger",
   MODEL_PLAN_REJECTED: "danger",
+  MODEL_PROVIDER_TIMEOUT: "danger",
+  MODEL_PROVIDER_FAILURE: "danger",
   ABORTED: "neutral",
 };
 const planStatusLabel: Record<PublicPlanHistory["status"], string> = {
@@ -324,7 +327,7 @@ export function WaitingStatus({
   );
 }
 
-type KnowledgeAccordionKey = "resources" | "locations" | "actors" | "facts" | "relations" | "requirements";
+type KnowledgeAccordionKey = "resources" | "locations" | "actors" | "facts" | "relations";
 
 type KnowledgeAccordionProps = {
   id: KnowledgeAccordionKey;
@@ -375,7 +378,6 @@ type KnownWorldAccordionsProps = {
   actors: PlayerGameState["actors"];
   knownFacts: PlayerGameState["known_facts"];
   knownRelations?: NonNullable<PlayerGameState["known_relations"]>;
-  knownActionRequirements?: NonNullable<PlayerGameState["known_action_requirements"]>;
   task?: PublicTask | null;
 };
 
@@ -386,7 +388,6 @@ export function KnownWorldAccordions({
   actors,
   knownFacts,
   knownRelations = [],
-  knownActionRequirements = [],
   task = null,
 }: KnownWorldAccordionsProps) {
   const [expanded, setExpanded] = useState<Record<KnowledgeAccordionKey, boolean>>({
@@ -395,7 +396,6 @@ export function KnownWorldAccordions({
     actors: false,
     facts: false,
     relations: false,
-    requirements: false,
   });
   const toggle = (id: KnowledgeAccordionKey) => {
     setExpanded((current) => ({ ...current, [id]: !current[id] }));
@@ -405,7 +405,6 @@ export function KnownWorldAccordions({
   const factGroups = groupFactsByRegion(knownFacts);
   const actorGroups = groupActorsByTask(actors, task);
   const displayedRelations = meaningfulKnownRelations(knownRelations);
-  const displayedRequirements = displayActionRequirements(knownActionRequirements, knownFacts, knownRelations);
   const statusTone = (value: string | number | boolean) =>
     value === false || value === 0 || value === "false" ? "neutral" : "success";
 
@@ -629,11 +628,12 @@ export function KnownWorldAccordions({
                 <div className="knowledge-entry-list">
                 {group.facts.map((fact) => (
                   <div className="knowledge-entry" key={`${group.key}:${fact.node_key}.${fact.fact_key}`}>
-                    <div className="knowledge-entry-copy">
-                      <strong>{factDisplayName(fact)}</strong>
+                    <div className="knowledge-entry-copy knowledge-fact-copy">
+                      <strong>{fact.node_name ?? "未知地点"}</strong>
+                      <small>{factDisplayLabel(fact)}</small>
                     </div>
-                    <span className={`console-pill ${statusTone(fact.value)} knowledge-status-pill`}>
-                      {typeof fact.value === "string" ? uiLabel(fact.value) : String(fact.value)}
+                    <span className={`console-pill ${statusTone(fact.value)} knowledge-status-pill knowledge-fact-value`}>
+                      {factDisplayValue(fact)}
                     </span>
                   </div>
                 ))}
@@ -663,33 +663,6 @@ export function KnownWorldAccordions({
                   <strong>{relation.target_node_name ?? relation.target_node_key}</strong>
                 </div>
                 <small>{knownRelationDescription(relation.relation_type_key)}</small>
-              </div>
-            ))}
-          </div>
-        )}
-      </KnowledgeAccordion>
-      <KnowledgeAccordion
-        id="requirements"
-        title="已知行动要求"
-        count={displayedRequirements.length}
-        summary="当前已掌握的行动条件与工程要求"
-        open={expanded.requirements}
-        onToggle={() => toggle("requirements")}
-      >
-        {displayedRequirements.length === 0 ? (
-          <div className="knowledge-empty-state">暂无已知行动要求</div>
-        ) : (
-          <div className="knowledge-requirement-list">
-            {displayedRequirements.map(({ requirement, lines }) => (
-              <div className="knowledge-requirement-group" key={requirement.action_key}>
-                <strong>{requirement.action_name}</strong>
-                <ul>
-                  {lines.map((line) => (
-                    <li key={line.key}>
-                      <span>{line.label}：</span>{line.value}
-                    </li>
-                  ))}
-                </ul>
               </div>
             ))}
           </div>
@@ -736,6 +709,8 @@ export function GoalComposer({
   resolving,
   startedAt,
   busy,
+  objectives = [],
+  objectivesLoaded = false,
   onGoalChange,
   onSubmit,
 }: {
@@ -744,10 +719,22 @@ export function GoalComposer({
   resolving: boolean;
   startedAt: number | null;
   busy: boolean;
+  objectives?: Array<{ key: string; name: string }>;
+  objectivesLoaded?: boolean;
   onGoalChange: (value: string) => void;
   onSubmit: () => void;
 }) {
+  const CUSTOM_GOAL = "__custom_goal__";
+  const [selectedObjectiveKey, setSelectedObjectiveKey] = useState("");
+  const selectedObjective = objectives.find((item) => item.key === selectedObjectiveKey);
+  const customGoalSelected = selectedObjectiveKey === CUSTOM_GOAL;
+  const showCustomInput = !objectivesLoaded || objectives.length === 0 || customGoalSelected;
   const displayedGoal = resolving ? pendingGoal ?? goal : goal;
+  const handleObjectiveChange = (value: string) => {
+    setSelectedObjectiveKey(value);
+    const objective = objectives.find((item) => item.key === value);
+    onGoalChange(objective?.name ?? "");
+  };
   return (
     <section className="command-panel goal-composer-panel" data-testid="goal-composer">
       <header className="command-panel-heading">
@@ -761,23 +748,52 @@ export function GoalComposer({
         className="command-composer-v2"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!resolving && goal.trim()) onSubmit();
+          if (!resolving && goal.trim() && (showCustomInput || selectedObjective)) onSubmit();
         }}
       >
-        <label htmlFor="goal">下达高层目标</label>
-        <div>
-          <textarea
-            id="goal"
-            rows={3}
-            value={displayedGoal}
-            onChange={(event) => onGoalChange(event.target.value)}
-            placeholder="例如：打开北部贸易路线"
-            disabled={resolving}
-          />
-          <button disabled={resolving || !goal.trim() || busy} type="submit">
-            {resolving ? "正在接收……" : "开始目标"}
-          </button>
-        </div>
+        <label htmlFor="objective-select">选择任务</label>
+        <select
+          id="objective-select"
+          aria-label="选择任务"
+          value={objectivesLoaded ? selectedObjectiveKey : ""}
+          onChange={(event) => handleObjectiveChange(event.target.value)}
+          disabled={resolving || !objectivesLoaded}
+        >
+          <option value="" disabled>
+            {objectivesLoaded ? "请选择一个任务" : "正在加载任务……"}
+          </option>
+          {objectives.map((objective) => (
+            <option key={objective.key} value={objective.key}>{objective.name}</option>
+          ))}
+          {objectivesLoaded && <option value={CUSTOM_GOAL}>自定义目标……</option>}
+        </select>
+        {showCustomInput && (
+          <div>
+            <label htmlFor="goal">自定义目标</label>
+            <textarea
+              id="goal"
+              rows={3}
+              value={displayedGoal}
+              onChange={(event) => {
+                setSelectedObjectiveKey(CUSTOM_GOAL);
+                onGoalChange(event.target.value);
+              }}
+              placeholder="输入自定义目标"
+              disabled={resolving}
+            />
+            <button disabled={resolving || !goal.trim() || busy} type="submit">
+              {resolving ? "正在接收……" : "开始目标"}
+            </button>
+          </div>
+        )}
+        {!showCustomInput && selectedObjective && (
+          <div className="goal-composer-selected">
+            <strong>{selectedObjective?.name}</strong>
+            <button disabled={resolving || !goal.trim() || busy} type="submit">
+              {resolving ? "正在接收……" : "开始目标"}
+            </button>
+          </div>
+        )}
         {resolving && startedAt !== null && (
           <WaitingStatus
             startedAt={startedAt}
@@ -791,6 +807,17 @@ export function GoalComposer({
       </form>
     </section>
   );
+}
+
+function scenarioObjectiveOptions(
+  version: ScenarioVersionDetail | undefined,
+): Array<{ key: string; name: string }> {
+  return (version?.definition_document.objectives ?? []).flatMap((item) => {
+    if (typeof item.key !== "string" || typeof item.name !== "string" || !item.name.trim()) {
+      return [];
+    }
+    return [{ key: item.key, name: item.name }];
+  });
 }
 
 export function GamePage() {
@@ -817,6 +844,14 @@ export function GamePage() {
     queryKey: ["scenario", play.data?.game.scenario_id],
     queryFn: () => api.scenario(play.data!.game.scenario_id),
     enabled: Boolean(play.data?.game.scenario_id),
+  });
+  const scenarioVersion = useQuery({
+    queryKey: ["scenario-version", play.data?.game.scenario_id, play.data?.game.scenario_version_id],
+    queryFn: () => api.scenarioVersion(
+      play.data!.game.scenario_id,
+      play.data!.game.scenario_version_id,
+    ),
+    enabled: Boolean(play.data?.game.scenario_id && play.data?.game.scenario_version_id),
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["play", gameId] });
   const syncLivePlay = (state: PlayerGameState) => {
@@ -918,6 +953,7 @@ export function GamePage() {
   }
   const { game } = play.data;
   const liveGame = livePlay.data.game;
+  const objectiveOptions = scenarioObjectiveOptions(scenarioVersion.data);
   const selectedTaskLoading = Boolean(
     selectedTaskId !== null && loadedTask?.id !== selectedTaskId,
   );
@@ -989,7 +1025,6 @@ export function GamePage() {
             actors={play.data.actors}
             knownFacts={play.data.known_facts}
             knownRelations={play.data.known_relations}
-            knownActionRequirements={play.data.known_action_requirements}
             task={task}
           />
         </aside>
@@ -1094,6 +1129,8 @@ export function GamePage() {
               resolving={goalResolving}
               startedAt={goalResolving ? activeOperation?.startedAt ?? null : null}
               busy={busy}
+              objectives={objectiveOptions}
+              objectivesLoaded={scenarioVersion.isFetched}
               onGoalChange={setGoal}
               onSubmit={() => submit.mutate()}
             />

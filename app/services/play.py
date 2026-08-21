@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import cast
 from uuid import UUID
@@ -17,7 +18,7 @@ from app.agent.generic import (
     GenericGoalResolver,
     proposal_signature,
 )
-from app.agent.provider import GenericModelProvider
+from app.agent.provider import GenericModelProvider, GenericProviderError, PlanRequest
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
@@ -78,7 +79,66 @@ class PlayOrchestrator:
             self.scope,
             goal_resolver=self.goal_resolver,
             provider=provider,
+            provider_call_observer=self._provider_call_event,
         )
+
+    def _provider_call_event(
+        self,
+        event: str,
+        task: AgentTask,
+        request: PlanRequest,
+        details: dict[str, object],
+    ) -> None:
+        """Persist provider-call audit state across the external I/O boundary."""
+
+        if event == "STARTED":
+            metadata = dict(task.objective_resolution_metadata or {})
+            calls = list(metadata.get("provider_calls", []))
+            calls.append(dict(details))
+            task.objective_resolution_metadata = {**metadata, "provider_calls": calls}
+            self.db.flush()
+            # The provider request must never run inside the uncommitted task
+            # transaction.  This commit is the durable STARTED checkpoint.
+            self.db.commit()
+            return
+        if event != "FINISHED":
+            return
+        audit_id = details.get("audit_id")
+        metadata = dict(task.objective_resolution_metadata or {})
+        calls = list(metadata.get("provider_calls", []))
+        for index, call in enumerate(calls):
+            if isinstance(call, dict) and call.get("audit_id") == audit_id:
+                calls[index] = {**call, **details}
+                break
+        task.objective_resolution_metadata = {**metadata, "provider_calls": calls}
+        self.db.flush()
+
+    def _persist_provider_failure(
+        self,
+        task: AgentTask,
+        checkpoint: PlayerExecutionCheckpoint,
+        error: GenericProviderError,
+        *,
+        operation_kind: str,
+        duration_ms: int,
+    ) -> None:
+        task.status = AgentTaskStatus.FAILED
+        task.last_error_code = error.code
+        task.last_error_detail = _provider_failure_detail(error.code)
+        task.completed_at = datetime.now(UTC)
+        task.version += 1
+        checkpoint.phase = PlayerExecutionPhase.BLOCKED
+        checkpoint.version += 1
+        self._record_operation_duration(
+            task,
+            kind=operation_kind,
+            duration_ms=duration_ms,
+        )
+        self.db.flush()
+        # The API boundary rolls back after re-raising the provider error.  A
+        # separate commit here makes the failure and its audit irreversible to
+        # that rollback while leaving the error response unchanged.
+        self.db.commit()
 
     def submit_goal(self, goal: str, *, idempotency_key: str) -> GoalSubmission:
         require_scope_writable(self.db, self.scope.game_instance_id)
@@ -171,6 +231,15 @@ class PlayOrchestrator:
         planning_started = perf_counter()
         try:
             plan = self.agent.plan(task)
+        except GenericProviderError as exc:
+            self._persist_provider_failure(
+                task,
+                checkpoint,
+                exc,
+                operation_kind="INITIAL_PLANNING_FAILURE",
+                duration_ms=_duration_ms(planning_started),
+            )
+            raise
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                 raise
@@ -291,6 +360,15 @@ class PlayOrchestrator:
             replan_started = perf_counter()
             try:
                 plan = self.agent.plan(task, reason=task.last_error_code or "ACTION_FAILED")
+            except GenericProviderError as exc:
+                self._persist_provider_failure(
+                    task,
+                    checkpoint,
+                    exc,
+                    operation_kind="REPLANNING_FAILURE",
+                    duration_ms=_duration_ms(replan_started),
+                )
+                raise
             except GenericAgentError as exc:
                 if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                     raise
@@ -393,6 +471,15 @@ class PlayOrchestrator:
         replan_started = perf_counter()
         try:
             plan = self.agent.plan(task, reason="PLAYER_REJECTED")
+        except GenericProviderError as exc:
+            self._persist_provider_failure(
+                task,
+                checkpoint,
+                exc,
+                operation_kind="REPLANNING_FAILURE",
+                duration_ms=_duration_ms(replan_started),
+            )
+            raise
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                 raise
@@ -451,6 +538,17 @@ class PlayOrchestrator:
             if self._action_cycle_failed(action_step):
                 return
             self._ensure_next_plan(task)
+        except GenericProviderError as exc:
+            checkpoint = self._ensure_checkpoint(task)
+            checkpoint.last_action_step_id = action_step.id
+            self._persist_provider_failure(
+                task,
+                checkpoint,
+                exc,
+                operation_kind="REPLANNING_FAILURE",
+                duration_ms=0,
+            )
+            raise
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                 raise
@@ -683,6 +781,15 @@ _PRODUCT_TERMINAL = (
 
 def _duration_ms(started_at: float) -> int:
     return max(0, round((perf_counter() - started_at) * 1000))
+
+
+def _provider_failure_detail(code: str) -> str:
+    return {
+        "MODEL_PROVIDER_TIMEOUT": "模型调用超时",
+        "MODEL_PROVIDER_HTTP_ERROR": "模型服务返回错误",
+        "MODEL_PROVIDER_RESPONSE_INVALID": "模型返回无效",
+        "MODEL_PROVIDER_CONFIGURATION_INVALID": "模型服务配置无效",
+    }.get(code, "模型调用失败")
 
 
 __all__ = ["GoalSubmission", "PlayError", "PlayOrchestrator"]

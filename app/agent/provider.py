@@ -5,6 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
+from datetime import UTC, datetime
+from threading import Lock
 from time import perf_counter
 from typing import Literal, Protocol
 
@@ -154,8 +159,25 @@ class PlanProposal(ProviderModel):
 class ProviderCallMetadata(ProviderModel):
     call_type: str
     latency_ms: int
+    provider: str | None = None
     model: str | None = None
     thinking_mode: str | None = None
+    reasoning_effort: str | None = None
+    configured_output_token_limit: int | None = None
+    http_timeout_seconds: float | None = None
+    total_deadline_seconds: float | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    request_started_at: str | None = None
+    request_send_completed_at: str | None = None
+    response_headers_received_at: str | None = None
+    first_response_byte_at: str | None = None
+    response_bytes_received: int | None = None
+    request_cancelled_at: str | None = None
+    timeout_subtype: str | None = None
+    wall_clock_latency_ms: int | None = None
+    outcome: str | None = None
+    error_category: str | None = None
     context_bytes: int | None = None
     request_size_bytes: int | None = None
     prompt_tokens: int | None = None
@@ -184,8 +206,87 @@ class GenericProviderError(ValueError):
         self.message = message
 
 
+class ProviderTotalTimeout(TimeoutError):
+    """The provider call exceeded the configured end-to-end deadline."""
+
+
+class _ProviderPhaseTelemetry:
+    """Thread-safe phase timestamps for one synchronous HTTP request.
+
+    HTTPX exposes response hooks after transport headers are available, and
+    the response stream yields body chunks before the non-streaming client
+    call returns.  It does not expose a reliable transport-level
+    "request bytes sent" callback, so that field intentionally remains null.
+    """
+
+    def __init__(self, *, request_started_at: str) -> None:
+        self._lock = Lock()
+        self._request_started_at = request_started_at
+        self._request_send_completed_at: str | None = None
+        self._response_headers_received_at: str | None = None
+        self._first_response_byte_at: str | None = None
+        self._response_bytes_received: int | None = None
+        self._request_cancelled_at: str | None = None
+        self._timeout_subtype: str | None = None
+
+    def mark_response_headers_received(self) -> None:
+        with self._lock:
+            self._response_headers_received_at = datetime.now(UTC).isoformat()
+            self._response_bytes_received = 0
+
+    def mark_response_chunk(self, byte_count: int) -> None:
+        if byte_count <= 0:
+            return
+        with self._lock:
+            if self._first_response_byte_at is None:
+                self._first_response_byte_at = datetime.now(UTC).isoformat()
+            self._response_bytes_received = (self._response_bytes_received or 0) + byte_count
+
+    def mark_timeout(self, timeout_subtype: str) -> None:
+        with self._lock:
+            self._request_cancelled_at = datetime.now(UTC).isoformat()
+            self._timeout_subtype = timeout_subtype
+
+    def snapshot(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "request_started_at": self._request_started_at,
+                "request_send_completed_at": self._request_send_completed_at,
+                "response_headers_received_at": self._response_headers_received_at,
+                "first_response_byte_at": self._first_response_byte_at,
+                "response_bytes_received": self._response_bytes_received,
+                "request_cancelled_at": self._request_cancelled_at,
+                "timeout_subtype": self._timeout_subtype,
+            }
+
+
+class _TelemetryResponseStream(httpx.SyncByteStream):
+    """Count body bytes delivered by HTTPX without changing the stream."""
+
+    def __init__(self, stream: httpx.SyncByteStream, telemetry: _ProviderPhaseTelemetry) -> None:
+        self._stream = stream
+        self._telemetry = telemetry
+
+    def __iter__(self) -> Iterator[bytes]:
+        try:
+            for chunk in self._stream:
+                self._telemetry.mark_response_chunk(len(chunk))
+                yield chunk
+        except httpx.TimeoutException as exc:
+            self._telemetry.mark_timeout(type(exc).__name__)
+            raise
+
+    def close(self) -> None:
+        self._stream.close()
+
+
 class OpenAICompatibleGenericProvider:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         if settings.model_api_key is None or not settings.model_api_key.get_secret_value().strip():
             raise GenericProviderError(
                 "MODEL_PROVIDER_CONFIGURATION_INVALID",
@@ -195,7 +296,36 @@ class OpenAICompatibleGenericProvider:
         self._api_key = settings.model_api_key.get_secret_value()
         self._model_name = settings.model_name
         self._timeout = settings.model_timeout_seconds
+        self._total_timeout = settings.model_total_timeout_seconds
+        self._max_output_tokens = settings.model_max_output_tokens
+        self._thinking_mode = "enabled"
+        self._reasoning_effort = "low"
+        self._transport = transport
         self._last_call_metadata: ProviderCallMetadata | None = None
+
+    @property
+    def provider_name(self) -> str:
+        return "openai_compatible"
+
+    @property
+    def thinking_mode(self) -> str:
+        return self._thinking_mode
+
+    @property
+    def reasoning_effort(self) -> str:
+        return self._reasoning_effort
+
+    @property
+    def configured_output_token_limit(self) -> int:
+        return self._max_output_tokens
+
+    @property
+    def http_timeout_seconds(self) -> float:
+        return self._timeout
+
+    @property
+    def total_deadline_seconds(self) -> float:
+        return self._total_timeout
 
     @property
     def model_name(self) -> str:
@@ -227,7 +357,9 @@ class OpenAICompatibleGenericProvider:
                 "The model provider returned an invalid Plan proposal",
             ) from exc
 
-    def _invoke(self, purpose: str, payload: dict[str, object]) -> object:
+    def _build_request_body(
+        self, purpose: str, payload: dict[str, object]
+    ) -> tuple[dict[str, object], int]:
         response_contract = (
             '{"status":"SELECTED|NEEDS_CLARIFICATION|UNSUPPORTED",'
             '"objective_keys":["zero_or_more_candidate_keys"],'
@@ -289,7 +421,17 @@ class OpenAICompatibleGenericProvider:
                 "currently locked or unavailable when earlier steps are expected "
                 "to establish their prerequisites."
             )
-        request_body = {
+        generic_guidance = (
+            "Static allowed_action_keys describe capability/role permission, "
+            "not current executability. Treat planner_constraints and "
+            "planner_effects as the generic Action contract. Resolve "
+            "KNOWN_BLOCKED conditions before execution; UNKNOWN is not false, "
+            "zero, or unavailable. Do not consume or transport resources whose "
+            "availability is unknown. "
+            if purpose in {"initial_plan", "replan", "repair"}
+            else ""
+        )
+        request_body: dict[str, object] = {
             "model": self._model_name,
             "thinking": {"type": "enabled"},
             "reasoning_effort": "low",
@@ -302,7 +444,7 @@ class OpenAICompatibleGenericProvider:
                         f"Use exactly this response shape: {response_contract}. "
                         "Select only keys supplied in the user payload; never invent keys. "
                         "For planning, use only entities supplied in planning_context. "
-                        f"{planning_prompt} "
+                        f"{planning_prompt} {generic_guidance}"
                         "Keep purpose and actor reason short, omit chain-of-thought, "
                         "never infer hidden state, and respect repair_diagnostics."
                     ),
@@ -310,36 +452,163 @@ class OpenAICompatibleGenericProvider:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
         }
+        if purpose in {"initial_plan", "replan", "repair"}:
+            request_body["max_tokens"] = self._max_output_tokens
         request_size_bytes = len(
             json.dumps(request_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         )
-        started = perf_counter()
+        return request_body, request_size_bytes
+
+    def estimate_request_size_bytes(self, purpose: str, payload: dict[str, object]) -> int:
+        """Return the exact compact JSON size of the request body, without I/O."""
+
+        _request_body, request_size_bytes = self._build_request_body(purpose, payload)
+        return request_size_bytes
+
+    def _post_with_total_deadline(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        request_body: dict[str, object],
+        telemetry: _ProviderPhaseTelemetry,
+    ) -> httpx.Response:
+        """Bound the complete synchronous HTTP call independently of HTTPX phases."""
+
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="journey-provider")
+        future = executor.submit(
+            self._post,
+            url=url,
+            headers=headers,
+            request_body=request_body,
+            telemetry=telemetry,
+        )
         try:
-            response = httpx.post(
-                f"{self._base_url}/chat/completions",
+            return future.result(timeout=self._total_timeout)
+        except FutureTimeout as exc:
+            future.cancel()
+            telemetry.mark_timeout("PROVIDER_TOTAL_DEADLINE")
+            raise ProviderTotalTimeout from exc
+        finally:
+            # A late upstream result must never keep the planning lifecycle
+            # waiting or get a chance to mutate persistence.  The worker is
+            # deliberately detached after the caller has crossed the total
+            # deadline; its result is ignored.
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _post(
+        self,
+        *,
+        url: str,
+        headers: dict[str, str],
+        request_body: dict[str, object],
+        telemetry: _ProviderPhaseTelemetry,
+    ) -> httpx.Response:
+        def response_hook(response: httpx.Response) -> None:
+            telemetry.mark_response_headers_received()
+            if response.is_stream_consumed:
+                telemetry.mark_response_chunk(len(response.content))
+                return
+            if not isinstance(response.stream, httpx.SyncByteStream):
+                return
+            telemetry_stream = _TelemetryResponseStream(response.stream, telemetry)
+            response.stream = telemetry_stream
+
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(self._timeout),
+                transport=self._transport,
+                event_hooks={"response": [response_hook]},
+            ) as client:
+                return client.post(url, headers=headers, json=request_body)
+        except httpx.TimeoutException as exc:
+            telemetry.mark_timeout(type(exc).__name__)
+            raise
+
+    def _invoke(self, purpose: str, payload: dict[str, object]) -> object:
+        request_body, request_size_bytes = self._build_request_body(purpose, payload)
+        started_at = datetime.now(UTC)
+        started = perf_counter()
+        telemetry = _ProviderPhaseTelemetry(request_started_at=started_at.isoformat())
+        try:
+            response = self._post_with_total_deadline(
+                url=f"{self._base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self._api_key}"},
-                json=request_body,
-                timeout=self._timeout,
+                request_body=request_body,
+                telemetry=telemetry,
             )
             response.raise_for_status()
-        except httpx.TimeoutException as exc:
+        except ProviderTotalTimeout as exc:
+            latency_ms = round((perf_counter() - started) * 1000)
+            self._set_failure_metadata(
+                purpose=purpose,
+                started_at=started_at,
+                latency_ms=latency_ms,
+                context_bytes=_planning_context_bytes(payload),
+                request_size_bytes=request_size_bytes,
+                outcome="TIMEOUT",
+                error_category="PROVIDER_TOTAL_DEADLINE",
+                telemetry=telemetry,
+            )
             _log_provider_failure(
                 purpose=purpose,
                 model=self._model_name,
                 request_size_bytes=request_size_bytes,
                 error=exc,
                 response=None,
+                latency_ms=latency_ms,
+                http_timeout_seconds=self._timeout,
+                total_deadline_seconds=self._total_timeout,
+            )
+            raise GenericProviderError(
+                "MODEL_PROVIDER_TIMEOUT", "The model provider request timed out"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            latency_ms = round((perf_counter() - started) * 1000)
+            self._set_failure_metadata(
+                purpose=purpose,
+                started_at=started_at,
+                latency_ms=latency_ms,
+                context_bytes=_planning_context_bytes(payload),
+                request_size_bytes=request_size_bytes,
+                outcome="TIMEOUT",
+                error_category=type(exc).__name__,
+                telemetry=telemetry,
+            )
+            _log_provider_failure(
+                purpose=purpose,
+                model=self._model_name,
+                request_size_bytes=request_size_bytes,
+                error=exc,
+                response=None,
+                latency_ms=latency_ms,
+                http_timeout_seconds=self._timeout,
+                total_deadline_seconds=self._total_timeout,
             )
             raise GenericProviderError(
                 "MODEL_PROVIDER_TIMEOUT", "The model provider request timed out"
             ) from exc
         except httpx.HTTPError as exc:
+            latency_ms = round((perf_counter() - started) * 1000)
+            self._set_failure_metadata(
+                purpose=purpose,
+                started_at=started_at,
+                latency_ms=latency_ms,
+                context_bytes=_planning_context_bytes(payload),
+                request_size_bytes=request_size_bytes,
+                outcome="ERROR",
+                error_category=type(exc).__name__,
+                telemetry=telemetry,
+            )
             _log_provider_failure(
                 purpose=purpose,
                 model=self._model_name,
                 request_size_bytes=request_size_bytes,
                 error=exc,
                 response=getattr(exc, "response", None),
+                latency_ms=latency_ms,
+                http_timeout_seconds=self._timeout,
+                total_deadline_seconds=self._total_timeout,
             )
             raise GenericProviderError(
                 "MODEL_PROVIDER_HTTP_ERROR", "The model provider request failed"
@@ -350,6 +619,17 @@ class OpenAICompatibleGenericProvider:
             content = choice["message"]["content"]
             parsed = json.loads(content)
         except (KeyError, IndexError, TypeError, ValueError) as exc:
+            latency_ms = round((perf_counter() - started) * 1000)
+            self._set_failure_metadata(
+                purpose=purpose,
+                started_at=started_at,
+                latency_ms=latency_ms,
+                context_bytes=_planning_context_bytes(payload),
+                request_size_bytes=request_size_bytes,
+                outcome="ERROR",
+                error_category=type(exc).__name__,
+                telemetry=telemetry,
+            )
             raise GenericProviderError(
                 "MODEL_PROVIDER_RESPONSE_INVALID",
                 "The model provider returned malformed JSON",
@@ -363,8 +643,20 @@ class OpenAICompatibleGenericProvider:
         self._last_call_metadata = ProviderCallMetadata(
             call_type=purpose.upper(),
             latency_ms=round((perf_counter() - started) * 1000),
+            provider=self.provider_name,
             model=self._model_name,
-            thinking_mode="disabled",
+            thinking_mode=self._thinking_mode,
+            reasoning_effort=self._reasoning_effort,
+            configured_output_token_limit=(
+                self._max_output_tokens if purpose in {"initial_plan", "replan", "repair"} else None
+            ),
+            http_timeout_seconds=self._timeout,
+            total_deadline_seconds=self._total_timeout,
+            started_at=started_at.isoformat(),
+            finished_at=datetime.now(UTC).isoformat(),
+            **telemetry.snapshot(),
+            wall_clock_latency_ms=round((perf_counter() - started) * 1000),
+            outcome="SUCCESS",
             context_bytes=(
                 len(
                     json.dumps(
@@ -392,6 +684,40 @@ class OpenAICompatibleGenericProvider:
         )
         return parsed
 
+    def _set_failure_metadata(
+        self,
+        *,
+        purpose: str,
+        started_at: datetime,
+        latency_ms: int,
+        context_bytes: int | None,
+        request_size_bytes: int,
+        outcome: str,
+        error_category: str,
+        telemetry: _ProviderPhaseTelemetry,
+    ) -> None:
+        self._last_call_metadata = ProviderCallMetadata(
+            call_type=purpose.upper(),
+            latency_ms=latency_ms,
+            provider=self.provider_name,
+            model=self._model_name,
+            thinking_mode=self._thinking_mode,
+            reasoning_effort=self._reasoning_effort,
+            configured_output_token_limit=(
+                self._max_output_tokens if purpose in {"initial_plan", "replan", "repair"} else None
+            ),
+            http_timeout_seconds=self._timeout,
+            total_deadline_seconds=self._total_timeout,
+            started_at=started_at.isoformat(),
+            finished_at=datetime.now(UTC).isoformat(),
+            **telemetry.snapshot(),
+            wall_clock_latency_ms=latency_ms,
+            outcome=outcome,
+            error_category=error_category,
+            context_bytes=context_bytes,
+            request_size_bytes=request_size_bytes,
+        )
+
 
 def build_generic_provider(settings: Settings) -> GenericModelProvider | None:
     if settings.model_provider == "mock":
@@ -402,6 +728,44 @@ def build_generic_provider(settings: Settings) -> GenericModelProvider | None:
 def provider_call_metadata(provider: GenericModelProvider) -> dict[str, object]:
     metadata = getattr(provider, "last_call_metadata", None)
     return metadata.model_dump(mode="json") if isinstance(metadata, ProviderCallMetadata) else {}
+
+
+def provider_call_start_metadata(
+    provider: GenericModelProvider,
+    request: PlanRequest,
+) -> dict[str, object]:
+    """Build safe, pre-request metadata for the persistent call audit."""
+
+    payload = request.provider_payload()
+    estimator = getattr(provider, "estimate_request_size_bytes", None)
+    if callable(estimator):
+        request_size_bytes = estimator(request.call_type.lower(), payload)
+    else:
+        request_size_bytes = len(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+    return {
+        "provider": getattr(provider, "provider_name", type(provider).__name__),
+        "model": getattr(provider, "model_name", None),
+        "call_type": request.call_type,
+        "context_bytes": _planning_context_bytes(payload),
+        "request_size_bytes": request_size_bytes,
+        "thinking_mode": getattr(provider, "thinking_mode", None),
+        "reasoning_effort": getattr(provider, "reasoning_effort", None),
+        "configured_output_token_limit": getattr(provider, "configured_output_token_limit", None),
+        "http_timeout_seconds": getattr(provider, "http_timeout_seconds", None),
+        "total_deadline_seconds": getattr(provider, "total_deadline_seconds", None),
+    }
+
+
+def _planning_context_bytes(payload: dict[str, object]) -> int | None:
+    if "planning_context" not in payload:
+        return None
+    return len(
+        json.dumps(
+            payload.get("planning_context", {}), ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+    )
 
 
 def _optional_int(value: object, key: str) -> int | None:
@@ -424,6 +788,9 @@ def _log_provider_failure(
     request_size_bytes: int,
     error: Exception,
     response: httpx.Response | None,
+    latency_ms: int,
+    http_timeout_seconds: float,
+    total_deadline_seconds: float,
 ) -> None:
     """Record bounded, credential-safe upstream diagnostics for Developer logs."""
 
@@ -434,6 +801,9 @@ def _log_provider_failure(
         error_type=type(error).__name__,
         upstream_status_code=response.status_code if response is not None else None,
         request_size_bytes=request_size_bytes,
+        latency_ms=latency_ms,
+        http_timeout_seconds=http_timeout_seconds,
+        total_deadline_seconds=total_deadline_seconds,
         provider_request_id=_provider_request_id(response),
         response_body_summary=_response_body_summary(response),
     )
@@ -533,6 +903,8 @@ __all__ = [
     "PlanningContext",
     "PlanningContextV1",
     "ProviderCallMetadata",
+    "ProviderTotalTimeout",
     "build_generic_provider",
     "provider_call_metadata",
+    "provider_call_start_metadata",
 ]

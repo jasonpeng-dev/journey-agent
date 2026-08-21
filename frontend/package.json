@@ -7,11 +7,11 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -p tsconfig.app.json --noEmit --pretty false && vite build",
+    "dev": "vite --configLoader runner",
+    "build": "tsc -p tsconfig.app.json --noEmit --pretty false && vite build --configLoader runner",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc -p tsconfig.app.json --noEmit --pretty false",
-    "test": "vitest run",
+    "test": "vitest run --configLoader runner",
     "e2e": "playwright test"
   },
   "dependencies": {

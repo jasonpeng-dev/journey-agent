@@ -450,6 +450,7 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     current_plan_version: Mapped[int] = mapped_column(Integer, default=0)
     replan_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error_code: Mapped[str | None] = mapped_column(String(100))
+    last_error_detail: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, default=1)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

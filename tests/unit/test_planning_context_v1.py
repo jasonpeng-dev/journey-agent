@@ -150,7 +150,18 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     assert "desired_state" not in context.goal
     assert "completion_requirements" in context.goal
     assert all(set(item) == {"target_key"} for item in context.relevant_targets)
+    assert all(
+        set(item) == {"target_key", "requirements"}
+        and all(
+            set(requirement).issubset(
+                {"action_key", "required_actor_role_key", "cost", "special_requirements"}
+            )
+            for requirement in item["requirements"]
+        )
+        for item in context.current_knowledge["known_action_requirements"]
+    )
     for action in context.relevant_actions:
+        assert "known_requirements" not in action
         assert "public_prerequisites" not in action
         assert "cost_risk" not in action
         if "soft_signals" in action:
@@ -303,9 +314,51 @@ def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrel
     assert any(item.get("code") == "OBJECTIVE_IRRELEVANT" for item in unrelated_diagnostics)
 
 
-def test_openai_compatible_provider_sends_context_not_candidate_catalog(
-    monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+def test_validator_reports_target_interaction_mismatch_to_provider(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(session)
+    provider = DirectBindingProvider()
+    service = GenericAgentService(session, scope, provider=provider)
+    task = service.create_task(runtime.session, "open the northern trade route")
+    request = provider.requests[0]
+    context = request.planning_context
+    assert context is not None
+    definition = service._definition()
+    objectives = service._objectives(task, definition)
+    catalog = PlanningActionCatalogBuilder(session, scope).build(
+        definition,
+        objectives,
+        task=task,
+        replan_reason=None,
+    )
+
+    # ``clear_valley`` requires ``clear_threat`` while the outpost only
+    # declares ``repair``.  The target is known, so this is a static contract
+    # mismatch rather than an objective-relevance failure.
+    invalid_step = PlanStepProposal(
+        purpose="Clear the outpost",
+        action_key="clear_valley",
+        actor_key="han_lie",
+        target_key="starfire_outpost",
+        parameters={"troop_count": 80, "strategy": "STANDARD"},
+    )
+    _steps, diagnostics = service._validate_provider_proposal_v1(
+        task,
+        definition,
+        objectives,
+        None,
+        2,
+        catalog,
+        (invalid_step,),
+        context,
+    )
+
+    assert diagnostics[0]["code"] == "TARGET_INTERACTION_INVALID"
+    assert all(item.get("code") != "OBJECTIVE_IRRELEVANT" for item in diagnostics)
+
+
+def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> None:
     captured: dict[str, object] = {}
     response_content = json.dumps(
         {
@@ -322,8 +375,8 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog(
         }
     )
 
-    def fake_post(*_args: object, **kwargs: object) -> httpx.Response:
-        captured.update(kwargs)
+    def fake_transport(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content)
         return httpx.Response(
             200,
             json={
@@ -344,10 +397,9 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog(
                     "total_tokens": 18,
                 },
             },
-            request=httpx.Request("POST", "https://provider.test/chat/completions"),
+            request=request,
         )
 
-    monkeypatch.setattr(httpx, "post", fake_post)
     provider = OpenAICompatibleGenericProvider(
         Settings(
             _env_file=None,
@@ -356,7 +408,8 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog(
             model_provider="openai_compatible",
             model_name="fake-model",
             model_api_key=SecretStr("not-a-real-key"),
-        )
+        ),
+        transport=httpx.MockTransport(fake_transport),
     )
     request = PlanRequest(
         call_type="INITIAL_PLAN",
@@ -393,10 +446,13 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog(
     assert "candidate_id" not in json.dumps(user_payload)
     assert captured["json"]["thinking"] == {"type": "enabled"}  # type: ignore[index]
     assert captured["json"]["reasoning_effort"] == "low"  # type: ignore[index]
+    assert captured["json"]["max_tokens"] == 8192  # type: ignore[index]
     assert provider.last_call_metadata is not None
     assert provider.last_call_metadata.model == "fake-model"
     assert provider.last_call_metadata.call_type == "INITIAL_PLAN"
-    assert provider.last_call_metadata.thinking_mode == "disabled"
+    assert provider.last_call_metadata.thinking_mode == "enabled"
+    assert provider.last_call_metadata.reasoning_effort == "low"
+    assert provider.last_call_metadata.configured_output_token_limit == 8192
     assert provider.last_call_metadata.context_bytes is not None
     assert provider.last_call_metadata.request_size_bytes is not None
     assert provider.last_call_metadata.prompt_cache_hit_tokens == 4

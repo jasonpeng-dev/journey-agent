@@ -9,6 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches
+from app.agent.planner_contract import (
+    action_planner_constraints,
+    action_planner_effects,
+    actor_execution_state,
+    declarative_action_effects,
+    planner_known_preconditions,
+    planner_target_contracts,
+)
 from app.agent.provider import PlanningActionCandidate, PlanningContext
 from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import RuntimeScope
@@ -63,12 +71,8 @@ class PlanningContextBuilder:
         known_refs = legacy.known_fact_refs()
         known_world = legacy.known_world(definition)
         knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
-        known_action_requirements = knowledge_projection.known_action_requirements()
-        known_action_requirements_by_key = {
-            item["action_key"]: item
-            for item in known_action_requirements
-            if isinstance(item.get("action_key"), str)
-        }
+        planner_action_requirements = knowledge_projection.planner_action_requirements()
+        known_pool_keys = {item.pool_key for item in knowledge_projection.visible_resource_pools()}
         relevant_action_keys = self._retrieve_action_keys(definition, objectives, known_refs)
         relevant_targets = self._targets(definition, relevant_action_keys, known_world)
         relevant_actions = self._actions(
@@ -76,14 +80,28 @@ class PlanningContextBuilder:
             objectives,
             relevant_action_keys,
             known_refs,
-            known_action_requirements_by_key,
+            known_world,
+            planner_action_requirements,
+            known_pool_keys,
+            {
+                action.key: planner_known_preconditions(
+                    definition,
+                    action,
+                    known_facts={
+                        identity: value
+                        for identity, value in _known_world_facts(known_world).items()
+                        if isinstance(value, (str, int, bool))
+                    },
+                )
+                for action in definition.actions
+            },
         )
         relevant_actors = self._actors(definition, relevant_action_keys)
         return PlanningContext(
             goal=self._goal(definition, objectives, known_refs),
             current_knowledge={
                 **known_world,
-                "known_action_requirements": list(known_action_requirements),
+                "known_action_requirements": list(planner_action_requirements),
                 "observations": self._observations(task),
             },
             relevant_actions=tuple(relevant_actions),
@@ -94,6 +112,23 @@ class PlanningContextBuilder:
                 "instructions": list(definition.planning.instructions),
                 "recovery_hints": [
                     item.model_dump(mode="json") for item in definition.planning.recovery_hints
+                ],
+                "generic_rules": [
+                    (
+                        "allowed_action_keys are static capability/role permission, "
+                        "not current executability."
+                    ),
+                    "KNOWN_BLOCKED conditions must be resolved before execution.",
+                    "UNKNOWN is not equivalent to false, zero, or unavailable.",
+                    "Do not consume or transport resources whose availability is not known.",
+                    (
+                        "Target-specific known requirements are in current_knowledge."
+                        "known_action_requirements; target_contracts adds target effects."
+                    ),
+                    (
+                        "Use planner_constraints, planner_effects, and target_contracts "
+                        "to order steps."
+                    ),
                 ],
             },
         )
@@ -242,10 +277,37 @@ class PlanningContextBuilder:
         objectives: tuple[ObjectiveDefinitionV2, ...],
         action_keys: set[str],
         known_refs: set[tuple[str, str]],
-        known_action_requirements: dict[str, dict[str, object]],
+        known_world: dict[str, object],
+        planner_action_requirements: tuple[dict[str, object], ...],
+        known_pool_keys: set[str],
+        known_preconditions_by_action: dict[str, tuple[dict[str, object], ...]],
     ) -> list[dict[str, object]]:
         objective_refs = _objective_refs(objectives)
         objective_nodes = {node_key for node_key, _fact_key in objective_refs}
+        raw_nodes = known_world.get("nodes", [])
+        node_rows = cast(list[dict[str, object]], raw_nodes) if isinstance(raw_nodes, list) else []
+        known_node_keys: set[str] = {
+            cast(str, item["key"])
+            for item in node_rows
+            if isinstance(item, dict) and isinstance(item.get("key"), str)
+        }
+        raw_relations = known_world.get("relations", [])
+        relation_rows = (
+            cast(list[dict[str, object]], raw_relations) if isinstance(raw_relations, list) else []
+        )
+        known_relation_keys: set[str] = {
+            cast(str, item["relation_key"])
+            for item in relation_rows
+            if isinstance(item, dict) and isinstance(item.get("relation_key"), str)
+        }
+        raw_facts = known_world.get("facts", {})
+        known_facts: dict[tuple[str, str], object] = {}
+        if isinstance(raw_facts, dict):
+            for identity, value in raw_facts.items():
+                if not isinstance(identity, str) or "." not in identity:
+                    continue
+                node_key, fact_key = identity.split(".", 1)
+                known_facts[(node_key, fact_key)] = value
         result: list[dict[str, object]] = []
         for action in sorted(definition.actions, key=lambda item: item.key):
             if action.key not in action_keys:
@@ -309,14 +371,39 @@ class PlanningContextBuilder:
                 "behavior": action.behavior.value,
                 "locality": action.locality.value,
                 "target_kind": action.target_kind.value,
+                "planner_constraints": action_planner_constraints(
+                    action,
+                    known_preconditions=known_preconditions_by_action.get(action.key, ()),
+                ),
             }
-            if action.key in known_action_requirements:
-                requirement = known_action_requirements[action.key]
-                action_context["known_requirements"] = {
-                    key: value
-                    for key, value in requirement.items()
-                    if key not in {"action_key", "action_name"}
-                }
+            planner_effects = action_planner_effects(action)
+            known_fact_values = {
+                key: value
+                for key, value in known_facts.items()
+                if isinstance(value, (str, int, bool))
+            }
+            planner_effects.extend(
+                declarative_action_effects(
+                    definition,
+                    action,
+                    known_node_keys=known_node_keys,
+                    known_relation_keys=known_relation_keys,
+                    known_pool_keys=known_pool_keys,
+                    known_facts=known_fact_values,
+                )
+            )
+            if planner_effects:
+                action_context["planner_effects"] = planner_effects
+            target_contracts = planner_target_contracts(
+                definition,
+                action,
+                known_node_keys=known_node_keys,
+                known_facts=known_fact_values,
+                known_relation_keys=known_relation_keys,
+                known_pool_keys=known_pool_keys,
+            )
+            if target_contracts:
+                action_context["target_contracts"] = target_contracts
             hints = list(action.planning.hints)
             if action.behavior == ActionBehavior.SURVEY_RESOURCES:
                 hints.extend(
@@ -395,6 +482,10 @@ class PlanningContextBuilder:
                     "capabilities": list(actor.capabilities),
                     "static_authority": actor.authority_policy,
                     "current_known_state": current_known_state,
+                    "execution_state": actor_execution_state(
+                        status=actor.status,
+                        command_reachability=actor.command_reachability,
+                    ),
                     "allowed_action_keys": [
                         key for key in actor.allowed_action_keys if key in action_keys
                     ],
@@ -775,6 +866,19 @@ def _objective_refs(
             ),
         )
     }
+
+
+def _known_world_facts(known_world: dict[str, object]) -> dict[tuple[str, str], object]:
+    raw_facts = known_world.get("facts", {})
+    if not isinstance(raw_facts, dict):
+        return {}
+    result: dict[tuple[str, str], object] = {}
+    for identity, value in raw_facts.items():
+        if not isinstance(identity, str) or "." not in identity:
+            continue
+        node_key, fact_key = identity.split(".", 1)
+        result[(node_key, fact_key)] = value
+    return result
 
 
 def _unsatisfied_objective_refs(

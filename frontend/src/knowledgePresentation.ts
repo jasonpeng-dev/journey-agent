@@ -1,4 +1,8 @@
-import type { PublicActionRequirement, PublicRelation, PlayerGameState } from "./types";
+import type {
+  PublicActionRequirement,
+  PublicRelation,
+  PlayerGameState,
+} from "./types";
 import { uiLabel } from "./ui";
 
 const STRUCTURAL_RELATION_TYPES = new Set(["located_in", "endpoint"]);
@@ -28,6 +32,7 @@ export type DisplayRequirementLine = {
 
 export type DisplayActionRequirements = {
   requirement: PublicActionRequirement;
+  title: string;
   lines: DisplayRequirementLine[];
 };
 
@@ -43,10 +48,64 @@ function knownRelationRequirementDescription(relationTypeKey: string): string {
   return RELATION_REQUIREMENT_DESCRIPTIONS[relationTypeKey] ?? "需要已知的系统关系";
 }
 
-function displayValue(value: string | number | boolean): string {
-  if (typeof value === "boolean") return value ? "是" : "否";
-  if (typeof value === "string") return uiLabel(value);
-  return String(value);
+const FACT_LABELS: Record<string, string> = {
+  operational: "运行状态",
+  power_supply: "供电状态",
+  power_generation_capable: "发电能力",
+  generation_capable: "发电能力",
+  emergency_power: "应急供电",
+  passable: "通行状态",
+  heavy_engineering_support: "重型工程支援",
+  heavy_engineering_support_ready: "重型工程支援状态",
+  repair_profile: "设施类型",
+};
+
+const MACHINE_VALUE_LABELS: Record<string, string> = {
+  central_hospital: "医院设施",
+  central_communication_core: "通信核心",
+  district_service_center: "公用事业保障设施",
+  east_distribution_station: "配电设施",
+  water_treatment_plant: "水处理设施",
+  south_pump_station: "南部泵站",
+  east_water_pump_station: "东部供水泵站",
+};
+
+export function factDisplayLabel(fact: PlayerGameState["known_facts"][number]): string {
+  return FACT_LABELS[fact.fact_key] ?? fact.name;
+}
+
+export function factDisplayValue(
+  fact: PlayerGameState["known_facts"][number],
+  value = fact.value,
+): string {
+  if (typeof value === "boolean") {
+    if (fact.fact_key === "operational") return value ? "运行中" : "未运行";
+    if (fact.fact_key === "power_supply") return value ? "已供电" : "未供电";
+    if (fact.fact_key === "emergency_power") return value ? "已恢复" : "未恢复";
+    if (fact.fact_key === "passable") return value ? "可通行" : "已阻断";
+    if (fact.fact_key === "heavy_engineering_support_ready") return value ? "已部署" : "未部署";
+    if (fact.fact_key === "heavy_engineering_support") return value ? "可用" : "不可用";
+    if (fact.fact_key === "generation_capable" || fact.fact_key === "power_generation_capable") {
+      return value ? "具备" : "不具备";
+    }
+    return value ? "是" : "否";
+  }
+  if (typeof value === "number") return String(value);
+  if (fact.fact_key === "power_supply") {
+    if (value === "AVAILABLE") return "已供电";
+    if (value === "UNAVAILABLE") return "未供电";
+  }
+  if (fact.fact_key === "heavy_engineering_support") {
+    if (value === "AVAILABLE") return "可用";
+    if (value === "UNAVAILABLE") return "不可用";
+  }
+  if (fact.fact_key === "repair_profile") {
+    return MACHINE_VALUE_LABELS[value] ?? "设施状态已知";
+  }
+  if (value === "AVAILABLE") return "可用";
+  if (value === "UNAVAILABLE") return "不可用";
+  if (MACHINE_VALUE_LABELS[value]) return MACHINE_VALUE_LABELS[value];
+  return /^[a-z0-9_]+$/i.test(value) ? "当前状态已知" : uiLabel(value);
 }
 
 function factLookupKey(nodeKey: string, factKey: string): string {
@@ -57,14 +116,77 @@ export function displayActionRequirements(
   requirements: PublicActionRequirement[],
   knownFacts: PlayerGameState["known_facts"],
   relations: PublicRelation[],
+  resources: PlayerGameState["resources"] = [],
 ): DisplayActionRequirements[] {
   const meaningfulRelations = meaningfulKnownRelations(relations);
   const knownFactsByKey = new Map(
     knownFacts.map((fact) => [factLookupKey(fact.node_key, fact.fact_key), fact]),
   );
+  const resourceNames = new Map(resources.map((resource) => [resource.key, resource.name]));
 
-  return requirements
-    .map((requirement) => {
+  const requirementValue = (
+    precondition: PublicActionRequirement["known_preconditions"][number],
+    fact: PlayerGameState["known_facts"][number],
+  ): string | null => {
+    const condition = precondition.failure_condition;
+    if (!condition || typeof condition.kind !== "string") return null;
+    if (condition.kind === "FACT_NOT_EQUALS" && "value" in condition) {
+      return factDisplayValue(fact, condition.value as string | number | boolean);
+    }
+    if (condition.kind === "FACT_EQUALS" && "value" in condition) {
+      const expected = condition.value;
+      if (typeof expected === "boolean") return factDisplayValue(fact, !expected);
+      return "需要满足指定状态";
+    }
+    if (condition.kind === "FACT_IN" || condition.kind === "FACT_COMPARE") {
+      return "需要满足指定状态";
+    }
+    return null;
+  };
+
+  const resourceCostLines = (requirement: PublicActionRequirement): DisplayRequirementLine[] => {
+    const extended = requirement as PublicActionRequirement & {
+      cost?: Record<string, number>;
+      resource_costs?: Record<string, number>;
+    };
+    const costs = extended.resource_costs ?? extended.cost;
+    if (!costs) return [];
+    const entries = Object.entries(costs).filter(([, amount]) => typeof amount === "number" && amount > 0);
+    if (!entries.length) return [];
+    return [{
+      key: "resource-cost",
+      label: "资源需求",
+      value: entries
+        .map(([key, amount]) => `${resourceNames.get(key) ?? "所需资源"} ×${amount}`)
+        .join("、"),
+    }];
+  };
+
+  const titleFor = (actionName: string, targetName: string | undefined): string => {
+    if (!targetName) return actionName;
+    if (actionName.includes(targetName)) return actionName;
+    if (actionName.startsWith("修复")) return `维修${targetName}`;
+    return `${actionName} · ${targetName}`;
+  };
+
+  return requirements.flatMap((requirement) => {
+    const targetCandidates = requirement.known_preconditions.flatMap((item) => {
+      if (item.fact_key !== "repair_profile") return [];
+      const fact = knownFactsByKey.get(factLookupKey(item.node_key, item.fact_key));
+      const condition = item.failure_condition;
+      const matches = condition?.kind === "FACT_IN"
+        && Array.isArray(condition.values)
+        ? condition.values.includes(fact?.value)
+        : condition?.kind === "FACT_EQUALS"
+          && "value" in condition
+          ? condition.value === fact?.value
+          : false;
+      if (!fact || !matches || !fact.node_name) return [];
+      return [{ key: fact.node_key, name: fact.node_name }];
+    });
+    const targets = [...new Map(targetCandidates.map((target) => [target.key, target])).values()];
+    const targetGroups = targets.length ? targets : [{ key: undefined, name: undefined }];
+    return targetGroups.flatMap((target) => {
       const lines: DisplayRequirementLine[] = [];
       if (requirement.required_actor_role_name) {
         lines.push({
@@ -83,24 +205,31 @@ export function displayActionRequirements(
         const relationTypeKey = requirement.source_relation_type_key;
         lines.push({
           key: "relation",
-          label: relationTypeKey === "supplies_power_to" ? "供电条件" : "系统条件",
+          label: relationTypeKey === "supplies_power_to" ? "前置条件" : "系统条件",
           value: knownRelationRequirementDescription(relationTypeKey),
         });
       }
 
+      lines.push(...resourceCostLines(requirement));
       requirement.known_preconditions.forEach((precondition) => {
+        if (precondition.fact_key === "repair_profile") return;
+        if (target.key !== undefined && precondition.node_key !== target.key) return;
         const fact = knownFactsByKey.get(factLookupKey(precondition.node_key, precondition.fact_key));
         if (!fact) return;
+        const value = requirementValue(precondition, fact);
+        if (!value) return;
         lines.push({
           key: `fact:${precondition.node_key}:${precondition.fact_key}`,
-          label: fact.node_name ? `${fact.node_name} · ${fact.name}` : fact.name,
-          value: displayValue(precondition.current_value),
+          label: factDisplayLabel(fact),
+          value,
         });
       });
 
-      return { requirement, lines };
-    })
-    .filter((item) => item.lines.length > 0);
+      return lines.length
+        ? [{ requirement, title: titleFor(requirement.action_name, target.name), lines }]
+        : [];
+    });
+  });
 }
 
 export function relationDisplayKey(relation: PublicRelation): string {

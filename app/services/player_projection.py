@@ -535,7 +535,7 @@ class PlayerProjectionService:
                 else None
             ),
             explanation=(
-                "当前世界状态下没有可继续执行的合法行动"
+                _task_explanation(task)
                 if task.status in (AgentTaskStatus.FAILED, AgentTaskStatus.BLOCKED)
                 else None
             ),
@@ -805,14 +805,23 @@ class PlayerProjectionService:
                     title=(
                         "目标已完成"
                         if task.status == AgentTaskStatus.SUCCEEDED
+                        else "规划失败"
+                        if _is_provider_failure(task.last_error_code)
                         else task.goal_description
                     ),
                     detail=(
                         " · ".join(objective_names)
                         if task.status == AgentTaskStatus.SUCCEEDED and objective_names
+                        else task.last_error_detail
+                        if _is_provider_failure(task.last_error_code)
                         else None
                     ),
                     occurred_at=task.completed_at,
+                    duration_ms=(
+                        _provider_failure_duration(task)
+                        if _is_provider_failure(task.last_error_code)
+                        else None
+                    ),
                 )
             )
         return events
@@ -906,12 +915,45 @@ def _operation_succeeded(operation: WorldOperation) -> bool:
     )
 
 
+_PROVIDER_FAILURE_CODES = {
+    "MODEL_PROVIDER_HTTP_ERROR",
+    "MODEL_PROVIDER_RESPONSE_INVALID",
+    "MODEL_PROVIDER_CONFIGURATION_INVALID",
+    "MODEL_PROVIDER_ERROR",
+}
+
+
+def _is_provider_failure(error_code: str | None) -> bool:
+    return error_code == "MODEL_PROVIDER_TIMEOUT" or error_code in _PROVIDER_FAILURE_CODES
+
+
+def _task_explanation(task: AgentTask) -> str:
+    if _is_provider_failure(task.last_error_code):
+        return task.last_error_detail or "模型调用失败"
+    return "当前世界状态下没有可继续执行的合法行动"
+
+
+def _provider_failure_duration(task: AgentTask) -> int | None:
+    for call in reversed(_provider_calls(task)):
+        if call.get("outcome") not in {"TIMEOUT", "ERROR"}:
+            continue
+        for key in ("wall_clock_latency_ms", "latency_ms"):
+            value = call.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+    return None
+
+
 def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskStatus:
     if status == AgentTaskStatus.BLOCKED:
         if error_code == "BLOCKED_BY_PLAYER_DECISION":
             return PublicTaskStatus.BLOCKED_BY_PLAYER_DECISION
         if error_code == "MODEL_PLAN_REJECTED":
             return PublicTaskStatus.MODEL_PLAN_REJECTED
+        if error_code == "MODEL_PROVIDER_TIMEOUT":
+            return PublicTaskStatus.MODEL_PROVIDER_TIMEOUT
+        if _is_provider_failure(error_code):
+            return PublicTaskStatus.MODEL_PROVIDER_FAILURE
         return PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE
     return {
         AgentTaskStatus.ACTIVE: PublicTaskStatus.ACTIVE,
@@ -919,7 +961,13 @@ def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskS
         AgentTaskStatus.WAITING_FOR_PLAYER_ACTION: PublicTaskStatus.NEEDS_PLAYER_INPUT,
         AgentTaskStatus.REQUIRES_PLAYER_DECISION: PublicTaskStatus.NEEDS_PLAYER_INPUT,
         AgentTaskStatus.SUCCEEDED: PublicTaskStatus.COMPLETED,
-        AgentTaskStatus.FAILED: PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE,
+        AgentTaskStatus.FAILED: (
+            PublicTaskStatus.MODEL_PROVIDER_TIMEOUT
+            if error_code == "MODEL_PROVIDER_TIMEOUT"
+            else PublicTaskStatus.MODEL_PROVIDER_FAILURE
+            if _is_provider_failure(error_code)
+            else PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE
+        ),
         AgentTaskStatus.ABORTED: PublicTaskStatus.ABORTED,
     }[status]
 

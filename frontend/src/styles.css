@@ -115,6 +115,8 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .knowledge-entry-copy strong { font-size: 11px; font-weight: 700; }
 .knowledge-entry-copy small { margin-top: 2px; color: var(--console-soft); font-size: 9px; }
 .knowledge-entry > .knowledge-status-pill { max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-fact-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-fact-value { flex: 0 0 auto; max-width: 42%; white-space: normal; }
 .actor-status-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: flex-end; }
 .actor-status-pills .knowledge-status-pill { max-width: 10rem; }
 .knowledge-status-pill { min-width: 42px; height: 26px; justify-content: center; padding: 4px 8px; font-variant-numeric: tabular-nums; text-align: center; }
@@ -194,8 +196,11 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .knowledge-gains li { margin-top: 4px; }
 .command-composer-v2 { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--console-line); }
 .command-composer-v2 label { display: block; margin-bottom: 9px; font: 18px Georgia, serif; }
+.command-composer-v2 select { width: 100%; margin-bottom: 10px; padding: 11px 12px; border: 1px solid #cec7b9; border-radius: 10px; color: var(--console-ink); background: #fffdf9; }
 .command-composer-v2 > div { display: flex; gap: 10px; }
 .command-composer-v2 textarea { min-height: 78px; flex: 1; resize: vertical; padding: 12px; border: 1px solid #cec7b9; border-radius: 10px; }
+.goal-composer-selected { min-height: 78px; align-items: center; justify-content: space-between; padding: 12px; border: 1px solid #cec7b9; border-radius: 10px; background: #fffdf9; }
+.goal-composer-selected strong { min-width: 0; overflow-wrap: anywhere; }
 .command-composer-v2 button, .console-approval button, .developer-bar-v2 button, .console-button { padding: 10px 15px; border: 0; border-radius: 9px; color: white; background: var(--console-jade); cursor: pointer; }
 .command-composer-v2 button:disabled, .console-approval button:disabled, .developer-bar-v2 button:disabled { cursor: wait; opacity: .55; }
 .command-composer-v2 p, .command-running, .archived-notice { margin: 8px 0 0; color: var(--console-soft); font-size: 11px; }

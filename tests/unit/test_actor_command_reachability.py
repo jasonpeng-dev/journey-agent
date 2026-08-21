@@ -279,6 +279,9 @@ def test_plan_projection_allows_relay_then_disconnected_actor_action(
         if item["actor_key"] == "electrical_team_beta"
     )
     assert disconnected["current_known_state"]["command_reachability"] == "DISCONNECTED"
+    assert disconnected["execution_state"]["status"] == "KNOWN_BLOCKED"
+    assert disconnected["execution_state"]["known_blockers"][0]["type"] == ("COMMAND_REACHABILITY")
+    assert "repair_electrical" in disconnected["allowed_action_keys"]
     assert "electrical_team_beta" in {
         item["target_key"] for item in request.planning_context.relevant_targets
     }
@@ -292,11 +295,27 @@ def test_plan_projection_allows_relay_then_disconnected_actor_action(
 
 def test_plan_projection_rejects_ordinary_action_before_relay(session: Session) -> None:
     runtime, scope, _definition = _runtime(session)
+    provider = _RelayPlanProvider(relay_first=False)
     with pytest.raises(GenericAgentError, match="could not produce") as error:
         GenericAgentService(
             session,
             scope,
-            provider=_RelayPlanProvider(relay_first=False),
+            provider=provider,
         ).create_task(runtime.session, "Restore emergency power to Central Hospital.")
 
     assert error.value.code == "MODEL_PLAN_REJECTED"
+    diagnostic = provider.requests[1].repair_diagnostics[0]
+    assert diagnostic["code"] == "ACTOR_COMMAND_DISCONNECTED"
+    assert diagnostic["failure_code"] == "ACTOR_COMMAND_DISCONNECTED"
+    assert diagnostic["actor_key"] == "electrical_team_beta"
+    assert diagnostic["known_state"]["command_reachability"] == "DISCONNECTED"
+    assert diagnostic["blocker"] == {
+        "type": "COMMAND_REACHABILITY",
+        "current_value": "DISCONNECTED",
+        "required_value": "ONLINE",
+    }
+    assert any(
+        item["action_key"] == "relay_message"
+        and item["effect"]["type"] == "ACTOR_COMMAND_REACHABILITY"
+        for item in diagnostic["known_recovery_effects"]
+    )

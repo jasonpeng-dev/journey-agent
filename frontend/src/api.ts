@@ -1,4 +1,4 @@
-import type { DeveloperSnapshot, Draft, DraftSandboxResult, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
+import type { DeveloperSnapshot, Draft, DraftSandboxResult, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -41,6 +41,7 @@ export const api = {
   testDraft: (id: string, revision: number, goal: string | null) => request<DraftSandboxResult>(`/api/v1/scenarios/${id}/draft/sandbox`, { method: "POST", body: JSON.stringify({ expected_revision: revision, goal: goal || null }) }),
   publishDraft: (id: string, revision: number, contentHash: string | null) => request<{ scenario: ScenarioSummary; version: ScenarioVersion }>(`/api/v1/scenarios/${id}/draft/publish`, { method: "POST", body: JSON.stringify({ expected_revision: revision, expected_content_hash: contentHash }) }),
   versions: (id: string) => request<ScenarioVersion[]>(`/api/v1/scenarios/${id}/versions`),
+  scenarioVersion: (scenarioId: string, versionId: string) => request<ScenarioVersionDetail>(`/api/v1/scenarios/${scenarioId}/versions/${versionId}`),
   restoreVersion: (id: string, revision: number, versionId: string) => request<Draft>(`/api/v1/scenarios/${id}/draft/restore`, { method: "POST", body: JSON.stringify({ expected_revision: revision, version_id: versionId }) }),
   saveDraft: (id: string, revision: number, document: Record<string, unknown>) =>
     request<Draft>(`/api/v1/scenarios/${id}/draft`, {

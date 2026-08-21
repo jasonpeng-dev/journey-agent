@@ -580,7 +580,7 @@ def test_supply_power_uses_declared_role_relation_and_fact_effects(session: Sess
     )
     assert supply_context["target_requirements"]["source_relation_type_key"] == "supplies_power_to"
     assert context.current_knowledge["known_action_requirements"] == list(
-        SharedKnowledgeProjection(session, agent.scope, definition).known_action_requirements()
+        SharedKnowledgeProjection(session, agent.scope, definition).planner_action_requirements()
     )
 
     first = agent.execute_next(task)

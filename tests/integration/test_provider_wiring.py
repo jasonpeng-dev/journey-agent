@@ -1,9 +1,10 @@
 import json
 from collections import deque
 from collections.abc import Iterable
+from time import sleep
 from types import SimpleNamespace
 from typing import Literal, NoReturn
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -29,6 +30,7 @@ from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import (
     AgentPlan,
     AgentStep,
+    AgentTask,
     GameInstance,
     GameInstanceNodeState,
     Player,
@@ -170,6 +172,11 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     _start_initial_plan(orchestrator, submission.task)
     assert len(provider.plan_requests) == 1
     assert submission.task.planning_mode == "PROVIDER"
+    calls = (submission.task.objective_resolution_metadata or {}).get("provider_calls", [])
+    assert calls[-1]["outcome"] == "SUCCESS"
+    assert calls[-1]["call_type"] == "INITIAL_PLAN"
+    assert calls[-1]["started_at"]
+    assert calls[-1]["finished_at"]
     catalog = {item.action_key: item for item in provider.plan_requests[0].planning_action_catalog}
     assert catalog["diagnose_patient"].currently_executable is True
     assert catalog["treat_patient"].currently_executable is False
@@ -694,54 +701,54 @@ def test_draft_sandbox_uses_same_provider_composition_without_formal_game_row(
     assert session.scalar(select(func.count()).select_from(GameInstance)) == game_count
 
 
-def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> None:
     settings = _settings("openai_compatible")
-    provider = OpenAICompatibleGenericProvider(settings)
     request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
 
-    def timeout(*_args: object, **_kwargs: object) -> NoReturn:
+    def timeout(_request: httpx.Request) -> NoReturn:
         raise httpx.ReadTimeout("timed out")
 
-    monkeypatch.setattr(httpx, "post", timeout)
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(timeout))
     with pytest.raises(GenericProviderError) as timed_out:
         provider.select_objectives(request)
     assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
     assert "not-a-real-key" not in str(timed_out.value)
+    assert provider.last_call_metadata is not None
+    assert provider.last_call_metadata.timeout_subtype == "ReadTimeout"
+    assert provider.last_call_metadata.response_headers_received_at is None
 
-    monkeypatch.setattr(
-        httpx,
-        "post",
-        lambda *_args, **_kwargs: httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": "not-json"}}]},
-            request=httpx.Request("POST", "https://provider.test/chat/completions"),
+    provider = OpenAICompatibleGenericProvider(
+        settings,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "not-json"}}]},
+                request=request,
+            )
         ),
     )
     with pytest.raises(GenericProviderError) as malformed:
         provider.select_objectives(request)
     assert malformed.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
 
-    monkeypatch.setattr(
-        httpx,
-        "post",
-        lambda *_args, **_kwargs: httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": '{"wrong":[]}'}}]},
-            request=httpx.Request("POST", "https://provider.test/chat/completions"),
+    provider = OpenAICompatibleGenericProvider(
+        settings,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": '{"wrong":[]}'}}]},
+                request=request,
+            )
         ),
     )
     with pytest.raises(GenericProviderError) as wrong_schema:
         provider.select_objectives(request)
     assert wrong_schema.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
 
-    monkeypatch.setattr(
-        httpx,
-        "post",
-        lambda *_args, **_kwargs: httpx.Response(
-            503,
-            request=httpx.Request("POST", "https://provider.test/chat/completions"),
+    provider = OpenAICompatibleGenericProvider(
+        settings,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(503, request=request)
         ),
     )
     with pytest.raises(GenericProviderError) as http_error:
@@ -749,11 +756,38 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe(
     assert http_error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
 
 
+def test_provider_total_deadline_bounds_a_slow_sync_provider_call() -> None:
+    settings = _settings("openai_compatible").model_copy(
+        update={"model_timeout_seconds": 5, "model_total_timeout_seconds": 0.02}
+    )
+    request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
+
+    def slow_post(_request: httpx.Request) -> httpx.Response:
+        sleep(0.15)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{}"}}]},
+            request=_request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        settings, transport=httpx.MockTransport(slow_post)
+    )
+    with pytest.raises(GenericProviderError) as timed_out:
+        provider.select_objectives(request)
+
+    assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
+    assert provider.last_call_metadata is not None
+    assert provider.last_call_metadata.outcome == "TIMEOUT"
+    assert provider.last_call_metadata.total_deadline_seconds == 0.02
+    assert provider.last_call_metadata.wall_clock_latency_ms is not None
+    assert provider.last_call_metadata.wall_clock_latency_ms < 120
+
+
 def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _settings("openai_compatible")
-    provider = OpenAICompatibleGenericProvider(settings)
     request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
     events: list[tuple[str, dict[str, object]]] = []
     monkeypatch.setattr(
@@ -763,10 +797,8 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
             error=lambda event, **fields: events.append((event, fields)),
         ),
     )
-    monkeypatch.setattr(
-        httpx,
-        "post",
-        lambda *_args, **_kwargs: httpx.Response(
+    def http_error_response(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
             503,
             json={
                 "error": {
@@ -776,8 +808,11 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
                 }
             },
             headers={"x-request-id": "provider-request-123"},
-            request=httpx.Request("POST", "https://provider.test/chat/completions"),
-        ),
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        settings, transport=httpx.MockTransport(http_error_response)
     )
 
     with pytest.raises(GenericProviderError) as http_error:
@@ -798,15 +833,12 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     assert "upstream unavailable" in json.dumps(fields)
 
 
-def test_generic_planner_prompt_requires_known_concrete_purpose(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
     settings = _settings("openai_compatible")
-    provider = OpenAICompatibleGenericProvider(settings)
     system_prompts: list[str] = []
 
-    def complete(*_args: object, **kwargs: object) -> httpx.Response:
-        request_body = kwargs["json"]
+    def complete(request: httpx.Request) -> httpx.Response:
+        request_body = json.loads(request.content)
         assert isinstance(request_body, dict)
         messages = request_body["messages"]
         assert isinstance(messages, list)
@@ -831,10 +863,12 @@ def test_generic_planner_prompt_requires_known_concrete_purpose(
                     }
                 ]
             },
-            request=httpx.Request("POST", "https://provider.test/chat/completions"),
+            request=request,
         )
 
-    monkeypatch.setattr(httpx, "post", complete)
+    provider = OpenAICompatibleGenericProvider(
+        settings, transport=httpx.MockTransport(complete)
+    )
     context = provider_module.PlanningContext(
         goal={"objective_keys": ["known_objective"]},
         current_knowledge={"facts": {}},
@@ -889,10 +923,30 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
     assert response.status_code == 504
     assert response.json()["error"]["code"] == "MODEL_PROVIDER_TIMEOUT"
     assert session.scalar(select(func.count()).select_from(WorldOperation)) == before_operations
-    assert client.get(f"/api/v1/games/{game_id}/play").json()["current_task"] is not None
+    state = client.get(f"/api/v1/games/{game_id}/play").json()
+    assert state["current_task"]["status"] == "MODEL_PROVIDER_TIMEOUT"
+    assert state["current_task"]["execution_phase"] == "BLOCKED"
+    assert state["current_task"]["explanation"] == "模型调用超时"
+    terminal = next(
+        event for event in state["current_task"]["timeline"] if event["kind"] == "TASK_BLOCKED"
+    )
+    assert terminal["title"] == "规划失败"
+    assert terminal["detail"] == "模型调用超时"
+    persisted = session.get(AgentTask, UUID(task["id"]))
+    assert persisted is not None
+    assert persisted.last_error_code == "MODEL_PROVIDER_TIMEOUT"
+    assert persisted.last_error_detail == "模型调用超时"
+    calls = (persisted.objective_resolution_metadata or {}).get("provider_calls", [])
+    assert calls[-1]["outcome"] == "TIMEOUT"
+    assert calls[-1]["call_type"] == "INITIAL_PLAN"
+    assert calls[-1]["started_at"]
+    assert calls[-1]["finished_at"]
+    assert calls[-1]["context_bytes"] is not None
+    assert calls[-1]["request_size_bytes"] is not None
+    assert calls[-1]["latency_ms"] >= 0
 
 
-def test_replan_provider_failure_rolls_back_action_cycle_to_safe_pause(
+def test_replan_provider_failure_persists_failure_and_action_history(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = FailOnReplanProvider(
@@ -947,5 +1001,18 @@ def test_replan_provider_failure_rolls_back_action_cycle_to_safe_pause(
     assert replanned.status_code == 504
     assert replanned.json()["error"]["code"] == "MODEL_PROVIDER_TIMEOUT"
     state = client.get(f"/api/v1/games/{game['id']}/play").json()
-    assert state["current_task"]["execution_phase"] == "AWAITING_REPLAN_ACK"
+    assert state["current_task"]["status"] == "MODEL_PROVIDER_TIMEOUT"
+    assert state["current_task"]["execution_phase"] == "BLOCKED"
+    assert state["current_task"]["explanation"] == "模型调用超时"
     assert session.scalar(select(func.count()).select_from(WorldOperation)) == before_operations + 1
+    terminal = next(
+        event for event in state["current_task"]["timeline"] if event["kind"] == "TASK_BLOCKED"
+    )
+    assert terminal["title"] == "规划失败"
+    assert terminal["detail"] == "模型调用超时"
+    persisted = session.get(AgentTask, UUID(task["id"]))
+    assert persisted is not None
+    calls = (persisted.objective_resolution_metadata or {}).get("provider_calls", [])
+    assert calls[-1]["outcome"] == "TIMEOUT"
+    assert calls[-1]["call_type"] == "REPLAN"
+    assert calls[-1]["latency_ms"] >= 0

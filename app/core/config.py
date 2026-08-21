@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     model_api_key: SecretStr | None = None
     developer_api_token: SecretStr | None = None
     model_timeout_seconds: float = Field(default=20, gt=0, le=120)
+    model_total_timeout_seconds: float = Field(default=60, gt=0, le=300)
+    model_max_output_tokens: int = Field(default=8192, ge=256, le=32768)
     agent_max_rounds: int = Field(default=5, ge=1, le=10)
     agent_max_tool_calls: int = Field(default=8, ge=1, le=20)
     planner_max_steps: int = Field(default=10, ge=1, le=12)

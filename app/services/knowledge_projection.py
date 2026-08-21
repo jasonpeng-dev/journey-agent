@@ -203,6 +203,107 @@ class SharedKnowledgeProjection:
             result.append(entry)
         return tuple(result)
 
+    def planner_action_requirements(self) -> tuple[dict[str, Any], ...]:
+        """Return a sparse, target-oriented Planner requirement projection.
+
+        ``known_action_requirements`` is also consumed by the Player API and
+        intentionally keeps its action-oriented compatibility shape.  The
+        provider does not need that shape's repeated per-known-node Fact
+        cards, though.  This projection keeps only target-specific repair
+        contracts that can be derived from Knowledge-safe PREFLIGHT rules:
+        role, resource costs, and known Fact prerequisites.
+
+        It deliberately skips a rule when its target selector is not itself
+        known.  In particular, hidden target Facts never become a target name
+        or a requirement hint merely because a matching Rule exists in the
+        immutable ScenarioVersion.
+        """
+
+        known_nodes = {row.node_key for row in self.known_node_rows()}
+        known_facts = {
+            (row.node_key, row.fact_key): row.truth_value for row in self.known_fact_rows()
+        }
+        by_target: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+
+        for action in sorted(self.definition.actions, key=lambda item: item.key):
+            for rule in self.definition.rules:
+                if rule.action_key != action.key or rule.phase.value != "PREFLIGHT":
+                    continue
+                leaves = self._condition_leaves_with_polarity(rule.condition)
+                selector_conditions = tuple(
+                    condition
+                    for condition, positive in leaves
+                    if positive
+                    and condition.node is not None
+                    and condition.node.kind == NodeSelectorKind.CURRENT_TARGET
+                    and condition.kind in {ConditionKind.FACT_EQUALS, ConditionKind.FACT_IN}
+                )
+                if not selector_conditions:
+                    continue
+                selector_ids = {id(condition) for condition in selector_conditions}
+                for target_key in sorted(known_nodes):
+                    if not all(
+                        self._target_selector_matches(
+                            condition,
+                            target_key,
+                            known_facts,
+                        )
+                        for condition in selector_conditions
+                    ):
+                        continue
+                    requirement = by_target[target_key].setdefault(
+                        action.key,
+                        {
+                            "action_key": action.key,
+                            **(
+                                {"required_actor_role_key": action.required_actor_role_key}
+                                if action.required_actor_role_key is not None
+                                else {}
+                            ),
+                        },
+                    )
+                    for condition, positive in leaves:
+                        if id(condition) in selector_ids:
+                            continue
+                        if condition.kind == ConditionKind.RESOURCE_COMPARE and positive:
+                            cost = self._planner_resource_cost(condition)
+                            if cost is not None:
+                                costs = requirement.setdefault("cost", {})
+                                assert isinstance(costs, dict)
+                                resource_key, amount = cost
+                                previous = costs.get(resource_key)
+                                costs[resource_key] = max(previous or 0, amount)
+                            continue
+                        special = self._planner_fact_requirement(
+                            condition,
+                            positive=positive,
+                            target_key=target_key,
+                            known_facts=known_facts,
+                        )
+                        if special is not None:
+                            special_requirements = requirement.setdefault(
+                                "special_requirements", []
+                            )
+                            assert isinstance(special_requirements, list)
+                            if special not in special_requirements:
+                                special_requirements.append(special)
+
+        result: list[dict[str, Any]] = []
+        for target_key in sorted(by_target):
+            requirements = [
+                requirement
+                for _action_key, requirement in sorted(by_target[target_key].items())
+                if len(requirement) > 1
+            ]
+            if requirements:
+                result.append(
+                    {
+                        "target_key": target_key,
+                        "requirements": requirements,
+                    }
+                )
+        return tuple(result)
+
     @staticmethod
     def _condition_leaves(condition: ConditionV2 | None) -> tuple[ConditionV2, ...]:
         if condition is None:
@@ -215,6 +316,101 @@ class SharedKnowledgeProjection:
         if condition.kind == ConditionKind.NOT:
             return SharedKnowledgeProjection._condition_leaves(condition.condition)
         return (condition,)
+
+    @staticmethod
+    def _condition_leaves_with_polarity(
+        condition: ConditionV2 | None,
+        *,
+        positive: bool = True,
+    ) -> tuple[tuple[ConditionV2, bool], ...]:
+        if condition is None:
+            return ()
+        if condition.kind in {ConditionKind.ALL, ConditionKind.ANY}:
+            leaves: list[tuple[ConditionV2, bool]] = []
+            for child in condition.conditions:
+                leaves.extend(
+                    SharedKnowledgeProjection._condition_leaves_with_polarity(
+                        child,
+                        positive=positive,
+                    )
+                )
+            return tuple(leaves)
+        if condition.kind == ConditionKind.NOT:
+            return SharedKnowledgeProjection._condition_leaves_with_polarity(
+                condition.condition,
+                positive=not positive,
+            )
+        return ((condition, positive),)
+
+    @staticmethod
+    def _target_selector_matches(
+        condition: ConditionV2,
+        target_key: str,
+        known_facts: dict[tuple[str, str], Any],
+    ) -> bool:
+        if condition.fact_key is None:
+            return False
+        current_value = known_facts.get((target_key, condition.fact_key))
+        if condition.kind == ConditionKind.FACT_EQUALS:
+            return current_value is not None and current_value == condition.value
+        if condition.kind == ConditionKind.FACT_IN:
+            return current_value is not None and current_value in condition.values
+        return False
+
+    @staticmethod
+    def _planner_resource_cost(condition: ConditionV2) -> tuple[str, int] | None:
+        if (
+            condition.resource_key is None
+            or condition.operator is None
+            or type(condition.value) is not int
+        ):
+            return None
+        if condition.operator.value == "LT":
+            return condition.resource_key, condition.value
+        if condition.operator.value == "LTE":
+            return condition.resource_key, condition.value + 1
+        return None
+
+    @staticmethod
+    def _planner_fact_requirement(
+        condition: ConditionV2,
+        *,
+        positive: bool,
+        target_key: str,
+        known_facts: dict[tuple[str, str], Any],
+    ) -> dict[str, Any] | None:
+        if condition.node is None or condition.fact_key is None:
+            return None
+        if condition.node.kind == NodeSelectorKind.EXPLICIT:
+            node_key = condition.node.node_key
+        elif condition.node.kind == NodeSelectorKind.CURRENT_TARGET:
+            node_key = target_key
+        else:
+            return None
+        if node_key is None or (node_key, condition.fact_key) not in known_facts:
+            return None
+        if condition.kind == ConditionKind.FACT_EQUALS:
+            operator = "NE" if positive else "EQ"
+            value: Any = condition.value
+        elif condition.kind == ConditionKind.FACT_NOT_EQUALS:
+            operator = "EQ" if positive else "NE"
+            value = condition.value
+        elif condition.kind == ConditionKind.FACT_IN:
+            operator = "NOT_IN" if positive else "IN"
+            value = list(condition.values)
+        elif condition.kind == ConditionKind.FACT_COMPARE:
+            if condition.operator is None:
+                return None
+            operator = f"NOT_{condition.operator.value}" if positive else condition.operator.value
+            value = condition.value
+        else:
+            return None
+        return {
+            "node_key": node_key,
+            "fact_key": condition.fact_key,
+            "operator": operator,
+            "value": value,
+        }
 
     @staticmethod
     def _known_condition_nodes(

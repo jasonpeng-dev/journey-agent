@@ -11,6 +11,8 @@ const labels: Record<string, string> = {
   BLOCKED_BY_PLAYER_DECISION: "因玩家决定受阻",
   UNREACHABLE_IN_CURRENT_STATE: "当前状态无法达成",
   MODEL_PLAN_REJECTED: "模型方案未通过验证",
+  MODEL_PROVIDER_TIMEOUT: "模型调用超时",
+  MODEL_PROVIDER_FAILURE: "模型调用失败",
   PENDING: "待执行",
   CURRENT: "执行中",
   BLOCKED: "受阻",
