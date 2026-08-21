@@ -184,6 +184,185 @@ describe("Formal Play player projections", () => {
     expect(screen.getByText("可用资源状态")).toBeVisible();
   });
 
+  it("filters structural relations and presents meaningful relations without machine keys", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        knownRelations={[
+          {
+            relation_key: "hospital-location",
+            source_node_key: "central_hospital",
+            relation_type_key: "located_in",
+            target_node_key: "central_district",
+            source_node_name: "中央医院",
+            target_node_name: "中央城区",
+          },
+          {
+            relation_key: "corridor-endpoint",
+            source_node_key: "west_freight_corridor",
+            relation_type_key: "endpoint",
+            target_node_key: "west_logistics_district",
+            source_node_name: "西部货运走廊",
+            target_node_name: "西部物流区",
+          },
+          {
+            relation_key: "power-link",
+            source_node_key: "southeast_power_station",
+            relation_type_key: "supplies_power_to",
+            target_node_key: "east_substation",
+            source_node_name: "东南应急发电站",
+            target_node_name: "东部配电站",
+          },
+        ]}
+      />,
+    );
+
+    const relations = within(screen.getByTestId("knowledge-accordion-relations"));
+    expect(screen.getByText("已知关系 · 1")).toBeVisible();
+    fireEvent.click(relations.getByRole("button"));
+    expect(relations.getByText("东南应急发电站")).toBeVisible();
+    expect(relations.getByText("东部配电站")).toBeVisible();
+    expect(relations.getByText("可向其供电")).toBeVisible();
+    expect(relations.queryByText("located_in")).not.toBeInTheDocument();
+    expect(relations.queryByText("endpoint")).not.toBeInTheDocument();
+    expect(relations.getByText("东部配电站")).not.toHaveClass("console-pill");
+  });
+
+  it("groups known action requirements and hides unknown requirement details", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[
+          {
+            node_key: "water_plant",
+            fact_key: "heavy_engineering_support",
+            name: "重型工程支援",
+            value: true,
+            node_name: "南部水处理厂",
+          },
+          {
+            node_key: "power_station",
+            fact_key: "power_supply",
+            name: "供电状态",
+            value: "AVAILABLE",
+            node_name: "东南应急发电站",
+          },
+        ]}
+        knownRelations={[
+          {
+            relation_key: "power-link",
+            source_node_key: "power_station",
+            relation_type_key: "supplies_power_to",
+            target_node_key: "east_substation",
+            source_node_name: "东南应急发电站",
+            target_node_name: "东部配电站",
+          },
+        ]}
+        knownActionRequirements={[
+          {
+            action_key: "repair_water",
+            action_name: "维修南部水处理厂",
+            required_actor_role_name: "水务抢修队",
+            known_preconditions: [
+              {
+                node_key: "water_plant",
+                fact_key: "heavy_engineering_support",
+                selector: "EXPLICIT",
+                current_value: true,
+              },
+            ],
+          },
+          {
+            action_key: "supply_power",
+            action_name: "送电至东部配电站",
+            source_relation_type_key: "supplies_power_to",
+            known_preconditions: [
+              {
+                node_key: "power_station",
+                fact_key: "power_supply",
+                selector: "EXPLICIT",
+                current_value: "AVAILABLE",
+              },
+            ],
+          },
+          {
+            action_key: "hidden_communication",
+            action_name: "恢复隐藏通信设施",
+            known_preconditions: [
+              {
+                node_key: "hidden_facility",
+                fact_key: "communication_requirement",
+                selector: "EXPLICIT",
+                current_value: true,
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    const requirements = within(screen.getByTestId("knowledge-accordion-requirements"));
+    expect(screen.getByText("已知行动要求 · 2")).toBeVisible();
+    fireEvent.click(requirements.getByRole("button"));
+    expect(requirements.getByText("维修南部水处理厂")).toBeVisible();
+    expect(requirements.getAllByRole("listitem")[0]).toHaveTextContent("执行队伍：水务抢修队");
+    expect(requirements.getAllByRole("listitem")[1]).toHaveTextContent("南部水处理厂 · 重型工程支援：是");
+    expect(requirements.getByText("送电至东部配电站")).toBeVisible();
+    expect(requirements.getAllByRole("listitem")[2]).toHaveTextContent("供电条件：需要已知的直接供电关系");
+    expect(requirements.getAllByRole("listitem")[3]).toHaveTextContent("东南应急发电站 · 供电状态：可用");
+    expect(requirements.queryByText("恢复隐藏通信设施")).not.toBeInTheDocument();
+    expect(requirements.queryByText("supplies_power_to")).not.toBeInTheDocument();
+    expect(requirements.queryByText("communication_requirement")).not.toBeInTheDocument();
+  });
+
+  it("keeps empty relation and requirement sections with concise empty states", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        knownRelations={[
+          {
+            relation_key: "location",
+            source_node_key: "facility",
+            relation_type_key: "located_in",
+            target_node_key: "region",
+          },
+        ]}
+        knownActionRequirements={[
+          {
+            action_key: "hidden",
+            action_name: "隐藏行动",
+            known_preconditions: [
+              {
+                node_key: "hidden",
+                fact_key: "secret",
+                selector: "EXPLICIT",
+                current_value: true,
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    const relations = within(screen.getByTestId("knowledge-accordion-relations"));
+    const requirements = within(screen.getByTestId("knowledge-accordion-requirements"));
+    expect(screen.getByText("已知关系 · 0")).toBeVisible();
+    expect(screen.getByText("已知行动要求 · 0")).toBeVisible();
+    fireEvent.click(relations.getByRole("button"));
+    fireEvent.click(requirements.getByRole("button"));
+    expect(relations.getByText("暂无已知关键关系")).toBeVisible();
+    expect(requirements.getByText("暂无已知行动要求")).toBeVisible();
+    expect(requirements.queryByText("secret")).not.toBeInTheDocument();
+  });
+
   it("derives actor groups from the current plan and action without persistent Actor status", () => {
     const initial = groupActorsByTask(actorFixtures, null);
     expect(initial.map((group) => group.key)).toEqual(["idle"]);

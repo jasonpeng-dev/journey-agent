@@ -4,6 +4,12 @@ import { useParams } from "react-router-dom";
 
 import { api } from "../api";
 import { groupActorsByTask } from "../actorPresentation";
+import {
+  displayActionRequirements,
+  knownRelationDescription,
+  meaningfulKnownRelations,
+  relationDisplayKey,
+} from "../knowledgePresentation";
 import type {
   ActionLocation,
   PublicPlanHistory,
@@ -398,6 +404,8 @@ export function KnownWorldAccordions({
   const locationGroups = groupNodesByRegion(visibleNodes);
   const factGroups = groupFactsByRegion(knownFacts);
   const actorGroups = groupActorsByTask(actors, task);
+  const displayedRelations = meaningfulKnownRelations(knownRelations);
+  const displayedRequirements = displayActionRequirements(knownActionRequirements, knownFacts, knownRelations);
   const statusTone = (value: string | number | boolean) =>
     value === false || value === 0 || value === "false" ? "neutral" : "success";
 
@@ -637,54 +645,55 @@ export function KnownWorldAccordions({
       </KnowledgeAccordion>
       <KnowledgeAccordion
         id="relations"
-        title="Known relations"
-        count={knownRelations.length}
-        summary="Knowledge-safe direct world relations"
+        title="已知关系"
+        count={displayedRelations.length}
+        summary="当前已掌握的关键系统关系"
         open={expanded.relations}
         onToggle={() => toggle("relations")}
       >
-        <div className="knowledge-entry-list">
-          {knownRelations.map((relation) => (
-            <div className="knowledge-entry" key={`${relation.source_node_key}:${relation.relation_type_key}:${relation.target_node_key}`}>
-              <div className="knowledge-entry-copy">
-                <strong>{relation.source_node_name ?? relation.source_node_key}</strong>
-                <small>{relation.relation_type_key}</small>
+        {displayedRelations.length === 0 ? (
+          <div className="knowledge-empty-state">暂无已知关键关系</div>
+        ) : (
+          <div className="knowledge-relation-list">
+            {displayedRelations.map((relation) => (
+              <div className="knowledge-relation" key={relationDisplayKey(relation)}>
+                <div className="knowledge-relation-line">
+                  <strong>{relation.source_node_name ?? relation.source_node_key}</strong>
+                  <span className="knowledge-relation-arrow" aria-hidden="true">→</span>
+                  <strong>{relation.target_node_name ?? relation.target_node_key}</strong>
+                </div>
+                <small>{knownRelationDescription(relation.relation_type_key)}</small>
               </div>
-              <span className="console-pill success knowledge-status-pill">
-                {relation.target_node_name ?? relation.target_node_key}
-              </span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </KnowledgeAccordion>
       <KnowledgeAccordion
         id="requirements"
-        title="Known action requirements"
-        count={knownActionRequirements.length}
-        summary="Knowledge-safe role, power, and heavy-support requirements"
+        title="已知行动要求"
+        count={displayedRequirements.length}
+        summary="当前已掌握的行动条件与工程要求"
         open={expanded.requirements}
         onToggle={() => toggle("requirements")}
       >
-        <div className="knowledge-entry-list">
-          {knownActionRequirements.map((requirement) => (
-            <div className="knowledge-entry" key={requirement.action_key}>
-              <div className="knowledge-entry-copy">
+        {displayedRequirements.length === 0 ? (
+          <div className="knowledge-empty-state">暂无已知行动要求</div>
+        ) : (
+          <div className="knowledge-requirement-list">
+            {displayedRequirements.map(({ requirement, lines }) => (
+              <div className="knowledge-requirement-group" key={requirement.action_key}>
                 <strong>{requirement.action_name}</strong>
-                {requirement.required_actor_role_name && (
-                  <small>Role: {requirement.required_actor_role_name}</small>
-                )}
-                {requirement.source_relation_type_key && (
-                  <small>Source relation: {requirement.source_relation_type_key}</small>
-                )}
-                {requirement.known_preconditions.map((precondition) => (
-                  <small key={`${precondition.node_key}:${precondition.fact_key}`}>
-                    {precondition.node_key} · {precondition.fact_key} = {String(precondition.current_value)}
-                  </small>
-                ))}
+                <ul>
+                  {lines.map((line) => (
+                    <li key={line.key}>
+                      <span>{line.label}：</span>{line.value}
+                    </li>
+                  ))}
+                </ul>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </KnowledgeAccordion>
     </div>
   );
