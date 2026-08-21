@@ -1110,6 +1110,7 @@ class GenericAgentService:
                 "No known public Action can advance the frozen ObjectiveScope",
             )
         diagnostics: tuple[dict[str, object], ...] = ()
+        rejected_segment: dict[str, object] | None = None
         call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
         for repair_attempt in range(self.MAX_PROVIDER_REPAIR_ATTEMPTS + 1):
             request = PlanRequest(
@@ -1127,6 +1128,7 @@ class GenericAgentService:
                 planning_action_catalog=catalog,
                 planning_context=planning_context,
                 planner_input=planner_input,
+                rejected_segment=rejected_segment,
                 repair_attempt=repair_attempt,
                 repair_diagnostics=diagnostics,
             )
@@ -1212,6 +1214,7 @@ class GenericAgentService:
                 self._last_provider_plan_summary = proposal.plan_summary.strip() or None
                 self._last_provider_stop_reason = proposal.stop_reason
                 return steps
+            rejected_segment = proposal.model_dump(mode="json")
         raise GenericAgentError(
             "MODEL_PLAN_REJECTED",
             "The model provider could not produce a backend-valid current Plan",
@@ -1403,13 +1406,13 @@ class GenericAgentService:
                 diagnostics.append(
                     _structured_plan_diagnostic(
                         exc,
+                        definition=definition,
                         action=action,
-                        step=index,
+                        step_id=str(getattr(raw_step, "step_id", "")),
                         actor_key=actor_key,
                         target_key=target_key,
                         projected_actor_locations=projected_actor_locations,
                         projected_command_reachability=projected_command_reachability,
-                        planning_context=planning_context,
                     )
                 )
                 continue
@@ -1484,13 +1487,13 @@ class GenericAgentService:
                 diagnostics.append(
                     _structured_plan_diagnostic(
                         exc,
+                        definition=definition,
                         action=action,
-                        step=index,
+                        step_id=str(getattr(raw_step, "step_id", "")),
                         actor_key=actor_key,
                         target_key=target_key,
                         projected_actor_locations=projected_actor_locations,
                         projected_command_reachability=projected_command_reachability,
-                        planning_context=planning_context,
                     )
                 )
                 continue
@@ -1516,7 +1519,9 @@ class GenericAgentService:
             )
 
         if diagnostics:
-            return [], tuple(diagnostics)
+            return [], tuple(
+                _diagnostic_with_step_id(item, proposed_steps) for item in diagnostics
+            )
 
         covered_before: set[tuple[str, str]] = set()
         for index, effects in enumerate(step_effects, start=1):
@@ -1539,7 +1544,7 @@ class GenericAgentService:
                     return [], (
                         {
                             "code": "PLAN_ORDER_INVALID",
-                            "step": index,
+                            "step_id": str(getattr(proposed_steps[index - 1], "step_id", "")),
                             "missing_prior_public_requirements": [
                                 {"node_key": node_key, "fact_key": fact_key}
                                 for node_key, fact_key in sorted(missing_before)
@@ -3069,42 +3074,57 @@ def _actor_command_reachability(actor: GameInstanceActor) -> CommandReachability
 def _structured_plan_diagnostic(
     exc: GenericAgentError,
     *,
+    definition: ScenarioDefinitionV2,
     action: ActionDefinitionV2,
-    step: int,
+    step_id: str,
     actor_key: str,
     target_key: str,
     projected_actor_locations: dict[str, str],
     projected_command_reachability: dict[str, CommandReachability],
-    planning_context: PlanningContext,
 ) -> dict[str, object]:
     """Keep repair diagnostics actionable without exposing hidden Truth."""
 
     diagnostic: dict[str, object] = {
         "code": _safe_provider_diagnostic(exc.code),
-        "failure_code": exc.code,
-        "step": step,
-        "action_key": action.key,
-        "actor_key": actor_key,
-        "target_key": target_key,
-        "reason": exc.message,
+        "step_id": step_id,
     }
-    known_state: dict[str, object] = {}
+    actual: dict[str, object] = {}
     location = projected_actor_locations.get(actor_key)
     if location is not None:
-        known_state["current_node_key"] = location
+        actual["actor_region"] = location
     reachability = projected_command_reachability.get(actor_key)
     if reachability is not None:
-        known_state["command_reachability"] = reachability.value
-    if known_state:
-        diagnostic["known_state"] = known_state
+        actual["command_reachability"] = reachability.value
 
-    blocker = _diagnostic_blocker(exc.code, action)
-    if blocker:
-        diagnostic["blocker"] = blocker
-    recovery = _known_recovery_effects(planning_context, exc.code)
-    if recovery:
-        diagnostic["known_recovery_effects"] = recovery
+    if exc.code.startswith("LOCALITY_"):
+        diagnostic["dimension"] = "LOCALITY"
+        diagnostic["required"] = (
+            "ONE_HOP_DIFFERENT_REGION"
+            if action.behavior in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
+            else "SAME_REGION"
+        )
+        target_location = projected_actor_locations.get(target_key, target_key)
+        with suppress(LocalityEngineError):
+            actual["target_region"] = region_for_node(definition, target_location)
+    else:
+        blocker = _diagnostic_blocker(exc.code, action)
+        if blocker:
+            diagnostic["dimension"] = blocker.get("type", "ACTION_PRECONDITION")
+            if "required_value" in blocker:
+                diagnostic["required"] = blocker["required_value"]
+    if actual:
+        diagnostic["actual"] = actual
     return diagnostic
+
+
+def _diagnostic_with_step_id(
+    diagnostic: dict[str, object], proposed_steps: tuple[object, ...]
+) -> dict[str, object]:
+    result = dict(diagnostic)
+    raw_step = result.pop("step", None)
+    if isinstance(raw_step, int) and 1 <= raw_step <= len(proposed_steps):
+        result["step_id"] = str(getattr(proposed_steps[raw_step - 1], "step_id", ""))
+    return result
 
 
 def _diagnostic_blocker(
@@ -3159,56 +3179,6 @@ def _diagnostic_blocker(
             "required_value": "KNOWN_VALID_SOURCE",
         }
     return {"type": "ACTION_PRECONDITION", "failure_code": failure_code}
-
-
-def _known_recovery_effects(
-    planning_context: PlanningContext,
-    failure_code: str,
-) -> list[dict[str, object]]:
-    """Discover generic recovery effects from the current Action catalog."""
-
-    wanted: set[tuple[str, object]] = set()
-    if failure_code == "ACTOR_COMMAND_DISCONNECTED":
-        wanted.add(("ACTOR_COMMAND_REACHABILITY", CommandReachability.ONLINE.value))
-    elif failure_code in {
-        "RESOURCE_INVENTORY_UNKNOWN",
-        "TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
-    }:
-        wanted.add(("REGION_RESOURCE_KNOWLEDGE", "VISIBLE"))
-    elif failure_code in {"KNOWN_TRANSPORT_BLOCKED", "TRAVEL_BLOCKED", "TRANSPORT_BLOCKED"}:
-        wanted.add(("FACT_MUTATION", "passable"))
-    elif failure_code in {"HEAVY_SUPPORT_UNAVAILABLE", "WATER_TREATMENT_HEAVY_SUPPORT_REQUIRED"}:
-        wanted.add(("FACT_MUTATION", "heavy_engineering_support"))
-
-    result: list[dict[str, object]] = []
-    for action in planning_context.relevant_actions:
-        action_key = action.get("action_key")
-        if not isinstance(action_key, str):
-            continue
-        effects: list[dict[str, object]] = []
-        raw_effects = action.get("planner_effects")
-        if isinstance(raw_effects, list):
-            effects.extend(item for item in raw_effects if isinstance(item, dict))
-        raw_contracts = action.get("target_contracts")
-        if isinstance(raw_contracts, dict):
-            for contract in raw_contracts.values():
-                if isinstance(contract, dict) and isinstance(contract.get("effects"), list):
-                    effects.extend(item for item in contract["effects"] if isinstance(item, dict))
-        for effect in effects:
-            effect_type = effect.get("type")
-            matches = False
-            for wanted_type, wanted_value in wanted:
-                if effect_type != wanted_type:
-                    continue
-                if wanted_type == "FACT_MUTATION":
-                    matches = effect.get("fact_key") == wanted_value
-                else:
-                    matches = effect.get("value", effect.get("visibility")) == wanted_value
-                if matches:
-                    break
-            if matches:
-                result.append({"action_key": action_key, "effect": effect})
-    return result
 
 
 def _validate_plan_segment_contract(

@@ -233,11 +233,16 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
         goal="goal",
         repair_attempt=0,
         repair_diagnostics=({"code": "PLAN_REJECTED"},),
+        rejected_segment={
+            "stop_reason": "OBJECTIVE_COMPLETION",
+            "steps": [{"step_id": "step-1"}],
+        },
         planning_context=initial_context,
         planner_input=planner_input,
     ).provider_payload()
     assert repair_payload["repair_attempt"] == 0
-    assert repair_payload["repair_diagnostics"] == [{"code": "PLAN_REJECTED"}]
+    assert repair_payload["validator_violations"] == [{"code": "PLAN_REJECTED"}]
+    assert repair_payload["rejected_segment"]["steps"][0]["step_id"] == "step-1"
 
 
 def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrelated(

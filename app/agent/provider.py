@@ -183,6 +183,7 @@ class PlanRequest(ProviderModel):
     planning_action_catalog: tuple[PlanningActionCandidate, ...] = ()
     planning_context: PlanningContext | None = None
     planner_input: PlannerInput | None = None
+    rejected_segment: dict[str, object] | None = None
     repair_attempt: int = 0
     repair_diagnostics: tuple[dict[str, object], ...] = ()
 
@@ -203,8 +204,10 @@ class PlanRequest(ProviderModel):
                 payload["replan_reason"] = self.replan_reason
             if self.call_type == "REPAIR" or self.repair_attempt != 0:
                 payload["repair_attempt"] = self.repair_attempt
+            if self.call_type == "REPAIR" and self.rejected_segment is not None:
+                payload["rejected_segment"] = self.rejected_segment
             if self.repair_diagnostics:
-                payload["repair_diagnostics"] = list(self.repair_diagnostics)
+                payload["validator_violations"] = list(self.repair_diagnostics)
             return payload
         if self.planning_context is not None:
             payload = {
@@ -526,7 +529,7 @@ class OpenAICompatibleGenericProvider:
                         "For planning, use only entities supplied in planner_input. "
                         f"{planning_prompt} {generic_guidance}"
                         "Keep purpose and actor reason short, omit chain-of-thought, "
-                        "never infer hidden state, and respect repair_diagnostics."
+                        "never infer hidden state, and respect validator_violations."
                     ),
                 },
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
