@@ -109,6 +109,15 @@ class PlannerKnownWorldSlice(ProviderModel):
     resource_knowledge: tuple[dict[str, object], ...] = ()
     unknown_dependencies: tuple[dict[str, object], ...] = ()
 
+    @model_validator(mode="after")
+    def validate_unknown_dependency_ids(self) -> PlannerKnownWorldSlice:
+        dependency_ids = [item.get("dependency_id") for item in self.unknown_dependencies]
+        if any(not isinstance(item, str) or not item.strip() for item in dependency_ids):
+            raise ValueError("Every UNKNOWN dependency needs a non-blank dependency_id")
+        if len(dependency_ids) != len(set(dependency_ids)):
+            raise ValueError("UNKNOWN dependency_id values must be unique")
+        return self
+
 
 class PlannerInput(ProviderModel):
     """Canonical schema shared by INITIAL, REPAIR, and REPLAN."""
@@ -126,8 +135,8 @@ class PlanningActionCandidate(ProviderModel):
     """Deprecated compatibility view of an Actor x Action x Target binding.
 
     It remains available while old FakeProvider tests and persisted diagnostics
-    migrate.  The canonical OpenAI-compatible payload is ``PlanningContext``;
-    no provider call is instructed to choose candidate IDs.
+    migrate. The canonical OpenAI-compatible payload is ``PlannerInput``;
+    no V2 provider call is instructed to choose candidate IDs.
     """
 
     candidate_id: str
@@ -188,11 +197,12 @@ class PlanRequest(ProviderModel):
     repair_diagnostics: tuple[dict[str, object], ...] = ()
 
     def provider_payload(self) -> dict[str, object]:
-        """Return only the canonical V1 provider input.
+        """Return the canonical V2 provider input when available.
 
         ``planning_action_catalog`` and the other legacy projections stay on
-        the in-process request object for compatibility, but are deliberately
-        omitted from this payload whenever a PlanningContext is available.
+        the in-process request object for compatibility. They are deliberately
+        omitted whenever ``planner_input`` is available, so V1 and V2 semantic
+        projections are never sent together.
         """
 
         if self.planner_input is not None:
@@ -229,7 +239,7 @@ class PlanSegment(ProviderModel):
     stop_reason: Literal["OBJECTIVE_COMPLETION", "INFORMATION_BOUNDARY", "BLOCKED"] = (
         "OBJECTIVE_COMPLETION"
     )
-    boundary_dependency: dict[str, object] | None = None
+    boundary_dependency_id: str | None = None
     plan_summary: str = ""
     steps: tuple[PlanStepProposal, ...]
 
@@ -380,7 +390,7 @@ class OpenAICompatibleGenericProvider:
         self._timeout = settings.model_timeout_seconds
         self._total_timeout = settings.model_total_timeout_seconds
         self._max_output_tokens = settings.model_max_output_tokens
-        self._thinking_mode = "enabled"
+        self._thinking_mode = "disabled"
         self._reasoning_effort = "low"
         self._transport = transport
         self._last_call_metadata: ProviderCallMetadata | None = None
@@ -450,7 +460,7 @@ class OpenAICompatibleGenericProvider:
             else (
                 '{"plan_summary":"short summary",'
                 '"stop_reason":"OBJECTIVE_COMPLETION|INFORMATION_BOUNDARY|BLOCKED",'
-                '"boundary_dependency":null,'
+                '"boundary_dependency_id":null,'
                 '"steps":[{"step_id":"segment-local-stable-id",'
                 '"purpose":"goal-directed step",'
                 '"action_key":"existing_action_key",'
@@ -463,7 +473,8 @@ class OpenAICompatibleGenericProvider:
             planning_prompt = (
                 "You are repairing a rejected plan for the same frozen ObjectiveScope. "
                 "Return one complete corrected PlanSegment for that exact scope. Use the "
-                "validator diagnostics in the user payload to fix the rejected parts, and "
+                "structured repair diagnostics in the user payload to fix the rejected "
+                "parts, and "
                 "keep valid parts whenever possible. Every step must directly advance the "
                 "current Objective, satisfy a public prerequisite, obtain Knowledge needed "
                 "for that Objective, or be an explicitly necessary supporting action. Do not "
@@ -505,18 +516,33 @@ class OpenAICompatibleGenericProvider:
                 "to establish their prerequisites."
             )
         generic_guidance = (
-            "Static allowed_action_keys describe capability/role permission, "
-            "not current executability. Treat planner_constraints and "
-            "planner_effects as the generic Action contract. Resolve "
-            "KNOWN_BLOCKED conditions before execution; UNKNOWN is not false, "
-            "zero, or unavailable. Do not consume or transport resources whose "
-            "availability is unknown. "
+            "The authoritative V2 planning semantics are planner_input.objective, "
+            "planner_input.actors, planner_input.action_contracts, "
+            "planner_input.target_bindings, and planner_input.known_world. Treat each "
+            "earlier Step's declared deterministic effects as updates to the projected "
+            "known state used by every later Step, including Actor location and command "
+            "reachability. You must still choose every Action, Actor, Target, parameter, "
+            "and ordering; do not automatically insert prerequisites, Travel, Relay, or "
+            "a recovery path. UNKNOWN is not false, zero, or unavailable. Do not consume "
+            "or transport resources whose availability is unknown. "
+            "Use OBJECTIVE_COMPLETION only when current Known state plus the segment's "
+            "projected deterministic effects legally reach the frozen Objective's "
+            "completion requirements. Use INFORMATION_BOUNDARY only when an UNKNOWN "
+            "dependency in planner_input.known_world.unknown_dependencies blocks the "
+            "next legal Target, Source, Parameter, or Precondition choice; the segment "
+            "must schedule a legal Action whose declared knowledge effect resolves it, "
+            "and further planning would otherwise guess Hidden Truth or treat UNKNOWN as "
+            "Known. Reference that dependency only by boundary_dependency_id. Complexity "
+            "or general uncertainty is not an information boundary. A route dependency "
+            "with attempt_policy MAY_ATTEMPT is not an information boundary. Use BLOCKED "
+            "only when the Objective is incomplete and no legal progress Action or legal "
+            "knowledge-acquisition Action exists; only BLOCKED may return steps=[]. "
             if purpose in {"initial_plan", "replan", "repair"}
             else ""
         )
         request_body: dict[str, object] = {
             "model": self._model_name,
-            "thinking": {"type": "enabled"},
+            "thinking": {"type": "disabled"},
             "reasoning_effort": "low",
             "response_format": {"type": "json_object"},
             "messages": [
@@ -529,7 +555,7 @@ class OpenAICompatibleGenericProvider:
                         "For planning, use only entities supplied in planner_input. "
                         f"{planning_prompt} {generic_guidance}"
                         "Keep purpose and actor reason short, omit chain-of-thought, "
-                        "never infer hidden state, and respect validator_violations."
+                        "and never infer hidden state."
                     ),
                 },
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

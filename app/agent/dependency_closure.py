@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import deque
 from dataclasses import dataclass
 
@@ -18,7 +20,7 @@ class TypedDependency:
     dimension: str
     subject: str
     key: str = ""
-    required: str = ""
+    required: str | int = ""
 
 
 @dataclass(frozen=True)
@@ -64,7 +66,7 @@ def build_dependency_closure(
         for requirement in objective.completion_requirements
     }
     relevant_resources: set[str] = set()
-    unknowns: dict[tuple[str, str, str], dict[str, object]] = {}
+    unknowns: dict[str, dict[str, object]] = {}
     audit: dict[str, list[dict[str, object]]] = {}
 
     def select_action(action_key: str, path: tuple[str, ...], producer_for: str) -> None:
@@ -124,8 +126,13 @@ def build_dependency_closure(
             for requirement in binding.requirements:
                 cost = requirement.get("cost")
                 if isinstance(cost, dict):
-                    for resource_key in cost:
-                        if not isinstance(resource_key, str):
+                    for resource_key, required_amount in cost.items():
+                        if (
+                            not isinstance(resource_key, str)
+                            or isinstance(required_amount, bool)
+                            or not isinstance(required_amount, int)
+                            or required_amount <= 0
+                        ):
                             continue
                         relevant_resources.add(resource_key)
                         queue.append(
@@ -134,6 +141,7 @@ def build_dependency_closure(
                                     "RESOURCE_SOURCE",
                                     resource_key,
                                     key=binding.target_key,
+                                    required=required_amount,
                                 ),
                                 (*path, f"action:{action_key}", f"resource:{resource_key}"),
                                 action_key,
@@ -178,15 +186,22 @@ def build_dependency_closure(
                     select_action(action_key, path, repr(dependency))
         elif dependency.dimension == "RESOURCE_SOURCE":
             known_resource = planner_input.known_world.resources.get(dependency.subject)
+            required_amount = int(dependency.required or 0)
+            known_available_amount = _known_available_resource_amount(known_resource)
             target_region = _known_region_for_node(
                 definition,
                 planner_input,
                 dependency.key,
             )
-            if not _has_known_available_resource(known_resource):
-                unknowns[("RESOURCE_SOURCE", dependency.subject, "")] = {
+            if known_available_amount < required_amount:
+                unknown: dict[str, object] = {
                     "dimension": "RESOURCE_SOURCE",
                     "resource_key": dependency.subject,
+                    "target_key": dependency.key,
+                    "required_amount": required_amount,
+                    "known_available_amount": known_available_amount,
+                    "deficit": required_amount - known_available_amount,
+                    "source_knowledge_status": "UNKNOWN",
                     "status": "UNKNOWN",
                     "blocks": "SOURCE_SELECTION",
                     "resolvable_by_effect_types": [
@@ -194,6 +209,13 @@ def build_dependency_closure(
                         "RESOURCE_POOL_KNOWLEDGE",
                     ],
                 }
+                unknown["dependency_id"] = _dependency_id(
+                    "RESOURCE_SOURCE",
+                    resource_key=dependency.subject,
+                    target_key=dependency.key,
+                    required_amount=required_amount,
+                )
+                unknowns[str(unknown["dependency_id"])] = unknown
                 for action_key, contract in contracts.items():
                     if action_key == consumer_action:
                         continue
@@ -203,7 +225,9 @@ def build_dependency_closure(
                         for effect in contract.deterministic_effects
                     ):
                         select_action(action_key, path, repr(dependency))
-            elif not _has_known_available_resource_at(known_resource, target_region):
+            elif not _has_known_available_resource_at(
+                known_resource, target_region, required_amount
+            ):
                 for action_key, contract in contracts.items():
                     if action_key == consumer_action:
                         continue
@@ -308,21 +332,27 @@ def build_dependency_closure(
     )
 
 
-def _has_known_available_resource(raw: object) -> bool:
+def _known_available_resource_amount(raw: object) -> int:
     if not isinstance(raw, dict):
-        return False
+        return 0
+    known_available = raw.get("known_available")
+    if isinstance(known_available, int) and not isinstance(known_available, bool):
+        return max(0, known_available)
     scopes = raw.get("scopes")
     if not isinstance(scopes, dict):
-        return False
-    return any(
-        isinstance(value, dict)
-        and isinstance(value.get("value"), int)
-        and value["value"] > 0
+        return 0
+    return sum(
+        max(0, int(value["value"]))
         for value in scopes.values()
+        if isinstance(value, dict)
+        and isinstance(value.get("value"), int)
+        and not isinstance(value.get("value"), bool)
     )
 
 
-def _has_known_available_resource_at(raw: object, region_key: str | None) -> bool:
+def _has_known_available_resource_at(
+    raw: object, region_key: str | None, required_amount: int
+) -> bool:
     if region_key is None or not isinstance(raw, dict):
         return False
     scopes = raw.get("scopes")
@@ -332,7 +362,8 @@ def _has_known_available_resource_at(raw: object, region_key: str | None) -> boo
     return (
         isinstance(value, dict)
         and isinstance(value.get("value"), int)
-        and value["value"] > 0
+        and not isinstance(value.get("value"), bool)
+        and value["value"] >= required_amount
     )
 
 
@@ -371,7 +402,7 @@ def _include_one_hop_locality(
     planner_input: PlannerInput,
     selected_actions: set[str],
     relevant_nodes: set[str],
-    unknowns: dict[tuple[str, str, str], dict[str, object]],
+    unknowns: dict[str, dict[str, object]],
 ) -> None:
     if not any(
         contract.action_key in selected_actions
@@ -410,13 +441,34 @@ def _include_one_hop_locality(
         if passability_key:
             identity = f"{transport_key}.{passability_key}"
             if identity not in planner_input.known_world.facts and transport_key in known_node_keys:
-                unknowns[("TRANSPORT_PASSABILITY", transport_key, passability_key)] = {
+                unknown: dict[str, object] = {
                     "dimension": "TRANSPORT_PASSABILITY",
                     "subject_key": transport_key,
                     "fact_key": passability_key,
                     "status": "UNKNOWN",
                     "attempt_policy": "MAY_ATTEMPT",
                 }
+                unknown["dependency_id"] = _dependency_id(
+                    "TRANSPORT_PASSABILITY",
+                    subject_key=transport_key,
+                    fact_key=passability_key,
+                )
+                unknowns[str(unknown["dependency_id"])] = unknown
+
+
+def _dependency_id(dimension: str, **identity: object) -> str:
+    """Return a stable ID from typed semantic keys, never display/scenario text."""
+
+    canonical_input: dict[str, object] = {"dimension": dimension}
+    canonical_input.update(identity)
+    canonical = json.dumps(
+        canonical_input,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"dependency-{dimension.lower().replace('_', '-')}-{digest}"
 
 
 def _slice_known_world(

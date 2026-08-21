@@ -453,6 +453,35 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
         and item.get("attempt_policy") == "MAY_ATTEMPT"
         for item in payload["known_world"]["unknown_dependencies"]
     )
+    dependencies = payload["known_world"]["unknown_dependencies"]
+    assert all(item.get("dependency_id") for item in dependencies)
+    assert len({item["dependency_id"] for item in dependencies}) == len(dependencies)
+    resource_dependencies = {
+        item["resource_key"]: item
+        for item in dependencies
+        if item.get("dimension") == "RESOURCE_SOURCE"
+    }
+    for resource_key, expected in {
+        "communication_equipment": (10, 0, 10),
+        "general_engineering_parts": (15, 10, 5),
+    }.items():
+        dependency = resource_dependencies[resource_key]
+        assert (
+            dependency["required_amount"],
+            dependency["known_available_amount"],
+            dependency["deficit"],
+        ) == expected
+        assert dependency["source_knowledge_status"] == "UNKNOWN"
+    repeated = PlanningContextBuilder(session, scope).build_v2_closure(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason=None,
+    ).planner_input.model_dump(mode="json")
+    assert [item["dependency_id"] for item in dependencies] == [
+        item["dependency_id"]
+        for item in repeated["known_world"]["unknown_dependencies"]
+    ]
     assert {item["actor_key"] for item in payload["actors"]} == {
         "communications_repair_team_alpha",
         "logistics_team_alpha",

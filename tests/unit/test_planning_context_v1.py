@@ -467,13 +467,36 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
     assert user_payload["planner_input"]["schema_version"] == 2
     assert "planning_context" not in user_payload
     assert "candidate_id" not in json.dumps(user_payload)
-    assert captured["json"]["thinking"] == {"type": "enabled"}  # type: ignore[index]
+    system_prompt = next(
+        item["content"]
+        for item in captured["json"]["messages"]  # type: ignore[index]
+        if item["role"] == "system"
+    )
+    for legacy_term in (
+        "allowed_action_keys",
+        "planner_constraints",
+        "planner_effects",
+        "validator_violations",
+    ):
+        assert legacy_term not in system_prompt
+    for v2_term in (
+        "planner_input.objective",
+        "planner_input.actors",
+        "planner_input.action_contracts",
+        "planner_input.target_bindings",
+        "planner_input.known_world",
+        "projected deterministic effects",
+        "boundary_dependency_id",
+        "attempt_policy MAY_ATTEMPT is not an information boundary",
+    ):
+        assert v2_term in system_prompt
+    assert captured["json"]["thinking"] == {"type": "disabled"}  # type: ignore[index]
     assert captured["json"]["reasoning_effort"] == "low"  # type: ignore[index]
     assert captured["json"]["max_tokens"] == 8192  # type: ignore[index]
     assert provider.last_call_metadata is not None
     assert provider.last_call_metadata.model == "fake-model"
     assert provider.last_call_metadata.call_type == "INITIAL_PLAN"
-    assert provider.last_call_metadata.thinking_mode == "enabled"
+    assert provider.last_call_metadata.thinking_mode == "disabled"
     assert provider.last_call_metadata.reasoning_effort == "low"
     assert provider.last_call_metadata.configured_output_token_limit == 8192
     assert provider.last_call_metadata.context_bytes is not None
@@ -498,6 +521,7 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         known_world=PlannerKnownWorldSlice(
             unknown_dependencies=(
                 {
+                    "dependency_id": "dependency-resource-source-test",
                     "dimension": "RESOURCE_SOURCE",
                     "resource_key": "repair_parts",
                     "status": "UNKNOWN",
@@ -507,7 +531,7 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
             )
         ),
     )
-    dependency = {"dimension": "RESOURCE_SOURCE", "resource_key": "repair_parts"}
+    dependency_id = "dependency-resource-source-test"
     acquisition = PlanStepProposal(
         step_id="survey-1",
         action_key="survey",
@@ -516,7 +540,7 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     )
     valid = PlanProposal(
         stop_reason="INFORMATION_BOUNDARY",
-        boundary_dependency=dependency,
+        boundary_dependency_id=dependency_id,
         steps=(acquisition,),
     )
     assert _validate_plan_segment_contract(valid, planner_input) == ()
@@ -524,10 +548,18 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=(acquisition,)),
         planner_input,
     ) == ()
+    assert _validate_plan_segment_contract(
+        PlanProposal(
+            stop_reason="OBJECTIVE_COMPLETION",
+            boundary_dependency_id=dependency_id,
+            steps=(acquisition,),
+        ),
+        planner_input,
+    )[0]["code"] == "BOUNDARY_DEPENDENCY_NOT_ALLOWED"
 
     missing_acquisition = PlanProposal(
         stop_reason="INFORMATION_BOUNDARY",
-        boundary_dependency=dependency,
+        boundary_dependency_id=dependency_id,
         steps=(
             PlanStepProposal(
                 step_id="inspect-1",
@@ -552,11 +584,16 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     assert _validate_plan_segment_contract(blocked, planner_input)[0]["code"] == (
         "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS"
     )
+    assert _validate_plan_segment_contract(
+        blocked.model_copy(update={"boundary_dependency_id": dependency_id}),
+        PlannerInput(),
+    )[0]["code"] == "BOUNDARY_DEPENDENCY_NOT_ALLOWED"
     unknown_route = planner_input.model_copy(
         update={
             "known_world": PlannerKnownWorldSlice(
                 unknown_dependencies=(
                     {
+                        "dependency_id": "dependency-route-test",
                         "dimension": "TRANSPORT_PASSABILITY",
                         "subject_key": "connector",
                         "fact_key": "passable",
@@ -569,11 +606,7 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     )
     route_boundary = PlanProposal(
         stop_reason="INFORMATION_BOUNDARY",
-        boundary_dependency={
-            "dimension": "TRANSPORT_PASSABILITY",
-            "subject_key": "connector",
-            "fact_key": "passable",
-        },
+        boundary_dependency_id="dependency-route-test",
         steps=(acquisition,),
     )
     assert _validate_plan_segment_contract(route_boundary, unknown_route)[0]["code"] == (

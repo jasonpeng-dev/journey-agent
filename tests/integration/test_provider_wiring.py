@@ -169,8 +169,21 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     assert submission.task is not None
     assert provider.goal_requests == []
     assert provider.plan_requests == []
+    original_propose_plan = provider.propose_plan
+    observed_started_calls: list[dict[str, object]] = []
+
+    def inspect_persistence_boundary(request: PlanRequest) -> PlanProposal:
+        persisted = session.get(AgentTask, submission.task.id)
+        assert persisted is not None
+        calls = (persisted.objective_resolution_metadata or {}).get("provider_calls", [])
+        observed_started_calls.append(dict(calls[-1]))
+        return original_propose_plan(request)
+
+    monkeypatch.setattr(provider, "propose_plan", inspect_persistence_boundary)
     _start_initial_plan(orchestrator, submission.task)
     assert len(provider.plan_requests) == 1
+    assert observed_started_calls[0]["outcome"] == "RUNNING"
+    assert observed_started_calls[0]["call_type"] == "INITIAL_PLAN"
     assert submission.task.planning_mode == "PROVIDER"
     calls = (submission.task.objective_resolution_metadata or {}).get("provider_calls", [])
     assert calls[-1]["outcome"] == "SUCCESS"

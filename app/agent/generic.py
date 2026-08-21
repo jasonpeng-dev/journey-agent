@@ -1108,8 +1108,8 @@ class GenericAgentService:
             replan_reason=reason,
         )
         # The old catalog is retained only as a compatibility projection for
-        # existing in-process FakeProviders.  It is never serialized by the
-        # OpenAI-compatible provider when ``planning_context`` is present.
+        # existing in-process FakeProviders. It is never serialized by the
+        # OpenAI-compatible provider when ``planner_input`` is present.
         catalog_builder = PlanningActionCatalogBuilder(self.db, self.scope)
         catalog = catalog_builder.build(
             definition,
@@ -3206,10 +3206,14 @@ def _validate_plan_segment_contract(
     if len(step_ids) != len(set(step_ids)):
         return ({"code": "STEP_ID_DUPLICATE", "step_ids": step_ids},)
     if segment.stop_reason == "OBJECTIVE_COMPLETION":
+        if segment.boundary_dependency_id is not None:
+            return ({"code": "BOUNDARY_DEPENDENCY_NOT_ALLOWED"},)
         if not segment.steps:
             return ({"code": "NO_STEPS", "message": "Completion segment has no steps"},)
         return ()
     if segment.stop_reason == "BLOCKED":
+        if segment.boundary_dependency_id is not None:
+            return ({"code": "BOUNDARY_DEPENDENCY_NOT_ALLOWED"},)
         if segment.steps:
             return ({"code": "BLOCKED_SEGMENT_HAS_STEPS"},)
         if planner_input.action_contracts:
@@ -3221,19 +3225,24 @@ def _validate_plan_segment_contract(
             )
         return ()
 
-    dependency = segment.boundary_dependency
-    if not isinstance(dependency, dict):
+    dependency_id = segment.boundary_dependency_id
+    if not isinstance(dependency_id, str) or not dependency_id.strip():
         return ({"code": "INFORMATION_BOUNDARY_DEPENDENCY_MISSING"},)
     matching = next(
         (
             item
             for item in planner_input.known_world.unknown_dependencies
-            if _same_unknown_dependency(item, dependency)
+            if item.get("dependency_id") == dependency_id
         ),
         None,
     )
     if matching is None or matching.get("status") != "UNKNOWN" or not matching.get("blocks"):
-        return ({"code": "INFORMATION_BOUNDARY_NOT_RELEVANT", "actual": dependency},)
+        return (
+            {
+                "code": "INFORMATION_BOUNDARY_NOT_RELEVANT",
+                "actual": dependency_id,
+            },
+        )
     resolvers = matching.get("resolvable_by_effect_types")
     resolver_types = (
         {str(item) for item in resolvers}
@@ -3241,13 +3250,20 @@ def _validate_plan_segment_contract(
         else set()
     )
     action_contracts = {item.action_key: item for item in planner_input.action_contracts}
-    scheduled_effects = {
-        str(effect.get("type"))
-        for step in segment.steps
-        if step.action_key in action_contracts
-        for effect in action_contracts[str(step.action_key)].deterministic_effects
-        if isinstance(effect.get("type"), str)
+    target_bindings = {
+        (item.action_key, item.target_key): item for item in planner_input.target_bindings
     }
+    scheduled_effects: set[str] = set()
+    for step in segment.steps:
+        contract = action_contracts.get(str(step.action_key))
+        binding = target_bindings.get((str(step.action_key), str(step.target_key)))
+        for effect in (
+            *(contract.deterministic_effects if contract is not None else ()),
+            *(binding.deterministic_effects if binding is not None else ()),
+        ):
+            effect_type = effect.get("type")
+            if isinstance(effect_type, str):
+                scheduled_effects.add(effect_type)
     if not resolver_types or not resolver_types.intersection(scheduled_effects):
         return (
             {
@@ -3258,22 +3274,6 @@ def _validate_plan_segment_contract(
     if not segment.steps:
         return ({"code": "NO_STEPS", "message": "Information boundary has no steps"},)
     return ()
-
-
-def _same_unknown_dependency(
-    known: dict[str, object], proposed: dict[str, object]
-) -> bool:
-    if known.get("dimension") != proposed.get("dimension"):
-        return False
-    identity_keys = ("resource_key", "subject_key", "fact_key")
-    compared = False
-    for key in identity_keys:
-        if key not in known:
-            continue
-        compared = True
-        if proposed.get(key) != known.get(key):
-            return False
-    return compared
 
 
 def _safe_provider_diagnostic(code: str) -> str:
