@@ -59,6 +59,7 @@ from app.domain.scenario_v2 import (
     ComparisonOperator,
     ConditionV2,
     EffectKind,
+    EffectV2,
     NodeSelectorKind,
     NodeSelectorV2,
     ObjectiveDefinitionV2,
@@ -815,6 +816,15 @@ class GenericAgentService:
                         "target_key": target_key,
                     },
                 )
+            projected_resolution_effects = self._projected_resolution_effects(
+                definition,
+                action,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+                projected_known_relations,
+            )
             try:
                 self._validate_projected_command_reachability(
                     action,
@@ -846,6 +856,7 @@ class GenericAgentService:
                     projected_actor_locations,
                     projected_resource_pools,
                     projected_region_resource_knowledge,
+                    projected_resolution_effects,
                 )
             except GenericAgentError as exc:
                 diagnostic: dict[str, object] = {
@@ -888,6 +899,7 @@ class GenericAgentService:
                 projected_known_facts,
                 projected_known_nodes,
                 projected_known_relations,
+                projected_resolution_effects,
                 projected_command_reachability=projected_command_reachability,
             )
         return ()
@@ -1390,6 +1402,15 @@ class GenericAgentService:
                     }
                 )
                 continue
+            projected_resolution_effects = self._projected_resolution_effects(
+                definition,
+                action,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+                projected_known_relations,
+            )
             try:
                 self._validate_projected_command_reachability(
                     action,
@@ -1421,6 +1442,7 @@ class GenericAgentService:
                     projected_actor_locations,
                     projected_resource_pools,
                     projected_region_resource_knowledge,
+                    projected_resolution_effects,
                 )
             except GenericAgentError as exc:
                 diagnostics.append(
@@ -1535,6 +1557,7 @@ class GenericAgentService:
                 projected_known_facts,
                 projected_known_nodes,
                 projected_known_relations,
+                projected_resolution_effects,
                 projected_command_reachability=projected_command_reachability,
             )
 
@@ -2111,6 +2134,7 @@ class GenericAgentService:
         projected_actor_locations: dict[str, str],
         projected_pools: dict[str, _ProjectedResourcePool],
         projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+        projected_resolution_effects: Sequence[EffectV2],
     ) -> None:
         if action.behavior == ActionBehavior.SURVEY_RESOURCES:
             knowledge = projected_region_knowledge.get(target_key)
@@ -2142,13 +2166,13 @@ class GenericAgentService:
                     pool.visibility = ResourcePoolVisibility.VISIBLE
             self._apply_projected_resource_effects(
                 definition,
-                action,
                 actor_key,
                 target_key,
                 parameters,
                 projected_actor_locations,
                 projected_pools,
                 projected_region_knowledge,
+                projected_resolution_effects,
             )
             return
 
@@ -2185,13 +2209,13 @@ class GenericAgentService:
 
         self._apply_projected_resource_effects(
             definition,
-            action,
             actor_key,
             target_key,
             parameters,
             projected_actor_locations,
             projected_pools,
             projected_region_knowledge,
+            projected_resolution_effects,
         )
 
     def _consume_projected_resource(
@@ -2292,67 +2316,64 @@ class GenericAgentService:
     def _apply_projected_resource_effects(
         self,
         definition: ScenarioDefinitionV2,
-        action: ActionDefinitionV2,
         actor_key: str,
         target_key: str,
         parameters: dict[str, StrictScalar],
         projected_actor_locations: dict[str, str],
         projected_pools: dict[str, _ProjectedResourcePool],
         projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+        projected_resolution_effects: Sequence[EffectV2],
     ) -> None:
         actor_node_key = projected_actor_locations.get(actor_key)
-        for rule in definition.rules:
-            if rule.phase != RulePhase.RESOLVE or rule.action_key != action.key:
-                continue
-            for effect in rule.effects:
-                if effect.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY:
-                    if effect.region_key is not None and effect.visibility is not None:
-                        region = projected_region_knowledge.get(effect.region_key)
-                        if region is not None:
-                            region.visibility = ResourceInventoryVisibility(effect.visibility.value)
-                elif effect.kind == EffectKind.SET_RESOURCE_POOL_VISIBILITY:
-                    if effect.pool_key is not None and effect.visibility is not None:
-                        for pool in projected_pools.values():
-                            if pool.pool_key == effect.pool_key:
-                                pool.visibility = ResourcePoolVisibility(effect.visibility.value)
-                elif effect.kind == EffectKind.SET_RESOURCE_POOL_AVAILABILITY:
-                    if effect.pool_key is not None and effect.availability is not None:
-                        for pool in projected_pools.values():
-                            if pool.pool_key == effect.pool_key:
-                                pool.availability = effect.availability
-                elif effect.kind == EffectKind.ADJUST_RESOURCE:
-                    if (
-                        effect.resource_key is None
-                        or effect.amount is None
-                        or actor_node_key is None
-                    ):
-                        continue
-                    amount = self._projected_integer_effect(effect.amount, parameters)
-                    try:
-                        scope = resolve_resource_scope(
-                            definition,
-                            effect.resource_scope,
-                            actor_current_node_key=actor_node_key,
-                            target_node_key=target_key,
-                        )
-                    except LocalityEngineError as exc:
-                        raise GenericAgentError(exc.code, exc.message) from exc
-                    if amount < 0:
-                        self._consume_projected_resource(
-                            scope,
-                            effect.resource_key,
-                            -amount,
-                            projected_pools,
-                            projected_region_knowledge,
-                            require_known=False,
-                        )
-                    elif amount > 0:
-                        self._add_projected_resource(
-                            scope,
-                            effect.resource_key,
-                            amount,
-                            projected_pools,
-                        )
+        for effect in projected_resolution_effects:
+            if effect.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY:
+                if effect.region_key is not None and effect.visibility is not None:
+                    region = projected_region_knowledge.get(effect.region_key)
+                    if region is not None:
+                        region.visibility = ResourceInventoryVisibility(effect.visibility.value)
+            elif effect.kind == EffectKind.SET_RESOURCE_POOL_VISIBILITY:
+                if effect.pool_key is not None and effect.visibility is not None:
+                    for pool in projected_pools.values():
+                        if pool.pool_key == effect.pool_key:
+                            pool.visibility = ResourcePoolVisibility(effect.visibility.value)
+            elif effect.kind == EffectKind.SET_RESOURCE_POOL_AVAILABILITY:
+                if effect.pool_key is not None and effect.availability is not None:
+                    for pool in projected_pools.values():
+                        if pool.pool_key == effect.pool_key:
+                            pool.availability = effect.availability
+            elif effect.kind == EffectKind.ADJUST_RESOURCE:
+                if (
+                    effect.resource_key is None
+                    or effect.amount is None
+                    or actor_node_key is None
+                ):
+                    continue
+                amount = self._projected_integer_effect(effect.amount, parameters)
+                try:
+                    scope = resolve_resource_scope(
+                        definition,
+                        effect.resource_scope,
+                        actor_current_node_key=actor_node_key,
+                        target_node_key=target_key,
+                    )
+                except LocalityEngineError as exc:
+                    raise GenericAgentError(exc.code, exc.message) from exc
+                if amount < 0:
+                    self._consume_projected_resource(
+                        scope,
+                        effect.resource_key,
+                        -amount,
+                        projected_pools,
+                        projected_region_knowledge,
+                        require_known=False,
+                    )
+                elif amount > 0:
+                    self._add_projected_resource(
+                        scope,
+                        effect.resource_key,
+                        amount,
+                        projected_pools,
+                    )
 
     @staticmethod
     def _projected_integer_effect(expression: object, parameters: dict[str, StrictScalar]) -> int:
@@ -2383,6 +2404,7 @@ class GenericAgentService:
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
+        projected_resolution_effects: Sequence[EffectV2],
         *,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> None:
@@ -2390,8 +2412,8 @@ class GenericAgentService:
             projected_actor_locations[actor_key] = target_key
         GenericAgentService._apply_projected_passability_effect(
             definition,
-            action,
             target_key,
+            projected_resolution_effects,
             projected_known_passability,
         )
         GenericAgentService._apply_projected_fact_effects(
@@ -2400,16 +2422,17 @@ class GenericAgentService:
             actor_key,
             target_key,
             parameters,
+            projected_resolution_effects,
             projected_known_facts,
             projected_known_nodes,
             projected_known_relations,
         )
         if projected_command_reachability is not None:
             GenericAgentService._apply_projected_actor_reachability_effect(
-                definition,
                 action,
                 actor_key,
                 target_key,
+                projected_resolution_effects,
                 projected_command_reachability,
             )
             if action.behavior == ActionBehavior.RELAY_MESSAGE:
@@ -2473,6 +2496,7 @@ class GenericAgentService:
         actor_key: str,
         target_key: str,
         parameters: dict[str, StrictScalar],
+        projected_resolution_effects: Sequence[EffectV2],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
@@ -2489,52 +2513,37 @@ class GenericAgentService:
         fact_visibility: dict[tuple[str, str], set[Visibility]] = {}
         node_visibility: dict[str, set[Visibility]] = {}
         relation_visibility: dict[str, set[RelationVisibility]] = {}
-        rules = [
-            rule
-            for rule in definition.rules
-            if rule.phase == RulePhase.RESOLVE and rule.action_key == action.key
-        ]
-        projected_rules = GenericAgentService._projected_resolution_rules(
-            definition,
-            rules,
-            target_key,
-            parameters,
-            projected_known_facts,
-            projected_known_nodes,
-            projected_known_relations,
-        )
-        for rule in projected_rules:
-            for effect in rule.effects:
-                node_key = GenericAgentService._projected_effect_node_key(
-                    effect.node,
-                    target_key,
-                    parameters,
-                )
-                if effect.kind == EffectKind.SET_FACT and node_key is not None:
-                    value = GenericAgentService._projected_value(effect.value, parameters)
-                    if value is not None and effect.fact_key is not None:
-                        fact_values.setdefault((node_key, effect.fact_key), set()).add(value)
-                elif effect.kind in {EffectKind.REVEAL_FACT, EffectKind.HIDE_FACT} and node_key:
-                    if effect.fact_key is not None:
-                        fact_visibility.setdefault((node_key, effect.fact_key), set()).add(
-                            Visibility.KNOWN
-                            if effect.kind == EffectKind.REVEAL_FACT
-                            else Visibility.HIDDEN
-                        )
-                elif effect.kind in {EffectKind.REVEAL_NODE, EffectKind.HIDE_NODE} and node_key:
-                    node_visibility.setdefault(node_key, set()).add(
+        for effect in projected_resolution_effects:
+            node_key = GenericAgentService._projected_effect_node_key(
+                effect.node,
+                target_key,
+                parameters,
+            )
+            if effect.kind == EffectKind.SET_FACT and node_key is not None:
+                value = GenericAgentService._projected_value(effect.value, parameters)
+                if value is not None and effect.fact_key is not None:
+                    fact_values.setdefault((node_key, effect.fact_key), set()).add(value)
+            elif effect.kind in {EffectKind.REVEAL_FACT, EffectKind.HIDE_FACT} and node_key:
+                if effect.fact_key is not None:
+                    fact_visibility.setdefault((node_key, effect.fact_key), set()).add(
                         Visibility.KNOWN
-                        if effect.kind == EffectKind.REVEAL_NODE
+                        if effect.kind == EffectKind.REVEAL_FACT
                         else Visibility.HIDDEN
                     )
-                elif (
-                    effect.kind == EffectKind.SET_RELATION_VISIBILITY
-                    and effect.relation_key is not None
-                    and effect.visibility is not None
-                ):
-                    relation_visibility.setdefault(effect.relation_key, set()).add(
-                        RelationVisibility(effect.visibility.value)
-                    )
+            elif effect.kind in {EffectKind.REVEAL_NODE, EffectKind.HIDE_NODE} and node_key:
+                node_visibility.setdefault(node_key, set()).add(
+                    Visibility.KNOWN
+                    if effect.kind == EffectKind.REVEAL_NODE
+                    else Visibility.HIDDEN
+                )
+            elif (
+                effect.kind == EffectKind.SET_RELATION_VISIBILITY
+                and effect.relation_key is not None
+                and effect.visibility is not None
+            ):
+                relation_visibility.setdefault(effect.relation_key, set()).add(
+                    RelationVisibility(effect.visibility.value)
+                )
 
         for identity, fact_value_options in fact_values.items():
             if len(fact_value_options) != 1:
@@ -2591,11 +2600,60 @@ class GenericAgentService:
         if not known_true:
             return [item[0] for item in potential]
         highest_true_priority = max(item[0].priority for item in known_true)
-        if any(
-            status is None and rule.priority >= highest_true_priority for rule, status in potential
-        ):
-            return [item[0] for item in potential]
-        return [rule for rule, status in known_true if rule.priority == highest_true_priority]
+        highest_known_winners = [
+            rule for rule, status in known_true if rule.priority == highest_true_priority
+        ]
+        possible_unknown_winners = [
+            rule
+            for rule, status in potential
+            if status is None and rule.priority >= highest_true_priority
+        ]
+        return [*highest_known_winners, *possible_unknown_winners]
+
+    @classmethod
+    def _projected_resolution_effects(
+        cls,
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+        projected_known_relations: set[str],
+    ) -> tuple[EffectV2, ...]:
+        """Return effects certain across all possible winning resolution rules."""
+
+        rules = [
+            rule
+            for rule in definition.rules
+            if rule.phase == RulePhase.RESOLVE and rule.action_key == action.key
+        ]
+        projected_rules = cls._projected_resolution_rules(
+            definition,
+            rules,
+            target_key,
+            parameters,
+            projected_known_facts,
+            projected_known_nodes,
+            projected_known_relations,
+        )
+        if not projected_rules:
+            return ()
+        if len(projected_rules) == 1:
+            return projected_rules[0].effects
+
+        identities_by_rule = [
+            {effect.model_dump_json() for effect in rule.effects} for rule in projected_rules
+        ]
+        common_identities = set.intersection(*identities_by_rule)
+        result: list[EffectV2] = []
+        seen: set[str] = set()
+        for effect in projected_rules[0].effects:
+            identity = effect.model_dump_json()
+            if identity in common_identities and identity not in seen:
+                result.append(effect)
+                seen.add(identity)
+        return tuple(result)
 
     @staticmethod
     def _projected_effect_node_key(
@@ -2631,51 +2689,45 @@ class GenericAgentService:
     @staticmethod
     def _apply_projected_passability_effect(
         definition: ScenarioDefinitionV2,
-        action: ActionDefinitionV2,
         target_key: str,
+        projected_resolution_effects: Sequence[EffectV2],
         projected_known_passability: dict[str, bool],
     ) -> None:
         fact_key = definition.metadata.locality.passability_fact_key
         if fact_key is None:
             return
         values: set[bool] = set()
-        for rule in definition.rules:
-            if rule.phase != RulePhase.RESOLVE or rule.action_key != action.key:
-                continue
-            for effect in rule.effects:
-                if (
-                    effect.kind == EffectKind.SET_FACT
-                    and effect.node is not None
-                    and effect.node.kind == NodeSelectorKind.CURRENT_TARGET
-                    and effect.fact_key == fact_key
-                    and effect.value is not None
-                    and effect.value.source == ValueSource.LITERAL
-                    and isinstance(effect.value.literal, bool)
-                ):
-                    values.add(effect.value.literal)
+        for effect in projected_resolution_effects:
+            if (
+                effect.kind == EffectKind.SET_FACT
+                and effect.node is not None
+                and effect.node.kind == NodeSelectorKind.CURRENT_TARGET
+                and effect.fact_key == fact_key
+                and effect.value is not None
+                and effect.value.source == ValueSource.LITERAL
+                and isinstance(effect.value.literal, bool)
+            ):
+                values.add(effect.value.literal)
         if len(values) == 1:
             projected_known_passability[target_key] = values.pop()
 
     @staticmethod
     def _apply_projected_actor_reachability_effect(
-        definition: ScenarioDefinitionV2,
         action: ActionDefinitionV2,
         actor_key: str,
         target_key: str,
+        projected_resolution_effects: Sequence[EffectV2],
         projected_command_reachability: dict[str, CommandReachability],
     ) -> None:
-        for rule in definition.rules:
-            if rule.phase != RulePhase.RESOLVE or rule.action_key != action.key:
-                continue
-            for effect in rule.effects:
-                if (
-                    effect.kind == EffectKind.SET_ACTOR_COMMAND_REACHABILITY
-                    and effect.command_reachability is not None
-                ):
-                    recipient = effect.actor_key or (
-                        target_key if action.target_kind == ActionTargetKind.ACTOR else actor_key
-                    )
-                    projected_command_reachability[recipient] = effect.command_reachability
+        for effect in projected_resolution_effects:
+            if (
+                effect.kind == EffectKind.SET_ACTOR_COMMAND_REACHABILITY
+                and effect.command_reachability is not None
+            ):
+                recipient = effect.actor_key or (
+                    target_key if action.target_kind == ActionTargetKind.ACTOR else actor_key
+                )
+                projected_command_reachability[recipient] = effect.command_reachability
 
     def _record_provider_plan_call(
         self,

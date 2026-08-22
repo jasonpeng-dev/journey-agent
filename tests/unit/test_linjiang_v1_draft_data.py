@@ -16,7 +16,11 @@ from app.agent.planner_contract import (
 )
 from app.agent.planning_context import PlanningContextBuilder
 from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
-from app.domain.enums import CommandReachability
+from app.domain.enums import (
+    CommandReachability,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
+)
 from app.domain.resources import resource_state_key
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.world import AccessState, Visibility
@@ -660,6 +664,165 @@ def test_linjiang_v10_unknown_resource_quantity_is_not_known_insufficient(
     assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
 
 
+def test_linjiang_v10_projected_repair_applies_selected_target_cost_once(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-selected-target-cost")
+    communications = session.get(
+        GameInstanceActor,
+        (runtime.instance.id, "communications_repair_team_alpha"),
+    )
+    known_parts = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            resource_state_key(
+                "general_engineering_parts",
+                "central_district",
+                "central_general_stock",
+            ),
+        ),
+    )
+    assert communications is not None
+    assert known_parts is not None
+    communications.current_node_key = "central_district"
+    communications.command_reachability = "ONLINE"
+    known_parts.value = 15
+    session.add(
+        GameInstanceResourceState(
+            game_instance_id=runtime.instance.id,
+            resource_identity=resource_state_key(
+                "communication_equipment",
+                "central_district",
+                "test_central_communication_stock",
+            ),
+            resource_key="communication_equipment",
+            scope_node_key="central_district",
+            pool_key="test_central_communication_stock",
+            value=10,
+            reserved_value=0,
+            visibility=ResourcePoolVisibility.VISIBLE,
+            availability=ResourcePoolAvailability.AVAILABLE,
+            survey_discoverable=False,
+        )
+    )
+    session.flush()
+    provider = _RepeatingPlanProvider(
+        (
+            PlanStepProposal(
+                step_id="repair-central",
+                purpose="Repair Central communications.",
+                action_key="repair_communications",
+                actor_key="communications_repair_team_alpha",
+                target_key="central_telecom_hub",
+            ),
+        )
+    )
+
+    task = GenericAgentService(session, scope, provider=provider).create_task(
+        runtime.session,
+        "restore_central_communication_capability",
+    )
+
+    assert task.current_plan_version == 1
+    assert len(provider.requests) == 1
+
+
+def test_linjiang_v10_projected_repair_does_not_leak_cross_target_reachability(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-target-reachability")
+    agent = GenericAgentService(session, scope)
+    definition = agent._definition()
+    action = next(item for item in definition.actions if item.key == "repair_communications")
+    facts = agent._known_fact_projection()
+    nodes = agent._known_node_keys()
+    relations = agent._known_relation_keys(definition)
+    effects = agent._projected_resolution_effects(
+        definition,
+        action,
+        "central_telecom_hub",
+        {},
+        facts,
+        nodes,
+        relations,
+    )
+    reachability = {
+        actor.actor_key: CommandReachability(actor.command_reachability)
+        for actor in session.scalars(
+            select(GameInstanceActor).where(
+                GameInstanceActor.game_instance_id == runtime.instance.id
+            )
+        )
+    }
+    industrial_before = reachability["industrial_repair_team_alpha"]
+
+    agent._apply_projected_actor_reachability_effect(
+        action,
+        "communications_repair_team_alpha",
+        "central_telecom_hub",
+        effects,
+        reachability,
+    )
+
+    assert reachability["communications_repair_team_alpha"] == CommandReachability.ONLINE
+    assert reachability["industrial_repair_team_alpha"] == industrial_before
+
+
+def test_projected_ambiguous_rules_apply_only_common_effects_once(
+    session: Session,
+) -> None:
+    _runtime, scope = _v10_runtime(session, "linjiang-v10-ambiguous-effects")
+    agent = GenericAgentService(session, scope)
+    definition = agent._definition()
+    action = next(item for item in definition.actions if item.key == "repair_communications")
+    facts = agent._known_fact_projection()
+    nodes = agent._known_node_keys()
+    relations = agent._known_relation_keys(definition)
+    profile = facts[("central_telecom_hub", "repair_profile")]
+    profile.visibility = Visibility.HIDDEN
+
+    effects = agent._projected_resolution_effects(
+        definition,
+        action,
+        "central_telecom_hub",
+        {},
+        facts,
+        nodes,
+        relations,
+    )
+    effect_payloads = [item.model_dump(mode="json") for item in effects]
+    resource_effects = [
+        item for item in effect_payloads if item["kind"] == "ADJUST_RESOURCE"
+    ]
+    reachability_effects = [
+        item
+        for item in effect_payloads
+        if item["kind"] == "SET_ACTOR_COMMAND_REACHABILITY"
+    ]
+
+    assert [(item["resource_key"], item["amount"]["literal"]) for item in resource_effects] == [
+        ("communication_equipment", -10),
+        ("general_engineering_parts", -15),
+    ]
+    assert reachability_effects == []
+    assert facts[("central_telecom_hub", "operational")].value is False
+
+    agent._apply_projected_fact_effects(
+        definition,
+        action,
+        "communications_repair_team_alpha",
+        "central_telecom_hub",
+        {},
+        effects,
+        facts,
+        nodes,
+        relations,
+    )
+
+    assert facts[("central_telecom_hub", "operational")].value is True
+
+
 def test_linjiang_v10_all_regions_have_the_generic_travel_target_contract() -> None:
     definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
     regions = {node.key: node for node in definition.world.nodes if node.node_type_key == "region"}
@@ -815,6 +978,15 @@ def test_linjiang_v10_relay_recovery_path_is_sequentially_validated(
             actors=actors,
             projected_command_reachability=projected_reachability,
         )
+        projected_effects = agent._projected_resolution_effects(
+            definition,
+            action,
+            target_key,
+            {},
+            projected_facts,
+            projected_nodes,
+            projected_relations,
+        )
         agent._advance_projected_action_state(
             definition,
             action,
@@ -826,6 +998,7 @@ def test_linjiang_v10_relay_recovery_path_is_sequentially_validated(
             projected_facts,
             projected_nodes,
             projected_relations,
+            projected_effects,
             projected_command_reachability=projected_reachability,
         )
 
