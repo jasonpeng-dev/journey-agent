@@ -560,7 +560,10 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         "REPAIR",
         "REPAIR",
     ]
-    assert provider.plan_requests[1].repair_diagnostics == (
+    assert tuple(
+        item.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+        for item in provider.plan_requests[1].repair_diagnostics
+    ) == (
         {
             "code": "UNKNOWN_CANDIDATE",
             "candidate_id": "candidate_invented",
@@ -571,7 +574,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert provider.plan_requests[1].rejected_segment["steps"][0]["step_id"] == (
         unknown[0].step_id
     )
-    assert provider.plan_requests[2].repair_diagnostics[0]["code"] == "PARAMETER_INVALID"
+    assert provider.plan_requests[2].repair_diagnostics[0].code == "PARAMETER_INVALID"
     diagnostic_text = str(provider.plan_requests[1].repair_diagnostics)
     assert "truth" not in diagnostic_text.casefold()
     assert "ambush" not in diagnostic_text.casefold()
@@ -614,7 +617,7 @@ def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     assert submission.task is not None
     _start_initial_plan(orchestrator, submission.task)
     assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN", "REPAIR"]
-    assert provider.plan_requests[1].repair_diagnostics[0]["code"] == "PLAN_ORDER_INVALID"
+    assert provider.plan_requests[1].repair_diagnostics[0].code == "PLAN_ORDER_INVALID"
 
 
 def test_empty_planning_catalog_is_unreachable_without_provider_fallback(

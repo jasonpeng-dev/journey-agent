@@ -343,7 +343,7 @@ def test_sequential_plan_locality_uses_projected_location_and_rejects_same_regio
     assert len(provider.requests) == 3
     assert provider.requests[1].call_type == "REPAIR"
     assert any(
-        diagnostic["code"] == "LOCALITY_INVALID"
+        diagnostic.code == "LOCALITY_INVALID"
         for diagnostic in provider.requests[1].repair_diagnostics
     )
     repair_request = provider.requests[1]
@@ -352,15 +352,16 @@ def test_sequential_plan_locality_uses_projected_location_and_rejects_same_regio
     assert all(step["step_id"] for step in rejected_steps)
     rejected_ids = {step["step_id"] for step in rejected_steps}
     assert all(
-        violation.get("step_id") in rejected_ids
+        violation.step_id in rejected_ids
         for violation in repair_request.repair_diagnostics
-        if violation.get("step_id") is not None
+        if violation.step_id is not None
     )
     locality = next(
-        item for item in repair_request.repair_diagnostics if item["code"] == "LOCALITY_INVALID"
+        item for item in repair_request.repair_diagnostics if item.code == "LOCALITY_INVALID"
     )
-    assert locality["required"] == "ONE_HOP_DIFFERENT_REGION"
-    assert locality["actual"]["actor_region"] == locality["actual"]["target_region"]
+    assert locality.required == "ONE_HOP_DIFFERENT_REGION"
+    assert isinstance(locality.actual, dict)
+    assert locality.actual["actor_region"] == locality.actual["target_region"]
     assert "known_recovery_effects" not in json.dumps(
         repair_request.provider_payload(), ensure_ascii=False
     )
@@ -394,7 +395,7 @@ def test_known_blocked_connector_is_rejected_without_reading_hidden_truth(sessio
             "restore central hospital emergency power",
         )
     assert any(
-        diagnostic["code"] == "KNOWN_TRANSPORT_BLOCKED"
+        diagnostic.code == "KNOWN_TRANSPORT_BLOCKED"
         for diagnostic in provider.requests[1].repair_diagnostics
     )
 

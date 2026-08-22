@@ -580,7 +580,7 @@ def test_linjiang_v10_completed_survey_repair_diagnostic_is_typed(
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
-    assert diagnostic == {
+    assert diagnostic.model_dump(mode="json", exclude_none=True, exclude_defaults=True) == {
         "code": "PROPOSAL_INVALID",
         "step_id": "survey-central",
         "failure_code": "RESOURCE_SURVEY_ALREADY_COMPLETED",
@@ -622,7 +622,7 @@ def test_linjiang_v10_known_resource_deficit_repair_diagnostic_is_typed(
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
-    assert diagnostic == {
+    assert diagnostic.model_dump(mode="json", exclude_none=True, exclude_defaults=True) == {
         "code": "PROPOSAL_INVALID",
         "step_id": "repair-central",
         "failure_code": "KNOWN_RESOURCE_INSUFFICIENT",

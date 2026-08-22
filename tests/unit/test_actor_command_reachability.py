@@ -305,9 +305,9 @@ def test_plan_projection_rejects_ordinary_action_before_relay(session: Session) 
 
     assert error.value.code == "MODEL_PLAN_REJECTED"
     diagnostic = provider.requests[1].repair_diagnostics[0]
-    assert diagnostic["code"] == "ACTOR_COMMAND_DISCONNECTED"
-    assert diagnostic["step_id"]
-    assert diagnostic["dimension"] == "COMMAND_REACHABILITY"
-    assert diagnostic["required"] == "ONLINE"
-    assert diagnostic["actual"]["command_reachability"] == "DISCONNECTED"
-    assert "known_recovery_effects" not in diagnostic
+    assert diagnostic.code == "ACTOR_COMMAND_DISCONNECTED"
+    assert diagnostic.step_id
+    assert diagnostic.dimension == "COMMAND_REACHABILITY"
+    assert diagnostic.required == "ONLINE"
+    assert diagnostic.actual == {"command_reachability": "DISCONNECTED"}
+    assert "known_recovery_effects" not in diagnostic.model_dump()

@@ -22,6 +22,7 @@ from app.agent.provider import (
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
+    PlanViolation,
 )
 from app.core.config import Settings
 from app.domain.enums import AgentPlanStatus
@@ -504,13 +505,13 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
                     "steps": [{"step_id": "step-1"}],
                 },
                 "repair_diagnostics": (
-                    {
-                        "code": "LOCALITY_INVALID",
-                        "step_id": "step-1",
-                        "dimension": "LOCALITY",
-                        "required": "SAME_REGION",
-                        "actual": {"actor_region": "region-a"},
-                    },
+                    PlanViolation(
+                        code="LOCALITY_INVALID",
+                        step_id="step-1",
+                        dimension="LOCALITY",
+                        required="SAME_REGION",
+                        actual={"actor_region": "region-a"},
+                    ),
                 ),
             }
         ).provider_payload(),

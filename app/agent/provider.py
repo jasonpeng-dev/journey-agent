@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import httpx
 import structlog
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from app.core.config import Settings
 from app.domain.scenario_v2 import StrictScalar
@@ -180,6 +180,55 @@ class PlanStepProposal(ProviderModel):
         return self
 
 
+class PlanViolation(ProviderModel):
+    """Canonical, knowledge-safe Validator rejection sent to REPAIR."""
+
+    code: str = Field(min_length=1)
+    failure_code: str | None = None
+    dimension: str | None = None
+    step_id: str | None = None
+    sequence: int | None = None
+
+    action_key: str | None = None
+    actor_key: str | None = None
+    target_key: str | None = None
+
+    required: JsonValue | None = None
+    actual: JsonValue | None = None
+    reason_code: str | None = None
+    message: str | None = None
+
+    required_interaction_key: str | None = None
+    actual_interactions: tuple[str, ...] = ()
+
+    transport_key: str | None = None
+    source_region: str | None = None
+    target_region: str | None = None
+
+    resource_key: str | None = None
+    scope_region: str | None = None
+    required_amount: int | None = None
+    projected_known_available_amount: int | None = None
+    deficit: int | None = None
+
+    parameter_key: str | None = None
+    parameter_error: str | None = None
+    validation_error: str | None = None
+    actual_parameters: dict[str, JsonValue] | None = None
+
+    cascade_from_step_id: str | None = None
+    blocking_condition: dict[str, JsonValue] | None = None
+    known_predicate: dict[str, JsonValue] | None = None
+
+    action_keys: tuple[str, ...] = ()
+    step_ids: tuple[str, ...] = ()
+    candidate_id: str | None = None
+    dependency_id: str | None = None
+    required_effect_types: tuple[str, ...] = ()
+    missing_prior_public_requirements: tuple[dict[str, JsonValue], ...] = ()
+    missing_public_requirements: tuple[dict[str, JsonValue], ...] = ()
+
+
 class PlanRequest(ProviderModel):
     call_type: Literal["INITIAL_PLAN", "REPLAN", "REPAIR"]
     goal: str = ""
@@ -194,7 +243,15 @@ class PlanRequest(ProviderModel):
     planner_input: PlannerInput | None = None
     rejected_segment: dict[str, object] | None = None
     repair_attempt: int = 0
-    repair_diagnostics: tuple[dict[str, object], ...] = ()
+    repair_diagnostics: tuple[PlanViolation, ...] = ()
+
+    def _violation_payloads(self) -> list[dict[str, JsonValue]]:
+        return [
+            PlanViolation.model_validate(violation).model_dump(
+                mode="json", exclude_none=True, exclude_defaults=True
+            )
+            for violation in self.repair_diagnostics
+        ]
 
     def provider_payload(self) -> dict[str, object]:
         """Return the canonical V2 provider input when available.
@@ -217,7 +274,7 @@ class PlanRequest(ProviderModel):
             if self.call_type == "REPAIR" and self.rejected_segment is not None:
                 payload["rejected_segment"] = self.rejected_segment
             if self.repair_diagnostics:
-                payload["validator_violations"] = list(self.repair_diagnostics)
+                payload["validator_violations"] = self._violation_payloads()
             return payload
         if self.planning_context is not None:
             payload = {
@@ -230,7 +287,7 @@ class PlanRequest(ProviderModel):
             if self.call_type == "REPAIR" or self.repair_attempt != 0:
                 payload["repair_attempt"] = self.repair_attempt
             if self.repair_diagnostics:
-                payload["repair_diagnostics"] = list(self.repair_diagnostics)
+                payload["repair_diagnostics"] = self._violation_payloads()
             return payload
         return self.model_dump(mode="json")
 
@@ -1016,6 +1073,7 @@ __all__ = [
     "PlanRequest",
     "PlanSegment",
     "PlanStepProposal",
+    "PlanViolation",
     "PlannerActionContract",
     "PlannerActorState",
     "PlannerInput",
