@@ -488,6 +488,30 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
         "survey_resources",
         "travel",
     }, closure.relevance_reason
+    assert all(
+        set(actor["allowed_action_keys"]).issubset(action_keys)
+        for actor in payload["actors"]
+    )
+    assert actors["logistics_team_alpha"]["allowed_action_keys"] == [
+        "relay_message",
+        "survey_resources",
+        "travel",
+    ]
+    runtime_logistics = session.get(
+        GameInstanceActor,
+        (scope.game_instance_id, "logistics_team_alpha"),
+    )
+    assert runtime_logistics is not None
+    assert "inspect" in runtime_logistics.allowed_action_keys
+    assert "transport_resource" in runtime_logistics.allowed_action_keys
+    canonical_actors = payload["actors"]
+    for call_type in ("INITIAL_PLAN", "REPLAN", "REPAIR"):
+        request_payload = PlanRequest(
+            call_type=call_type,
+            planner_input=planner_input,
+            repair_attempt=1 if call_type == "REPAIR" else 0,
+        ).provider_payload()
+        assert request_payload["planner_input"]["actors"] == canonical_actors
     assert any(
         item.get("dimension") == "TRANSPORT_PASSABILITY"
         and item.get("status") == "UNKNOWN"
@@ -576,6 +600,13 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     assert "clear_transport" in {
         item.action_key for item in replanned.planner_input.action_contracts
     }
+    replanned_action_keys = {
+        item.action_key for item in replanned.planner_input.action_contracts
+    }
+    assert all(
+        set(actor.allowed_action_keys).issubset(replanned_action_keys)
+        for actor in replanned.planner_input.actors
+    )
 
 
 def test_linjiang_v10_completed_survey_repair_diagnostic_is_typed(

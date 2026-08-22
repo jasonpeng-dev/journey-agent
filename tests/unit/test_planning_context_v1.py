@@ -5,6 +5,7 @@ import httpx
 from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
+from app.agent.dependency_closure import _scope_actor_actions_to_contracts
 from app.agent.generic import (
     GenericAgentService,
     PlanningActionCatalogBuilder,
@@ -100,6 +101,37 @@ def _runtime(session: Session):  # type: ignore[no-untyped-def]
     )
     scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
     return runtime, scope
+
+
+def test_planner_actor_actions_are_scoped_without_mutating_global_permissions() -> None:
+    actor = PlannerActorState(
+        actor_key="logistics",
+        role_key="logistics_team",
+        capabilities=("EXECUTE_ACTION", "LOGISTICS"),
+        allowed_action_keys=(
+            "inspect",
+            "survey_resources",
+            "transport_resource",
+            "travel",
+        ),
+        availability="ACTIVE",
+        current_region="central",
+        command_reachability="ONLINE",
+    )
+    contracts = (
+        PlannerActionContract(action_key="survey_resources"),
+        PlannerActionContract(action_key="travel"),
+    )
+
+    projected = _scope_actor_actions_to_contracts((actor,), contracts)
+
+    assert projected[0].allowed_action_keys == ("survey_resources", "travel")
+    assert actor.allowed_action_keys == (
+        "inspect",
+        "survey_resources",
+        "transport_resource",
+        "travel",
+    )
 
 
 def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) -> None:

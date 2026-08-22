@@ -7,7 +7,12 @@ import json
 from collections import deque
 from dataclasses import dataclass
 
-from app.agent.provider import PlannerInput, PlannerKnownWorldSlice
+from app.agent.provider import (
+    PlannerActionContract,
+    PlannerActorState,
+    PlannerInput,
+    PlannerKnownWorldSlice,
+)
 from app.domain.scenario_v2 import ObjectiveDefinitionV2, ScenarioDefinitionV2
 
 
@@ -27,6 +32,27 @@ class TypedDependency:
 class DependencyClosureResult:
     planner_input: PlannerInput
     relevance_reason: dict[str, tuple[dict[str, object], ...]]
+
+
+def _scope_actor_actions_to_contracts(
+    actors: tuple[PlannerActorState, ...],
+    action_contracts: tuple[PlannerActionContract, ...],
+) -> tuple[PlannerActorState, ...]:
+    """Project global Actor permissions onto the exposed closure vocabulary."""
+
+    exposed_action_keys = {item.action_key for item in action_contracts}
+    return tuple(
+        actor.model_copy(
+            update={
+                "allowed_action_keys": tuple(
+                    action_key
+                    for action_key in actor.allowed_action_keys
+                    if action_key in exposed_action_keys
+                )
+            }
+        )
+        for actor in actors
+    )
 
 
 def build_dependency_closure(
@@ -310,16 +336,19 @@ def build_dependency_closure(
         relevant_resources,
         tuple(unknowns.values()),
     )
+    sliced_action_contracts = tuple(
+        item for item in planner_input.action_contracts if item.action_key in selected_actions
+    )
+    selected_actors = tuple(
+        item for item in planner_input.actors if item.actor_key in selected_actor_keys
+    )
     sliced = planner_input.model_copy(
         update={
-            "actors": tuple(
-                item for item in planner_input.actors if item.actor_key in selected_actor_keys
+            "actors": _scope_actor_actions_to_contracts(
+                selected_actors,
+                sliced_action_contracts,
             ),
-            "action_contracts": tuple(
-                item
-                for item in planner_input.action_contracts
-                if item.action_key in selected_actions
-            ),
+            "action_contracts": sliced_action_contracts,
             "target_bindings": tuple(
                 item
                 for item in planner_input.target_bindings
