@@ -190,6 +190,10 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     assert calls[-1]["call_type"] == "INITIAL_PLAN"
     assert calls[-1]["started_at"]
     assert calls[-1]["finished_at"]
+    assert calls[-1]["provider_payload"]["call_type"] == "INITIAL_PLAN"
+    assert "planner_input" in calls[-1]["provider_payload"]
+    assert calls[-1]["proposal_stop_reason"] == "OBJECTIVE_COMPLETION"
+    assert calls[-1]["validator_violations"] == []
     catalog = {item.action_key: item for item in provider.plan_requests[0].planning_action_catalog}
     assert catalog["diagnose_patient"].currently_executable is True
     assert catalog["treat_patient"].currently_executable is False
@@ -578,6 +582,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert provider.plan_requests[1].rejected_segment["steps"][0]["step_id"] == (
         unknown[0].step_id
     )
+    assert provider.plan_requests[1].anti_regression_memory == ()
     parameter_diagnostic = provider.plan_requests[2].repair_diagnostics[0]
     assert parameter_diagnostic.code == "PARAMETER_INVALID"
     assert parameter_diagnostic.failure_code == "GENERIC_PLAN_PARAMETER_INVALID"
@@ -588,6 +593,13 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert parameter_diagnostic.target_key == "patient_one"
     assert parameter_diagnostic.actual_parameters == {"dosage": 99}
     assert parameter_diagnostic.validation_error
+    assert len(provider.plan_requests[2].anti_regression_memory) == 1
+    historical = provider.plan_requests[2].anti_regression_memory[0]
+    assert historical.code == "UNKNOWN_CANDIDATE"
+    assert historical.step_id is None
+    assert historical.first_seen_attempt == 0
+    assert historical.last_seen_attempt == 0
+    assert historical.seen_count == 1
     diagnostic_text = str(provider.plan_requests[1].repair_diagnostics)
     assert "truth" not in diagnostic_text.casefold()
     assert "ambush" not in diagnostic_text.casefold()
@@ -610,6 +622,42 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert rejected.task.status.value == "BLOCKED"
     assert rejected.task.last_error_code == "MODEL_PLAN_REJECTED"
     assert len(rejected_provider.plan_requests) == 3
+    assert rejected_provider.plan_requests[1].anti_regression_memory == ()
+
+
+def test_provider_repair_attempt_limit_comes_from_settings(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert Settings(_env_file=None).model_max_repair_attempts_per_cycle == 2
+    unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
+    provider = RecordingProvider(
+        proposals=[unknown, unknown, unknown, unknown, _medical_plan()]
+    )
+    monkeypatch.setattr(
+        "app.services.composition.build_generic_provider", lambda _settings: provider
+    )
+    runtime, _scope = _runtime(session, MEDICAL_EMERGENCY_V2)
+    settings = _settings("openai_compatible").model_copy(
+        update={"model_max_repair_attempts_per_cycle": 4}
+    )
+    orchestrator = configured_play_orchestrator(
+        session, GameInstanceId(runtime.instance.id), settings
+    )
+
+    submission = orchestrator.submit_goal(
+        "stabilize the patient", idempotency_key=str(uuid4())
+    )
+
+    assert submission.task is not None
+    _start_initial_plan(orchestrator, submission.task)
+    assert [request.call_type for request in provider.plan_requests] == [
+        "INITIAL_PLAN",
+        "REPAIR",
+        "REPAIR",
+        "REPAIR",
+        "REPAIR",
+    ]
+    assert submission.task.status.value == "ACTIVE"
 
 
 def test_plan_order_repair_accepts_future_step_after_public_prerequisite(

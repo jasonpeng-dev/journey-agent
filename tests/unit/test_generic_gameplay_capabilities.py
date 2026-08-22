@@ -624,7 +624,7 @@ def test_supply_power_generation_qualification_is_declarative(session: Session) 
     assert target is not None and target.truth_value == "AVAILABLE"
 
 
-def test_supply_power_unknown_requirement_is_not_rejected_but_runtime_enforces_truth(
+def test_supply_power_wrong_target_is_rejected_by_target_specific_coverage(
     session: Session,
 ) -> None:
     steps = (
@@ -658,22 +658,20 @@ def test_supply_power_unknown_requirement_is_not_rejected_but_runtime_enforces_t
         for item in hidden_requirements["supply_power"]["known_preconditions"]
     )
 
-    task = agent.create_task(
-        _session_for_agent(session, runtime), "restore central hospital emergency power"
-    )
-    assert task.status == AgentTaskStatus.ACTIVE
-    with pytest.raises(GenericActionError) as error:
-        GenericActionService(session, agent.scope).execute_action(
-            actor_key="electrical_team_beta",
-            action_key="supply_power",
-            target_key="central_telecom_hub",
-            parameters={"source_key": "central_hospital"},
-            idempotency_key="hidden-power-source",
+    with pytest.raises(GenericAgentError) as error:
+        agent.create_task(
+            _session_for_agent(session, runtime), "restore central hospital emergency power"
         )
-    assert error.value.code == "POWER_SOURCE_UNAVAILABLE"
+    assert error.value.code == "MODEL_PLAN_REJECTED"
+    assert isinstance(agent.provider, _CapabilityProvider)
+    diagnostic = agent.provider.requests[1].repair_diagnostics[0]
+    assert diagnostic.code == "OBJECTIVE_COVERAGE_INCOMPLETE"
+    assert diagnostic.missing_public_requirements == (
+        {"node_key": "central_fire_rescue_station", "fact_key": "power_supply"},
+    )
 
 
-def test_heavy_support_and_specialist_repair_are_sequential_and_role_restricted(
+def test_heavy_support_and_specialist_repair_wrong_objective_target_is_rejected(
     session: Session,
 ) -> None:
     steps = (
@@ -689,28 +687,17 @@ def test_heavy_support_and_specialist_repair_are_sequential_and_role_restricted(
         ),
     )
     agent, runtime, _definition_value = _runtime(session, "generic-heavy", steps=steps)
-    task = agent.create_task(
-        _session_for_agent(session, runtime), "restore central hospital emergency power"
-    )
-
-    first = agent.execute_next(task)
-    second = agent.execute_next(task)
-    assert first is not None and second is not None
-    support = session.get(
-        GameInstanceFactState,
-        (runtime.instance.id, "central_fire_rescue_station", "heavy_engineering_support_ready"),
-    )
-    assert support is not None and support.truth_value is True
-
-    with pytest.raises(GenericActionError) as error:
-        GenericActionService(session, agent.scope).execute_action(
-            actor_key="industrial_team",
-            action_key="repair_supported_facility",
-            target_key="central_fire_rescue_station",
-            parameters={},
-            idempotency_key="wrong-specialist-role",
+    with pytest.raises(GenericAgentError) as error:
+        agent.create_task(
+            _session_for_agent(session, runtime), "restore central hospital emergency power"
         )
-    assert error.value.code == "ACTOR_ROLE_MISSING"
+    assert error.value.code == "MODEL_PLAN_REJECTED"
+    assert isinstance(agent.provider, _CapabilityProvider)
+    diagnostic = agent.provider.requests[1].repair_diagnostics[0]
+    assert diagnostic.code == "OBJECTIVE_COVERAGE_INCOMPLETE"
+    assert diagnostic.missing_public_requirements == (
+        {"node_key": "central_fire_rescue_station", "fact_key": "power_supply"},
+    )
 
 
 def test_heavy_support_accepts_transport_corridor_target_with_generic_locality(

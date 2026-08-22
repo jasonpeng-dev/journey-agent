@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentError, GenericAgentService
@@ -11,7 +12,12 @@ from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import CommandReachability
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
-from app.infrastructure.db.models import GameInstanceActor, Player
+from app.infrastructure.db.models import (
+    GameInstanceActor,
+    GameInstanceRegionResourceKnowledge,
+    GameInstanceResourceState,
+    Player,
+)
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
@@ -263,6 +269,25 @@ def test_plan_projection_allows_relay_then_disconnected_actor_action(
     session: Session,
 ) -> None:
     runtime, scope, _definition = _runtime(session)
+    # This test exercises projected command reachability.  Make the repair
+    # resource explicitly known so the plan is not rejected earlier by the
+    # new UNKNOWN-inventory consumption contract.
+    resource_knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "central_district"),
+    )
+    assert resource_knowledge is not None
+    resource_knowledge.resource_inventory_visibility = "VISIBLE"
+    resource_knowledge.resource_survey_completed = True
+    resource_state = session.scalar(
+        select(GameInstanceResourceState).where(
+            GameInstanceResourceState.game_instance_id == runtime.instance.id,
+            GameInstanceResourceState.resource_key == "electrical_repair_parts",
+        )
+    )
+    assert resource_state is not None
+    resource_state.scope_node_key = "central_district"
+    session.flush()
     provider = _RelayPlanProvider(relay_first=True)
     task = GenericAgentService(
         session,

@@ -90,10 +90,21 @@ def _canonical_resource_knowledge(raw: object) -> tuple[dict[str, object], ...]:
 def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
     """Normalize the internal V1 view into one Provider-facing semantic source."""
 
+    current = context.current_knowledge
+    raw_locality = current.get("locality")
+    locality_projection = (
+        {
+            key: value
+            for key, value in cast(dict[str, object], raw_locality).items()
+            if isinstance(value, (str, int, bool))
+        }
+        if isinstance(raw_locality, dict)
+        else {}
+    )
     actors: list[PlannerActorState] = []
     for raw in context.relevant_actors:
-        current = raw.get("current_known_state")
-        state = current if isinstance(current, dict) else {}
+        actor_current = raw.get("current_known_state")
+        state = actor_current if isinstance(actor_current, dict) else {}
         actors.append(
             PlannerActorState(
                 actor_key=str(raw["actor_key"]),
@@ -130,6 +141,17 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
         contract = constraints if isinstance(constraints, dict) else {}
         effects = raw.get("planner_effects")
         action_key = str(raw["action_key"])
+        raw_contract_locality = contract.get("locality")
+        contract_locality = (
+            dict(cast(dict[str, object], raw_contract_locality))
+            if isinstance(raw_contract_locality, dict)
+            else {}
+        )
+        # The action-level locality contract remains authoritative for the
+        # Planner.  These generic schema keys make the one-step BLOCKED
+        # legality proof able to interpret Region/Facility/Transport
+        # relations without consulting Scenario Truth.
+        contract_locality.update(locality_projection)
         action_contracts.append(
             PlannerActionContract(
                 action_key=action_key,
@@ -143,11 +165,7 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
                     if isinstance(contract.get("target"), dict)
                     else {}
                 ),
-                locality=(
-                    dict(cast(dict[str, object], contract["locality"]))
-                    if isinstance(contract.get("locality"), dict)
-                    else {}
-                ),
+                locality=contract_locality,
                 parameters=tuple(
                     dict(item)
                     for item in cast(list[object], raw.get("parameter_schema", []))
@@ -778,6 +796,7 @@ class PlanningContextBuilder:
         completed: list[dict[str, object]] = []
         failed: dict[str, object] | None = None
         player_visible_result: dict[str, object] | None = None
+        newly_learned_knowledge: list[object] = []
         operation = self.db.scalar(
             select(WorldOperation)
             .where(
@@ -788,10 +807,14 @@ class PlanningContextBuilder:
         )
         if operation is not None and isinstance(operation.outcome, dict):
             outcome = operation.outcome
+            raw_knowledge_changes = outcome.get("knowledge_changes", [])
+            if isinstance(raw_knowledge_changes, list):
+                newly_learned_knowledge = list(raw_knowledge_changes)
             failure = outcome.get("failure")
             if isinstance(failure, dict):
                 player_visible_result = {
                     "outcome_code": outcome.get("outcome_code"),
+                    "knowledge_changes": newly_learned_knowledge,
                     "failure": {
                         "code": failure.get("code"),
                         "message": failure.get("message"),
@@ -829,7 +852,7 @@ class PlanningContextBuilder:
             "previous_plan_version": plan.version if plan is not None else None,
             "failed_or_current_step": failed,
             "player_visible_result": player_visible_result or failed,
-            "newly_learned_knowledge": [],
+            "newly_learned_knowledge": newly_learned_knowledge,
             "relevant_blocker": replan_reason or task.last_error_code,
             "completed_steps": completed,
         }

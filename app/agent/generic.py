@@ -22,6 +22,7 @@ from app.agent.planning_context import (
     objective_context,
 )
 from app.agent.provider import (
+    AntiRegressionMemoryItem,
     GenericModelProvider,
     GenericProviderError,
     GoalSelectionRequest,
@@ -312,7 +313,6 @@ class GenericAgentService:
     """A compact persistent Agent loop driven only by exact v2 Version data."""
 
     MAX_REPLANS = 5
-    MAX_PROVIDER_REPAIR_ATTEMPTS = 2
 
     def __init__(
         self,
@@ -322,12 +322,16 @@ class GenericAgentService:
         goal_resolver: GenericGoalResolver | None = None,
         provider: GenericModelProvider | None = None,
         provider_call_observer: ProviderCallObserver | None = None,
+        model_max_repair_attempts_per_cycle: int = 2,
     ) -> None:
         self.db = db
         self.scope = scope
         self.provider = provider
         self.goal_resolver = goal_resolver or GenericGoalResolver(provider=provider)
         self.provider_call_observer = provider_call_observer
+        self.model_max_repair_attempts_per_cycle = (
+            model_max_repair_attempts_per_cycle
+        )
         self._provider_call_started_at: dict[str, float] = {}
         self._last_provider_plan_summary: str | None = None
         self._last_provider_stop_reason: str | None = None
@@ -1166,9 +1170,10 @@ class GenericAgentService:
                 "No known public Action can advance the frozen ObjectiveScope",
             )
         diagnostics: tuple[PlanViolation, ...] = ()
+        anti_regression_memory: tuple[AntiRegressionMemoryItem, ...] = ()
         rejected_segment: dict[str, object] | None = None
         call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
-        for repair_attempt in range(self.MAX_PROVIDER_REPAIR_ATTEMPTS + 1):
+        for repair_attempt in range(self.model_max_repair_attempts_per_cycle + 1):
             request = PlanRequest(
                 call_type=(call_type if repair_attempt == 0 else "REPAIR"),
                 goal=task.goal_description,
@@ -1187,6 +1192,7 @@ class GenericAgentService:
                 rejected_segment=rejected_segment,
                 repair_attempt=repair_attempt,
                 repair_diagnostics=diagnostics,
+                anti_regression_memory=anti_regression_memory,
             )
             audit_id = str(uuid4())
             provider_started_at = perf_counter()
@@ -1252,6 +1258,7 @@ class GenericAgentService:
                     catalog,
                     proposal.steps,
                     planning_context,
+                    planner_input=planner_input,
                     stop_reason=proposal.stop_reason,
                 )
                 diagnostics = tuple(
@@ -1265,9 +1272,16 @@ class GenericAgentService:
                     item.candidate_id or "" for item in proposal.steps if item.candidate_id
                 ),
                 diagnostics=diagnostics,
+                proposal_stop_reason=proposal.stop_reason,
                 accepted=not diagnostics,
                 audit_id=audit_id,
             )
+            if repair_attempt > 0:
+                anti_regression_memory = _remember_prior_contradictions(
+                    anti_regression_memory,
+                    request.repair_diagnostics,
+                    seen_attempt=repair_attempt - 1,
+                )
             self._provider_call_started_at.pop(audit_id, None)
             if not diagnostics:
                 self._last_provider_plan_summary = proposal.plan_summary.strip() or None
@@ -1300,6 +1314,7 @@ class GenericAgentService:
         proposed_steps: tuple[object, ...],
         planning_context: PlanningContext,
         *,
+        planner_input: PlannerInput | None = None,
         stop_reason: str = "OBJECTIVE_COMPLETION",
     ) -> tuple[list[dict[str, object]], tuple[dict[str, object], ...]]:
         """Validate direct V1 bindings while accepting legacy candidate IDs.
@@ -1355,6 +1370,7 @@ class GenericAgentService:
             catalog=catalog,
             proposed_steps=proposed_steps,
             planning_context=planning_context,
+            planner_input=planner_input,
             actors=actors,
             projected_command_reachability=projected_command_reachability,
         )
@@ -1427,7 +1443,12 @@ class GenericAgentService:
                     )
                 )
                 break
-            effect_refs = self._context_effect_refs(planning_context, action_key)
+            effect_refs = self._objective_effect_refs(
+                planning_context,
+                action_key,
+                target_key,
+                planner_input=planner_input,
+            )
             target_definition = definition.world.node(target_key)
             target_actor = (
                 actors.get(target_key) if action.target_kind == ActionTargetKind.ACTOR else None
@@ -1465,8 +1486,7 @@ class GenericAgentService:
                         *action.planning.terminal_effects,
                         *action.planning.supporting_effects,
                     )
-                    if (item.node_key, item.fact_key)
-                    in self._context_effect_refs(planning_context, action_key)
+                    if (item.node_key, item.fact_key) in effect_refs
                 ),
                 currently_executable=True,
             )
@@ -1599,6 +1619,7 @@ class GenericAgentService:
         catalog: tuple[PlanningActionCandidate, ...],
         proposed_steps: tuple[object, ...],
         planning_context: PlanningContext,
+        planner_input: PlannerInput | None = None,
         actors: dict[str, GameInstanceActor],
         projected_command_reachability: dict[str, CommandReachability],
     ) -> tuple[list[_StaticProposalBinding], list[dict[str, object]]]:
@@ -1787,7 +1808,12 @@ class GenericAgentService:
                 )
                 continue
             signature = proposal_signature(actor_key, action_key, target_key, parameters)
-            effect_refs = self._context_effect_refs(planning_context, action_key)
+            effect_refs = self._objective_effect_refs(
+                planning_context,
+                action_key,
+                target_key,
+                planner_input=planner_input,
+            )
             if signature in set(task.rejected_proposal_signatures):
                 diagnostics.append(
                     {
@@ -1809,13 +1835,7 @@ class GenericAgentService:
             ):
                 actual_relevance = "ALREADY_SUCCEEDED_WITHOUT_NEEDED_EFFECT"
             else:
-                projected_refs = {
-                    (item.node_key, item.fact_key)
-                    for item in (
-                        *action.planning.terminal_effects,
-                        *action.planning.supporting_effects,
-                    )
-                }
+                projected_refs = effect_refs
                 actual_relevance = (
                     "NO_DECLARED_RELEVANT_EFFECT"
                     if objective_refs.isdisjoint(projected_refs)
@@ -1870,6 +1890,60 @@ class GenericAgentService:
                     fact_key = effect.get("fact_key")
                     if isinstance(node_key, str) and isinstance(fact_key, str):
                         refs.add((node_key, fact_key))
+        return refs
+
+    @classmethod
+    def _objective_effect_refs(
+        cls,
+        planning_context: PlanningContext,
+        action_key: str,
+        target_key: str,
+        *,
+        planner_input: PlannerInput | None,
+    ) -> set[tuple[str, str]]:
+        """Return deterministic FACT effects for the selected Action/Target.
+
+        The canonical V2 contract is authoritative when available.  In
+        particular, target bindings are selected by the submitted target;
+        effects from another target are never treated as coverage for this
+        step.  The legacy context fallback exists only for old in-process
+        callers that do not provide a V2 input.
+        """
+
+        if planner_input is None:
+            return cls._context_effect_refs(planning_context, action_key)
+
+        contracts = {item.action_key: item for item in planner_input.action_contracts}
+        contract = contracts.get(action_key)
+        if contract is None:
+            return set()
+        binding = next(
+            (
+                item
+                for item in planner_input.target_bindings
+                if item.action_key == action_key and item.target_key == target_key
+            ),
+            None,
+        )
+        effects = (
+            *(contract.deterministic_effects if contract is not None else ()),
+            *(binding.deterministic_effects if binding is not None else ()),
+        )
+        refs: set[tuple[str, str]] = set()
+        for effect in effects:
+            if effect.get("type") != "FACT_MUTATION":
+                continue
+            fact_key = effect.get("fact_key")
+            if not isinstance(fact_key, str):
+                continue
+            effect_target = effect.get("target")
+            if effect_target in {"target_key", "target_node"}:
+                resolved_target = target_key
+            elif isinstance(effect_target, str):
+                resolved_target = effect_target
+            else:
+                continue
+            refs.add((resolved_target, fact_key))
         return refs
 
     @staticmethod
@@ -2593,7 +2667,7 @@ class GenericAgentService:
                 resource_key=item.resource_key,
                 region_key=item.region_key,
                 facility_key=item.facility_key,
-                quantity=item.quantity,
+                quantity=item.available_quantity,
                 visibility=ResourcePoolVisibility.VISIBLE,
                 availability=item.availability,
                 survey_discoverable=False,
@@ -2759,20 +2833,18 @@ class GenericAgentService:
             pool for pool in candidates if pool.availability == ResourcePoolAvailability.AVAILABLE
         ]
         if not candidates:
-            if require_known:
-                raise GenericAgentError(
-                    "RESOURCE_INVENTORY_UNKNOWN",
-                    "The source Region Resource inventory is not known",
-                    details={
-                        "dimension": "RESOURCE_KNOWLEDGE",
-                        "resource_key": resource_key,
-                        "scope_region": region_key,
-                        "required_amount": amount,
-                        "required": "KNOWN_VISIBLE_AVAILABLE",
-                        "actual": "UNKNOWN",
-                    },
-                )
-            return False
+            raise GenericAgentError(
+                "RESOURCE_INVENTORY_UNKNOWN",
+                "The source Region Resource inventory is not known",
+                details={
+                    "dimension": "RESOURCE_KNOWLEDGE",
+                    "resource_key": resource_key,
+                    "scope_region": region_key,
+                    "required_amount": amount,
+                    "required": "KNOWN_VISIBLE_AVAILABLE",
+                    "actual": "UNKNOWN",
+                },
+            )
         known_available = sum(pool.quantity for pool in available if pool.quantity is not None)
         has_unknown_available = any(pool.quantity is None for pool in available)
         if known_available < amount and not has_unknown_available:
@@ -2789,7 +2861,18 @@ class GenericAgentService:
                 },
             )
         if known_available < amount:
-            return False
+            raise GenericAgentError(
+                "RESOURCE_INVENTORY_UNKNOWN",
+                "The source Region Resource inventory is not known",
+                details={
+                    "dimension": "RESOURCE_KNOWLEDGE",
+                    "resource_key": resource_key,
+                    "scope_region": region_key,
+                    "required_amount": amount,
+                    "required": "KNOWN_VISIBLE_AVAILABLE",
+                    "actual": "UNKNOWN",
+                },
+            )
         remaining = amount
         for pool in sorted(available, key=lambda item: item.pool_key):
             if remaining <= 0:
@@ -2877,7 +2960,7 @@ class GenericAgentService:
                         -amount,
                         projected_pools,
                         projected_region_knowledge,
-                        require_known=False,
+                        require_known=True,
                     )
                 elif amount > 0:
                     self._add_projected_resource(
@@ -3249,6 +3332,7 @@ class GenericAgentService:
         proposal_steps: tuple[object, ...],
         proposal_candidate_ids: tuple[str, ...],
         diagnostics: tuple[PlanViolation, ...],
+        proposal_stop_reason: str,
         accepted: bool,
         audit_id: str | None = None,
     ) -> None:
@@ -3262,6 +3346,7 @@ class GenericAgentService:
             "call_type": request.call_type,
             "model": self.provider.model_name,
             "repair_attempt": request.repair_attempt,
+            "provider_payload": request.provider_payload(),
             "planning_context": (
                 request.planning_context.compact_dump()
                 if request.planning_context is not None
@@ -3301,6 +3386,13 @@ class GenericAgentService:
                 for index, item in enumerate(proposal_steps, start=1)
             ],
             "proposal_candidate_ids": list(proposal_candidate_ids),
+            "proposal_stop_reason": proposal_stop_reason,
+            "validator_violations": [
+                violation.model_dump(
+                    mode="json", exclude_none=True, exclude_defaults=True
+                )
+                for violation in diagnostics
+            ],
             "validation": "ACCEPTED" if accepted else "REJECTED",
             "outcome": "SUCCESS",
             "finished_at": datetime.now(UTC).isoformat(),
@@ -4016,18 +4108,23 @@ def _validate_plan_segment_contract(
     target_bindings = {
         (item.action_key, item.target_key): item for item in planner_input.target_bindings
     }
-    acquisition_matches = False
-    for step in segment.steps:
+    acquisition_indices: list[int] = []
+    for index, step in enumerate(segment.steps):
         contract = action_contracts.get(str(step.action_key))
         binding = target_bindings.get((str(step.action_key), str(step.target_key)))
         effects = (
             *(contract.deterministic_effects if contract is not None else ()),
             *(binding.deterministic_effects if binding is not None else ()),
         )
-        if _submitted_step_matches_dependency(step, matching, resolver_types, effects):
-            acquisition_matches = True
-            break
-    if not resolver_types or not acquisition_matches:
+        if _submitted_step_matches_dependency(
+            step,
+            matching,
+            resolver_types,
+            effects,
+            planner_input=planner_input,
+        ):
+            acquisition_indices.append(index)
+    if not resolver_types or not acquisition_indices:
         return (
             PlanViolation(
                 code="INFORMATION_BOUNDARY_ACQUISITION_MISSING",
@@ -4039,13 +4136,32 @@ def _validate_plan_segment_contract(
                 required_effect_types=tuple(sorted(resolver_types)),
             ),
         )
+    if acquisition_indices[-1] != len(segment.steps) - 1:
+        return (
+            PlanViolation(
+                code="INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST",
+                failure_code="INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST",
+                dimension="INFORMATION_BOUNDARY_ACQUISITION",
+                required="MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP",
+                actual={
+                    "matching_step_indices": acquisition_indices,
+                    "segment_step_count": len(segment.steps),
+                },
+                dependency_id=dependency_id,
+                required_effect_types=tuple(sorted(resolver_types)),
+            ),
+        )
     return ()
 
 
 def _has_direct_known_progress_option(planner_input: PlannerInput) -> bool:
     """Prove one immediately legal option without planning or suggesting one."""
 
-    nodes = [item for item in planner_input.known_world.nodes if item.get("access") == "AVAILABLE"]
+    nodes = [
+        item
+        for item in planner_input.known_world.nodes
+        if item.get("access") in {"AVAILABLE", "ENTERED"}
+    ]
     resource_knowledge = {
         item.get("region_key"): item for item in planner_input.known_world.resource_knowledge
     }
@@ -4053,10 +4169,7 @@ def _has_direct_known_progress_option(planner_input: PlannerInput) -> bool:
         (item.action_key, item.target_key): item for item in planner_input.target_bindings
     }
     for contract in planner_input.action_contracts:
-        if contract.known_preconditions or any(
-            item.get("required") is True and "default" not in item
-            for item in contract.parameters
-        ):
+        if not _direct_known_parameters(contract) or not _direct_known_preconditions(contract):
             continue
         requirements = contract.executor_requirements
         required_role = requirements.get("required_role_key")
@@ -4103,6 +4216,7 @@ def _actor_has_direct_known_target(
         required_reachability = contract.target_contract.get("command_reachability")
         return any(
             target.actor_key != actor.actor_key
+            and target.availability == "ACTIVE"
             and (
                 not isinstance(required_reachability, str)
                 or target.command_reachability == required_reachability
@@ -4127,19 +4241,247 @@ def _actor_has_direct_known_target(
         binding = bindings.get((contract.action_key, target_key))
         if binding is not None and binding.requirements:
             continue
-        if locality in {"REGION", "ACTOR_SAME_REGION"} and (
-            actor.current_region is None or target_key != actor.current_region
+        if not _direct_known_locality(
+            actor,
+            contract,
+            target_key,
+            planner_input,
         ):
-            continue
-        if locality not in {"NONE", "REGION", "ACTOR_SAME_REGION"}:
             continue
         if any(
             effect.get("type") == "RESOURCE_SURVEY_COMPLETED"
             for effect in contract.deterministic_effects
         ) and resource_knowledge.get(target_key, {}).get("resource_survey_completed") is not False:
             continue
+        if not _direct_known_resource_option(
+            actor,
+            contract,
+            binding,
+            planner_input,
+        ):
+            continue
         return True
     return False
+
+
+def _direct_known_locality(
+    actor: PlannerActorState,
+    contract: PlannerActionContract,
+    target_key: str,
+    planner_input: PlannerInput,
+) -> bool:
+    """Prove one-step locality from the public V2 graph only.
+
+    This intentionally checks existence, not a route or a choice.  Relation
+    rows are already part of the canonical Known-world slice, so the helper
+    never consults Scenario Truth or constructs a multi-step recovery plan.
+    """
+
+    actor_region = actor.current_region
+    locality = contract.locality.get("type")
+    if not isinstance(actor_region, str):
+        return False
+    if contract.target_contract.get("kind") == "ACTOR":
+        actor_target = next(
+            (item for item in planner_input.actors if item.actor_key == target_key),
+            None,
+        )
+        return actor_target is not None and (
+            locality not in {"ACTOR_SAME_REGION", "ACTOR_REGION"}
+            or actor_target.current_region == actor_region
+        )
+
+    nodes = {str(item.get("key")): item for item in planner_input.known_world.nodes}
+    target_node = nodes.get(target_key)
+    if target_node is None:
+        return False
+    if locality in {None, "NONE"}:
+        return True
+    locality_metadata = contract.locality
+    region_type = locality_metadata.get("region_node_type_key", "region")
+    facility_type = locality_metadata.get("facility_node_type_key", "facility")
+    transport_type = locality_metadata.get("transport_node_type_key", "transport")
+    located_in_type = locality_metadata.get("located_in_relation_type_key")
+    endpoint_type = locality_metadata.get("transport_endpoint_relation_type_key")
+    target_type = target_node.get("type")
+    if locality in {"REGION", "ACTOR_SAME_REGION"}:
+        return target_type == region_type and target_key == actor_region
+    if locality in {"FACILITY_REGION", "LOCAL_TARGET", "LOCAL_TARGET_FACILITY_OR_TRANSPORT"}:
+        if target_type == facility_type:
+            return any(
+                relation.get("source_node_key") == target_key
+                and relation.get("target_node_key") == actor_region
+                and (
+                    not isinstance(located_in_type, str)
+                    or relation.get("relation_type_key") == located_in_type
+                )
+                for relation in planner_input.known_world.relations
+            )
+        if (
+            locality in {"LOCAL_TARGET", "LOCAL_TARGET_FACILITY_OR_TRANSPORT"}
+            and target_type == transport_type
+        ):
+            return any(
+                relation.get("source_node_key") == target_key
+                and relation.get("target_node_key") == actor_region
+                and (
+                    not isinstance(endpoint_type, str)
+                    or relation.get("relation_type_key") == endpoint_type
+                )
+                for relation in planner_input.known_world.relations
+            )
+        return False
+    if locality == "TRANSPORT_ENDPOINT":
+        return any(
+            relation.get("source_node_key") == target_key
+            and relation.get("target_node_key") == actor_region
+            and target_type == transport_type
+            and (
+                not isinstance(endpoint_type, str)
+                or relation.get("relation_type_key") == endpoint_type
+            )
+            for relation in planner_input.known_world.relations
+        )
+    if locality == "ONE_HOP_TRANSPORT":
+        if target_type != region_type or target_key == actor_region:
+            return False
+        for transport_key in {
+            str(item.get("key"))
+            for item in planner_input.known_world.nodes
+            if item.get("type") == transport_type and isinstance(item.get("key"), str)
+        }:
+            endpoints = {
+                str(relation.get("target_node_key"))
+                for relation in planner_input.known_world.relations
+                if relation.get("source_node_key") == transport_key
+                and (
+                    not isinstance(endpoint_type, str)
+                    or relation.get("relation_type_key") == endpoint_type
+                )
+            }
+            if {actor_region, target_key}.issubset(endpoints):
+                return _known_transport_route_is_not_blocked(
+                    planner_input,
+                    transport_key,
+                    locality_metadata,
+                )
+        return False
+    return False
+
+
+def _direct_known_parameters(contract: PlannerActionContract) -> bool:
+    for parameter in contract.parameters:
+        if parameter.get("required") is not True or "default" in parameter:
+            continue
+        allowed_values = parameter.get("allowed_values")
+        if isinstance(allowed_values, list) and allowed_values:
+            continue
+        if parameter.get("value_type") in {"BOOLEAN", "INTEGER"}:
+            # A numeric/boolean required parameter without a bounded domain is
+            # not an immediately provable choice.
+            return False
+        return False
+    return True
+
+
+def _direct_known_preconditions(contract: PlannerActionContract) -> bool:
+    """Accept only preconditions that are publicly proven non-blocking."""
+
+    for precondition in contract.known_preconditions:
+        current = precondition.get("current_value")
+        failure = precondition.get("failure_condition")
+        if current is None or not isinstance(failure, dict):
+            return False
+        kind = failure.get("kind")
+        expected = failure.get("value")
+        if kind not in {"FACT_EQUALS", "FACT_NOT_EQUALS", "FACT_IN"}:
+            return False
+        blocked = (
+            kind == "FACT_EQUALS" and current == expected
+        ) or (
+            kind == "FACT_NOT_EQUALS" and current != expected
+        ) or (
+            kind == "FACT_IN"
+            and isinstance(failure.get("values"), list)
+            and current in failure["values"]
+        )
+        if blocked:
+            return False
+    return True
+
+
+def _known_transport_route_is_not_blocked(
+    planner_input: PlannerInput,
+    transport_key: str,
+    locality: dict[str, object],
+) -> bool:
+    passability_key = locality.get("passability_fact_key")
+    if not isinstance(passability_key, str):
+        return True
+    identity = f"{transport_key}.{passability_key}"
+    value = planner_input.known_world.facts.get(identity)
+    return value is not False
+
+
+def _direct_known_resource_option(
+    actor: PlannerActorState,
+    contract: PlannerActionContract,
+    binding: PlannerTargetBinding | None,
+    planner_input: PlannerInput,
+) -> bool:
+    """Reject a direct proof when a negative Resource effect is unknown/short."""
+
+    effects = (*contract.deterministic_effects, *(binding.deterministic_effects if binding else ()))
+    requirements: list[dict[str, object]] = []
+    if binding is not None:
+        requirements.extend(item for item in binding.requirements if isinstance(item, dict))
+    for requirement in requirements:
+        cost = requirement.get("cost")
+        if isinstance(cost, dict):
+            for resource_key, amount in cost.items():
+                if not isinstance(resource_key, str) or not isinstance(amount, int) or amount <= 0:
+                    continue
+                if not _known_resource_sufficient(
+                    planner_input.known_world.resources.get(resource_key),
+                    actor.current_region,
+                    amount,
+                ):
+                    return False
+    for effect in effects:
+        if effect.get("type") not in {"RESOURCE_DELTA", "RESOURCE_CONSUMPTION"}:
+            continue
+        resource_key = effect.get("resource_key")
+        amount = effect.get("amount")
+        if not isinstance(resource_key, str):
+            continue
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            return False
+        if amount >= 0:
+            continue
+        scope = effect.get("scope")
+        scope_region = actor.current_region if scope in {None, "ACTOR_CURRENT_REGION"} else None
+        if not _known_resource_sufficient(
+            planner_input.known_world.resources.get(resource_key),
+            scope_region,
+            -amount,
+        ):
+            return False
+    return True
+
+
+def _known_resource_sufficient(raw: object, region_key: str | None, amount: int) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    scopes = raw.get("scopes")
+    if isinstance(scopes, dict) and region_key is not None:
+        value = scopes.get(region_key)
+        return (
+            isinstance(value, dict)
+            and isinstance(value.get("known_available"), int)
+            and value["known_available"] >= amount
+        )
+    known_available = raw.get("known_available")
+    return isinstance(known_available, int) and known_available >= amount
 
 
 def _submitted_step_matches_dependency(
@@ -4147,6 +4489,8 @@ def _submitted_step_matches_dependency(
     dependency: dict[str, object],
     resolver_types: set[str],
     effects: Sequence[dict[str, object]],
+    *,
+    planner_input: PlannerInput | None = None,
 ) -> bool:
     """Judge the submitted acquisition binding; never choose one for the Planner."""
 
@@ -4157,18 +4501,132 @@ def _submitted_step_matches_dependency(
         if effect_type not in resolver_types:
             continue
         if dimension == "RESOURCE_SOURCE":
-            scope_region = dependency.get("scope_region")
-            if not isinstance(scope_region, str) or target_key != scope_region:
+            if not isinstance(target_key, str):
+                continue
+            known_nodes = planner_input.known_world.nodes if planner_input else ()
+            public_region = next(
+                (item for item in known_nodes if item.get("key") == target_key),
+                None,
+            )
+            if planner_input is not None and known_nodes and public_region is None:
+                continue
+            if (
+                planner_input is not None
+                and public_region is not None
+                and str(public_region.get("type", "")).casefold() != "region"
+            ):
+                continue
+            if planner_input is not None and not known_nodes:
+                scope_region = dependency.get("scope_region")
+                if isinstance(scope_region, str) and target_key != scope_region:
+                    continue
+            knowledge = next(
+                (
+                    item
+                    for item in (
+                        planner_input.known_world.resource_knowledge
+                        if planner_input
+                        else ()
+                    )
+                    if item.get("region_key") == target_key
+                ),
+                None,
+            )
+            if knowledge is not None and knowledge.get("resource_survey_completed") is True:
                 continue
             if effect.get("target") == "target_region":
                 return True
-            if effect.get("region_key") == scope_region:
+            if effect.get("region_key") == target_key:
                 return True
             continue
         subject_key = dependency.get("subject_key")
         if isinstance(subject_key, str) and target_key == subject_key:
             return True
     return False
+
+
+_ANTI_REGRESSION_LOCATION_FIELDS: set[str] = {
+    "step_id",
+    "sequence",
+    "message",
+    "cascade_from_step_id",
+    "step_ids",
+}
+_ANTI_REGRESSION_OCCURRENCE_FIELDS: set[str] = {
+    "first_seen_attempt",
+    "last_seen_attempt",
+    "seen_count",
+}
+
+
+def _anti_regression_evidence(violation: PlanViolation) -> dict[str, object]:
+    return violation.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude_defaults=True,
+        exclude=_ANTI_REGRESSION_LOCATION_FIELDS,
+    )
+
+
+def _anti_regression_fingerprint(evidence: dict[str, object]) -> str:
+    return json.dumps(
+        evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _remember_prior_contradictions(
+    memory: tuple[AntiRegressionMemoryItem, ...],
+    violations: tuple[PlanViolation, ...],
+    *,
+    seen_attempt: int,
+) -> tuple[AntiRegressionMemoryItem, ...]:
+    result = list(memory)
+    indexes = {
+        _anti_regression_fingerprint(
+            item.model_dump(
+                mode="json",
+                exclude_none=True,
+                exclude_defaults=True,
+                exclude=(
+                    _ANTI_REGRESSION_LOCATION_FIELDS
+                    | _ANTI_REGRESSION_OCCURRENCE_FIELDS
+                ),
+            )
+        ): index
+        for index, item in enumerate(result)
+    }
+    seen_in_proposal: set[str] = set()
+    for violation in violations:
+        evidence = _anti_regression_evidence(violation)
+        fingerprint = _anti_regression_fingerprint(evidence)
+        if fingerprint in seen_in_proposal:
+            continue
+        seen_in_proposal.add(fingerprint)
+        existing_index = indexes.get(fingerprint)
+        if existing_index is None:
+            indexes[fingerprint] = len(result)
+            result.append(
+                AntiRegressionMemoryItem.model_validate(
+                    {
+                        **evidence,
+                        "first_seen_attempt": seen_attempt,
+                        "last_seen_attempt": seen_attempt,
+                        "seen_count": 1,
+                    }
+                )
+            )
+            continue
+        existing = result[existing_index]
+        result[existing_index] = existing.model_copy(
+            update={
+                "last_seen_attempt": seen_attempt,
+                "seen_count": existing.seen_count + 1,
+            }
+        )
+    return tuple(result)
 
 
 def _safe_provider_diagnostic(code: str) -> str:

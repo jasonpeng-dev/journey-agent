@@ -50,6 +50,7 @@ class KnownResourcePoolView:
     region_key: str | None
     facility_key: str | None
     quantity: int
+    available_quantity: int
     availability: ResourcePoolAvailability
     availability_requirement: dict[str, Any] | None
     availability_requirement_status: str | None
@@ -515,6 +516,7 @@ class SharedKnowledgeProjection:
                     region_key=region_key,
                     facility_key=row.facility_key,
                     quantity=row.value,
+                    available_quantity=max(0, row.value - row.reserved_value),
                     availability=_enum_value(
                         row,
                         "availability",
@@ -634,6 +636,7 @@ class SharedKnowledgeProjection:
                 "resource_name": resource_names.get(pool.resource_key, pool.resource_key),
                 "facility_name": self._facility_name(pool.facility_key),
                 "quantity": pool.quantity,
+                "available_quantity": pool.available_quantity,
                 "availability": pool.availability.value,
                 "availability_requirement": pool.availability_requirement,
                 "availability_requirement_status": pool.availability_requirement_status,
@@ -651,7 +654,7 @@ class SharedKnowledgeProjection:
             "resource_name": resource_name,
             "known_total": sum(pool.quantity for pool in pools),
             "known_available": sum(
-                pool.quantity
+                pool.available_quantity
                 for pool in pools
                 if pool.availability == ResourcePoolAvailability.AVAILABLE
             ),
@@ -659,6 +662,7 @@ class SharedKnowledgeProjection:
                 {
                     "pool_key": pool.pool_key,
                     "quantity": pool.quantity,
+                    "available_quantity": pool.available_quantity,
                     "facility_key": pool.facility_key,
                     "facility_name": self._facility_name(pool.facility_key),
                     "availability": pool.availability.value,

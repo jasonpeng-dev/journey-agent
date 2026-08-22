@@ -600,6 +600,10 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "re-evaluate the corrected segment sequentially against projected known state",
         "same dimension / required / actual contradiction",
         "complete, corrected, revalidated PlanSegment",
+        "anti_regression_memory is historical contradiction evidence only",
+        "does not prescribe or preserve any previous Action, Actor, Target",
+        "You may redesign the entire PlanSegment freely",
+        "does not reintroduce contradictions represented by this memory",
     ):
         assert repair_term in repair_prompt
     for forbidden_term in (
@@ -672,6 +676,25 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=(acquisition,)),
         planner_input,
     ) == ()
+    acquisition_not_last = _validate_plan_segment_contract(
+        valid.model_copy(
+            update={
+                "steps": (
+                    acquisition,
+                    PlanStepProposal(
+                        step_id="after-survey",
+                        action_key="inspect",
+                        actor_key="actor",
+                        target_key="region",
+                    ),
+                )
+            }
+        ),
+        planner_input,
+    )[0]
+    assert acquisition_not_last.code == "INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST"
+    assert acquisition_not_last.dimension == "INFORMATION_BOUNDARY_ACQUISITION"
+    assert acquisition_not_last.required == "MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP"
     boundary_not_allowed = _validate_plan_segment_contract(
         PlanProposal(
             stop_reason="OBJECTIVE_COMPLETION",

@@ -613,7 +613,18 @@ class GenericGameService:
                     message="The source Region Resource inventory is not known",
                     retryable=True,
                 )
-            available = sum(pool.quantity for pool in source_pools)
+            free_by_pool = {
+                pool.pool_key: max(
+                    0,
+                    pool.quantity
+                    - state.resource_reservations.get(
+                        resource_state_key(resource_key, source_region, pool.pool_key),
+                        0,
+                    ),
+                )
+                for pool in source_pools
+            }
+            available = sum(free_by_pool.values())
             if available < amount:
                 return self._blocked_outcome(
                     outcome,
@@ -626,7 +637,7 @@ class GenericGameService:
             for pool in source_pools:
                 if remaining <= 0:
                     break
-                consumed = min(pool.quantity, remaining)
+                consumed = min(free_by_pool[pool.pool_key], remaining)
                 mutations.append(
                     ResourceMutation(
                         resource_key,
@@ -1258,16 +1269,20 @@ class GenericGameService:
                     "The Resource inventory is not known or available",
                     retryable=True,
                 )
-            available = sum(row.value for row in rows)
+            free_by_pool = {
+                row.pool_key: max(0, row.value - row.reserved_value) for row in rows
+            }
+            available = sum(free_by_pool.values())
             if available < remaining:
                 raise GenericGameError(
-                    "RULE_OUTCOME_RESOURCE_INVALID",
-                    "The complete Resource outcome would violate Resource bounds",
+                    "KNOWN_RESOURCE_INSUFFICIENT",
+                    "Known available Resource quantity is insufficient",
+                    retryable=True,
                 )
             for row in rows:
                 if remaining <= 0:
                     break
-                consumed = min(row.value, remaining)
+                consumed = min(free_by_pool[row.pool_key], remaining)
                 expanded.append(
                     ResourceMutation(
                         mutation.resource_key,

@@ -114,7 +114,8 @@ def test_generic_service_rejects_complete_invalid_outcome_before_mutation(
             parameters={"dosage": 3},
         )
 
-    assert caught.value.code == "RULE_OUTCOME_RESOURCE_INVALID"
+    assert caught.value.code == "KNOWN_RESOURCE_INSUFFICIENT"
+    assert caught.value.retryable is True
     fact = session.get(
         GameInstanceFactState,
         (runtime.instance.id, "patient_one", "stable"),

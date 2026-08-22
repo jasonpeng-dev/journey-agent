@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from collections import deque
@@ -12,6 +13,7 @@ from app.agent.provider import (
     PlannerActorState,
     PlannerInput,
     PlannerKnownWorldSlice,
+    PlannerTargetBinding,
 )
 from app.domain.scenario_v2 import ObjectiveDefinitionV2, ScenarioDefinitionV2
 
@@ -69,7 +71,15 @@ def build_dependency_closure(
     bindings = {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
     queue: deque[tuple[TypedDependency, tuple[str, ...], str | None]] = deque()
     for objective in objectives:
-        for requirement in objective.completion_requirements:
+        requirements = (
+            *objective.completion_requirements,
+            *(
+                requirement
+                for group in objective.prerequisites
+                for requirement in group.requirements
+            ),
+        )
+        for requirement in requirements:
             queue.append(
                 (
                     TypedDependency(
@@ -89,7 +99,10 @@ def build_dependency_closure(
     relevant_nodes = {
         requirement.node_key
         for objective in objectives
-        for requirement in objective.completion_requirements
+        for requirement in (
+            *objective.completion_requirements,
+            *(item for group in objective.prerequisites for item in group.requirements),
+        )
     }
     relevant_resources: set[str] = set()
     unknowns: dict[str, dict[str, object]] = {}
@@ -149,30 +162,90 @@ def build_dependency_closure(
         for binding_key, binding in bindings.items():
             if binding_key[0] != action_key or binding_key not in selected_bindings:
                 continue
-            for requirement in binding.requirements:
-                cost = requirement.get("cost")
-                if isinstance(cost, dict):
-                    for resource_key, required_amount in cost.items():
-                        if (
-                            not isinstance(resource_key, str)
-                            or isinstance(required_amount, bool)
-                            or not isinstance(required_amount, int)
-                            or required_amount <= 0
-                        ):
-                            continue
-                        relevant_resources.add(resource_key)
-                        queue.append(
-                            (
-                                TypedDependency(
-                                    "RESOURCE_SOURCE",
-                                    resource_key,
-                                    key=binding.target_key,
-                                    required=required_amount,
-                                ),
-                                (*path, f"action:{action_key}", f"resource:{resource_key}"),
-                                action_key,
-                            )
-                        )
+            _queue_binding_resource_dependencies(binding, path, action_key)
+
+        # Resource requirements declared by the canonical Action contract are
+        # source-agnostic. Queue the knowledge dependency without selecting a
+        # source Region; the Planner may choose any public acquisition target.
+        for effect in contract.deterministic_effects:
+            resource_key = effect.get("resource_key")
+            amount = effect.get("amount")
+            if (
+                effect.get("type") not in {"RESOURCE_DELTA", "RESOURCE_CONSUMPTION"}
+                or not isinstance(resource_key, str)
+                or isinstance(amount, bool)
+                or not isinstance(amount, int)
+                or amount >= 0
+            ):
+                continue
+            _queue_resource_dependency(resource_key, -amount, "", path, action_key)
+
+    def _queue_resource_dependency(
+        resource_key: str,
+        required_amount: int,
+        target_key: str,
+        path: tuple[str, ...],
+        action_key: str,
+    ) -> None:
+        relevant_resources.add(resource_key)
+        queue.append(
+            (
+                TypedDependency(
+                    "RESOURCE_SOURCE",
+                    resource_key,
+                    key=target_key,
+                    required=required_amount,
+                ),
+                (*path, f"action:{action_key}", f"resource:{resource_key}"),
+                action_key,
+            )
+        )
+
+    def _queue_binding_resource_dependencies(
+        binding: PlannerTargetBinding,
+        path: tuple[str, ...],
+        action_key: str,
+    ) -> None:
+        """Queue source knowledge for one selected target binding only."""
+
+        for requirement in binding.requirements:
+            cost = requirement.get("cost")
+            if not isinstance(cost, dict):
+                continue
+            for resource_key, required_amount in cost.items():
+                if (
+                    not isinstance(resource_key, str)
+                    or isinstance(required_amount, bool)
+                    or not isinstance(required_amount, int)
+                    or required_amount <= 0
+                ):
+                    continue
+                _queue_resource_dependency(
+                    resource_key,
+                    required_amount,
+                    binding.target_key,
+                    path,
+                    action_key,
+                )
+
+        for effect in binding.deterministic_effects:
+            resource_key = effect.get("resource_key")
+            amount = effect.get("amount")
+            if (
+                effect.get("type") not in {"RESOURCE_DELTA", "RESOURCE_CONSUMPTION"}
+                or not isinstance(resource_key, str)
+                or isinstance(amount, bool)
+                or not isinstance(amount, int)
+                or amount >= 0
+            ):
+                continue
+            _queue_resource_dependency(
+                resource_key,
+                -amount,
+                binding.target_key,
+                path,
+                action_key,
+            )
 
     while queue:
         dependency, path, consumer_action = queue.popleft()
@@ -185,6 +258,14 @@ def build_dependency_closure(
             )
         visited.add(dependency)
         if dependency.dimension == "FACT":
+            for action_key, contract in contracts.items():
+                if not _contract_can_produce_fact_for_target(
+                    contract,
+                    dependency,
+                    planner_input,
+                ):
+                    continue
+                select_action(action_key, path, repr(dependency))
             for binding_key, binding in bindings.items():
                 for effect in binding.deterministic_effects:
                     if (
@@ -194,6 +275,7 @@ def build_dependency_closure(
                     ):
                         selected_bindings.add(binding_key)
                         select_action(binding.action_key, path, repr(dependency))
+                        _queue_binding_resource_dependencies(binding, path, binding.action_key)
         elif dependency.dimension in {"ACTOR_COMMAND_REACHABILITY", "ACTOR_LOCATION"}:
             effect_type = dependency.dimension
             for action_key, contract in contracts.items():
@@ -214,7 +296,7 @@ def build_dependency_closure(
             known_resource = planner_input.known_world.resources.get(dependency.subject)
             required_amount = int(dependency.required or 0)
             known_available_amount = _known_available_resource_amount(known_resource)
-            target_region = _known_region_for_node(
+            destination_region = _known_region_for_node(
                 definition,
                 planner_input,
                 dependency.key,
@@ -235,8 +317,8 @@ def build_dependency_closure(
                         "RESOURCE_POOL_KNOWLEDGE",
                     ],
                 }
-                if target_region is not None:
-                    unknown["scope_region"] = target_region
+                if destination_region is not None:
+                    unknown["destination_region"] = destination_region
                 unknown["dependency_id"] = _dependency_id(
                     "RESOURCE_SOURCE",
                     resource_key=dependency.subject,
@@ -254,7 +336,7 @@ def build_dependency_closure(
                     ):
                         select_action(action_key, path, repr(dependency))
             elif not _has_known_available_resource_at(
-                known_resource, target_region, required_amount
+                known_resource, destination_region, required_amount
             ):
                 for action_key, contract in contracts.items():
                     if action_key == consumer_action:
@@ -291,6 +373,12 @@ def build_dependency_closure(
         selected_actions,
         relevant_nodes,
         unknowns,
+    )
+    _include_public_resource_acquisition_regions(
+        definition,
+        planner_input,
+        selected_actions,
+        relevant_nodes,
     )
     passability_key = definition.metadata.locality.passability_fact_key
     if passability_key is not None:
@@ -363,6 +451,67 @@ def build_dependency_closure(
     )
 
 
+def _contract_can_produce_fact_for_target(
+    contract: PlannerActionContract,
+    dependency: TypedDependency,
+    planner_input: PlannerInput,
+) -> bool:
+    """Check an action-level FACT producer without inventing a binding."""
+
+    target_key = dependency.subject
+    target = next(
+        (item for item in planner_input.known_world.nodes if item.get("key") == target_key),
+        None,
+    )
+    if target is None:
+        return False
+    required_interaction = contract.target_contract.get("required_interaction_key")
+    interactions = target.get("interactions")
+    if (
+        isinstance(required_interaction, str)
+        and (not isinstance(interactions, list) or required_interaction not in interactions)
+    ):
+        return False
+    accepted_values: object = dependency.required
+    if isinstance(dependency.required, str):
+        try:
+            accepted_values = ast.literal_eval(dependency.required)
+        except (SyntaxError, ValueError):
+            accepted_values = dependency.required
+    if not isinstance(accepted_values, (tuple, list, set, frozenset)):
+        accepted_values = (accepted_values,)
+    for effect in contract.deterministic_effects:
+        effect_value = effect.get("value")
+        if isinstance(effect_value, dict) and isinstance(
+            effect_value.get("from_parameter"), str
+        ):
+            parameter = next(
+                (
+                    item
+                    for item in contract.parameters
+                    if item.get("key") == effect_value.get("from_parameter")
+                ),
+                None,
+            )
+            allowed_values = parameter.get("allowed_values", []) if parameter else []
+            if (
+                effect.get("type") == "FACT_MUTATION"
+                and effect.get("fact_key") == dependency.key
+                and effect.get("target") in {"target_key", "target_node", target_key}
+                and isinstance(allowed_values, list)
+                and any(value in accepted_values for value in allowed_values)
+            ):
+                return True
+        if (
+            effect.get("type") == "FACT_MUTATION"
+            and effect.get("fact_key") == dependency.key
+            and effect.get("target") in {"target_key", "target_node", target_key}
+            and effect.get("value") in accepted_values
+        ):
+            return True
+    return False
+
+
 def _known_available_resource_amount(raw: object) -> int:
     if not isinstance(raw, dict):
         return 0
@@ -373,11 +522,11 @@ def _known_available_resource_amount(raw: object) -> int:
     if not isinstance(scopes, dict):
         return 0
     return sum(
-        max(0, int(value["value"]))
+        max(0, int(value["known_available"]))
         for value in scopes.values()
         if isinstance(value, dict)
-        and isinstance(value.get("value"), int)
-        and not isinstance(value.get("value"), bool)
+        and isinstance(value.get("known_available"), int)
+        and not isinstance(value.get("known_available"), bool)
     )
 
 
@@ -392,9 +541,9 @@ def _has_known_available_resource_at(
     value = scopes.get(region_key)
     return (
         isinstance(value, dict)
-        and isinstance(value.get("value"), int)
-        and not isinstance(value.get("value"), bool)
-        and value["value"] >= required_amount
+        and isinstance(value.get("known_available"), int)
+        and not isinstance(value.get("known_available"), bool)
+        and value["known_available"] >= required_amount
     )
 
 
@@ -485,6 +634,44 @@ def _include_one_hop_locality(
                     fact_key=passability_key,
                 )
                 unknowns[str(unknown["dependency_id"])] = unknown
+
+
+def _include_public_resource_acquisition_regions(
+    definition: ScenarioDefinitionV2,
+    planner_input: PlannerInput,
+    selected_actions: set[str],
+    relevant_nodes: set[str],
+) -> None:
+    """Keep public Region choices for source-knowledge acquisition available.
+
+    A RESOURCE_SOURCE dependency deliberately does not identify a source
+    Region.  Once a public knowledge-acquisition Action is in the closure,
+    expose the bounded set of currently public, accessible Region Nodes so the
+    Planner can choose among them.  This is a Region slice only; it never
+    creates Actor x Action x Target candidates or selects a source.
+    """
+
+    if not definition.metadata.locality.enabled:
+        return
+    region_type = definition.metadata.locality.region_node_type_key
+    acquisition_actions = {
+        contract.action_key
+        for contract in planner_input.action_contracts
+        if contract.action_key in selected_actions
+        and any(
+            effect.get("type") in {"REGION_RESOURCE_KNOWLEDGE", "RESOURCE_POOL_KNOWLEDGE"}
+            for effect in contract.deterministic_effects
+        )
+    }
+    if not acquisition_actions:
+        return
+    relevant_nodes.update(
+        str(item["key"])
+        for item in planner_input.known_world.nodes
+        if item.get("type") == region_type
+        and item.get("access") in {"AVAILABLE", "ENTERED"}
+        and isinstance(item.get("key"), str)
+    )
 
 
 def _dependency_id(dimension: str, **identity: object) -> str:

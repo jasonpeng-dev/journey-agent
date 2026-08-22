@@ -231,6 +231,14 @@ class PlanViolation(ProviderModel):
     missing_public_requirements: tuple[dict[str, JsonValue], ...] = ()
 
 
+class AntiRegressionMemoryItem(PlanViolation):
+    """Historical contradiction evidence from earlier proposals in one cycle."""
+
+    first_seen_attempt: int = Field(ge=0)
+    last_seen_attempt: int = Field(ge=0)
+    seen_count: int = Field(default=1, ge=1)
+
+
 class PlanRequest(ProviderModel):
     call_type: Literal["INITIAL_PLAN", "REPLAN", "REPAIR"]
     goal: str = ""
@@ -246,6 +254,7 @@ class PlanRequest(ProviderModel):
     rejected_segment: dict[str, object] | None = None
     repair_attempt: int = 0
     repair_diagnostics: tuple[PlanViolation, ...] = ()
+    anti_regression_memory: tuple[AntiRegressionMemoryItem, ...] = ()
 
     def _violation_payloads(self) -> list[dict[str, JsonValue]]:
         return [
@@ -253,6 +262,17 @@ class PlanRequest(ProviderModel):
                 mode="json", exclude_none=True, exclude_defaults=True
             )
             for violation in self.repair_diagnostics
+        ]
+
+    def _anti_regression_payloads(self) -> list[dict[str, JsonValue]]:
+        return [
+            item.model_dump(
+                mode="json",
+                exclude_none=True,
+                exclude_defaults=True,
+                exclude={"step_id", "sequence", "message", "cascade_from_step_id", "step_ids"},
+            )
+            for item in self.anti_regression_memory
         ]
 
     def provider_payload(self) -> dict[str, object]:
@@ -275,6 +295,8 @@ class PlanRequest(ProviderModel):
                 payload["repair_attempt"] = self.repair_attempt
             if self.call_type == "REPAIR" and self.rejected_segment is not None:
                 payload["rejected_segment"] = self.rejected_segment
+            if self.call_type == "REPAIR":
+                payload["anti_regression_memory"] = self._anti_regression_payloads()
             if self.repair_diagnostics:
                 payload["validator_violations"] = self._violation_payloads()
             return payload
@@ -288,6 +310,8 @@ class PlanRequest(ProviderModel):
                 payload["replan_reason"] = self.replan_reason
             if self.call_type == "REPAIR" or self.repair_attempt != 0:
                 payload["repair_attempt"] = self.repair_attempt
+            if self.call_type == "REPAIR":
+                payload["anti_regression_memory"] = self._anti_regression_payloads()
             if self.repair_diagnostics:
                 payload["repair_diagnostics"] = self._violation_payloads()
             return payload
@@ -532,8 +556,8 @@ class OpenAICompatibleGenericProvider:
             planning_prompt = (
                 "You are repairing a rejected plan for the same frozen ObjectiveScope. "
                 "Return one complete corrected PlanSegment for that exact scope. Use the "
-                "structured repair diagnostics in the user payload to fix the rejected "
-                "parts, and "
+                "validator_violations in the user payload as the current rejected "
+                "proposal's active violations, and "
                 "keep valid parts whenever possible. Every step must directly advance the "
                 "current Objective, satisfy a public prerequisite, obtain Knowledge needed "
                 "for that Objective, or be an explicitly necessary supporting action. Do not "
@@ -553,6 +577,12 @@ class OpenAICompatibleGenericProvider:
                 "not valid and must not be returned. Do not merely shorten the rejected "
                 "segment or delete an offending Step and return arbitrary remaining content; "
                 "return a complete, corrected, revalidated PlanSegment for the frozen scope."
+                " anti_regression_memory is historical contradiction evidence only. It "
+                "does not prescribe or preserve any previous Action, Actor, Target, "
+                "resource source, route, or ordering. You may redesign the entire "
+                "PlanSegment freely from the current canonical PlannerInput. Before "
+                "returning, ensure the new segment does not reintroduce contradictions "
+                "represented by this memory."
             )
         elif purpose in {"initial_plan", "replan"}:
             planning_prompt = (
@@ -571,16 +601,12 @@ class OpenAICompatibleGenericProvider:
                 "locked or unavailable when earlier steps are expected to establish their "
                 "prerequisites. Choose the Action, Actor, Target, parameters, and ordering "
                 "yourself. "
-                + (
-                    "Before returning a PlanSegment, validate every Step in order against "
-                    "the projected known state. Apply all declared deterministic effects "
-                    "from earlier Steps before evaluating each later Step. Every returned "
-                    "Step must satisfy all currently known executor, locality, target, "
-                    "parameter, and precondition requirements in that projected state. Do "
-                    "not return a Step with a known deterministic contradiction."
-                    if purpose == "initial_plan"
-                    else ""
-                )
+                + "Before returning a PlanSegment, validate every Step in order against "
+                "the projected known state. Apply all declared deterministic effects "
+                "from earlier Steps before evaluating each later Step. Every returned "
+                "Step must satisfy all currently known executor, locality, target, "
+                "parameter, and precondition requirements in that projected state. Do "
+                "not return a Step with a known deterministic contradiction."
             )
         else:
             planning_prompt = (
@@ -597,8 +623,9 @@ class OpenAICompatibleGenericProvider:
             "earlier Step's declared deterministic effects as updates to the projected "
             "known state used by every later Step, including Actor location and command "
             "reachability. You must still choose every Action, Actor, Target, parameter, "
-            "and ordering; do not automatically insert prerequisites, Travel, Relay, or "
-            "a recovery path. UNKNOWN is not false, zero, or unavailable. Do not consume "
+            "and ordering. The backend will not insert prerequisites, Travel, Relay, or "
+            "a recovery path for you; include them yourself when required. UNKNOWN is not "
+            "false, zero, or unavailable. Do not consume "
             "or transport resources whose availability is unknown. "
             "Use OBJECTIVE_COMPLETION only when current Known state plus the segment's "
             "projected deterministic effects legally reach the frozen Objective's "
@@ -1076,6 +1103,7 @@ PlanningContextV1 = PlanningContext
 
 
 __all__ = [
+    "AntiRegressionMemoryItem",
     "GenericModelProvider",
     "GenericProviderError",
     "GoalSelection",

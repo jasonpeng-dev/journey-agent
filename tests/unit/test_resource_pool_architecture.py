@@ -4,12 +4,22 @@ import json
 from copy import deepcopy
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.generic import GenericAgentService, PlanningActionCatalogBuilder
+from app.agent.dependency_closure import (
+    _has_known_available_resource_at,
+    build_dependency_closure,
+)
+from app.agent.generic import GenericAgentError, GenericAgentService, PlanningActionCatalogBuilder
 from app.agent.planning_context import PlanningContextBuilder, objective_context
-from app.agent.provider import PlanRequest
+from app.agent.provider import (
+    PlannerActionContract,
+    PlannerInput,
+    PlannerKnownWorldSlice,
+    PlanRequest,
+)
 from app.domain.enums import (
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
@@ -18,6 +28,7 @@ from app.domain.enums import (
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.domain.world import Visibility
+from app.engine.rules import ResourceMutation
 from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
@@ -28,7 +39,7 @@ from app.infrastructure.db.models import (
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
-from app.services.generic_game import GenericGameService
+from app.services.generic_game import GenericGameError, GenericGameService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
@@ -213,6 +224,151 @@ def test_hidden_pool_is_absent_from_shared_planner_and_player_safe_projection(
     assert runtime.instance.id == scope.game_instance_id
 
 
+def test_reserved_inventory_is_not_available_to_closure_validator_or_runtime(
+    session: Session,
+) -> None:
+    document: dict[str, Any] = deepcopy(_pool_definition().model_dump(mode="json"))
+    for pool in document["initialization"]["resource_pools"]:
+        if pool["pool_key"] == "west_pool_a":
+            pool["quantity"] = 20
+            pool["reserved_value"] = 10
+        elif pool["pool_key"] == "west_pool_b":
+            pool["quantity"] = 0
+            pool["reserved_value"] = 0
+    definition = ScenarioDefinitionV2.model_validate(document)
+    _runtime_value, scope = _runtime(session, definition, "resource-pool-reserved-available")
+
+    projection = SharedKnowledgeProjection(session, scope, definition)
+    pool = next(
+        item for item in projection.visible_resource_pools() if item.pool_key == "west_pool_a"
+    )
+    summary = projection.resource_intelligence()["regions"]["west_logistics_district"][
+        "resources"
+    ]["electrical_repair_parts"]
+    assert pool.quantity == 20
+    assert pool.available_quantity == 10
+    assert summary["known_total"] == 20
+    assert summary["known_available"] == 10
+
+    raw_resource = {
+        "scopes": {
+            "west_logistics_district": {
+                "value": 20,
+                "known_total": 20,
+                "known_available": 10,
+            }
+        }
+    }
+    assert not _has_known_available_resource_at(
+        raw_resource, "west_logistics_district", 15
+    )
+    assert _has_known_available_resource_at(raw_resource, "west_logistics_district", 10)
+
+    objective = definition.objectives[0]
+    requirement = objective.completion_requirements[0]
+
+    def closure_for(cost: int):
+        planner_input = PlannerInput(
+            action_contracts=(
+                PlannerActionContract(
+                    action_key="repair_reserved_test",
+                    deterministic_effects=(
+                        {
+                            "type": "FACT_MUTATION",
+                            "target": "target_key",
+                            "fact_key": requirement.fact_key,
+                            "value": requirement.accepted_values[0],
+                        },
+                        {
+                            "type": "RESOURCE_DELTA",
+                            "resource_key": "electrical_repair_parts",
+                            "amount": -cost,
+                        },
+                    ),
+                ),
+            ),
+            known_world=PlannerKnownWorldSlice(
+                nodes=(
+                    {
+                        "key": requirement.node_key,
+                        "type": "facility",
+                        "interactions": [],
+                    },
+                ),
+                resources={"electrical_repair_parts": raw_resource},
+            ),
+        )
+        return build_dependency_closure(
+            definition,
+            (objective,),
+            planner_input,
+        )
+
+    insufficient_closure = closure_for(15)
+    assert any(
+        item.get("dimension") == "RESOURCE_SOURCE"
+        and item.get("required_amount") == 15
+        and item.get("known_available_amount") == 10
+        for item in insufficient_closure.planner_input.known_world.unknown_dependencies
+    )
+    sufficient_closure = closure_for(10)
+    assert not any(
+        item.get("dimension") == "RESOURCE_SOURCE"
+        for item in sufficient_closure.planner_input.known_world.unknown_dependencies
+    )
+
+    agent = GenericAgentService(session, scope)
+    projected_pools, region_knowledge = agent._projected_resource_state(definition)
+    with pytest.raises(GenericAgentError) as validator_error:
+        agent._consume_projected_resource(
+            "west_logistics_district",
+            "electrical_repair_parts",
+            15,
+            projected_pools,
+            region_knowledge,
+        )
+    assert validator_error.value.code == "KNOWN_RESOURCE_INSUFFICIENT"
+    agent._consume_projected_resource(
+        "west_logistics_district",
+        "electrical_repair_parts",
+        10,
+        projected_pools,
+        region_knowledge,
+    )
+
+    game = GenericGameService(session, scope)
+    with pytest.raises(GenericGameError) as runtime_error:
+        game._expand_resource_mutations(
+            (
+                ResourceMutation(
+                    "electrical_repair_parts",
+                    -15,
+                    "west_logistics_district",
+                    "default",
+                ),
+            )
+        )
+    assert runtime_error.value.code == "KNOWN_RESOURCE_INSUFFICIENT"
+    expanded = game._expand_resource_mutations(
+        (
+            ResourceMutation(
+                "electrical_repair_parts",
+                -10,
+                "west_logistics_district",
+                "default",
+            ),
+        )
+    )
+    assert expanded == (
+        ResourceMutation(
+            "electrical_repair_parts",
+            -10,
+            "west_logistics_district",
+            "west_pool_a",
+        ),
+    )
+
+
 def test_survey_reveals_discoverable_facility_pool_without_unlocking_it(
     session: Session,
 ) -> None:
@@ -318,6 +474,57 @@ def test_transport_aggregates_multiple_visible_available_pools_and_creates_desti
     assert west_summary["known_total"] == 15
     assert west_summary["known_available"] == 15
     assert any(pool["quantity"] == 0 for pool in west_summary["pools"])
+
+
+def test_transport_excludes_reserved_source_inventory(
+    session: Session,
+) -> None:
+    document: dict[str, Any] = deepcopy(_pool_definition().model_dump(mode="json"))
+    for pool in document["initialization"]["resource_pools"]:
+        if pool["pool_key"] == "west_pool_a":
+            pool["quantity"] = 20
+            pool["reserved_value"] = 10
+        elif pool["pool_key"] == "west_pool_b":
+            pool["quantity"] = 0
+            pool["reserved_value"] = 0
+    definition = ScenarioDefinitionV2.model_validate(document)
+    runtime, scope = _runtime(session, definition, "resource-pool-reserved-transport")
+    actor = session.get(GameInstanceActor, (runtime.instance.id, "logistics_team_alpha"))
+    passability = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "west_freight_corridor", "passable"),
+    )
+    assert actor is not None and passability is not None
+    actor.current_node_key = "west_logistics_district"
+    passability.truth_value = True
+    session.flush()
+
+    insufficient = GenericGameService(session, scope).execute(
+        actor_key="logistics_team_alpha",
+        action_key="transport_resource",
+        target_node_key="central_district",
+        parameters={"resource_key": "electrical_repair_parts", "amount": 15},
+    )
+    assert insufficient.outcome.failure is not None
+    assert insufficient.outcome.failure.code == "TRANSPORT_RESOURCE_INSUFFICIENT"
+
+    successful = GenericGameService(session, scope).execute(
+        actor_key="logistics_team_alpha",
+        action_key="transport_resource",
+        target_node_key="central_district",
+        parameters={"resource_key": "electrical_repair_parts", "amount": 10},
+    )
+    assert successful.outcome.failure is None
+    source = session.get(
+        GameInstanceResourceState,
+        (runtime.instance.id, "electrical_repair_parts@west_logistics_district@west_pool_a"),
+    )
+    destination = session.get(
+        GameInstanceResourceState,
+        (runtime.instance.id, "electrical_repair_parts@central_district"),
+    )
+    assert source is not None and source.value == 10 and source.reserved_value == 10
+    assert destination is not None and destination.value == 10
 
 
 def test_repair_adjust_resource_aggregates_multiple_visible_available_pools(

@@ -7,7 +7,11 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.dependency_closure import DependencyClosureError, build_dependency_closure
+from app.agent.dependency_closure import (
+    DependencyClosureError,
+    _has_known_available_resource_at,
+    build_dependency_closure,
+)
 from app.agent.generic import GenericAgentError, GenericAgentService, _ProjectedFact
 from app.agent.planner_contract import (
     action_planner_constraints,
@@ -77,6 +81,21 @@ def _rule_state(
         },
         resource_reservations={},
     )
+
+
+def test_dependency_closure_uses_known_available_not_total_at_scope() -> None:
+    resource = {
+        "scopes": {
+            "central_district": {
+                "value": 100,
+                "known_total": 100,
+                "known_available": 5,
+            }
+        }
+    }
+
+    assert _has_known_available_resource_at(resource, "central_district", 5)
+    assert not _has_known_available_resource_at(resource, "central_district", 6)
 
 
 def _v10_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
@@ -545,8 +564,8 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
         "resource_inventory_visibility": "VISIBLE",
         "resource_survey_completed": True,
     }
-    assert "southeast_heights_district" not in resource_knowledge
-    assert len(resource_knowledge) < 6
+    assert resource_knowledge["southeast_heights_district"]["resource_survey_completed"] is False
+    assert len(resource_knowledge) == 6
     repeated = PlanningContextBuilder(session, scope).build_v2_closure(
         definition,
         agent._objectives(task, definition),
@@ -677,18 +696,18 @@ def test_linjiang_v10_known_resource_deficit_repair_diagnostic_is_typed(
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
     assert diagnostic.model_dump(mode="json", exclude_none=True, exclude_defaults=True) == {
-        "code": "KNOWN_RESOURCE_INSUFFICIENT",
+        "code": "RESOURCE_INVENTORY_UNKNOWN",
         "step_id": "repair-central",
-        "failure_code": "KNOWN_RESOURCE_INSUFFICIENT",
-        "dimension": "RESOURCE_QUANTITY",
+        "failure_code": "RESOURCE_INVENTORY_UNKNOWN",
+        "dimension": "RESOURCE_KNOWLEDGE",
         "action_key": "repair_communications",
         "actor_key": "communications_repair_team_alpha",
         "target_key": "central_telecom_hub",
-        "resource_key": "general_engineering_parts",
+        "resource_key": "communication_equipment",
         "scope_region": "central_district",
-        "required_amount": 15,
-        "projected_known_available_amount": 10,
-        "deficit": 5,
+        "required_amount": 10,
+        "required": "KNOWN_VISIBLE_AVAILABLE",
+        "actual": "UNKNOWN",
     }
 
 
@@ -700,16 +719,6 @@ def test_linjiang_v10_unknown_resource_quantity_is_not_known_insufficient(
     definition = agent._definition()
     pools, region_knowledge = agent._projected_resource_state(definition)
 
-    consumed = agent._consume_projected_resource(
-        "central_district",
-        "communication_equipment",
-        10,
-        pools,
-        region_knowledge,
-        require_known=False,
-    )
-    assert consumed is False
-
     with pytest.raises(GenericAgentError) as error:
         agent._consume_projected_resource(
             "central_district",
@@ -717,6 +726,7 @@ def test_linjiang_v10_unknown_resource_quantity_is_not_known_insufficient(
             10,
             pools,
             region_knowledge,
+            require_known=False,
         )
     assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
     assert error.value.details == {

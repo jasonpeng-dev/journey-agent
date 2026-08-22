@@ -70,6 +70,7 @@ class PlayOrchestrator:
         game_instance_id: GameInstanceId,
         *,
         provider: GenericModelProvider | None = None,
+        model_max_repair_attempts_per_cycle: int = 2,
     ) -> None:
         self.db = db
         self.scope = GameInstanceService(db).load(game_instance_id)
@@ -80,6 +81,7 @@ class PlayOrchestrator:
             goal_resolver=self.goal_resolver,
             provider=provider,
             provider_call_observer=self._provider_call_event,
+            model_max_repair_attempts_per_cycle=model_max_repair_attempts_per_cycle,
         )
 
     def _provider_call_event(
