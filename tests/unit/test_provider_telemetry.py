@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from threading import Event
 from time import sleep
+from typing import Literal
 
 import httpx
 import pytest
@@ -116,6 +118,92 @@ def test_fast_response_records_headers_first_byte_and_bytes() -> None:
     assert metadata.response_bytes_received > 0
     assert metadata.request_cancelled_at is None
     assert metadata.timeout_subtype is None
+
+
+@pytest.mark.parametrize("call_type", ["INITIAL_PLAN", "REPLAN", "REPAIR"])
+def test_enabled_uncapped_provider_uses_nullable_production_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    call_type: Literal["INITIAL_PLAN", "REPLAN", "REPAIR"],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return _plan_response(request)
+
+    def unexpected_executor(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("No total deadline must not create a deadline executor")
+
+    monkeypatch.setattr("app.agent.provider.ThreadPoolExecutor", unexpected_executor)
+    provider = OpenAICompatibleGenericProvider(
+        _settings().model_copy(
+            update={
+                "model_name": "deepseek-v4-flash",
+                "model_thinking_mode": "enabled",
+                "model_reasoning_effort": "low",
+                "model_timeout_seconds": None,
+                "model_total_timeout_seconds": None,
+                "model_max_output_tokens": None,
+            }
+        ),
+        transport=httpx.MockTransport(complete),
+    )
+
+    provider.propose_plan(
+        PlanRequest(
+            call_type=call_type,
+            goal="known goal",
+            planning_context=PlanningContext(goal={"objective_keys": ["known"]}),
+        )
+    )
+
+    assert captured["model"] == "deepseek-v4-flash"
+    assert captured["thinking"] == {"type": "enabled"}
+    assert captured["reasoning_effort"] == "low"
+    assert "max_tokens" not in captured
+    assert "max_completion_tokens" not in captured
+    metadata = provider.last_call_metadata
+    assert metadata is not None
+    assert metadata.thinking_mode == "enabled"
+    assert metadata.reasoning_effort == "low"
+    assert metadata.configured_output_token_limit is None
+    assert metadata.http_timeout_seconds is None
+    assert metadata.total_deadline_seconds is None
+
+
+def test_provider_settings_defaults_remain_bounded_and_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in (
+        "MODEL_THINKING_MODE",
+        "MODEL_REASONING_EFFORT",
+        "MODEL_TIMEOUT_SECONDS",
+        "MODEL_TOTAL_TIMEOUT_SECONDS",
+        "MODEL_MAX_OUTPUT_TOKENS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.model_thinking_mode == "disabled"
+    assert settings.model_reasoning_effort == "low"
+    assert settings.model_timeout_seconds == 20
+    assert settings.model_total_timeout_seconds == 60
+    assert settings.model_max_output_tokens == 8192
+
+
+def test_provider_settings_parse_explicit_null_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODEL_TIMEOUT_SECONDS", "null")
+    monkeypatch.setenv("MODEL_TOTAL_TIMEOUT_SECONDS", "null")
+    monkeypatch.setenv("MODEL_MAX_OUTPUT_TOKENS", "null")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.model_timeout_seconds is None
+    assert settings.model_total_timeout_seconds is None
+    assert settings.model_max_output_tokens is None
 
 
 def test_headers_received_but_slow_body_is_distinguished_from_no_response() -> None:

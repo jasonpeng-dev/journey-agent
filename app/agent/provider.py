@@ -449,8 +449,8 @@ class OpenAICompatibleGenericProvider:
         self._timeout = settings.model_timeout_seconds
         self._total_timeout = settings.model_total_timeout_seconds
         self._max_output_tokens = settings.model_max_output_tokens
-        self._thinking_mode = "disabled"
-        self._reasoning_effort = "low"
+        self._thinking_mode = settings.model_thinking_mode
+        self._reasoning_effort = settings.model_reasoning_effort
         self._transport = transport
         self._last_call_metadata: ProviderCallMetadata | None = None
 
@@ -467,15 +467,15 @@ class OpenAICompatibleGenericProvider:
         return self._reasoning_effort
 
     @property
-    def configured_output_token_limit(self) -> int:
+    def configured_output_token_limit(self) -> int | None:
         return self._max_output_tokens
 
     @property
-    def http_timeout_seconds(self) -> float:
+    def http_timeout_seconds(self) -> float | None:
         return self._timeout
 
     @property
-    def total_deadline_seconds(self) -> float:
+    def total_deadline_seconds(self) -> float | None:
         return self._total_timeout
 
     @property
@@ -617,8 +617,8 @@ class OpenAICompatibleGenericProvider:
         )
         request_body: dict[str, object] = {
             "model": self._model_name,
-            "thinking": {"type": "disabled"},
-            "reasoning_effort": "low",
+            "thinking": {"type": self._thinking_mode},
+            "reasoning_effort": self._reasoning_effort,
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -636,7 +636,10 @@ class OpenAICompatibleGenericProvider:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
         }
-        if purpose in {"initial_plan", "replan", "repair"}:
+        if (
+            purpose in {"initial_plan", "replan", "repair"}
+            and self._max_output_tokens is not None
+        ):
             request_body["max_tokens"] = self._max_output_tokens
         request_size_bytes = len(
             json.dumps(request_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -659,6 +662,13 @@ class OpenAICompatibleGenericProvider:
     ) -> httpx.Response:
         """Bound the complete synchronous HTTP call independently of HTTPX phases."""
 
+        if self._total_timeout is None:
+            return self._post(
+                url=url,
+                headers=headers,
+                request_body=request_body,
+                telemetry=telemetry,
+            )
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="journey-provider")
         future = executor.submit(
             self._post,
@@ -964,8 +974,8 @@ def _log_provider_failure(
     error: Exception,
     response: httpx.Response | None,
     latency_ms: int,
-    http_timeout_seconds: float,
-    total_deadline_seconds: float,
+    http_timeout_seconds: float | None,
+    total_deadline_seconds: float | None,
 ) -> None:
     """Record bounded, credential-safe upstream diagnostics for Developer logs."""
 
