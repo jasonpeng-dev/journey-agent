@@ -98,6 +98,16 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
             PlannerActorState(
                 actor_key=str(raw["actor_key"]),
                 role_key=str(raw.get("role_key", "")),
+                capabilities=tuple(
+                    str(item)
+                    for item in cast(list[object], raw.get("capabilities", []))
+                    if isinstance(item, str)
+                ),
+                allowed_action_keys=tuple(
+                    str(item)
+                    for item in cast(list[object], raw.get("allowed_action_keys", []))
+                    if isinstance(item, str)
+                ),
                 availability=str(state.get("availability", "UNKNOWN")),
                 current_region=(
                     str(state["current_region"])

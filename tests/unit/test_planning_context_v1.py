@@ -15,6 +15,7 @@ from app.agent.provider import (
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
     PlannerActionContract,
+    PlannerActorState,
     PlannerInput,
     PlannerKnownWorldSlice,
     PlanningActionCandidate,
@@ -183,6 +184,9 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     assert "repair_attempt" not in initial_payload
     assert "repair_diagnostics" not in initial_payload
     assert initial_payload["planner_input"]["schema_version"] == 2
+    assert "enemy_north_supply_route" not in json.dumps(
+        initial_payload, ensure_ascii=False
+    )
     assert "planning_context" not in initial_payload
     assert task.current_plan_version == 1
 
@@ -203,7 +207,19 @@ def test_legacy_catalog_is_not_in_canonical_provider_payload(session: Session) -
 
 def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
     initial_context = PlanningContext(previous_execution_context={})
-    planner_input = PlannerInput()
+    planner_input = PlannerInput(
+        actors=(
+            PlannerActorState(
+                actor_key="actor-one",
+                role_key="operator",
+                capabilities=("FIELD_COMMAND",),
+                allowed_action_keys=("inspect",),
+                availability="AVAILABLE",
+                current_region="region-one",
+                command_reachability="REACHABLE",
+            ),
+        )
+    )
     initial_payload = PlanRequest(
         call_type="INITIAL_PLAN",
         goal="goal",
@@ -212,6 +228,7 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
     ).provider_payload()
     assert set(initial_payload) == {"call_type", "planner_input"}
     assert initial_payload["planner_input"]["schema_version"] == 2
+    canonical_actor = initial_payload["planner_input"]["actors"][0]
 
     replan_context = PlanningContext(
         previous_execution_context={"previous_plan_version": 1},
@@ -221,7 +238,9 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
         goal="goal",
         replan_reason="TRAVEL_BLOCKED",
         planning_context=replan_context,
-        planner_input=PlannerInput(execution_context={"previous_plan_version": 1}),
+        planner_input=planner_input.model_copy(
+            update={"execution_context": {"previous_plan_version": 1}}
+        ),
     ).provider_payload()
     assert replan_payload["replan_reason"] == "TRAVEL_BLOCKED"
     assert replan_payload["planner_input"]["execution_context"] == {
@@ -229,6 +248,7 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
     }
     assert "repair_attempt" not in replan_payload
     assert "repair_diagnostics" not in replan_payload
+    assert replan_payload["planner_input"]["actors"][0] == canonical_actor
 
     repair_payload = PlanRequest(
         call_type="REPAIR",
@@ -245,6 +265,7 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
     assert repair_payload["repair_attempt"] == 0
     assert repair_payload["validator_violations"] == [{"code": "PLAN_REJECTED"}]
     assert repair_payload["rejected_segment"]["steps"][0]["step_id"] == "step-1"
+    assert repair_payload["planner_input"]["actors"][0] == canonical_actor
 
 
 def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrelated(

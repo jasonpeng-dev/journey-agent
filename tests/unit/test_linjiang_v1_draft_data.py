@@ -450,12 +450,33 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
         "central_telecom_hub"
     )
     actors = {item["actor_key"]: item for item in payload["actors"]}
+    assert all(
+        set(actor) == {
+            "actor_key",
+            "role_key",
+            "capabilities",
+            "allowed_action_keys",
+            "availability",
+            "current_region",
+            "command_reachability",
+            "execution_state",
+        }
+        for actor in actors.values()
+    )
     assert actors["logistics_team_alpha"]["current_region"] == "central_district"
     assert actors["logistics_team_alpha"]["command_reachability"] == "ONLINE"
     communications = actors["communications_repair_team_alpha"]
     assert communications["current_region"] == "east_residential_district"
     assert communications["command_reachability"] == "DISCONNECTED"
     assert communications["execution_state"]["status"] == "KNOWN_BLOCKED"
+    repair_contract = next(
+        item for item in payload["action_contracts"]
+        if item["action_key"] == "repair_communications"
+    )
+    assert set(repair_contract["executor_requirements"]["required_capabilities"]).issubset(
+        communications["capabilities"]
+    )
+    assert "repair_communications" in communications["allowed_action_keys"]
     assert "north_heavy_equipment_stock" not in serialized
     action_keys = {item["action_key"] for item in payload["action_contracts"]}
     assert "transport_resource" not in action_keys, closure.relevance_reason.get(

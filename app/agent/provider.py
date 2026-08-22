@@ -71,6 +71,8 @@ class PlannerActorState(ProviderModel):
 
     actor_key: str
     role_key: str
+    capabilities: tuple[str, ...] = ()
+    allowed_action_keys: tuple[str, ...] = ()
     availability: str
     current_region: str | None
     command_reachability: str
