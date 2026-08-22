@@ -487,7 +487,13 @@ class OpenAICompatibleGenericProvider:
                 "with broader work after the current Objective can be completed. Future steps "
                 "may be currently locked or unavailable when earlier steps establish their "
                 "prerequisites. Choose the Action, Actor, Target, parameters, and ordering "
-                "yourself, and return the full corrected plan."
+                "yourself. A repaired PlanSegment must eliminate every supplied validator "
+                "violation. Before returning, re-evaluate the corrected segment sequentially "
+                "against projected known state. If any supplied violation would still occur "
+                "with the same dimension / required / actual contradiction, the repair is "
+                "not valid and must not be returned. Do not merely shorten the rejected "
+                "segment or delete an offending Step and return arbitrary remaining content; "
+                "return a complete, corrected, revalidated PlanSegment for the frozen scope."
             )
         elif purpose in {"initial_plan", "replan"}:
             planning_prompt = (
@@ -505,7 +511,17 @@ class OpenAICompatibleGenericProvider:
                 "stop planning instead of adding more work. Future steps may be currently "
                 "locked or unavailable when earlier steps are expected to establish their "
                 "prerequisites. Choose the Action, Actor, Target, parameters, and ordering "
-                "yourself."
+                "yourself. "
+                + (
+                    "Before returning a PlanSegment, validate every Step in order against "
+                    "the projected known state. Apply all declared deterministic effects "
+                    "from earlier Steps before evaluating each later Step. Every returned "
+                    "Step must satisfy all currently known executor, locality, target, "
+                    "parameter, and precondition requirements in that projected state. Do "
+                    "not return a Step with a known deterministic contradiction."
+                    if purpose == "initial_plan"
+                    else ""
+                )
             )
         else:
             planning_prompt = (

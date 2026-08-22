@@ -488,8 +488,52 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "projected deterministic effects",
         "boundary_dependency_id",
         "attempt_policy MAY_ATTEMPT is not an information boundary",
+        "validate every Step in order against the projected known state",
+        "Apply all declared deterministic effects from earlier Steps",
+        "known deterministic contradiction",
     ):
         assert v2_term in system_prompt
+    repair_body, _repair_size = provider._build_request_body(
+        "repair",
+        request.model_copy(
+            update={
+                "call_type": "REPAIR",
+                "repair_attempt": 1,
+                "rejected_segment": {
+                    "stop_reason": "OBJECTIVE_COMPLETION",
+                    "steps": [{"step_id": "step-1"}],
+                },
+                "repair_diagnostics": (
+                    {
+                        "code": "LOCALITY_INVALID",
+                        "step_id": "step-1",
+                        "dimension": "LOCALITY",
+                        "required": "SAME_REGION",
+                        "actual": {"actor_region": "region-a"},
+                    },
+                ),
+            }
+        ).provider_payload(),
+    )
+    repair_prompt = repair_body["messages"][0]["content"]  # type: ignore[index]
+    for repair_term in (
+        "must eliminate every supplied validator violation",
+        "re-evaluate the corrected segment sequentially against projected known state",
+        "same dimension / required / actual contradiction",
+        "complete, corrected, revalidated PlanSegment",
+    ):
+        assert repair_term in repair_prompt
+    for forbidden_term in (
+        "Linjiang",
+        "Task 1",
+        "Travel before Relay",
+        "travel_first",
+        "relay_first",
+        "known_recovery_effects",
+        "recommended recovery action",
+    ):
+        assert forbidden_term not in system_prompt
+        assert forbidden_term not in repair_prompt
     assert captured["json"]["thinking"] == {"type": "disabled"}  # type: ignore[index]
     assert captured["json"]["reasoning_effort"] == "low"  # type: ignore[index]
     assert captured["json"]["max_tokens"] == 8192  # type: ignore[index]
