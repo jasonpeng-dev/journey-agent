@@ -138,6 +138,17 @@ class _KnownPreflightFailure:
     known_predicate: dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class _StaticProposalBinding:
+    index: int
+    raw_step: object
+    candidate: PlanningActionCandidate | None
+    action: ActionDefinitionV2
+    actor: GameInstanceActor
+    target_key: str
+    parameters: dict[str, StrictScalar]
+
+
 _NON_TERMINAL_TASK_STATUSES = (
     AgentTaskStatus.ACTIVE,
     AgentTaskStatus.REQUIRES_PLAYER_DECISION,
@@ -1293,8 +1304,6 @@ class GenericAgentService:
         valid.
         """
 
-        candidates = {item.candidate_id: item for item in catalog}
-        actions = {item.key: item for item in definition.actions}
         actors = {
             item.actor_key: item
             for item in self.db.scalars(
@@ -1316,109 +1325,38 @@ class GenericAgentService:
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
-        target_keys = {
-            str(item.get("target_key"))
-            for item in planning_context.relevant_targets
-            if isinstance(item.get("target_key"), str)
-        }
-        context_action_keys = {
-            str(item.get("action_key"))
-            for item in planning_context.relevant_actions
-            if isinstance(item.get("action_key"), str)
-            and (
-                bool(item.get("objective_relevance"))
-                or bool(item.get("declared_knowledge_effects"))
-                or item.get("behavior") != "RULE"
-                or item.get("locality") != "NONE"
-            )
-        }
-        diagnostics: list[dict[str, object]] = []
         result: list[dict[str, object]] = []
         step_effects: list[set[tuple[str, str]]] = []
-        successful_signatures = self._successful_proposal_signatures(task)
-        objective_needed = {
-            (requirement.node_key, requirement.fact_key)
-            for objective in objectives
-            for prerequisite in objective.prerequisites
-            for requirement in prerequisite.requirements
-            if self._known_requirement_public(requirement)
-            and not self._known_requirement_satisfied(requirement)
-        } | {
-            (requirement.node_key, requirement.fact_key)
-            for objective in objectives
-            for requirement in objective.completion_requirements
-            if self._known_requirement_public(requirement)
-            and not self._known_requirement_satisfied(requirement)
-        }
         if not proposed_steps and stop_reason != "BLOCKED":
             return [], ({"code": "NO_STEPS", "message": "Proposal contains no steps"},)
         if not proposed_steps:
             return [], ()
 
-        for index, raw_step in enumerate(proposed_steps, start=1):
-            candidate_id = getattr(raw_step, "candidate_id", None)
-            action_key = getattr(raw_step, "action_key", None)
-            actor_key = getattr(raw_step, "actor_key", None)
-            target_key = getattr(raw_step, "target_key", None)
-            candidate = candidates.get(candidate_id) if isinstance(candidate_id, str) else None
-            if isinstance(candidate_id, str) and candidate is None and not action_key:
-                diagnostics.append(
-                    {
-                        "code": "UNKNOWN_CANDIDATE",
-                        "step": index,
-                        "candidate_id": candidate_id,
-                    }
-                )
-                continue
-            if candidate is not None:
-                action_key = action_key or candidate.action_key
-                actor_key = actor_key or candidate.actor_key
-                target_key = target_key or candidate.target_key
-            if not isinstance(action_key, str) or not action_key:
-                diagnostics.append({"code": "UNKNOWN_ACTION", "step": index})
-                continue
-            if not isinstance(actor_key, str) or not actor_key:
-                diagnostics.append({"code": "UNKNOWN_ACTOR", "step": index})
-                continue
-            if not isinstance(target_key, str) or not target_key:
-                diagnostics.append({"code": "UNKNOWN_TARGET", "step": index})
-                continue
-            action = actions.get(action_key)
-            actor = actors.get(actor_key)
-            if action is None:
-                diagnostics.append(
-                    {"code": "UNKNOWN_ACTION", "step": index, "action_key": action_key}
-                )
-                continue
-            if actor is None:
-                diagnostics.append({"code": "UNKNOWN_ACTOR", "step": index, "actor_key": actor_key})
-                continue
-            if target_key not in target_keys:
-                diagnostics.append(
-                    {"code": "UNKNOWN_TARGET", "step": index, "target_key": target_key}
-                )
-                continue
-            try:
-                parameters = normalize_action_parameters(
-                    action, dict(getattr(raw_step, "parameters", {}) or {})
-                )
-            except ValueError as exc:
-                diagnostics.append(
-                    {
-                        "code": "PARAMETER_INVALID",
-                        "failure_code": "GENERIC_PLAN_PARAMETER_INVALID",
-                        "step": index,
-                        "action_key": action_key,
-                        "actor_key": actor_key,
-                        "target_key": target_key,
-                        "dimension": "PARAMETER",
-                        "actual_parameters": dict(
-                            getattr(raw_step, "parameters", {}) or {}
-                        ),
-                        "validation_error": str(exc),
-                    }
-                )
-                continue
+        static_bindings, diagnostics = self._static_proposal_bindings(
+            task=task,
+            definition=definition,
+            objectives=objectives,
+            catalog=catalog,
+            proposed_steps=proposed_steps,
+            planning_context=planning_context,
+            actors=actors,
+            projected_command_reachability=projected_command_reachability,
+        )
+        if diagnostics:
+            return [], tuple(
+                _diagnostic_with_step_id(item, proposed_steps) for item in diagnostics
+            )
+
+        for static_binding in static_bindings:
+            index = static_binding.index
+            raw_step = static_binding.raw_step
+            candidate = static_binding.candidate
+            action = static_binding.action
+            actor = static_binding.actor
+            action_key = action.key
+            actor_key = actor.actor_key
+            target_key = static_binding.target_key
+            parameters = static_binding.parameters
             projected_resolution_effects = self._projected_resolution_effects(
                 definition,
                 action,
@@ -1472,31 +1410,8 @@ class GenericAgentService:
                         projected_command_reachability=projected_command_reachability,
                     )
                 )
-                continue
-            signature = proposal_signature(actor_key, action_key, target_key, parameters)
-            if signature in set(task.rejected_proposal_signatures):
-                diagnostics.append(
-                    {"code": "REJECTED_PROPOSAL", "step": index, "action_key": action_key}
-                )
-                continue
+                break
             effect_refs = self._context_effect_refs(planning_context, action_key)
-            if signature in successful_signatures and not effect_refs.intersection(
-                objective_needed
-            ):
-                diagnostics.append(
-                    {
-                        "code": "OBJECTIVE_IRRELEVANT",
-                        "failure_code": "OBJECTIVE_IRRELEVANT",
-                        "step": index,
-                        "action_key": action_key,
-                        "actor_key": actor_key,
-                        "target_key": target_key,
-                        "dimension": "OBJECTIVE_RELEVANCE",
-                        "required": "ADVANCES_FROZEN_OBJECTIVE_SCOPE",
-                        "actual": "ALREADY_SUCCEEDED_WITHOUT_NEEDED_EFFECT",
-                    }
-                )
-                continue
             target_definition = definition.world.node(target_key)
             target_actor = (
                 actors.get(target_key) if action.target_kind == ActionTargetKind.ACTOR else None
@@ -1548,7 +1463,7 @@ class GenericAgentService:
                     plan_version,
                     index,
                     reason,
-                    allow_epistemic=action_key in context_action_keys,
+                    allow_epistemic=True,
                 )
             except GenericAgentError as exc:
                 diagnostics.append(
@@ -1561,7 +1476,7 @@ class GenericAgentService:
                         projected_command_reachability=projected_command_reachability,
                     )
                 )
-                continue
+                break
             purpose = getattr(raw_step, "purpose", "")
             if isinstance(purpose, str) and purpose.strip() and generated:
                 generated[0]["description"] = purpose.strip()[:400]
@@ -1618,6 +1533,20 @@ class GenericAgentService:
                         },
                     )
             covered_before.update(effects)
+        objective_needed = {
+            (requirement.node_key, requirement.fact_key)
+            for objective in objectives
+            for prerequisite in objective.prerequisites
+            for requirement in prerequisite.requirements
+            if self._known_requirement_public(requirement)
+            and not self._known_requirement_satisfied(requirement)
+        } | {
+            (requirement.node_key, requirement.fact_key)
+            for objective in objectives
+            for requirement in objective.completion_requirements
+            if self._known_requirement_public(requirement)
+            and not self._known_requirement_satisfied(requirement)
+        }
         missing_refs = objective_needed - set().union(*step_effects)
         if missing_refs and stop_reason == "OBJECTIVE_COMPLETION":
             return [], (
@@ -1630,6 +1559,202 @@ class GenericAgentService:
                 },
             )
         return result, ()
+
+    def _static_proposal_bindings(
+        self,
+        *,
+        task: AgentTask,
+        definition: ScenarioDefinitionV2,
+        objectives: tuple[ObjectiveDefinitionV2, ...],
+        catalog: tuple[PlanningActionCandidate, ...],
+        proposed_steps: tuple[object, ...],
+        planning_context: PlanningContext,
+        actors: dict[str, GameInstanceActor],
+        projected_command_reachability: dict[str, CommandReachability],
+    ) -> tuple[list[_StaticProposalBinding], list[dict[str, object]]]:
+        """Validate all ordering-independent proposal facts without projecting state."""
+
+        candidates = {item.candidate_id: item for item in catalog}
+        actions = {item.key: item for item in definition.actions}
+        target_keys = {
+            str(item.get("target_key"))
+            for item in planning_context.relevant_targets
+            if isinstance(item.get("target_key"), str)
+        }
+        context_action_keys = {
+            str(item.get("action_key"))
+            for item in planning_context.relevant_actions
+            if isinstance(item.get("action_key"), str)
+            and (
+                bool(item.get("objective_relevance"))
+                or bool(item.get("declared_knowledge_effects"))
+                or item.get("behavior") != "RULE"
+                or item.get("locality") != "NONE"
+            )
+        }
+        successful_signatures = self._successful_proposal_signatures(task)
+        objective_needed = {
+            (requirement.node_key, requirement.fact_key)
+            for objective in objectives
+            for prerequisite in objective.prerequisites
+            for requirement in prerequisite.requirements
+            if self._known_requirement_public(requirement)
+            and not self._known_requirement_satisfied(requirement)
+        } | {
+            (requirement.node_key, requirement.fact_key)
+            for objective in objectives
+            for requirement in objective.completion_requirements
+            if self._known_requirement_public(requirement)
+            and not self._known_requirement_satisfied(requirement)
+        }
+        objective_refs = {
+            (requirement.node_key, requirement.fact_key)
+            for objective in objectives
+            for requirement in (
+                *objective.completion_requirements,
+                *(item for group in objective.prerequisites for item in group.requirements),
+            )
+        }
+        bindings: list[_StaticProposalBinding] = []
+        diagnostics: list[dict[str, object]] = []
+        for index, raw_step in enumerate(proposed_steps, start=1):
+            candidate_id = getattr(raw_step, "candidate_id", None)
+            action_key = getattr(raw_step, "action_key", None)
+            actor_key = getattr(raw_step, "actor_key", None)
+            target_key = getattr(raw_step, "target_key", None)
+            candidate = candidates.get(candidate_id) if isinstance(candidate_id, str) else None
+            if isinstance(candidate_id, str) and candidate is None and not action_key:
+                diagnostics.append(
+                    {
+                        "code": "UNKNOWN_CANDIDATE",
+                        "step": index,
+                        "candidate_id": candidate_id,
+                    }
+                )
+                break
+            if candidate is not None:
+                action_key = action_key or candidate.action_key
+                actor_key = actor_key or candidate.actor_key
+                target_key = target_key or candidate.target_key
+            if not isinstance(action_key, str) or not action_key:
+                diagnostics.append({"code": "UNKNOWN_ACTION", "step": index})
+                continue
+            if not isinstance(actor_key, str) or not actor_key:
+                diagnostics.append({"code": "UNKNOWN_ACTOR", "step": index})
+                continue
+            if not isinstance(target_key, str) or not target_key:
+                diagnostics.append({"code": "UNKNOWN_TARGET", "step": index})
+                continue
+            action = actions.get(action_key)
+            actor = actors.get(actor_key)
+            if action is None:
+                diagnostics.append(
+                    {"code": "UNKNOWN_ACTION", "step": index, "action_key": action_key}
+                )
+                continue
+            if actor is None:
+                diagnostics.append(
+                    {"code": "UNKNOWN_ACTOR", "step": index, "actor_key": actor_key}
+                )
+                continue
+            if target_key not in target_keys:
+                diagnostics.append(
+                    {"code": "UNKNOWN_TARGET", "step": index, "target_key": target_key}
+                )
+                continue
+            raw_parameters = dict(getattr(raw_step, "parameters", {}) or {})
+            try:
+                parameters = normalize_action_parameters(action, raw_parameters)
+            except ValueError as exc:
+                diagnostics.append(
+                    {
+                        "code": "PARAMETER_INVALID",
+                        "failure_code": "GENERIC_PLAN_PARAMETER_INVALID",
+                        "step": index,
+                        "action_key": action_key,
+                        "actor_key": actor_key,
+                        "target_key": target_key,
+                        "dimension": "PARAMETER",
+                        "actual_parameters": raw_parameters,
+                        "validation_error": str(exc),
+                    }
+                )
+                continue
+            failure_code = self._planning_action_failure_code(
+                definition, action, actor, target_key
+            )
+            if failure_code is not None:
+                diagnostics.append(
+                    _structured_plan_diagnostic(
+                        GenericAgentError(
+                            failure_code,
+                            "The Action assignment does not satisfy its static contract",
+                            details=_planning_failure_details(
+                                definition, action, actor, target_key, failure_code
+                            ),
+                        ),
+                        action=action,
+                        step_id=str(getattr(raw_step, "step_id", "")),
+                        actor_key=actor_key,
+                        target_key=target_key,
+                        projected_command_reachability=projected_command_reachability,
+                    )
+                )
+                continue
+            signature = proposal_signature(actor_key, action_key, target_key, parameters)
+            effect_refs = self._context_effect_refs(planning_context, action_key)
+            if signature in set(task.rejected_proposal_signatures):
+                diagnostics.append(
+                    {"code": "REJECTED_PROPOSAL", "step": index, "action_key": action_key}
+                )
+                continue
+            actual_relevance: str | None
+            if signature in successful_signatures and not effect_refs.intersection(
+                objective_needed
+            ):
+                actual_relevance = "ALREADY_SUCCEEDED_WITHOUT_NEEDED_EFFECT"
+            else:
+                projected_refs = {
+                    (item.node_key, item.fact_key)
+                    for item in (
+                        *action.planning.terminal_effects,
+                        *action.planning.supporting_effects,
+                    )
+                }
+                actual_relevance = (
+                    "NO_DECLARED_RELEVANT_EFFECT"
+                    if objective_refs.isdisjoint(projected_refs)
+                    and not action.planning.supporting_effects
+                    and action_key not in context_action_keys
+                    else None
+                )
+            if actual_relevance is not None:
+                diagnostics.append(
+                    {
+                        "code": "OBJECTIVE_IRRELEVANT",
+                        "failure_code": "OBJECTIVE_IRRELEVANT",
+                        "step": index,
+                        "action_key": action_key,
+                        "actor_key": actor_key,
+                        "target_key": target_key,
+                        "dimension": "OBJECTIVE_RELEVANCE",
+                        "required": "ADVANCES_FROZEN_OBJECTIVE_SCOPE",
+                        "actual": actual_relevance,
+                    }
+                )
+                continue
+            bindings.append(
+                _StaticProposalBinding(
+                    index=index,
+                    raw_step=raw_step,
+                    candidate=candidate,
+                    action=action,
+                    actor=actor,
+                    target_key=target_key,
+                    parameters=parameters,
+                )
+            )
+        return bindings, diagnostics
 
     @staticmethod
     def _context_effect_refs(
@@ -3305,8 +3430,6 @@ class GenericAgentService:
                 return "TARGET_NOT_VISIBLE"
             if not target_interaction_valid:
                 return "TARGET_INTERACTION_INVALID"
-        if not actor_binding_matches(definition, actor):
-            return "ACTOR_BINDING_INVALID"
         if actor.status != "ACTIVE":
             return "ACTOR_NOT_AVAILABLE"
         if action.key not in actor.allowed_action_keys:
@@ -3320,6 +3443,8 @@ class GenericAgentService:
             and actor.role_key != action.required_actor_role_key
         ):
             return "ACTOR_ROLE_MISSING"
+        if not actor_binding_matches(definition, actor):
+            return "ACTOR_BINDING_INVALID"
         return None
 
     @staticmethod

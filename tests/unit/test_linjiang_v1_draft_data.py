@@ -749,6 +749,168 @@ def test_linjiang_v10_known_preflight_repair_diagnostic_has_public_witness(
     } in predicates
 
 
+def test_validator_stops_projected_diagnostics_after_static_root_failure(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-static-root-no-cascade")
+    provider = _RepeatingPlanProvider(
+        (
+            PlanStepProposal(
+                step_id="invalid-interaction",
+                action_key="repair_communications",
+                actor_key="communications_repair_team_alpha",
+                target_key="central_district",
+            ),
+            PlanStepProposal(
+                step_id="downstream-locality",
+                action_key="travel",
+                actor_key="logistics_team_alpha",
+                target_key="central_district",
+            ),
+            PlanStepProposal(
+                step_id="downstream-command-resource",
+                action_key="repair_communications",
+                actor_key="communications_repair_team_alpha",
+                target_key="central_telecom_hub",
+            ),
+        )
+    )
+
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore_central_communication_capability",
+        )
+
+    diagnostics = provider.requests[1].repair_diagnostics
+    assert len(diagnostics) == 1
+    assert diagnostics[0].code == "TARGET_INTERACTION_INVALID"
+    assert diagnostics[0].step_id == "invalid-interaction"
+
+
+def test_validator_reports_multiple_independent_static_root_failures(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-multiple-static-roots")
+    provider = _RepeatingPlanProvider(
+        (
+            PlanStepProposal(
+                step_id="invalid-interaction",
+                action_key="repair_communications",
+                actor_key="communications_repair_team_alpha",
+                target_key="central_district",
+            ),
+            PlanStepProposal(
+                step_id="invalid-parameters",
+                action_key="transport_resource",
+                actor_key="logistics_team_alpha",
+                target_key="central_district",
+                parameters={"resource_key": "communication_equipment", "amount": "many"},
+            ),
+            PlanStepProposal(
+                step_id="actor-not-allowed",
+                action_key="repair_communications",
+                actor_key="logistics_team_alpha",
+                target_key="central_telecom_hub",
+            ),
+        )
+    )
+
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore_central_communication_capability",
+        )
+
+    diagnostics = provider.requests[1].repair_diagnostics
+    assert [(item.step_id, item.code) for item in diagnostics] == [
+        ("invalid-interaction", "TARGET_INTERACTION_INVALID"),
+        ("invalid-parameters", "PARAMETER_INVALID"),
+        ("actor-not-allowed", "ACTOR_NOT_ALLOWED"),
+    ]
+
+
+def test_validator_reports_actor_capability_mismatch_from_public_actor_state(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-actor-capability-diagnostic")
+    actor = session.get(
+        GameInstanceActor,
+        (runtime.instance.id, "communications_repair_team_alpha"),
+    )
+    assert actor is not None
+    actor.capabilities = [
+        capability for capability in actor.capabilities if capability != "EXECUTE_ACTION"
+    ]
+    session.flush()
+    provider = _RepeatingPlanProvider(
+        (
+            PlanStepProposal(
+                step_id="missing-capability",
+                action_key="repair_communications",
+                actor_key="communications_repair_team_alpha",
+                target_key="central_telecom_hub",
+            ),
+        )
+    )
+
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore_central_communication_capability",
+        )
+
+    planner_actor = next(
+        item
+        for item in provider.requests[0].planner_input.actors
+        if item.actor_key == "communications_repair_team_alpha"
+    )
+    assert "EXECUTE_ACTION" not in planner_actor.capabilities
+    diagnostic = provider.requests[1].repair_diagnostics[0]
+    assert diagnostic.code == "ACTOR_CAPABILITY_MISSING"
+    assert diagnostic.failure_code == "ACTOR_CAPABILITY_MISSING"
+    assert diagnostic.dimension == "ACTOR_CAPABILITY"
+    assert diagnostic.step_id == "missing-capability"
+    assert diagnostic.action_key == "repair_communications"
+    assert diagnostic.actor_key == "communications_repair_team_alpha"
+    assert diagnostic.target_key == "central_telecom_hub"
+    assert diagnostic.required == ["EXECUTE_ACTION"]
+    assert diagnostic.actual == ["INSPECT_STATE", "PLAN"]
+
+
+def test_validator_stops_after_first_projected_state_root_failure(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-state-root-no-cascade")
+    provider = _RepeatingPlanProvider(
+        (
+            PlanStepProposal(
+                step_id="same-region-travel",
+                action_key="travel",
+                actor_key="logistics_team_alpha",
+                target_key="central_district",
+            ),
+            PlanStepProposal(
+                step_id="downstream-command",
+                action_key="repair_communications",
+                actor_key="communications_repair_team_alpha",
+                target_key="central_telecom_hub",
+            ),
+        )
+    )
+
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore_central_communication_capability",
+        )
+
+    diagnostics = provider.requests[1].repair_diagnostics
+    assert len(diagnostics) == 1
+    assert diagnostics[0].code == "LOCALITY_INVALID"
+    assert diagnostics[0].step_id == "same-region-travel"
+
+
 def test_linjiang_v10_projected_repair_applies_selected_target_cost_once(
     session: Session,
 ) -> None:
