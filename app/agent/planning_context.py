@@ -52,6 +52,41 @@ from app.services.knowledge_projection import SharedKnowledgeProjection
 PlanningContextV1 = PlanningContext
 
 
+def _canonical_resource_knowledge(raw: object) -> tuple[dict[str, object], ...]:
+    """Normalize the V1 region-keyed view into sparse canonical V2 entries."""
+
+    candidates: list[tuple[str | None, object]]
+    if isinstance(raw, dict):
+        candidates = [(str(region_key), value) for region_key, value in raw.items()]
+    elif isinstance(raw, (list, tuple)):
+        candidates = [
+            (
+                str(value["region_key"])
+                if isinstance(value, dict) and isinstance(value.get("region_key"), str)
+                else None,
+                value,
+            )
+            for value in raw
+        ]
+    else:
+        candidates = []
+
+    result: list[dict[str, object]] = []
+    for region_key, value in candidates:
+        if region_key is None or not isinstance(value, dict):
+            continue
+        entry: dict[str, object] = {"region_key": region_key}
+        visibility = value.get("resource_inventory_visibility")
+        if isinstance(visibility, str):
+            entry["resource_inventory_visibility"] = visibility
+        survey_completed = value.get("resource_survey_completed")
+        if isinstance(survey_completed, bool):
+            entry["resource_survey_completed"] = survey_completed
+        if len(entry) > 1:
+            result.append(entry)
+    return tuple(sorted(result, key=lambda item: str(item["region_key"])))
+
+
 def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
     """Normalize the internal V1 view into one Provider-facing semantic source."""
 
@@ -194,10 +229,8 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
                 if isinstance(current.get("resources"), dict)
                 else {}
             ),
-            resource_knowledge=tuple(
-                dict(item)
-                for item in cast(list[object], current.get("region_resource_knowledge", []))
-                if isinstance(item, dict)
+            resource_knowledge=_canonical_resource_knowledge(
+                current.get("region_resource_knowledge", {})
             ),
         ),
         execution_context=dict(context.previous_execution_context),

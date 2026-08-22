@@ -141,10 +141,17 @@ _NON_TERMINAL_TASK_STATUSES = (
 
 
 class GenericAgentError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details = dict(details or {})
 
 
 PLAN_INVALIDATED_BY_NEW_KNOWLEDGE = "PLAN_INVALIDATED_BY_NEW_KNOWLEDGE"
@@ -2116,6 +2123,12 @@ class GenericAgentService:
                 raise GenericAgentError(
                     "RESOURCE_SURVEY_ALREADY_COMPLETED",
                     "The target Region has already completed a resource survey",
+                    details={
+                        "dimension": "RESOURCE_SURVEY_STATE",
+                        "target_key": target_key,
+                        "required": "NOT_COMPLETED",
+                        "actual": "COMPLETED",
+                    },
                 )
             knowledge.visibility = ResourceInventoryVisibility.VISIBLE
             knowledge.survey_completed = True
@@ -2230,6 +2243,14 @@ class GenericAgentService:
             raise GenericAgentError(
                 "KNOWN_RESOURCE_INSUFFICIENT",
                 "Known available Resource quantity is insufficient",
+                details={
+                    "dimension": "RESOURCE_QUANTITY",
+                    "resource_key": resource_key,
+                    "scope_region": region_key,
+                    "required_amount": amount,
+                    "projected_known_available_amount": known_available,
+                    "deficit": amount - known_available,
+                },
             )
         if known_available < amount:
             return False
@@ -3101,13 +3122,33 @@ def _structured_plan_diagnostic(
         "code": _safe_provider_diagnostic(exc.code),
         "step_id": step_id,
     }
-    actual: dict[str, object] = {}
-    location = projected_actor_locations.get(actor_key)
-    if location is not None:
-        actual["actor_region"] = location
-    reachability = projected_command_reachability.get(actor_key)
-    if reachability is not None:
-        actual["command_reachability"] = reachability.value
+    detail_dimension = exc.details.get("dimension")
+    detail_fields = {
+        "RESOURCE_SURVEY_STATE": (
+            "dimension",
+            "target_key",
+            "required",
+            "actual",
+        ),
+        "RESOURCE_QUANTITY": (
+            "dimension",
+            "resource_key",
+            "scope_region",
+            "required_amount",
+            "projected_known_available_amount",
+            "deficit",
+        ),
+    }
+    if isinstance(detail_dimension, str) and detail_dimension in detail_fields:
+        diagnostic["failure_code"] = exc.code
+        diagnostic.update(
+            {
+                key: exc.details[key]
+                for key in detail_fields[detail_dimension]
+                if key in exc.details
+            }
+        )
+        return diagnostic
 
     if exc.code.startswith("LOCALITY_"):
         diagnostic["dimension"] = "LOCALITY"
@@ -3116,17 +3157,28 @@ def _structured_plan_diagnostic(
             if action.behavior in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
             else "SAME_REGION"
         )
+        actual: dict[str, object] = {}
+        location = projected_actor_locations.get(actor_key)
+        if location is not None:
+            actual["actor_region"] = location
         target_location = projected_actor_locations.get(target_key, target_key)
         with suppress(LocalityEngineError):
             actual["target_region"] = region_for_node(definition, target_location)
+        if actual:
+            diagnostic["actual"] = actual
     else:
         blocker = _diagnostic_blocker(exc.code, action)
         if blocker:
-            diagnostic["dimension"] = blocker.get("type", "ACTION_PRECONDITION")
+            dimension = blocker.get("type", "ACTION_PRECONDITION")
+            diagnostic["dimension"] = dimension
             if "required_value" in blocker:
                 diagnostic["required"] = blocker["required_value"]
-    if actual:
-        diagnostic["actual"] = actual
+            if dimension == "COMMAND_REACHABILITY":
+                reachability = projected_command_reachability.get(actor_key)
+                if reachability is not None:
+                    diagnostic["actual"] = {
+                        "command_reachability": reachability.value,
+                    }
     return diagnostic
 
 

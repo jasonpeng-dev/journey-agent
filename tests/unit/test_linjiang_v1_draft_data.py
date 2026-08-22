@@ -8,13 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.dependency_closure import DependencyClosureError, build_dependency_closure
-from app.agent.generic import GenericAgentService, _ProjectedFact
+from app.agent.generic import GenericAgentError, GenericAgentService, _ProjectedFact
 from app.agent.planner_contract import (
     action_planner_constraints,
     action_planner_effects,
     declarative_action_effects,
 )
 from app.agent.planning_context import PlanningContextBuilder
+from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import CommandReachability
 from app.domain.resources import resource_state_key
 from app.domain.runtime_scope import GameInstanceId
@@ -88,6 +89,21 @@ def _v10_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
     )
     scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
     return runtime, scope
+
+
+class _RepeatingPlanProvider:
+    model_name = "typed-diagnostic-test-provider"
+
+    def __init__(self, steps: tuple[PlanStepProposal, ...]) -> None:
+        self.steps = steps
+        self.requests: list[PlanRequest] = []
+
+    def select_objectives(self, request: object) -> object:
+        raise AssertionError(f"exact objective should not call goal selection: {request}")
+
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        self.requests.append(request)
+        return PlanProposal(plan_summary=request.call_type, steps=self.steps)
 
 
 def test_linjiang_v1_draft_is_complete_and_does_not_mutate_v9() -> None:
@@ -472,6 +488,16 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
             dependency["deficit"],
         ) == expected
         assert dependency["source_knowledge_status"] == "UNKNOWN"
+    resource_knowledge = {
+        item["region_key"]: item for item in payload["known_world"]["resource_knowledge"]
+    }
+    assert resource_knowledge["central_district"] == {
+        "region_key": "central_district",
+        "resource_inventory_visibility": "VISIBLE",
+        "resource_survey_completed": True,
+    }
+    assert "southeast_heights_district" not in resource_knowledge
+    assert len(resource_knowledge) < 6
     repeated = PlanningContextBuilder(session, scope).build_v2_closure(
         definition,
         agent._objectives(task, definition),
@@ -525,6 +551,113 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     assert "clear_transport" in {
         item.action_key for item in replanned.planner_input.action_contracts
     }
+
+
+def test_linjiang_v10_completed_survey_repair_diagnostic_is_typed(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-survey-diagnostic")
+    provider = _RepeatingPlanProvider(
+        (
+            PlanStepProposal(
+                step_id="survey-central",
+                purpose="Survey Central resources.",
+                action_key="survey_resources",
+                actor_key="logistics_team_alpha",
+                target_key="central_district",
+            ),
+        )
+    )
+
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore_central_communication_capability",
+        )
+
+    diagnostic = provider.requests[1].repair_diagnostics[0]
+    assert diagnostic == {
+        "code": "PROPOSAL_INVALID",
+        "step_id": "survey-central",
+        "failure_code": "RESOURCE_SURVEY_ALREADY_COMPLETED",
+        "dimension": "RESOURCE_SURVEY_STATE",
+        "target_key": "central_district",
+        "required": "NOT_COMPLETED",
+        "actual": "COMPLETED",
+    }
+
+
+def test_linjiang_v10_known_resource_deficit_repair_diagnostic_is_typed(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-resource-diagnostic")
+    communications = session.get(
+        GameInstanceActor,
+        (runtime.instance.id, "communications_repair_team_alpha"),
+    )
+    assert communications is not None
+    communications.current_node_key = "central_district"
+    communications.command_reachability = "ONLINE"
+    session.flush()
+    provider = _RepeatingPlanProvider(
+        (
+            PlanStepProposal(
+                step_id="repair-central",
+                purpose="Repair Central communications.",
+                action_key="repair_communications",
+                actor_key="communications_repair_team_alpha",
+                target_key="central_telecom_hub",
+            ),
+        )
+    )
+
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore_central_communication_capability",
+        )
+
+    diagnostic = provider.requests[1].repair_diagnostics[0]
+    assert diagnostic == {
+        "code": "PROPOSAL_INVALID",
+        "step_id": "repair-central",
+        "failure_code": "KNOWN_RESOURCE_INSUFFICIENT",
+        "dimension": "RESOURCE_QUANTITY",
+        "resource_key": "general_engineering_parts",
+        "scope_region": "central_district",
+        "required_amount": 15,
+        "projected_known_available_amount": 10,
+        "deficit": 5,
+    }
+
+
+def test_linjiang_v10_unknown_resource_quantity_is_not_known_insufficient(
+    session: Session,
+) -> None:
+    _runtime, scope = _v10_runtime(session, "linjiang-v10-unknown-resource")
+    agent = GenericAgentService(session, scope)
+    definition = agent._definition()
+    pools, region_knowledge = agent._projected_resource_state(definition)
+
+    consumed = agent._consume_projected_resource(
+        "central_district",
+        "communication_equipment",
+        10,
+        pools,
+        region_knowledge,
+        require_known=False,
+    )
+    assert consumed is False
+
+    with pytest.raises(GenericAgentError) as error:
+        agent._consume_projected_resource(
+            "central_district",
+            "communication_equipment",
+            10,
+            pools,
+            region_knowledge,
+        )
+    assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
 
 
 def test_linjiang_v10_all_regions_have_the_generic_travel_target_contract() -> None:
