@@ -574,7 +574,16 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert provider.plan_requests[1].rejected_segment["steps"][0]["step_id"] == (
         unknown[0].step_id
     )
-    assert provider.plan_requests[2].repair_diagnostics[0].code == "PARAMETER_INVALID"
+    parameter_diagnostic = provider.plan_requests[2].repair_diagnostics[0]
+    assert parameter_diagnostic.code == "PARAMETER_INVALID"
+    assert parameter_diagnostic.failure_code == "GENERIC_PLAN_PARAMETER_INVALID"
+    assert parameter_diagnostic.dimension == "PARAMETER"
+    assert parameter_diagnostic.step_id == invalid_parameters[0].step_id
+    assert parameter_diagnostic.action_key == "treat_patient"
+    assert parameter_diagnostic.actor_key == "doctor_lee"
+    assert parameter_diagnostic.target_key == "patient_one"
+    assert parameter_diagnostic.actual_parameters == {"dosage": 99}
+    assert parameter_diagnostic.validation_error
     diagnostic_text = str(provider.plan_requests[1].repair_diagnostics)
     assert "truth" not in diagnostic_text.casefold()
     assert "ambush" not in diagnostic_text.casefold()

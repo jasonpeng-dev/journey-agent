@@ -359,7 +359,9 @@ def test_sequential_plan_locality_uses_projected_location_and_rejects_same_regio
     locality = next(
         item for item in repair_request.repair_diagnostics if item.code == "LOCALITY_INVALID"
     )
-    assert locality.required == "ONE_HOP_DIFFERENT_REGION"
+    assert locality.failure_code == "LOCALITY_TRAVEL_SAME_REGION"
+    assert locality.dimension == "LOCALITY"
+    assert locality.required == "DIFFERENT_REGION"
     assert isinstance(locality.actual, dict)
     assert locality.actual["actor_region"] == locality.actual["target_region"]
     assert "known_recovery_effects" not in json.dumps(
@@ -394,10 +396,48 @@ def test_known_blocked_connector_is_rejected_without_reading_hidden_truth(sessio
             runtime.session,
             "restore central hospital emergency power",
         )
-    assert any(
-        diagnostic.code == "KNOWN_TRANSPORT_BLOCKED"
-        for diagnostic in provider.requests[1].repair_diagnostics
+    diagnostic = next(
+        item
+        for item in provider.requests[1].repair_diagnostics
+        if item.code == "KNOWN_TRANSPORT_BLOCKED"
     )
+    assert diagnostic.failure_code == "KNOWN_TRANSPORT_BLOCKED"
+    assert diagnostic.dimension == "TRANSPORT_PASSABILITY"
+    assert diagnostic.step_id
+    assert diagnostic.action_key == "transport_resource"
+    assert diagnostic.actor_key == "logistics_team_alpha"
+    assert diagnostic.target_key == "west_logistics_district"
+    assert diagnostic.transport_key == "west_freight_corridor"
+    assert diagnostic.source_region == "central_district"
+    assert diagnostic.target_region == "west_logistics_district"
+    assert diagnostic.required == "PASSABLE"
+    assert diagnostic.actual == "BLOCKED"
+
+
+def test_unknown_transport_resource_source_diagnostic_is_actionable(session: Session) -> None:
+    runtime, scope = _runtime(session, "linjiang-unknown-resource-plan")
+    provider = FixedPlanProvider(
+        (_transport_step("west_logistics_district"), _repair_step())
+    )
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore central hospital emergency power",
+        )
+
+    diagnostic = provider.requests[1].repair_diagnostics[0]
+    assert diagnostic.code == "RESOURCE_INVENTORY_UNKNOWN"
+    assert diagnostic.failure_code == "RESOURCE_INVENTORY_UNKNOWN"
+    assert diagnostic.dimension == "RESOURCE_KNOWLEDGE"
+    assert diagnostic.step_id
+    assert diagnostic.action_key == "transport_resource"
+    assert diagnostic.actor_key == "logistics_team_alpha"
+    assert diagnostic.target_key == "west_logistics_district"
+    assert diagnostic.resource_key == "electrical_repair_parts"
+    assert diagnostic.scope_region == "central_district"
+    assert diagnostic.required_amount == 10
+    assert diagnostic.required == "KNOWN_VISIBLE_AVAILABLE"
+    assert diagnostic.actual == "UNKNOWN"
 
 
 def test_linjiang_vertical_slice_hidden_block_reveals_and_replans(session: Session) -> None:
@@ -638,7 +678,12 @@ def test_known_knowledge_invalidates_only_remaining_plan_and_enters_replan(
     assert marker["diagnostics"][0]["code"] == "KNOWN_TRANSPORT_BLOCKED"
     assert marker["diagnostics"][0]["sequence"] == 2
     assert marker["diagnostics"][0]["action_key"] == "travel"
-    assert marker["diagnostics"][0]["known_value"] is False
+    assert marker["diagnostics"][0]["dimension"] == "TRANSPORT_PASSABILITY"
+    assert marker["diagnostics"][0]["transport_key"] == "west_freight_corridor"
+    assert marker["diagnostics"][0]["source_region"] == "central_district"
+    assert marker["diagnostics"][0]["target_region"] == "west_logistics_district"
+    assert marker["diagnostics"][0]["required"] == "PASSABLE"
+    assert marker["diagnostics"][0]["actual"] == "BLOCKED"
 
     replanned = agent.plan(task, reason=PLAN_INVALIDATED_BY_NEW_KNOWLEDGE)
     assert replanned.replan_reason == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE

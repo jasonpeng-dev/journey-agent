@@ -352,7 +352,20 @@ def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrel
         (recon, *proposal.steps),
         unrelated_context,
     )
-    assert any(item.get("code") == "OBJECTIVE_IRRELEVANT" for item in unrelated_diagnostics)
+    unrelated = next(
+        item for item in unrelated_diagnostics if item.get("code") == "OBJECTIVE_IRRELEVANT"
+    )
+    assert unrelated == {
+        "code": "OBJECTIVE_IRRELEVANT",
+        "failure_code": "OBJECTIVE_IRRELEVANT",
+        "step_id": recon.step_id,
+        "action_key": "recon_valley",
+        "actor_key": "han_lie",
+        "target_key": "northern_valley",
+        "dimension": "OBJECTIVE_RELEVANCE",
+        "required": "ADVANCES_FROZEN_OBJECTIVE_SCOPE",
+        "actual": "NO_DECLARED_RELEVANT_EFFECT",
+    }
 
 
 def test_validator_reports_target_interaction_mismatch_to_provider(
@@ -395,7 +408,19 @@ def test_validator_reports_target_interaction_mismatch_to_provider(
         context,
     )
 
-    assert diagnostics[0]["code"] == "TARGET_INTERACTION_INVALID"
+    assert diagnostics[0] == {
+        "code": "TARGET_INTERACTION_INVALID",
+        "failure_code": "TARGET_INTERACTION_INVALID",
+        "step_id": invalid_step.step_id,
+        "action_key": "clear_valley",
+        "actor_key": "han_lie",
+        "target_key": "starfire_outpost",
+        "dimension": "TARGET_INTERACTION",
+        "required": "clear_threat",
+        "actual": ["repair"],
+        "required_interaction_key": "clear_threat",
+        "actual_interactions": ("repair",),
+    }
     assert all(item.get("code") != "OBJECTIVE_IRRELEVANT" for item in diagnostics)
 
 

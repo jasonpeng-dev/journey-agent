@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
@@ -131,6 +130,12 @@ class _ProjectedRegionResourceKnowledge:
 class _ProjectedFact:
     value: StrictScalar
     visibility: Visibility
+
+
+@dataclass(frozen=True, slots=True)
+class _KnownPreflightFailure:
+    failure_code: str
+    known_predicate: dict[str, object]
 
 
 _NON_TERMINAL_TASK_STATUSES = (
@@ -799,23 +804,45 @@ class GenericAgentService:
             parameters = dict(parameters_value) if isinstance(parameters_value, dict) else {}
             try:
                 parameters = normalize_action_parameters(action, parameters)
-            except ValueError:
+            except ValueError as exc:
                 return (
                     {
-                        "code": "KNOWN_PLAN_STEP_INVALID",
+                        "code": "PARAMETER_INVALID",
+                        "failure_code": "GENERIC_PLAN_PARAMETER_INVALID",
+                        "dimension": "PARAMETER",
+                        "step_id": step.planner_step_id,
                         "sequence": step.sequence,
                         "action_key": action.key,
-                    },
-                )
-            if not self._validate_planning_action(definition, action, actor, target_key):
-                return (
-                    {
-                        "code": "KNOWN_PLAN_STEP_INVALID",
-                        "sequence": step.sequence,
-                        "action_key": action.key,
+                        "actor_key": actor_key,
                         "target_key": target_key,
+                        "actual_parameters": parameters,
+                        "validation_error": str(exc),
                     },
                 )
+            planning_failure_code = self._planning_action_failure_code(
+                definition, action, actor, target_key
+            )
+            if planning_failure_code is not None:
+                diagnostic = _structured_plan_diagnostic(
+                    GenericAgentError(
+                        planning_failure_code,
+                        "The Action assignment no longer satisfies its static contract",
+                        details=_planning_failure_details(
+                            definition,
+                            action,
+                            actor,
+                            target_key,
+                            planning_failure_code,
+                        ),
+                    ),
+                    action=action,
+                    step_id=step.planner_step_id or "",
+                    actor_key=actor_key,
+                    target_key=target_key,
+                    projected_command_reachability=projected_command_reachability,
+                )
+                diagnostic["sequence"] = step.sequence
+                return (diagnostic,)
             projected_resolution_effects = self._projected_resolution_effects(
                 definition,
                 action,
@@ -859,33 +886,15 @@ class GenericAgentService:
                     projected_resolution_effects,
                 )
             except GenericAgentError as exc:
-                diagnostic: dict[str, object] = {
-                    "code": _safe_provider_diagnostic(exc.code),
-                    "sequence": step.sequence,
-                    "action_key": action.key,
-                    "target_key": target_key,
-                }
-                if exc.code == "KNOWN_TRANSPORT_BLOCKED":
-                    fact_key = definition.metadata.locality.passability_fact_key
-                    diagnostic_connector: str | None = None
-                    with suppress(GenericAgentError):
-                        diagnostic_connector = self._validate_projected_plan_locality(
-                            definition,
-                            action,
-                            actor_key,
-                            target_key,
-                            parameters,
-                            projected_actor_locations,
-                            actors=actors,
-                            projected_command_reachability=projected_command_reachability,
-                        )
-                    diagnostic.update(
-                        {
-                            "transport_key": diagnostic_connector,
-                            "fact_key": fact_key,
-                            "known_value": False,
-                        }
-                    )
+                diagnostic = _structured_plan_diagnostic(
+                    exc,
+                    action=action,
+                    step_id=step.planner_step_id or "",
+                    actor_key=actor_key,
+                    target_key=target_key,
+                    projected_command_reachability=projected_command_reachability,
+                )
+                diagnostic["sequence"] = step.sequence
                 return (diagnostic,)
 
             self._advance_projected_action_state(
@@ -1393,12 +1402,20 @@ class GenericAgentService:
                 parameters = normalize_action_parameters(
                     action, dict(getattr(raw_step, "parameters", {}) or {})
                 )
-            except ValueError:
+            except ValueError as exc:
                 diagnostics.append(
                     {
                         "code": "PARAMETER_INVALID",
+                        "failure_code": "GENERIC_PLAN_PARAMETER_INVALID",
                         "step": index,
                         "action_key": action_key,
+                        "actor_key": actor_key,
+                        "target_key": target_key,
+                        "dimension": "PARAMETER",
+                        "actual_parameters": dict(
+                            getattr(raw_step, "parameters", {}) or {}
+                        ),
+                        "validation_error": str(exc),
                     }
                 )
                 continue
@@ -1448,12 +1465,10 @@ class GenericAgentService:
                 diagnostics.append(
                     _structured_plan_diagnostic(
                         exc,
-                        definition=definition,
                         action=action,
                         step_id=str(getattr(raw_step, "step_id", "")),
                         actor_key=actor_key,
                         target_key=target_key,
-                        projected_actor_locations=projected_actor_locations,
                         projected_command_reachability=projected_command_reachability,
                     )
                 )
@@ -1469,7 +1484,17 @@ class GenericAgentService:
                 objective_needed
             ):
                 diagnostics.append(
-                    {"code": "OBJECTIVE_IRRELEVANT", "step": index, "action_key": action_key}
+                    {
+                        "code": "OBJECTIVE_IRRELEVANT",
+                        "failure_code": "OBJECTIVE_IRRELEVANT",
+                        "step": index,
+                        "action_key": action_key,
+                        "actor_key": actor_key,
+                        "target_key": target_key,
+                        "dimension": "OBJECTIVE_RELEVANCE",
+                        "required": "ADVANCES_FROZEN_OBJECTIVE_SCOPE",
+                        "actual": "ALREADY_SUCCEEDED_WITHOUT_NEEDED_EFFECT",
+                    }
                 )
                 continue
             target_definition = definition.world.node(target_key)
@@ -1529,12 +1554,10 @@ class GenericAgentService:
                 diagnostics.append(
                     _structured_plan_diagnostic(
                         exc,
-                        definition=definition,
                         action=action,
                         step_id=str(getattr(raw_step, "step_id", "")),
                         actor_key=actor_key,
                         target_key=target_key,
-                        projected_actor_locations=projected_actor_locations,
                         projected_command_reachability=projected_command_reachability,
                     )
                 )
@@ -1641,12 +1664,28 @@ class GenericAgentService:
             raise GenericAgentError(
                 "ACTOR_COMMAND_DISCONNECTED",
                 "A disconnected Actor cannot receive an ordinary Action",
+                details={
+                    "dimension": "COMMAND_REACHABILITY",
+                    "actor_key": actor_key,
+                    "required": CommandReachability.ONLINE.value,
+                    "actual": (
+                        projected_command_reachability[actor_key].value
+                        if actor_key in projected_command_reachability
+                        else "UNKNOWN"
+                    ),
+                },
             )
         if action.target_kind == ActionTargetKind.ACTOR:
             if target_key not in actors:
                 raise GenericAgentError(
                     "RELAY_TARGET_INVALID",
                     "The proposed Actor target does not exist",
+                    details={
+                        "dimension": "TARGET",
+                        "target_key": target_key,
+                        "required": "ACTOR_EXISTS",
+                        "actual": "NOT_FOUND",
+                    },
                 )
             if action.behavior == ActionBehavior.RELAY_MESSAGE and (
                 projected_command_reachability.get(target_key) != CommandReachability.DISCONNECTED
@@ -1654,6 +1693,16 @@ class GenericAgentService:
                 raise GenericAgentError(
                     "RELAY_TARGET_NOT_DISCONNECTED",
                     "Relay requires a disconnected target Actor",
+                    details={
+                        "dimension": "TARGET_COMMAND_REACHABILITY",
+                        "target_key": target_key,
+                        "required": CommandReachability.DISCONNECTED.value,
+                        "actual": (
+                            projected_command_reachability[target_key].value
+                            if target_key in projected_command_reachability
+                            else "UNKNOWN"
+                        ),
+                    },
                 )
 
     @staticmethod
@@ -1672,6 +1721,12 @@ class GenericAgentService:
             raise GenericAgentError(
                 "LOCALITY_ACTOR_REGION_REQUIRED",
                 "The Actor has no projected current location",
+                details={
+                    "dimension": "LOCALITY",
+                    "required": "ACTOR_REGION",
+                    "actual": "UNKNOWN",
+                    "actor_key": actor_key,
+                },
             )
         try:
             return validate_action_locality(
@@ -1687,7 +1742,11 @@ class GenericAgentService:
                 ),
             )
         except LocalityEngineError as exc:
-            raise GenericAgentError(exc.code, exc.message) from exc
+            raise GenericAgentError(
+                exc.code,
+                exc.message,
+                details={"dimension": "LOCALITY", **exc.details},
+            ) from exc
 
     def _validate_projected_action_state(
         self,
@@ -1720,6 +1779,12 @@ class GenericAgentService:
             raise GenericAgentError(
                 "ACTOR_ROLE_MISSING",
                 "The proposed Actor does not have the Action's required Role",
+                details={
+                    "dimension": "ACTOR_ROLE",
+                    "actor_key": actor_key,
+                    "required": action.required_actor_role_key,
+                    "actual": actor.role_key,
+                },
             )
         # Existing rule preconditions remain execution-time guards unless an
         # action opts into proposal-time known-state validation.  The new
@@ -1746,8 +1811,14 @@ class GenericAgentService:
             )
             if known_failure is not None:
                 raise GenericAgentError(
-                    known_failure,
+                    known_failure.failure_code,
                     "A known Action requirement is not satisfied",
+                    details={
+                        "dimension": "ACTION_PRECONDITION",
+                        "known_predicate": known_failure.known_predicate,
+                        "required": "PREFLIGHT_CONDITION_NOT_MATCHED",
+                        "actual": "KNOWN_FAILURE_CONDITION_MATCHED",
+                    },
                 )
         if action.behavior == ActionBehavior.SUPPLY_POWER:
             self._validate_projected_supply_power(
@@ -1781,9 +1852,23 @@ class GenericAgentService:
             projected_command_reachability=projected_command_reachability,
         )
         if connector is not None and projected_known_passability.get(connector) is False:
+            source_region = region_for_node(definition, projected_actor_locations[actor_key])
+            target_node_key = (
+                projected_actor_locations[target_key]
+                if action.target_kind == ActionTargetKind.ACTOR
+                else target_key
+            )
             raise GenericAgentError(
                 "KNOWN_TRANSPORT_BLOCKED",
                 "The proposed route is known to be blocked",
+                details={
+                    "dimension": "TRANSPORT_PASSABILITY",
+                    "transport_key": connector,
+                    "source_region": source_region,
+                    "target_region": region_for_node(definition, target_node_key),
+                    "required": "PASSABLE",
+                    "actual": "BLOCKED",
+                },
             )
         return connector
 
@@ -1802,11 +1887,33 @@ class GenericAgentService:
             raise GenericAgentError(
                 "SUPPLY_POWER_RELATION_UNKNOWN",
                 "The proposed power source is not currently known",
+                details={
+                    "dimension": "POWER_SOURCE_REQUIREMENT",
+                    "required": "KNOWN_SOURCE_NODE",
+                    "actual": "UNKNOWN",
+                    "known_predicate": {
+                        "parameter_key": "source_key",
+                        "operator": "REFERENCES_KNOWN_NODE",
+                        "expected": True,
+                        "actual": False,
+                    },
+                },
             )
         if target_key not in projected_known_nodes:
             raise GenericAgentError(
                 "SUPPLY_POWER_RELATION_UNKNOWN",
                 "The proposed power target is not currently known",
+                details={
+                    "dimension": "POWER_SOURCE_REQUIREMENT",
+                    "required": "KNOWN_TARGET_NODE",
+                    "actual": "UNKNOWN",
+                    "known_predicate": {
+                        "node_key": target_key,
+                        "operator": "VISIBLE",
+                        "expected": True,
+                        "actual": False,
+                    },
+                },
             )
         if not any(
             relation_identity(relation) in projected_known_relations
@@ -1820,6 +1927,19 @@ class GenericAgentService:
             raise GenericAgentError(
                 "SUPPLY_POWER_RELATION_UNKNOWN",
                 "No known direct power relation connects the source and target",
+                details={
+                    "dimension": "POWER_SOURCE_REQUIREMENT",
+                    "required": "KNOWN_DIRECT_RELATION",
+                    "actual": "UNKNOWN",
+                    "known_predicate": {
+                        "node_key": source_key,
+                        "relation_type": action.source_relation_type_key,
+                        "target_key": target_key,
+                        "operator": "EXISTS",
+                        "expected": True,
+                        "actual": False,
+                    },
+                },
             )
         for fact_key, expected, code in (
             ("operational", True, "SUPPLY_POWER_SOURCE_NOT_OPERATIONAL"),
@@ -1830,6 +1950,18 @@ class GenericAgentService:
                 raise GenericAgentError(
                     code,
                     "The power source does not satisfy its known power requirement",
+                    details={
+                        "dimension": "POWER_SOURCE_REQUIREMENT",
+                        "required": expected,
+                        "actual": fact.value,
+                        "known_predicate": {
+                            "node_key": source_key,
+                            "fact_key": fact_key,
+                            "operator": "EQ",
+                            "expected": expected,
+                            "actual": fact.value,
+                        },
+                    },
                 )
 
     @classmethod
@@ -1842,8 +1974,8 @@ class GenericAgentService:
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
-    ) -> str | None:
-        matches: list[tuple[int, str]] = []
+    ) -> _KnownPreflightFailure | None:
+        matches: list[tuple[int, _KnownPreflightFailure]] = []
         for rule in definition.rules:
             if rule.phase != RulePhase.PREFLIGHT or rule.action_key != action.key:
                 continue
@@ -1863,10 +1995,162 @@ class GenericAgentService:
                 None,
             )
             if failure is not None:
-                matches.append((rule.priority, failure))
+                witness = cls._known_condition_witness(
+                    definition,
+                    rule.condition,
+                    target_key,
+                    parameters,
+                    projected_known_facts,
+                    projected_known_nodes,
+                    projected_known_relations,
+                    expected_status=True,
+                )
+                matches.append(
+                    (
+                        rule.priority,
+                        _KnownPreflightFailure(
+                            failure,
+                            witness or {"condition": "KNOWN_TRUE"},
+                        ),
+                    )
+                )
         if not matches:
             return None
         return max(matches, key=lambda item: item[0])[1]
+
+    @classmethod
+    def _known_condition_witness(
+        cls,
+        definition: ScenarioDefinitionV2,
+        condition: ConditionV2 | None,
+        target_key: str,
+        parameters: dict[str, StrictScalar],
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+        projected_known_relations: set[str],
+        *,
+        expected_status: bool,
+    ) -> dict[str, object] | None:
+        """Return one public Known predicate explaining a condition result."""
+
+        if condition is None:
+            return {"condition": "ALWAYS", "actual": True}
+        kind = condition.kind.value
+        if kind == "ALL" and expected_status:
+            predicates: list[dict[str, object]] = []
+            for child in condition.conditions:
+                witness = cls._known_condition_witness(
+                    definition,
+                    child,
+                    target_key,
+                    parameters,
+                    projected_known_facts,
+                    projected_known_nodes,
+                    projected_known_relations,
+                    expected_status=True,
+                )
+                if witness is not None:
+                    predicates.append(witness)
+            return {"operator": "ALL", "predicates": predicates} if predicates else None
+        if kind in {"ALL", "ANY"}:
+            for child in condition.conditions:
+                status = cls._known_condition_status(
+                    definition,
+                    child,
+                    target_key,
+                    parameters,
+                    projected_known_facts,
+                    projected_known_nodes,
+                    projected_known_relations,
+                )
+                if status is expected_status:
+                    witness = cls._known_condition_witness(
+                        definition,
+                        child,
+                        target_key,
+                        parameters,
+                        projected_known_facts,
+                        projected_known_nodes,
+                        projected_known_relations,
+                        expected_status=expected_status,
+                    )
+                    if witness is not None:
+                        return {"parent_operator": kind, **witness}
+            return None
+        if kind == "NOT":
+            witness = cls._known_condition_witness(
+                definition,
+                condition.condition,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+                projected_known_relations,
+                expected_status=not expected_status,
+            )
+            return {"negated": True, **witness} if witness is not None else None
+
+        node_key = cls._projected_selector_key(
+            definition,
+            condition.node,
+            target_key,
+            parameters,
+            projected_known_facts,
+            projected_known_nodes,
+            projected_known_relations,
+        )
+        if kind in {"FACT_EQUALS", "FACT_NOT_EQUALS", "FACT_IN", "FACT_COMPARE"}:
+            if node_key is None or not isinstance(condition.fact_key, str):
+                return None
+            fact = projected_known_facts.get((node_key, condition.fact_key))
+            if fact is None or fact.visibility != Visibility.KNOWN:
+                return None
+            operator: object = {
+                "FACT_EQUALS": "EQ",
+                "FACT_NOT_EQUALS": "NE",
+                "FACT_IN": "IN",
+            }.get(kind, condition.operator.value if condition.operator is not None else None)
+            expected: object = condition.values if kind == "FACT_IN" else condition.value
+            return {
+                "kind": kind,
+                "node_key": node_key,
+                "fact_key": condition.fact_key,
+                "operator": operator,
+                "expected": expected,
+                "actual": fact.value,
+            }
+        if kind == "PARAMETER_COMPARE" and isinstance(condition.parameter_key, str):
+            return {
+                "kind": kind,
+                "parameter_key": condition.parameter_key,
+                "operator": condition.operator.value if condition.operator is not None else None,
+                "expected": condition.value,
+                "actual": parameters.get(condition.parameter_key),
+            }
+        if kind == "RELATION_EXISTS" and condition.relation_type_key is not None:
+            return {
+                "kind": kind,
+                "node_key": node_key,
+                "relation_type": condition.relation_type_key,
+                "operator": "EXISTS",
+                "expected": expected_status,
+                "actual": expected_status,
+            }
+        if kind == "NODE_VISIBLE":
+            return {
+                "kind": kind,
+                "node_key": node_key,
+                "operator": "VISIBILITY_EQUALS",
+                "expected": (
+                    condition.visibility.value if condition.visibility is not None else None
+                ),
+                "actual": (
+                    Visibility.KNOWN.value
+                    if node_key in projected_known_nodes
+                    else Visibility.HIDDEN.value
+                ),
+            }
+        return None
 
     @classmethod
     def _known_condition_status(
@@ -2259,6 +2543,14 @@ class GenericAgentService:
                 raise GenericAgentError(
                     "RESOURCE_INVENTORY_UNKNOWN",
                     "The source Region Resource inventory is not known",
+                    details={
+                        "dimension": "RESOURCE_KNOWLEDGE",
+                        "resource_key": resource_key,
+                        "scope_region": region_key,
+                        "required_amount": amount,
+                        "required": "KNOWN_VISIBLE_AVAILABLE",
+                        "actual": "UNKNOWN",
+                    },
                 )
             return False
         known_available = sum(pool.quantity for pool in available if pool.quantity is not None)
@@ -2862,7 +3154,15 @@ class GenericAgentService:
         try:
             parameters = normalize_action_parameters(action, parameters)
         except ValueError as exc:
-            raise GenericAgentError("GENERIC_PLAN_PARAMETER_INVALID", str(exc)) from exc
+            raise GenericAgentError(
+                "GENERIC_PLAN_PARAMETER_INVALID",
+                str(exc),
+                details={
+                    "dimension": "PARAMETER",
+                    "actual_parameters": parameters,
+                    "validation_error": str(exc),
+                },
+            ) from exc
         planning_failure_code = self._planning_action_failure_code(
             definition,
             action,
@@ -2873,6 +3173,13 @@ class GenericAgentService:
             raise GenericAgentError(
                 planning_failure_code,
                 "The Action target does not satisfy the declared planning contract",
+                details=_planning_failure_details(
+                    definition,
+                    action,
+                    actor,
+                    candidate.target_key,
+                    planning_failure_code,
+                ),
             )
         if not self._validate_planning_action(definition, action, actor, candidate.target_key):
             raise GenericAgentError("GENERIC_PROVIDER_PLAN_INVALID", "Action assignment is invalid")
@@ -2897,7 +3204,13 @@ class GenericAgentService:
             and not allow_epistemic
         ):
             raise GenericAgentError(
-                "GENERIC_PROVIDER_PLAN_INVALID", "Action does not advance the frozen scope"
+                "OBJECTIVE_IRRELEVANT",
+                "Action does not advance the frozen scope",
+                details={
+                    "dimension": "OBJECTIVE_RELEVANCE",
+                    "required": "ADVANCES_FROZEN_OBJECTIVE_SCOPE",
+                    "actual": "NO_DECLARED_RELEVANT_EFFECT",
+                },
             )
         authority = evaluate_authority(actor, action, parameters)
         if authority.outcome == AuthorityOutcome.DENY:
@@ -2970,7 +3283,10 @@ class GenericAgentService:
                 GameInstanceActor,
                 (self.scope.game_instance_id, target_key),
             )
-            target_valid = target_actor is not None and target_actor.status == "ACTIVE"
+            if target_actor is None:
+                return "TARGET_INVALID"
+            if target_actor.status != "ACTIVE":
+                return "TARGET_INVALID"
             target_interaction_valid = True
             target_visible = True
         else:
@@ -2979,24 +3295,32 @@ class GenericAgentService:
                 GameInstanceNodeState,
                 (self.scope.game_instance_id, target_key),
             )
-            target_valid = target is not None
+            if target is None:
+                return "TARGET_INVALID"
             target_interaction_valid = bool(
                 target is not None and action.required_interaction_key in target.interaction_keys
             )
             target_visible = bool(node_state and node_state.visibility == Visibility.KNOWN)
-            if target_valid and target_visible and not target_interaction_valid:
+            if not target_visible:
+                return "TARGET_NOT_VISIBLE"
+            if not target_interaction_valid:
                 return "TARGET_INTERACTION_INVALID"
-        valid = bool(
-            target_valid
-            and actor_binding_matches(definition, actor)
-            and target_visible
-            and target_interaction_valid
-            and action.key in actor.allowed_action_keys
-            and {item.value for item in action.allowed_actor_capabilities}.issubset(
-                set(actor.capabilities)
-            )
-        )
-        return None if valid else "GENERIC_PROVIDER_PLAN_INVALID"
+        if not actor_binding_matches(definition, actor):
+            return "ACTOR_BINDING_INVALID"
+        if actor.status != "ACTIVE":
+            return "ACTOR_NOT_AVAILABLE"
+        if action.key not in actor.allowed_action_keys:
+            return "ACTOR_NOT_ALLOWED"
+        if not {item.value for item in action.allowed_actor_capabilities}.issubset(
+            set(actor.capabilities)
+        ):
+            return "ACTOR_CAPABILITY_MISSING"
+        if (
+            action.required_actor_role_key is not None
+            and actor.role_key != action.required_actor_role_key
+        ):
+            return "ACTOR_ROLE_MISSING"
+        return None
 
     @staticmethod
     def _default_parameters(action: ActionDefinitionV2) -> dict[str, StrictScalar]:
@@ -3160,65 +3484,51 @@ def _actor_command_reachability(actor: GameInstanceActor) -> CommandReachability
 def _structured_plan_diagnostic(
     exc: GenericAgentError,
     *,
-    definition: ScenarioDefinitionV2,
     action: ActionDefinitionV2,
     step_id: str,
     actor_key: str,
     target_key: str,
-    projected_actor_locations: dict[str, str],
     projected_command_reachability: dict[str, CommandReachability],
 ) -> dict[str, object]:
     """Keep repair diagnostics actionable without exposing hidden Truth."""
 
     diagnostic: dict[str, object] = {
         "code": _safe_provider_diagnostic(exc.code),
+        "failure_code": exc.code,
         "step_id": step_id,
+        "action_key": action.key,
+        "actor_key": actor_key,
+        "target_key": target_key,
     }
-    detail_dimension = exc.details.get("dimension")
-    detail_fields = {
-        "RESOURCE_SURVEY_STATE": (
-            "dimension",
-            "target_key",
-            "required",
-            "actual",
-        ),
-        "RESOURCE_QUANTITY": (
-            "dimension",
-            "resource_key",
-            "scope_region",
-            "required_amount",
-            "projected_known_available_amount",
-            "deficit",
-        ),
-    }
-    if isinstance(detail_dimension, str) and detail_dimension in detail_fields:
-        diagnostic["failure_code"] = exc.code
-        diagnostic.update(
-            {
-                key: exc.details[key]
-                for key in detail_fields[detail_dimension]
-                if key in exc.details
-            }
-        )
-        return diagnostic
-
-    if exc.code.startswith("LOCALITY_"):
-        diagnostic["dimension"] = "LOCALITY"
-        diagnostic["required"] = (
-            "ONE_HOP_DIFFERENT_REGION"
-            if action.behavior in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
-            else "SAME_REGION"
-        )
-        actual: dict[str, object] = {}
-        location = projected_actor_locations.get(actor_key)
-        if location is not None:
-            actual["actor_region"] = location
-        target_location = projected_actor_locations.get(target_key, target_key)
-        with suppress(LocalityEngineError):
-            actual["target_region"] = region_for_node(definition, target_location)
-        if actual:
-            diagnostic["actual"] = actual
-    else:
+    typed_fields = (
+        "dimension",
+        "required",
+        "actual",
+        "reason_code",
+        "required_interaction_key",
+        "actual_interactions",
+        "transport_key",
+        "source_region",
+        "target_region",
+        "resource_key",
+        "scope_region",
+        "required_amount",
+        "projected_known_available_amount",
+        "deficit",
+        "parameter_key",
+        "parameter_error",
+        "validation_error",
+        "actual_parameters",
+        "blocking_condition",
+        "known_predicate",
+    )
+    diagnostic.update({key: exc.details[key] for key in typed_fields if key in exc.details})
+    if (
+        diagnostic.get("code") == "PROPOSAL_INVALID"
+        and diagnostic.get("dimension") == "ACTION_PRECONDITION"
+    ):
+        diagnostic["code"] = "ACTION_PRECONDITION_FAILED"
+    if "dimension" not in diagnostic:
         blocker = _diagnostic_blocker(exc.code, action)
         if blocker:
             dimension = blocker.get("type", "ACTION_PRECONDITION")
@@ -3228,10 +3538,62 @@ def _structured_plan_diagnostic(
             if dimension == "COMMAND_REACHABILITY":
                 reachability = projected_command_reachability.get(actor_key)
                 if reachability is not None:
-                    diagnostic["actual"] = {
-                        "command_reachability": reachability.value,
-                    }
+                    diagnostic["actual"] = reachability.value
     return diagnostic
+
+
+def _planning_failure_details(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    actor: GameInstanceActor,
+    target_key: str,
+    failure_code: str,
+) -> dict[str, object]:
+    """Project only public static assignment facts for a planning failure."""
+
+    if failure_code == "TARGET_INTERACTION_INVALID":
+        target = definition.world.node(target_key)
+        actual_interactions = tuple(target.interaction_keys) if target is not None else ()
+        return {
+            "dimension": "TARGET_INTERACTION",
+            "required": action.required_interaction_key,
+            "actual": list(actual_interactions),
+            "required_interaction_key": action.required_interaction_key,
+            "actual_interactions": actual_interactions,
+        }
+    if failure_code == "ACTOR_NOT_ALLOWED":
+        return {
+            "dimension": "ACTOR_ACTION_ELIGIBILITY",
+            "required": action.key,
+            "actual": list(actor.allowed_action_keys),
+        }
+    if failure_code == "ACTOR_CAPABILITY_MISSING":
+        return {
+            "dimension": "ACTOR_CAPABILITY",
+            "required": [item.value for item in action.allowed_actor_capabilities],
+            "actual": list(actor.capabilities),
+        }
+    if failure_code == "ACTOR_ROLE_MISSING":
+        return {
+            "dimension": "ACTOR_ROLE",
+            "required": action.required_actor_role_key,
+            "actual": actor.role_key,
+        }
+    if failure_code == "ACTOR_BINDING_INVALID":
+        return {
+            "dimension": "ACTOR_BINDING",
+            "required": "VALID_VERSION_BINDING",
+            "actual": "INVALID",
+        }
+    if failure_code == "ACTOR_NOT_AVAILABLE":
+        return {
+            "dimension": "ACTOR_AVAILABILITY",
+            "required": "ACTIVE",
+            "actual": actor.status,
+        }
+    if failure_code == "TARGET_NOT_VISIBLE":
+        return {"dimension": "TARGET_VISIBILITY", "required": "KNOWN", "actual": "HIDDEN"}
+    return {"dimension": "TARGET", "required": "VALID_TARGET", "actual": "INVALID"}
 
 
 def _diagnostic_with_step_id(
@@ -3381,25 +3743,39 @@ def _validate_plan_segment_contract(
 
 
 def _safe_provider_diagnostic(code: str) -> str:
-    if code == "KNOWN_TRANSPORT_BLOCKED":
+    if code in {
+        "KNOWN_TRANSPORT_BLOCKED",
+        "OBJECTIVE_IRRELEVANT",
+        "TARGET_INTERACTION_INVALID",
+        "TARGET_INVALID",
+        "TARGET_NOT_VISIBLE",
+        "ACTOR_NOT_ALLOWED",
+        "ACTOR_CAPABILITY_MISSING",
+        "ACTOR_ROLE_MISSING",
+        "ACTOR_BINDING_INVALID",
+        "ACTOR_NOT_AVAILABLE",
+        "RESOURCE_SURVEY_ALREADY_COMPLETED",
+        "RESOURCE_INVENTORY_UNKNOWN",
+        "KNOWN_RESOURCE_INSUFFICIENT",
+    }:
         return code
     if code.startswith("LOCALITY_"):
         return "LOCALITY_INVALID"
     return {
         "ACTION_PARAMETERS_INVALID": "PARAMETER_INVALID",
         "GENERIC_PLAN_PARAMETER_INVALID": "PARAMETER_INVALID",
+        "TRANSPORT_PARAMETERS_INVALID": "PARAMETER_INVALID",
+        "RESOURCE_AMOUNT_INVALID": "PARAMETER_INVALID",
         "AUTHORITY_PARAMETER_INVALID": "PARAMETER_INVALID",
         "ACTION_APPROVAL_REQUIRED": "AUTHORITY_REQUIRED",
         "ACTION_NOT_ALLOWED": "ACTOR_NOT_ALLOWED",
-        "ACTOR_CAPABILITY_MISSING": "ACTOR_NOT_ALLOWED",
-        "ACTOR_ROLE_MISSING": "ACTOR_NOT_ALLOWED",
         "ACTOR_COMMAND_DISCONNECTED": "ACTOR_COMMAND_DISCONNECTED",
-        "TARGET_INTERACTION_INVALID": "TARGET_INTERACTION_INVALID",
         "RELAY_TARGET_NOT_DISCONNECTED": "RELAY_TARGET_NOT_DISCONNECTED",
+        "RELAY_TARGET_INVALID": "TARGET_INVALID",
         "SUPPLY_POWER_RELATION_UNKNOWN": "SUPPLY_POWER_REQUIREMENT_UNKNOWN",
         "SUPPLY_POWER_SOURCE_NOT_OPERATIONAL": "SUPPLY_POWER_SOURCE_INVALID",
         "SUPPLY_POWER_SOURCE_UNAVAILABLE": "SUPPLY_POWER_SOURCE_INVALID",
-        "GENERIC_PROVIDER_PLAN_INVALID": "OBJECTIVE_IRRELEVANT",
+        "GENERIC_PROVIDER_PLAN_INVALID": "PROPOSAL_INVALID",
     }.get(code, "PROPOSAL_INVALID")
 
 

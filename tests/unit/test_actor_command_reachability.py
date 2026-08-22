@@ -309,5 +309,8 @@ def test_plan_projection_rejects_ordinary_action_before_relay(session: Session) 
     assert diagnostic.step_id
     assert diagnostic.dimension == "COMMAND_REACHABILITY"
     assert diagnostic.required == "ONLINE"
-    assert diagnostic.actual == {"command_reachability": "DISCONNECTED"}
+    assert diagnostic.actual == "DISCONNECTED"
+    assert diagnostic.action_key == "repair_electrical"
+    assert diagnostic.actor_key == "electrical_team_beta"
+    assert diagnostic.target_key == "central_hospital"
     assert "known_recovery_effects" not in diagnostic.model_dump()

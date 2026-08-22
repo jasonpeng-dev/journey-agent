@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentError, GenericAgentService
 from app.agent.planning_context import PlanningContextBuilder
-from app.agent.provider import PlanProposal, PlanStepProposal
+from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
@@ -466,8 +466,10 @@ class _CapabilityProvider:
 
     def __init__(self, steps: tuple[PlanStepProposal, ...]) -> None:
         self.steps = steps
+        self.requests: list[PlanRequest] = []
 
-    def propose_plan(self, _request: object) -> PlanProposal:
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        self.requests.append(request)
         return PlanProposal(plan_summary="capability test", steps=self.steps)
 
 
@@ -765,6 +767,16 @@ def test_validator_rejects_known_repair_role_mismatch(session: Session) -> None:
         )
 
     assert error.value.code == "MODEL_PLAN_REJECTED"
+    assert isinstance(agent.provider, _CapabilityProvider)
+    diagnostic = agent.provider.requests[1].repair_diagnostics[0]
+    assert diagnostic.code == "ACTOR_ROLE_MISSING"
+    assert diagnostic.failure_code == "ACTOR_ROLE_MISSING"
+    assert diagnostic.dimension == "ACTOR_ROLE"
+    assert diagnostic.action_key == "repair_electrical"
+    assert diagnostic.actor_key == "industrial_team"
+    assert diagnostic.target_key == "central_hospital"
+    assert diagnostic.required == "electrical_response_team"
+    assert diagnostic.actual == "industrial_support_team"
 
 
 def test_validator_rejects_unknown_power_relation_without_pathfinding(session: Session) -> None:
@@ -785,3 +797,21 @@ def test_validator_rejects_unknown_power_relation_without_pathfinding(session: S
         )
 
     assert error.value.code == "MODEL_PLAN_REJECTED"
+    assert isinstance(agent.provider, _CapabilityProvider)
+    diagnostic = agent.provider.requests[1].repair_diagnostics[0]
+    assert diagnostic.code == "SUPPLY_POWER_REQUIREMENT_UNKNOWN"
+    assert diagnostic.failure_code == "SUPPLY_POWER_RELATION_UNKNOWN"
+    assert diagnostic.dimension == "POWER_SOURCE_REQUIREMENT"
+    assert diagnostic.action_key == "supply_power"
+    assert diagnostic.actor_key == "electrical_team_beta"
+    assert diagnostic.target_key == "central_fire_rescue_station"
+    assert diagnostic.required == "KNOWN_DIRECT_RELATION"
+    assert diagnostic.actual == "UNKNOWN"
+    assert diagnostic.known_predicate == {
+        "node_key": "central_hospital",
+        "relation_type": "supplies_power_to",
+        "target_key": "central_fire_rescue_station",
+        "operator": "EXISTS",
+        "expected": True,
+        "actual": False,
+    }

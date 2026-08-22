@@ -602,10 +602,12 @@ def test_linjiang_v10_completed_survey_repair_diagnostic_is_typed(
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
     assert diagnostic.model_dump(mode="json", exclude_none=True, exclude_defaults=True) == {
-        "code": "PROPOSAL_INVALID",
+        "code": "RESOURCE_SURVEY_ALREADY_COMPLETED",
         "step_id": "survey-central",
         "failure_code": "RESOURCE_SURVEY_ALREADY_COMPLETED",
         "dimension": "RESOURCE_SURVEY_STATE",
+        "action_key": "survey_resources",
+        "actor_key": "logistics_team_alpha",
         "target_key": "central_district",
         "required": "NOT_COMPLETED",
         "actual": "COMPLETED",
@@ -644,10 +646,13 @@ def test_linjiang_v10_known_resource_deficit_repair_diagnostic_is_typed(
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
     assert diagnostic.model_dump(mode="json", exclude_none=True, exclude_defaults=True) == {
-        "code": "PROPOSAL_INVALID",
+        "code": "KNOWN_RESOURCE_INSUFFICIENT",
         "step_id": "repair-central",
         "failure_code": "KNOWN_RESOURCE_INSUFFICIENT",
         "dimension": "RESOURCE_QUANTITY",
+        "action_key": "repair_communications",
+        "actor_key": "communications_repair_team_alpha",
+        "target_key": "central_telecom_hub",
         "resource_key": "general_engineering_parts",
         "scope_region": "central_district",
         "required_amount": 15,
@@ -683,6 +688,65 @@ def test_linjiang_v10_unknown_resource_quantity_is_not_known_insufficient(
             region_knowledge,
         )
     assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
+    assert error.value.details == {
+        "dimension": "RESOURCE_KNOWLEDGE",
+        "resource_key": "communication_equipment",
+        "scope_region": "central_district",
+        "required_amount": 10,
+        "required": "KNOWN_VISIBLE_AVAILABLE",
+        "actual": "UNKNOWN",
+    }
+
+
+def test_linjiang_v10_known_preflight_repair_diagnostic_has_public_witness(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-known-preflight-diagnostic")
+    actor = session.get(
+        GameInstanceActor,
+        (runtime.instance.id, "water_repair_team_alpha"),
+    )
+    assert actor is not None
+    actor.command_reachability = "ONLINE"
+    session.flush()
+    provider = _RepeatingPlanProvider(
+        (
+            PlanStepProposal(
+                step_id="repair-water-without-support",
+                action_key="repair_water_facility",
+                actor_key="water_repair_team_alpha",
+                target_key="water_treatment_plant",
+            ),
+        )
+    )
+
+    with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
+        GenericAgentService(session, scope, provider=provider).create_task(
+            runtime.session,
+            "restore_east_emergency_water_supply",
+        )
+
+    diagnostic = provider.requests[1].repair_diagnostics[0]
+    assert diagnostic.code == "ACTION_PRECONDITION_FAILED"
+    assert diagnostic.failure_code == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
+    assert diagnostic.dimension == "ACTION_PRECONDITION"
+    assert diagnostic.step_id == "repair-water-without-support"
+    assert diagnostic.action_key == "repair_water_facility"
+    assert diagnostic.actor_key == "water_repair_team_alpha"
+    assert diagnostic.target_key == "water_treatment_plant"
+    assert diagnostic.required == "PREFLIGHT_CONDITION_NOT_MATCHED"
+    assert diagnostic.actual == "KNOWN_FAILURE_CONDITION_MATCHED"
+    assert diagnostic.known_predicate is not None
+    predicates = diagnostic.known_predicate["predicates"]
+    assert isinstance(predicates, list)
+    assert {
+        "kind": "FACT_NOT_EQUALS",
+        "node_key": "water_treatment_plant",
+        "fact_key": "heavy_engineering_support_ready",
+        "operator": "NE",
+        "expected": True,
+        "actual": False,
+    } in predicates
 
 
 def test_linjiang_v10_projected_repair_applies_selected_target_cost_once(
@@ -1107,7 +1171,29 @@ def test_linjiang_v1_task_three_repairs_and_task_four_support_gate() -> None:
         {node.key for node in definition.world.nodes},
         set(),
     )
-    assert known_failure == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
+    assert known_failure is not None
+    assert known_failure.failure_code == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
+    assert known_failure.known_predicate == {
+        "operator": "ALL",
+        "predicates": [
+            {
+                "kind": "FACT_EQUALS",
+                "node_key": "water_treatment_plant",
+                "fact_key": "repair_profile",
+                "operator": "EQ",
+                "expected": "water_treatment_plant",
+                "actual": "water_treatment_plant",
+            },
+            {
+                "kind": "FACT_NOT_EQUALS",
+                "node_key": "water_treatment_plant",
+                "fact_key": "heavy_engineering_support_ready",
+                "operator": "NE",
+                "expected": True,
+                "actual": False,
+            },
+        ],
+    }
 
     water_resources = {
         ("water_system_parts", "south_waterfront_district"): 15,
