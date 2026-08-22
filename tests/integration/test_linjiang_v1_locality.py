@@ -14,7 +14,7 @@ from app.agent.generic import (
 )
 from app.agent.planning_context import legal_candidate_id
 from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
-from app.domain.enums import AgentPlanStatus, AgentStepStatus, AgentTaskStatus
+from app.domain.enums import AgentPlanStatus, AgentStepStatus, AgentTaskStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
@@ -233,6 +233,15 @@ def _travel_to_west_step() -> PlanStepProposal:
     )
 
 
+def _travel_to_central_step() -> PlanStepProposal:
+    return PlanStepProposal(
+        purpose="Travel back to the Central district.",
+        action_key="travel",
+        actor_key="logistics_team_alpha",
+        target_key="central_district",
+    )
+
+
 def _transport_step(target_key: str) -> PlanStepProposal:
     return PlanStepProposal(
         purpose="Transport ten electrical repair parts.",
@@ -377,6 +386,63 @@ def test_sequential_plan_accepts_travel_then_transport_to_central(session: Sessi
     )
     assert task.current_plan_version == 1
     assert len(provider.requests) == 1
+
+
+def test_historical_travel_signature_uses_sequential_projected_location(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(session, "linjiang-historical-travel-projected-location")
+    _set_actor_location(
+        session,
+        runtime.instance.id,
+        "logistics_team_alpha",
+        "west_logistics_district",
+    )
+    provider = FixedPlanProvider(
+        (
+            _travel_to_central_step(),
+            _travel_to_west_step(),
+            _transport_step("central_district"),
+            _repair_step(),
+        )
+    )
+    agent = GenericAgentService(session, scope, provider=provider)
+    task = agent.create_task(
+        runtime.session,
+        "restore central hospital emergency power",
+        initialize_plan=False,
+    )
+    session.add(
+        WorldOperation(
+            player_id=scope.player_id,
+            game_instance_id=scope.game_instance_id,
+            task_id=task.id,
+            source_step_id=None,
+            actor_key="logistics_team_alpha",
+            action_key="travel",
+            execution_mode="SYNC",
+            target_key="west_logistics_district",
+            parameters={},
+            status=WorldOperationStatus.RESOLVED,
+            outcome={"success": True},
+            idempotency_key="historical-travel-west-success",
+        )
+    )
+    session.flush()
+
+    plan = agent.plan(task)
+
+    assert plan.version == 1
+    assert len(provider.requests) == 1
+    steps = tuple(
+        session.scalars(
+            select(AgentStep).where(AgentStep.plan_id == plan.id).order_by(AgentStep.sequence)
+        )
+    )
+    assert [(step.action_intent, step.tool_arguments["target_key"]) for step in steps[:2]] == [
+        ("travel", "central_district"),
+        ("travel", "west_logistics_district"),
+    ]
 
 
 def test_known_blocked_connector_is_rejected_without_reading_hidden_truth(session: Session) -> None:

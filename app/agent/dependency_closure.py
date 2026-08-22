@@ -151,7 +151,23 @@ def build_dependency_closure(
                 )
 
         locality = contract.locality.get("type")
-        if locality in {"ACTOR_SAME_REGION", "TARGET_SAME_REGION"}:
+        # A locality contract is a dependency on the executor's current
+        # Region, not a choice of executor, destination, or route. Keep a
+        # public Actor-location producer (normally one-hop Travel) in the
+        # closure whenever an action may need to be performed at a different
+        # Region. The closure deliberately does not select a binding or
+        # synthesize a relocation step.
+        if locality in {
+            "ACTOR_SAME_REGION",
+            "TARGET_SAME_REGION",
+            "ACTOR_REGION",
+            "REGION",
+            "FACILITY_REGION",
+            "TRANSPORT_ENDPOINT",
+            "LOCAL_TARGET",
+            "LOCAL_TARGET_FACILITY_OR_TRANSPORT",
+            "ONE_HOP_TRANSPORT",
+        }:
             queue.append(
                 (
                     TypedDependency("ACTOR_LOCATION", "executor", required="SAME_REGION"),

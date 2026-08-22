@@ -928,6 +928,8 @@ def _is_provider_failure(error_code: str | None) -> bool:
 
 
 def _task_explanation(task: AgentTask) -> str:
+    if task.last_error_code == "MODEL_PLAN_REJECTED":
+        return "Model failed to produce a validated executable plan within the allowed repairs"
     if _is_provider_failure(task.last_error_code):
         return task.last_error_detail or "模型调用失败"
     return "当前世界状态下没有可继续执行的合法行动"

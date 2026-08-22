@@ -365,6 +365,8 @@ class PublicKnowledgeChangeResponse(ApiModel):
         "NODE_REVEALED",
         "FACT_REVEALED",
         "RESOURCE_DISCOVERED",
+        "RESOURCE_INVENTORY_REVEALED",
+        "RESOURCE_SURVEY_COMPLETED",
         "RELATION_REVEALED",
     ]
     key: str

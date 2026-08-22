@@ -22,7 +22,13 @@ import type {
   ScenarioVersionDetail,
 } from "../types";
 import { errorText, resultLabel, stepDescription, uiLabel } from "../ui";
-import { formatDuration, type ActivePlayOperation } from "../playPresentation";
+import {
+  debriefButtonLabel,
+  formatDuration,
+  segmentCompletionMessage,
+  syncPlayStateCaches,
+  type ActivePlayOperation,
+} from "../playPresentation";
 import {
   actionLocationText,
   groupFactsByRegion,
@@ -855,7 +861,12 @@ export function GamePage() {
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["play", gameId] });
   const syncLivePlay = (state: PlayerGameState) => {
-    queryClient.setQueryData(["play", gameId, "live"], state);
+    syncPlayStateCaches(
+      (queryKey, nextState) => queryClient.setQueryData<PlayerGameState>(queryKey, nextState),
+      gameId,
+      selectedTaskId,
+      state,
+    );
     void refresh();
   };
   const submit = useMutation({
@@ -1001,6 +1012,16 @@ export function GamePage() {
   const actionReady = task?.execution_phase === "AWAITING_ACTION_ACK";
   const successDebrief = task?.execution_phase === "AWAITING_DEBRIEF_ACK";
   const failureDebrief = task?.execution_phase === "AWAITING_REPLAN_ACK";
+  const planInvalidatedDebrief = Boolean(
+    failureDebrief && task?.debrief?.success && task.debrief.plan_invalidated,
+  );
+  const segmentCompleteDebrief = Boolean(
+    failureDebrief && task?.debrief?.success && !planInvalidatedDebrief,
+  );
+  const segmentCompletion = segmentCompletionMessage(
+    segmentCompleteDebrief,
+    planInvalidatedDebrief,
+  );
 
   return (
     <main className="game-console">
@@ -1068,7 +1089,7 @@ export function GamePage() {
               <div><p>当前 · 汇报</p><h1>Agent 当前汇报</h1></div>
               <span className="console-pill warning">逐步确认</span>
             </header>
-            {task && goalAccepted && selectedTaskActive && (
+            {task && goalAccepted && selectedTaskActive && !planningForTask && !replanningForTask && (
               <section className="player-checkpoint goal-accepted-card" data-testid="goal-accepted-card">
                 <small>目标已接受</small>
                 <h2>{task.goal}</h2>
@@ -1081,7 +1102,7 @@ export function GamePage() {
                 </button>
               </section>
             )}
-            {task && actionReady && task.briefing && selectedTaskActive && (
+            {task && actionReady && task.briefing && selectedTaskActive && !planningForTask && !replanningForTask && (
               <section className="player-checkpoint action-briefing">
                 <small>下一步行动</small>
                 <h2>{task.briefing.actor_name} 准备执行</h2>
@@ -1093,7 +1114,7 @@ export function GamePage() {
                 </button>
               </section>
             )}
-            {task && (successDebrief || failureDebrief) && task.debrief && (
+            {task && (successDebrief || failureDebrief) && task.debrief && !planningForTask && !replanningForTask && (
               <section className={`player-checkpoint action-debrief ${task.debrief.success ? "success" : "failed"}`}>
                 <small>行动汇报</small>
                 <h2>{task.debrief.success ? "✓" : "✕"} {task.debrief.action_name}</h2>
@@ -1103,6 +1124,15 @@ export function GamePage() {
                   <h3>新获知识</h3>
                   <ul>{task.debrief.knowledge_changes.map((change) => <li key={change.key}>{change.name}{change.value !== null ? `：${typeof change.value === "string" ? uiLabel(change.value) : String(change.value)}` : ""}</li>)}</ul>
                 </>}
+                {segmentCompletion && (
+                  <div
+                    className={planInvalidatedDebrief ? "plan-invalidation-message" : "segment-complete-message"}
+                    data-testid={planInvalidatedDebrief ? "plan-invalidation-message" : "segment-complete-message"}
+                  >
+                    <strong>{segmentCompletion.title}</strong>
+                    <p>{segmentCompletion.detail}</p>
+                  </div>
+                )}
                 <button
                   disabled={busy || !selectedTaskActive}
                   onClick={() => {
@@ -1113,7 +1143,12 @@ export function GamePage() {
                     }
                   }}
                 >
-                  {failureDebrief ? (replan.isPending ? "正在重新规划……" : "没事，重新规划") : "收到，继续任务"}
+                  {debriefButtonLabel({
+                    failureDebrief,
+                    segmentCompleteDebrief,
+                    planInvalidated: planInvalidatedDebrief,
+                    replanning: replan.isPending,
+                  })}
                 </button>
               </section>
             )}
@@ -1144,7 +1179,7 @@ export function GamePage() {
           {!task && !selectedTaskLoading && <p className="console-empty">等待下达第一个目标。</p>}
           {selectedTaskLoading && <p className="plan-waiting-message">正在加载所选任务记录……</p>}
           {task && <div className="task-brief"><small>当前目标</small><strong>{task.goal}</strong><span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span><p>{task.objective_names.join(" · ")}</p>{task.explanation && <code>{uiLabel(task.explanation)}</code>}</div>}
-          {task && !planningForTask && <PlanHistory task={task} />}
+           {task && !planningForTask && !replanningForTask && <PlanHistory task={task} />}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>

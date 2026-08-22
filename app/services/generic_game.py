@@ -264,6 +264,51 @@ class GenericGameService:
             ).visibility
             != RelationVisibility.VISIBLE
         )
+        # Region inventory knowledge is persisted in its own table, so it is
+        # not represented by the ordinary Fact/Node/Relation visibility
+        # collections above. Keep the public delta explicit and only emit it
+        # for an actual state transition; repeated/no-op mutations must not
+        # manufacture new Knowledge.
+        region_resource_knowledge_changes: list[PlayerKnowledgeChange] = []
+        projected_region_resource_knowledge = {
+            region_key: knowledge
+            for region_key, knowledge in state.region_resource_knowledge.items()
+        }
+        for visibility_mutation in outcome.region_resource_visibility_updates:
+            previous = projected_region_resource_knowledge.get(visibility_mutation.region_key)
+            if (
+                previous is None
+                or previous.resource_inventory_visibility == visibility_mutation.visibility
+            ):
+                continue
+            region_resource_knowledge_changes.append(
+                PlayerKnowledgeChange(
+                    kind="RESOURCE_INVENTORY_REVEALED",
+                    key=f"{visibility_mutation.region_key}.resource_inventory_visibility",
+                    name="Resource inventory visibility",
+                    value=visibility_mutation.visibility.value,
+                )
+            )
+            projected_region_resource_knowledge[visibility_mutation.region_key] = replace(
+                previous,
+                resource_inventory_visibility=visibility_mutation.visibility,
+            )
+        for survey_mutation in outcome.region_resource_survey_updates:
+            previous = projected_region_resource_knowledge.get(survey_mutation.region_key)
+            if previous is None or previous.resource_survey_completed == survey_mutation.completed:
+                continue
+            region_resource_knowledge_changes.append(
+                PlayerKnowledgeChange(
+                    kind="RESOURCE_SURVEY_COMPLETED",
+                    key=f"{survey_mutation.region_key}.resource_survey_completed",
+                    name="Resource survey completed",
+                    value=survey_mutation.completed,
+                )
+            )
+            projected_region_resource_knowledge[survey_mutation.region_key] = replace(
+                previous,
+                resource_survey_completed=survey_mutation.completed,
+            )
         self._apply(definition, actor_key, outcome)
         instance = self._instance()
         instance.runtime_revision += 1
@@ -292,6 +337,7 @@ class GenericGameService:
                     value=row.truth_value,
                 )
             )
+        knowledge_changes.extend(region_resource_knowledge_changes)
         resource_names = {item.key: item.name for item in definition.world.resources}
         for pool in sorted(
             newly_known_pools,

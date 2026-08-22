@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -12,14 +13,25 @@ from app.agent.dependency_closure import (
     _has_known_available_resource_at,
     build_dependency_closure,
 )
-from app.agent.generic import GenericAgentError, GenericAgentService, _ProjectedFact
+from app.agent.generic import (
+    GenericAgentError,
+    GenericAgentService,
+    GenericGoalResolution,
+    _ProjectedFact,
+)
 from app.agent.planner_contract import (
     action_planner_constraints,
     action_planner_effects,
     declarative_action_effects,
 )
 from app.agent.planning_context import PlanningContextBuilder
-from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
+from app.agent.provider import (
+    PlannerActionContract,
+    PlannerInput,
+    PlanProposal,
+    PlanRequest,
+    PlanStepProposal,
+)
 from app.domain.enums import (
     CommandReachability,
     ResourcePoolAvailability,
@@ -628,6 +640,91 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     )
 
 
+def test_locality_dependency_closure_keeps_relocation_capability_for_local_actions(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-locality-closure-relocation")
+    route = session.get(
+        GameInstanceFactState,
+        (scope.game_instance_id, "central_river_tunnel", "passable"),
+    )
+    assert route is not None
+    route.visibility = Visibility.KNOWN
+    route.truth_value = False
+    session.flush()
+
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore central communication capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            "restore_central_communication_capability",
+            ("restore_central_communication_capability",),
+        ),
+        initialize_plan=False,
+    )
+    definition = agent._definition()
+    closure = PlanningContextBuilder(session, scope).build_v2_closure(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason="TRAVEL_BLOCKED",
+    )
+    action_keys = {item.action_key for item in closure.planner_input.action_contracts}
+    assert {"clear_transport", "repair_communications", "travel"}.issubset(action_keys)
+
+
+def test_historical_travel_success_requires_current_location_redundancy_proof(
+    session: Session,
+) -> None:
+    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    travel = next(item for item in definition.actions if item.key == "travel")
+    actor = GameInstanceActor(
+        game_instance_id=uuid4(),
+        actor_key="actor",
+        name="Actor",
+        role_key="worker",
+        persona="worker",
+        current_node_key="west_logistics_district",
+        allowed_action_keys=["travel"],
+        capabilities=["EXECUTE_ACTION"],
+        status="ACTIVE",
+        command_reachability="ONLINE",
+    )
+    assert GenericAgentService._historical_success_is_redundant(
+        definition=definition,
+        action=travel,
+        actor=actor,
+        target_key="west_logistics_district",
+        planner_input=None,
+    )
+    assert GenericAgentService._historical_success_is_redundant(
+        definition=definition,
+        action=travel,
+        actor=actor,
+        target_key="west_logistics_district",
+        planner_input=None,
+        projected_actor_locations={"actor": "west_logistics_district"},
+    )
+    actor.current_node_key = "central_district"
+    assert not GenericAgentService._historical_success_is_redundant(
+        definition=definition,
+        action=travel,
+        actor=actor,
+        target_key="west_logistics_district",
+        planner_input=None,
+    )
+    assert not GenericAgentService._historical_success_is_redundant(
+        definition=definition,
+        action=travel,
+        actor=actor,
+        target_key="west_logistics_district",
+        planner_input=None,
+        projected_actor_locations={"actor": "central_district"},
+    )
+
+
 def test_linjiang_v10_completed_survey_repair_diagnostic_is_typed(
     session: Session,
 ) -> None:
@@ -1183,6 +1280,120 @@ def test_linjiang_v10_central_east_hidden_route_is_accepted_by_validator(
     assert connector == "central_river_tunnel"
 
 
+def test_linjiang_v10_clear_transport_uses_endpoint_locality_not_passability(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-v10-clear-transport-locality")
+    agent = GenericAgentService(session, scope)
+    definition = agent._definition()
+    actors = {
+        actor.actor_key: actor
+        for actor in session.scalars(
+            select(GameInstanceActor).where(
+                GameInstanceActor.game_instance_id == runtime.instance.id
+            )
+        )
+    }
+    action = next(item for item in definition.actions if item.key == "clear_transport")
+    projected_locations = {key: item.current_node_key for key, item in actors.items()}
+    projected_reachability = {
+        key: CommandReachability.ONLINE for key in actors
+    }
+    projected_passability = {"central_river_tunnel": False}
+    projected_facts = agent._known_fact_projection()
+    projected_nodes = agent._known_node_keys()
+    projected_relations = agent._known_relation_keys(definition)
+
+    with pytest.raises(GenericAgentError) as wrong_endpoint:
+        agent._validate_projected_action_state(
+            definition,
+            action,
+            "municipal_transport_team",
+            "central_river_tunnel",
+            {},
+            {**projected_locations, "municipal_transport_team": "west_logistics_district"},
+            projected_passability,
+            projected_facts,
+            projected_nodes,
+            projected_relations,
+            actors=actors,
+            projected_command_reachability=projected_reachability,
+        )
+    assert wrong_endpoint.value.code == "LOCALITY_TRANSPORT_ENDPOINT_INVALID"
+
+    projected_locations["municipal_transport_team"] = "central_district"
+    assert agent._validate_projected_action_state(
+        definition,
+        action,
+        "municipal_transport_team",
+        "central_river_tunnel",
+        {},
+        projected_locations,
+        projected_passability,
+        projected_facts,
+        projected_nodes,
+        projected_relations,
+        actors=actors,
+        projected_command_reachability=projected_reachability,
+    ) is None
+
+    travel = next(item for item in definition.actions if item.key == "travel")
+    projected_locations["municipal_transport_team"] = "west_logistics_district"
+    travel_connector = agent._validate_projected_action_state(
+        definition,
+        travel,
+        "municipal_transport_team",
+        "central_district",
+        {},
+        projected_locations,
+        projected_passability,
+        projected_facts,
+        projected_nodes,
+        projected_relations,
+        actors=actors,
+        projected_command_reachability=projected_reachability,
+    )
+    assert travel_connector == "west_freight_corridor"
+    travel_effects = agent._projected_resolution_effects(
+        definition,
+        travel,
+        "central_district",
+        {},
+        projected_facts,
+        projected_nodes,
+        projected_relations,
+    )
+    agent._advance_projected_action_state(
+        definition,
+        travel,
+        "municipal_transport_team",
+        "central_district",
+        {},
+        projected_locations,
+        projected_passability,
+        projected_facts,
+        projected_nodes,
+        projected_relations,
+        travel_effects,
+        projected_command_reachability=projected_reachability,
+    )
+    assert projected_locations["municipal_transport_team"] == "central_district"
+    assert agent._validate_projected_action_state(
+        definition,
+        action,
+        "municipal_transport_team",
+        "central_river_tunnel",
+        {},
+        projected_locations,
+        projected_passability,
+        projected_facts,
+        projected_nodes,
+        projected_relations,
+        actors=actors,
+        projected_command_reachability=projected_reachability,
+    ) is None
+
+
 def test_linjiang_v10_hidden_block_is_discovered_only_during_runtime(
     session: Session,
 ) -> None:
@@ -1293,6 +1504,69 @@ def test_linjiang_v10_relay_recovery_path_is_sequentially_validated(
     assert projected_locations["logistics_team_alpha"] == "east_residential_district"
     assert projected_locations["communications_repair_team_alpha"] == "central_district"
     assert projected_reachability["communications_repair_team_alpha"] == CommandReachability.ONLINE
+
+
+def test_projected_canonical_actor_location_effect_updates_following_step(
+    session: Session,
+) -> None:
+    runtime, scope = _v10_runtime(session, "linjiang-projected-actor-location-effect")
+    agent = GenericAgentService(session, scope)
+    definition = agent._definition()
+    actors = {
+        actor.actor_key: actor
+        for actor in session.scalars(
+            select(GameInstanceActor).where(
+                GameInstanceActor.game_instance_id == runtime.instance.id
+            )
+        )
+    }
+    projected_locations = {key: item.current_node_key for key, item in actors.items()}
+    projected_passability = agent._known_passability(definition)
+    projected_facts = agent._known_fact_projection()
+    projected_nodes = agent._known_node_keys()
+    projected_relations = agent._known_relation_keys(definition)
+    projected_reachability = {
+        key: CommandReachability(actor.command_reachability)
+        for key, actor in actors.items()
+    }
+    action = next(item for item in definition.actions if item.key == "repair_communications")
+    planner_input = PlannerInput(
+        action_contracts=(
+            PlannerActionContract(
+                action_key=action.key,
+                deterministic_effects=(
+                    {"type": "ACTOR_LOCATION", "actor": "executor", "value": "target_key"},
+                ),
+            ),
+        ),
+    )
+
+    agent._advance_projected_action_state(
+        definition,
+        action,
+        "logistics_team_alpha",
+        "west_logistics_district",
+        {},
+        projected_locations,
+        projected_passability,
+        projected_facts,
+        projected_nodes,
+        projected_relations,
+        (),
+        planner_input=planner_input,
+        projected_command_reachability=projected_reachability,
+    )
+
+    assert projected_locations["logistics_team_alpha"] == "west_logistics_district"
+    travel = next(item for item in definition.actions if item.key == "travel")
+    assert agent._validate_projected_plan_locality(
+        definition,
+        travel,
+        "logistics_team_alpha",
+        "central_district",
+        {},
+        projected_locations,
+    ) == "west_freight_corridor"
 
 
 def test_linjiang_v10_known_route_remains_one_hop_after_hidden_route_failure() -> None:

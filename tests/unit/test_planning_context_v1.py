@@ -19,6 +19,7 @@ from app.agent.provider import (
     PlannerActorState,
     PlannerInput,
     PlannerKnownWorldSlice,
+    PlannerTargetBinding,
     PlanningActionCandidate,
     PlanningContext,
     PlanProposal,
@@ -824,6 +825,45 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         }
     )
     assert _validate_plan_segment_contract(blocked, already_surveyed) == ()
+    binding_cost_is_known = direct_progress.model_copy(
+        update={
+            "known_world": direct_progress.known_world.model_copy(
+                update={
+                    "resources": {
+                        "survey_parts": {
+                            "scopes": {"region": {"known_available": 5}}
+                        }
+                    }
+                }
+            ),
+            "target_bindings": (
+                PlannerTargetBinding(
+                    action_key="survey",
+                    target_key="region",
+                    requirements=(
+                        {"cost": {"survey_parts": 5}},
+                    ),
+                ),
+            ),
+        }
+    )
+    assert _validate_plan_segment_contract(blocked, binding_cost_is_known)[0].code == (
+        "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS"
+    )
+    binding_cost_is_unknown = binding_cost_is_known.model_copy(
+        update={
+            "known_world": binding_cost_is_known.known_world.model_copy(
+                update={
+                    "resources": {
+                        "survey_parts": {
+                            "scopes": {"region": {"known_available": 4}}
+                        }
+                    }
+                }
+            )
+        }
+    )
+    assert _validate_plan_segment_contract(blocked, binding_cost_is_unknown) == ()
     composed_only = PlannerInput(
         actors=(
             PlannerActorState(

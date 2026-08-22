@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
 from app.agent.objective_scope import ObjectiveScope, ObjectiveScopeError
+from app.agent.planner_contract import action_planner_effects
 from app.agent.planning_context import (
     PlanningActionCatalogBuilder,
     PlanningContextBuilder,
@@ -1053,6 +1054,11 @@ class GenericAgentService:
             signature = proposal_signature(actor.actor_key, action.key, target_key, parameters)
             if signature in rejected_signatures:
                 continue
+            # A historical success is only used together with the current
+            # unsatisfied objective projection.  Supporting effects that are
+            # no longer needed are directly proven redundant by that current
+            # state; a state-dependent action that still covers an objective
+            # requirement remains eligible for re-use.
             if signature in successful_signatures and not set(matched).intersection(
                 objective_needed
             ):
@@ -1347,6 +1353,7 @@ class GenericAgentService:
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
+        successful_signatures = self._successful_proposal_signatures(task)
         result: list[dict[str, object]] = []
         step_effects: list[set[tuple[str, str]]] = []
         if not proposed_steps and stop_reason != "BLOCKED":
@@ -1399,6 +1406,24 @@ class GenericAgentService:
                 projected_known_relations,
             )
             try:
+                signature = proposal_signature(actor_key, action_key, target_key, parameters)
+                if signature in successful_signatures and self._historical_success_is_redundant(
+                    definition=definition,
+                    action=action,
+                    actor=actor,
+                    target_key=target_key,
+                    planner_input=planner_input,
+                    projected_actor_locations=projected_actor_locations,
+                ):
+                    raise GenericAgentError(
+                        "OBJECTIVE_IRRELEVANT",
+                        "The previously successful location is already the projected location",
+                        details={
+                            "dimension": "OBJECTIVE_RELEVANCE",
+                            "required": "ADVANCES_FROZEN_OBJECTIVE_SCOPE",
+                            "actual": "ALREADY_SUCCEEDED_WITHOUT_NEEDED_EFFECT",
+                        },
+                    )
                 self._validate_projected_command_reachability(
                     action,
                     actor_key,
@@ -1532,6 +1557,7 @@ class GenericAgentService:
                 projected_known_nodes,
                 projected_known_relations,
                 projected_resolution_effects,
+                planner_input=planner_input,
                 projected_command_reachability=projected_command_reachability,
             )
 
@@ -1642,21 +1668,6 @@ class GenericAgentService:
                 or item.get("behavior") != "RULE"
                 or item.get("locality") != "NONE"
             )
-        }
-        successful_signatures = self._successful_proposal_signatures(task)
-        objective_needed = {
-            (requirement.node_key, requirement.fact_key)
-            for objective in objectives
-            for prerequisite in objective.prerequisites
-            for requirement in prerequisite.requirements
-            if self._known_requirement_public(requirement)
-            and not self._known_requirement_satisfied(requirement)
-        } | {
-            (requirement.node_key, requirement.fact_key)
-            for objective in objectives
-            for requirement in objective.completion_requirements
-            if self._known_requirement_public(requirement)
-            and not self._known_requirement_satisfied(requirement)
         }
         objective_refs = {
             (requirement.node_key, requirement.fact_key)
@@ -1829,20 +1840,14 @@ class GenericAgentService:
                     }
                 )
                 continue
-            actual_relevance: str | None
-            if signature in successful_signatures and not effect_refs.intersection(
-                objective_needed
-            ):
-                actual_relevance = "ALREADY_SUCCEEDED_WITHOUT_NEEDED_EFFECT"
-            else:
-                projected_refs = effect_refs
-                actual_relevance = (
-                    "NO_DECLARED_RELEVANT_EFFECT"
-                    if objective_refs.isdisjoint(projected_refs)
-                    and not action.planning.supporting_effects
-                    and action_key not in context_action_keys
-                    else None
-                )
+            projected_refs = effect_refs
+            actual_relevance = (
+                "NO_DECLARED_RELEVANT_EFFECT"
+                if objective_refs.isdisjoint(projected_refs)
+                and not action.planning.supporting_effects
+                and action_key not in context_action_keys
+                else None
+            )
             if actual_relevance is not None:
                 diagnostics.append(
                     {
@@ -1891,6 +1896,75 @@ class GenericAgentService:
                     if isinstance(node_key, str) and isinstance(fact_key, str):
                         refs.add((node_key, fact_key))
         return refs
+
+    @staticmethod
+    def _historical_success_is_redundant(
+        *,
+        definition: ScenarioDefinitionV2,
+        action: ActionDefinitionV2,
+        actor: GameInstanceActor,
+        target_key: str,
+        planner_input: PlannerInput | None,
+        projected_actor_locations: dict[str, str] | None = None,
+    ) -> bool:
+        """Use a prior success only when the current state proves redundancy.
+
+        A historical operation is evidence, not proof that a newly proposed
+        operation is still unnecessary. Movement is the one generic case where
+        the public current location gives a direct proof. Other resource,
+        knowledge, and declarative effects remain state-dependent and are
+        validated by the current projected state instead of by this signature.
+        """
+
+        effect_changes_location = action.behavior == ActionBehavior.TRAVEL
+        if planner_input is not None:
+            contract = next(
+                (
+                    item
+                    for item in planner_input.action_contracts
+                    if item.action_key == action.key
+                ),
+                None,
+            )
+            binding = next(
+                (
+                    item
+                    for item in planner_input.target_bindings
+                    if item.action_key == action.key and item.target_key == target_key
+                ),
+                None,
+            )
+            effect_changes_location = effect_changes_location or bool(
+                contract is not None
+                and any(
+                    effect.get("type") == "ACTOR_LOCATION"
+                    and effect.get("value") in {"target_key", "target_node"}
+                    for effect in contract.deterministic_effects
+                )
+            )
+            effect_changes_location = effect_changes_location or bool(
+                binding is not None
+                and any(
+                    effect.get("type") == "ACTOR_LOCATION"
+                    and effect.get("value") in {"target_key", "target_node"}
+                    for effect in binding.deterministic_effects
+                )
+            )
+        if not effect_changes_location:
+            return False
+        actor_node_key = (
+            projected_actor_locations.get(actor.actor_key)
+            if projected_actor_locations is not None
+            else actor.current_node_key
+        )
+        if actor_node_key is None:
+            return False
+        try:
+            actor_region = region_for_node(definition, actor_node_key)
+            target_region = region_for_node(definition, target_key)
+        except LocalityEngineError:
+            return False
+        return actor_region == target_region
 
     @classmethod
     def _objective_effect_refs(
@@ -2125,14 +2199,9 @@ class GenericAgentService:
                 projected_known_relations,
             )
         if (
-            action.behavior
-            not in (
-                ActionBehavior.TRAVEL,
-                ActionBehavior.TRANSPORT_RESOURCE,
-                ActionBehavior.SUPPLY_POWER,
-                ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT,
-            )
-            and action.target_kind != ActionTargetKind.ACTOR
+            action.locality.value == "NONE"
+            and action.behavior
+            not in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
         ):
             return None
         connector = self._validate_projected_plan_locality(
@@ -2145,7 +2214,12 @@ class GenericAgentService:
             actors=actors,
             projected_command_reachability=projected_command_reachability,
         )
-        if connector is not None and projected_known_passability.get(connector) is False:
+        if (
+            action.behavior
+            in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
+            and connector is not None
+            and projected_known_passability.get(connector) is False
+        ):
             source_region = region_for_node(definition, projected_actor_locations[actor_key])
             target_node_key = (
                 projected_actor_locations[target_key]
@@ -3001,9 +3075,41 @@ class GenericAgentService:
         projected_known_relations: set[str],
         projected_resolution_effects: Sequence[EffectV2],
         *,
+        planner_input: PlannerInput | None = None,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> None:
         if action.behavior in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE):
+            projected_actor_locations[actor_key] = target_key
+        location_effects: tuple[dict[str, object], ...]
+        if planner_input is None:
+            location_effects = tuple(action_planner_effects(action))
+        else:
+            contract = next(
+                (item for item in planner_input.action_contracts if item.action_key == action.key),
+                None,
+            )
+            binding = next(
+                (
+                    item
+                    for item in planner_input.target_bindings
+                    if item.action_key == action.key and item.target_key == target_key
+                ),
+                None,
+            )
+            location_effects = tuple(
+                effect
+                for item in (contract, binding)
+                if item is not None
+                for effect in item.deterministic_effects
+            )
+            if contract is None:
+                location_effects = tuple(action_planner_effects(action))
+        if any(
+            effect.get("type") == "ACTOR_LOCATION"
+            and effect.get("actor") in {"executor", "actor"}
+            and effect.get("value") in {"target_key", "target_node"}
+            for effect in location_effects
+        ):
             projected_actor_locations[actor_key] = target_key
         GenericAgentService._apply_projected_passability_effect(
             definition,
@@ -4239,7 +4345,11 @@ def _actor_has_direct_known_target(
         if isinstance(required_interaction, str) and required_interaction not in interactions:
             continue
         binding = bindings.get((contract.action_key, target_key))
-        if binding is not None and binding.requirements:
+        if binding is not None and not _direct_known_binding_requirements(
+            binding,
+            planner_input,
+            actor.current_region,
+        ):
             continue
         if not _direct_known_locality(
             actor,
@@ -4467,6 +4577,87 @@ def _direct_known_resource_option(
         ):
             return False
     return True
+
+
+def _direct_known_binding_requirements(
+    binding: PlannerTargetBinding,
+    planner_input: PlannerInput,
+    actor_region: str | None,
+) -> bool:
+    """Prove sparse target requirements from the public Known projection.
+
+    A target binding may carry a known resource cost and/or known Fact
+    predicates.  This helper only evaluates those already-projected values;
+    it does not infer hidden Truth or construct a recovery sequence.
+    """
+
+    for requirement in binding.requirements:
+        if not isinstance(requirement, dict):
+            return False
+        cost = requirement.get("cost")
+        if isinstance(cost, dict):
+            for resource_key, amount in cost.items():
+                if (
+                    not isinstance(resource_key, str)
+                    or isinstance(amount, bool)
+                    or not isinstance(amount, int)
+                    or amount <= 0
+                    or not _known_resource_sufficient(
+                        planner_input.known_world.resources.get(resource_key),
+                        actor_region,
+                        amount,
+                    )
+                ):
+                    return False
+        special_requirements = requirement.get("special_requirements", [])
+        if not isinstance(special_requirements, list):
+            return False
+        for special in special_requirements:
+            if not isinstance(special, dict):
+                return False
+            node_key = special.get("node_key")
+            fact_key = special.get("fact_key")
+            operator = special.get("operator")
+            expected = special.get("value")
+            if not isinstance(node_key, str) or not isinstance(fact_key, str):
+                return False
+            actual = planner_input.known_world.facts.get(f"{node_key}.{fact_key}")
+            if actual is None or not _direct_known_predicate_holds(actual, operator, expected):
+                return False
+    return True
+
+
+def _direct_known_predicate_holds(actual: object, operator: object, expected: object) -> bool:
+    if not isinstance(operator, str):
+        return False
+    try:
+        if operator == "EQ":
+            return actual == expected
+        if operator == "NE":
+            return actual != expected
+        if operator == "IN":
+            return isinstance(expected, list) and actual in expected
+        if operator == "NOT_IN":
+            return isinstance(expected, list) and actual not in expected
+        if operator in {"LT", "LTE", "GT", "GTE"}:
+            if not isinstance(actual, (bool, int, str)) or not isinstance(
+                expected, (bool, int, str)
+            ):
+                return False
+            actual_value = cast(Any, actual)
+            expected_value = cast(Any, expected)
+            if operator == "LT":
+                return bool(actual_value < expected_value)
+            if operator == "LTE":
+                return bool(actual_value <= expected_value)
+            if operator == "GT":
+                return bool(actual_value > expected_value)
+            return bool(actual_value >= expected_value)
+        if operator.startswith("NOT_"):
+            return not _direct_known_predicate_holds(actual, operator[4:], expected)
+    except TypeError:
+        return False
+    return False
 
 
 def _known_resource_sufficient(raw: object, region_key: str | None, amount: int) -> bool:

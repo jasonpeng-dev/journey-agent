@@ -388,6 +388,17 @@ def test_survey_reveals_discoverable_facility_pool_without_unlocking_it(
     assert result.outcome.failure is None
     assert result.outcome.outcome_code == "SURVEYED"
     assert any(item.kind == "RESOURCE_DISCOVERED" for item in result.knowledge_changes)
+    assert any(
+        item.kind == "RESOURCE_INVENTORY_REVEALED"
+        and item.key == "north_industrial_district.resource_inventory_visibility"
+        for item in result.knowledge_changes
+    )
+    assert any(
+        item.kind == "RESOURCE_SURVEY_COMPLETED"
+        and item.key == "north_industrial_district.resource_survey_completed"
+        and item.value is True
+        for item in result.knowledge_changes
+    )
 
     knowledge = session.get(
         GameInstanceRegionResourceKnowledge,

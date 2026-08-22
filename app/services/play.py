@@ -315,7 +315,7 @@ class PlayOrchestrator:
         return task
 
     def replan(self, *, expected_pacing_version: int) -> AgentTask:
-        """Build the next Plan after a visible Action failure.
+        """Build the next Plan after a visible failure or completed segment.
 
         This is a small application boundary split: the Generic Agent still
         owns planning and validation, while Formal Play controls when the
@@ -339,17 +339,6 @@ class PlayOrchestrator:
             else None
         )
         plan_invalidated = self.agent.has_pending_plan_invalidation(task)
-        if plan_invalidated:
-            if failed_step is None or failed_step.status != AgentStepStatus.SUCCEEDED:
-                raise PlayError(
-                    "PLAY_REPLAN_NOT_REQUIRED",
-                    "The current Plan was not invalidated after a successful Action",
-                )
-        elif failed_step is None or not self._action_cycle_failed(failed_step):
-            raise PlayError(
-                "PLAY_REPLAN_NOT_REQUIRED",
-                "The current Action did not produce a retryable failure",
-            )
         latest_plan = self.db.scalar(
             select(AgentPlan)
             .where(
@@ -358,10 +347,44 @@ class PlayOrchestrator:
             )
             .order_by(AgentPlan.version.desc())
         )
+        segment_complete = bool(
+            not plan_invalidated
+            and failed_step is not None
+            and failed_step.status == AgentStepStatus.SUCCEEDED
+            and latest_plan is not None
+            and latest_plan.id == failed_step.plan_id
+            and task.status == AgentTaskStatus.ACTIVE
+            and self._next_action_step(task) is None
+            and not self._action_cycle_failed(failed_step)
+            and not self.agent.evaluate(task).completed
+        )
+        if plan_invalidated:
+            if failed_step is None or failed_step.status != AgentStepStatus.SUCCEEDED:
+                raise PlayError(
+                    "PLAY_REPLAN_NOT_REQUIRED",
+                    "The current Plan was not invalidated after a successful Action",
+                )
+        elif not segment_complete and (
+            failed_step is None or not self._action_cycle_failed(failed_step)
+        ):
+            raise PlayError(
+                "PLAY_REPLAN_NOT_REQUIRED",
+                "The current Action did not require a replan",
+            )
+        assert failed_step is not None
         if latest_plan is None or latest_plan.id == failed_step.plan_id:
             replan_started = perf_counter()
             try:
-                plan = self.agent.plan(task, reason=task.last_error_code or "ACTION_FAILED")
+                if segment_complete:
+                    assert latest_plan is not None
+                    replan_reason = (
+                        "INFORMATION_BOUNDARY"
+                        if latest_plan.stop_reason == "INFORMATION_BOUNDARY"
+                        else "PLAN_EXHAUSTED"
+                    )
+                else:
+                    replan_reason = task.last_error_code or "ACTION_FAILED"
+                plan = self.agent.plan(task, reason=replan_reason)
             except GenericProviderError as exc:
                 self._persist_provider_failure(
                     task,
@@ -511,7 +534,11 @@ class PlayOrchestrator:
         return task
 
     def _execute_action_cycle(self, task: AgentTask, action_step: AgentStep) -> None:
-        """Run one TOOL action plus its internal async settlement and replan."""
+        """Run one TOOL action plus its internal async settlement.
+
+        Formal Play owns the player acknowledgement boundary; it never starts
+        a new Provider cycle from this action request.
+        """
 
         try:
             self.agent.execute_next(task, replan_on_failure=False)
@@ -539,7 +566,9 @@ class PlayOrchestrator:
                 self.agent.execute_next(task, replan_on_failure=False)
             if self._action_cycle_failed(action_step):
                 return
-            self._ensure_next_plan(task)
+            # Formal Play deliberately pauses after the final successful step
+            # of an incomplete segment. The player must acknowledge the
+            # completed segment before a new Provider planning cycle starts.
         except GenericProviderError as exc:
             checkpoint = self._ensure_checkpoint(task)
             checkpoint.last_action_step_id = action_step.id
@@ -678,6 +707,11 @@ class PlayOrchestrator:
         if action_step is not None and self._action_cycle_failed(action_step):
             return PlayerExecutionPhase.AWAITING_REPLAN_ACK
         if self.agent.has_pending_plan_invalidation(task):
+            return PlayerExecutionPhase.AWAITING_REPLAN_ACK
+        if action_step is not None and self._next_action_step(task) is None:
+            # A segment can end before the frozen objective is complete (for
+            # example at an INFORMATION_BOUNDARY). Do not silently call the
+            # Provider from the action acknowledgement request.
             return PlayerExecutionPhase.AWAITING_REPLAN_ACK
         return PlayerExecutionPhase.AWAITING_DEBRIEF_ACK
 

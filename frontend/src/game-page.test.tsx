@@ -10,7 +10,13 @@ import {
   WaitingStatus,
 } from "./pages/GamePage";
 import { groupActorsByTask } from "./actorPresentation";
-import { formatDuration, operationBelongsToTask } from "./playPresentation";
+import {
+  debriefButtonLabel,
+  formatDuration,
+  operationBelongsToTask,
+  segmentCompletionMessage,
+  syncPlayStateCaches,
+} from "./playPresentation";
 import type { PlayerGameState, PublicPlanStep, PublicTask } from "./types";
 
 const task: PublicTask = {
@@ -121,6 +127,78 @@ describe("Formal Play player projections", () => {
     expect(screen.getByLabelText("自定义目标")).toHaveValue("打开北部贸易路线");
     fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("synchronously updates the active PLAY cache without overwriting another task history", () => {
+    const state = {
+      game: { active_task_id: "active-task" },
+      current_task: { id: "active-task" },
+    } as PlayerGameState;
+    const writes: Array<{ key: readonly unknown[]; state: PlayerGameState }> = [];
+    const setQueryData = (key: readonly unknown[], nextState: PlayerGameState) => {
+      writes.push({ key, state: nextState });
+    };
+
+    syncPlayStateCaches(setQueryData, "game", null, state);
+    expect(writes.map((item) => item.key)).toEqual([
+      ["play", "game", "live"],
+      ["play", "game", null],
+    ]);
+
+    writes.length = 0;
+    syncPlayStateCaches(setQueryData, "game", "active-task", state);
+    expect(writes.map((item) => item.key)).toEqual([
+      ["play", "game", "live"],
+      ["play", "game", "active-task"],
+    ]);
+
+    writes.length = 0;
+    syncPlayStateCaches(setQueryData, "game", "old-task", state);
+    expect(writes.map((item) => item.key)).toEqual([["play", "game", "live"]]);
+  });
+
+  it("keeps the segment-complete debrief copy and ordinary/failure labels distinct", () => {
+    expect(segmentCompletionMessage(true)).toEqual({
+      title: "当前方案已完成，任务目标尚未达成。",
+      detail: "可以根据最新信息继续规划。",
+    });
+    expect(segmentCompletionMessage(false)).toBeNull();
+    expect(segmentCompletionMessage(false, true)).toEqual({
+      title: "最新信息使当前方案后续步骤不再有效，需要重新规划。",
+      detail: "当前步骤已完成，请根据新获知识重新规划。",
+    });
+    expect(
+      debriefButtonLabel({
+        failureDebrief: false,
+        segmentCompleteDebrief: false,
+        planInvalidated: false,
+        replanning: false,
+      }),
+    ).toBe("收到，继续任务");
+    expect(
+      debriefButtonLabel({
+        failureDebrief: true,
+        segmentCompleteDebrief: false,
+        planInvalidated: false,
+        replanning: false,
+      }),
+    ).toBe("没事，重新规划");
+    expect(
+      debriefButtonLabel({
+        failureDebrief: true,
+        segmentCompleteDebrief: true,
+        planInvalidated: false,
+        replanning: false,
+      }),
+    ).toBe("收到，继续规划任务");
+    expect(
+      debriefButtonLabel({
+        failureDebrief: true,
+        segmentCompleteDebrief: false,
+        planInvalidated: true,
+        replanning: false,
+      }),
+    ).toBe("收到，继续规划任务");
   });
 
   it("uses Scenario Objective names in the preset Goal Composer and keeps custom input separate", () => {
