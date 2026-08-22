@@ -566,8 +566,12 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     ) == (
         {
             "code": "UNKNOWN_CANDIDATE",
+            "failure_code": "UNKNOWN_CANDIDATE",
+            "dimension": "CANDIDATE_BINDING",
             "candidate_id": "candidate_invented",
             "step_id": unknown[0].step_id,
+            "required": "KNOWN_CANDIDATE_OR_DIRECT_BINDING",
+            "actual": "candidate_invented",
         },
     )
     assert provider.plan_requests[1].rejected_segment is not None
@@ -626,7 +630,12 @@ def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     assert submission.task is not None
     _start_initial_plan(orchestrator, submission.task)
     assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN", "REPAIR"]
-    assert provider.plan_requests[1].repair_diagnostics[0].code == "PLAN_ORDER_INVALID"
+    diagnostic = provider.plan_requests[1].repair_diagnostics[0]
+    assert diagnostic.code == "PLAN_ORDER_INVALID"
+    assert diagnostic.failure_code == "PLAN_ORDER_INVALID"
+    assert diagnostic.dimension == "PLAN_ORDER"
+    assert diagnostic.required == "PUBLIC_PREREQUISITES_BEFORE_TERMINAL_EFFECT"
+    assert diagnostic.actual == list(diagnostic.missing_prior_public_requirements)
 
 
 def test_empty_planning_catalog_is_unreachable_without_provider_fallback(

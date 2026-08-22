@@ -25,11 +25,15 @@ from app.agent.provider import (
     GenericModelProvider,
     GenericProviderError,
     GoalSelectionRequest,
+    PlannerActionContract,
+    PlannerActorState,
     PlannerInput,
+    PlannerTargetBinding,
     PlanningActionCandidate,
     PlanningContext,
     PlanProposal,
     PlanRequest,
+    PlanViolation,
     provider_call_metadata,
     provider_call_start_metadata,
 )
@@ -1161,7 +1165,7 @@ class GenericAgentService:
                 "GENERIC_PLAN_NOT_FOUND",
                 "No known public Action can advance the frozen ObjectiveScope",
             )
-        diagnostics: tuple[dict[str, object], ...] = ()
+        diagnostics: tuple[PlanViolation, ...] = ()
         rejected_segment: dict[str, object] | None = None
         call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
         for repair_attempt in range(self.MAX_PROVIDER_REPAIR_ATTEMPTS + 1):
@@ -1239,7 +1243,7 @@ class GenericAgentService:
             if diagnostics:
                 steps: list[dict[str, object]] = []
             else:
-                steps, diagnostics = self._validate_provider_proposal_v1(
+                steps, raw_diagnostics = self._validate_provider_proposal_v1(
                     task,
                     definition,
                     objectives,
@@ -1249,6 +1253,9 @@ class GenericAgentService:
                     proposal.steps,
                     planning_context,
                     stop_reason=proposal.stop_reason,
+                )
+                diagnostics = tuple(
+                    PlanViolation.model_validate(item) for item in raw_diagnostics
                 )
             self._record_provider_plan_call(
                 task,
@@ -1328,7 +1335,16 @@ class GenericAgentService:
         result: list[dict[str, object]] = []
         step_effects: list[set[tuple[str, str]]] = []
         if not proposed_steps and stop_reason != "BLOCKED":
-            return [], ({"code": "NO_STEPS", "message": "Proposal contains no steps"},)
+            return [], (
+                {
+                    "code": "NO_STEPS",
+                    "failure_code": "NO_STEPS",
+                    "dimension": "PLAN_STRUCTURE",
+                    "required": "AT_LEAST_ONE_STEP",
+                    "actual": 0,
+                    "message": "Proposal contains no steps",
+                },
+            )
         if not proposed_steps:
             return [], ()
 
@@ -1525,7 +1541,14 @@ class GenericAgentService:
                     return [], (
                         {
                             "code": "PLAN_ORDER_INVALID",
+                            "failure_code": "PLAN_ORDER_INVALID",
+                            "dimension": "PLAN_ORDER",
                             "step_id": str(getattr(proposed_steps[index - 1], "step_id", "")),
+                            "required": "PUBLIC_PREREQUISITES_BEFORE_TERMINAL_EFFECT",
+                            "actual": [
+                                {"node_key": node_key, "fact_key": fact_key}
+                                for node_key, fact_key in sorted(missing_before)
+                            ],
                             "missing_prior_public_requirements": [
                                 {"node_key": node_key, "fact_key": fact_key}
                                 for node_key, fact_key in sorted(missing_before)
@@ -1552,6 +1575,13 @@ class GenericAgentService:
             return [], (
                 {
                     "code": "OBJECTIVE_COVERAGE_INCOMPLETE",
+                    "failure_code": "OBJECTIVE_COVERAGE_INCOMPLETE",
+                    "dimension": "OBJECTIVE_COVERAGE",
+                    "required": "ALL_KNOWN_PUBLIC_REQUIREMENTS_COVERED",
+                    "actual": [
+                        {"node_key": node_key, "fact_key": fact_key}
+                        for node_key, fact_key in sorted(missing_refs)
+                    ],
                     "missing_public_requirements": [
                         {"node_key": node_key, "fact_key": fact_key}
                         for node_key, fact_key in sorted(missing_refs)
@@ -1627,8 +1657,12 @@ class GenericAgentService:
                 diagnostics.append(
                     {
                         "code": "UNKNOWN_CANDIDATE",
+                        "failure_code": "UNKNOWN_CANDIDATE",
+                        "dimension": "CANDIDATE_BINDING",
                         "step": index,
                         "candidate_id": candidate_id,
+                        "required": "KNOWN_CANDIDATE_OR_DIRECT_BINDING",
+                        "actual": candidate_id,
                     }
                 )
                 break
@@ -1637,29 +1671,80 @@ class GenericAgentService:
                 actor_key = actor_key or candidate.actor_key
                 target_key = target_key or candidate.target_key
             if not isinstance(action_key, str) or not action_key:
-                diagnostics.append({"code": "UNKNOWN_ACTION", "step": index})
+                diagnostics.append(
+                    {
+                        "code": "UNKNOWN_ACTION",
+                        "failure_code": "UNKNOWN_ACTION",
+                        "dimension": "ACTION_BINDING",
+                        "step": index,
+                        "required": "KNOWN_ACTION_KEY",
+                        "actual": "MISSING",
+                    }
+                )
                 continue
             if not isinstance(actor_key, str) or not actor_key:
-                diagnostics.append({"code": "UNKNOWN_ACTOR", "step": index})
+                diagnostics.append(
+                    {
+                        "code": "UNKNOWN_ACTOR",
+                        "failure_code": "UNKNOWN_ACTOR",
+                        "dimension": "ACTOR_BINDING",
+                        "step": index,
+                        "required": "KNOWN_ACTOR_KEY",
+                        "actual": "MISSING",
+                    }
+                )
                 continue
             if not isinstance(target_key, str) or not target_key:
-                diagnostics.append({"code": "UNKNOWN_TARGET", "step": index})
+                diagnostics.append(
+                    {
+                        "code": "UNKNOWN_TARGET",
+                        "failure_code": "UNKNOWN_TARGET",
+                        "dimension": "TARGET_BINDING",
+                        "step": index,
+                        "required": "KNOWN_VISIBLE_TARGET_KEY",
+                        "actual": "MISSING",
+                    }
+                )
                 continue
             action = actions.get(action_key)
             actor = actors.get(actor_key)
             if action is None:
                 diagnostics.append(
-                    {"code": "UNKNOWN_ACTION", "step": index, "action_key": action_key}
+                    {
+                        "code": "UNKNOWN_ACTION",
+                        "failure_code": "UNKNOWN_ACTION",
+                        "dimension": "ACTION_BINDING",
+                        "step": index,
+                        "action_key": action_key,
+                        "required": "KNOWN_ACTION_KEY",
+                        "actual": action_key,
+                    }
                 )
                 continue
             if actor is None:
                 diagnostics.append(
-                    {"code": "UNKNOWN_ACTOR", "step": index, "actor_key": actor_key}
+                    {
+                        "code": "UNKNOWN_ACTOR",
+                        "failure_code": "UNKNOWN_ACTOR",
+                        "dimension": "ACTOR_BINDING",
+                        "step": index,
+                        "actor_key": actor_key,
+                        "required": "KNOWN_ACTOR_KEY",
+                        "actual": actor_key,
+                    }
                 )
                 continue
             if target_key not in target_keys:
                 diagnostics.append(
-                    {"code": "UNKNOWN_TARGET", "step": index, "target_key": target_key}
+                    {
+                        "code": "UNKNOWN_TARGET",
+                        "failure_code": "UNKNOWN_TARGET",
+                        "dimension": "TARGET_BINDING",
+                        "step": index,
+                        "target_key": target_key,
+                        "required": "KNOWN_VISIBLE_TARGET_KEY",
+                        "actual": target_key,
+                    }
                 )
                 continue
             raw_parameters = dict(getattr(raw_step, "parameters", {}) or {})
@@ -1705,7 +1790,17 @@ class GenericAgentService:
             effect_refs = self._context_effect_refs(planning_context, action_key)
             if signature in set(task.rejected_proposal_signatures):
                 diagnostics.append(
-                    {"code": "REJECTED_PROPOSAL", "step": index, "action_key": action_key}
+                    {
+                        "code": "REJECTED_PROPOSAL",
+                        "failure_code": "REJECTED_PROPOSAL",
+                        "dimension": "PROPOSAL_HISTORY",
+                        "step": index,
+                        "action_key": action_key,
+                        "actor_key": actor_key,
+                        "target_key": target_key,
+                        "required": "NEW_OR_CORRECTED_BINDING",
+                        "actual": "PREVIOUSLY_REJECTED_BINDING",
+                    }
                 )
                 continue
             actual_relevance: str | None
@@ -3153,7 +3248,7 @@ class GenericAgentService:
         request: PlanRequest,
         proposal_steps: tuple[object, ...],
         proposal_candidate_ids: tuple[str, ...],
-        diagnostics: tuple[dict[str, object], ...],
+        diagnostics: tuple[PlanViolation, ...],
         accepted: bool,
         audit_id: str | None = None,
     ) -> None:
@@ -3788,37 +3883,100 @@ def _diagnostic_blocker(
 def _validate_plan_segment_contract(
     segment: PlanProposal,
     planner_input: PlannerInput,
-) -> tuple[dict[str, object], ...]:
+) -> tuple[PlanViolation, ...]:
     """Validate segment termination without planning a recovery path."""
 
     step_ids = [step.step_id for step in segment.steps]
     if any(not step_id.strip() for step_id in step_ids):
-        return ({"code": "STEP_ID_INVALID", "message": "step_id cannot be blank"},)
+        return (
+            PlanViolation(
+                code="STEP_ID_INVALID",
+                failure_code="STEP_ID_INVALID",
+                dimension="STEP_ID",
+                required="NON_BLANK",
+                actual="BLANK",
+            ),
+        )
     if len(step_ids) != len(set(step_ids)):
-        return ({"code": "STEP_ID_DUPLICATE", "step_ids": step_ids},)
+        return (
+            PlanViolation(
+                code="STEP_ID_DUPLICATE",
+                failure_code="STEP_ID_DUPLICATE",
+                dimension="STEP_ID",
+                required="UNIQUE",
+                actual="DUPLICATE",
+                step_ids=tuple(step_ids),
+            ),
+        )
     if segment.stop_reason == "OBJECTIVE_COMPLETION":
         if segment.boundary_dependency_id is not None:
-            return ({"code": "BOUNDARY_DEPENDENCY_NOT_ALLOWED"},)
+            return (
+                PlanViolation(
+                    code="BOUNDARY_DEPENDENCY_NOT_ALLOWED",
+                    failure_code="BOUNDARY_DEPENDENCY_NOT_ALLOWED",
+                    dimension="SEGMENT_TERMINATION",
+                    required="NO_BOUNDARY_DEPENDENCY",
+                    actual=segment.boundary_dependency_id,
+                    dependency_id=segment.boundary_dependency_id,
+                ),
+            )
         if not segment.steps:
-            return ({"code": "NO_STEPS", "message": "Completion segment has no steps"},)
+            return (
+                PlanViolation(
+                    code="NO_STEPS",
+                    failure_code="NO_STEPS",
+                    dimension="SEGMENT_STEPS",
+                    required="AT_LEAST_ONE_STEP",
+                    actual=0,
+                ),
+            )
         return ()
     if segment.stop_reason == "BLOCKED":
         if segment.boundary_dependency_id is not None:
-            return ({"code": "BOUNDARY_DEPENDENCY_NOT_ALLOWED"},)
-        if segment.steps:
-            return ({"code": "BLOCKED_SEGMENT_HAS_STEPS"},)
-        if planner_input.action_contracts:
             return (
-                {
-                    "code": "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS",
-                    "action_keys": [item.action_key for item in planner_input.action_contracts],
-                },
+                PlanViolation(
+                    code="BOUNDARY_DEPENDENCY_NOT_ALLOWED",
+                    failure_code="BOUNDARY_DEPENDENCY_NOT_ALLOWED",
+                    dimension="SEGMENT_TERMINATION",
+                    required="NO_BOUNDARY_DEPENDENCY",
+                    actual=segment.boundary_dependency_id,
+                    dependency_id=segment.boundary_dependency_id,
+                ),
+            )
+        if segment.steps:
+            return (
+                PlanViolation(
+                    code="BLOCKED_SEGMENT_HAS_STEPS",
+                    failure_code="BLOCKED_SEGMENT_HAS_STEPS",
+                    dimension="SEGMENT_STEPS",
+                    required="EMPTY",
+                    actual=len(segment.steps),
+                    step_ids=tuple(step_ids),
+                ),
+            )
+        if _has_direct_known_progress_option(planner_input):
+            return (
+                PlanViolation(
+                    code="BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS",
+                    failure_code="BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS",
+                    dimension="SEGMENT_TERMINATION",
+                    required="NO_DIRECT_KNOWN_LEGAL_PROGRESS_OPTION",
+                    actual="DIRECT_KNOWN_LEGAL_PROGRESS_OPTION_EXISTS",
+                ),
             )
         return ()
 
     dependency_id = segment.boundary_dependency_id
     if not isinstance(dependency_id, str) or not dependency_id.strip():
-        return ({"code": "INFORMATION_BOUNDARY_DEPENDENCY_MISSING"},)
+        return (
+            PlanViolation(
+                code="INFORMATION_BOUNDARY_DEPENDENCY_MISSING",
+                failure_code="INFORMATION_BOUNDARY_DEPENDENCY_MISSING",
+                dimension="INFORMATION_BOUNDARY",
+                required="REGISTERED_UNKNOWN_DEPENDENCY_ID",
+                actual="MISSING",
+            ),
+        )
     matching = next(
         (
             item
@@ -3829,10 +3987,24 @@ def _validate_plan_segment_contract(
     )
     if matching is None or matching.get("status") != "UNKNOWN" or not matching.get("blocks"):
         return (
-            {
-                "code": "INFORMATION_BOUNDARY_NOT_RELEVANT",
-                "actual": dependency_id,
-            },
+            PlanViolation(
+                code="INFORMATION_BOUNDARY_NOT_RELEVANT",
+                failure_code="INFORMATION_BOUNDARY_NOT_RELEVANT",
+                dimension="INFORMATION_BOUNDARY",
+                required="ACTIVE_UNKNOWN_BLOCKING_DEPENDENCY",
+                actual=dependency_id,
+                dependency_id=dependency_id,
+            ),
+        )
+    if not segment.steps:
+        return (
+            PlanViolation(
+                code="NO_STEPS",
+                failure_code="NO_STEPS",
+                dimension="SEGMENT_STEPS",
+                required="AT_LEAST_ONE_STEP",
+                actual=0,
+            ),
         )
     resolvers = matching.get("resolvable_by_effect_types")
     resolver_types = (
@@ -3844,27 +4016,159 @@ def _validate_plan_segment_contract(
     target_bindings = {
         (item.action_key, item.target_key): item for item in planner_input.target_bindings
     }
-    scheduled_effects: set[str] = set()
+    acquisition_matches = False
     for step in segment.steps:
         contract = action_contracts.get(str(step.action_key))
         binding = target_bindings.get((str(step.action_key), str(step.target_key)))
-        for effect in (
+        effects = (
             *(contract.deterministic_effects if contract is not None else ()),
             *(binding.deterministic_effects if binding is not None else ()),
-        ):
-            effect_type = effect.get("type")
-            if isinstance(effect_type, str):
-                scheduled_effects.add(effect_type)
-    if not resolver_types or not resolver_types.intersection(scheduled_effects):
-        return (
-            {
-                "code": "INFORMATION_BOUNDARY_ACQUISITION_MISSING",
-                "required_effect_types": sorted(resolver_types),
-            },
         )
-    if not segment.steps:
-        return ({"code": "NO_STEPS", "message": "Information boundary has no steps"},)
+        if _submitted_step_matches_dependency(step, matching, resolver_types, effects):
+            acquisition_matches = True
+            break
+    if not resolver_types or not acquisition_matches:
+        return (
+            PlanViolation(
+                code="INFORMATION_BOUNDARY_ACQUISITION_MISSING",
+                failure_code="INFORMATION_BOUNDARY_ACQUISITION_MISSING",
+                dimension="INFORMATION_BOUNDARY_ACQUISITION",
+                required="MATCHING_SUBMITTED_KNOWLEDGE_ACQUISITION",
+                actual="NO_MATCHING_SUBMITTED_STEP",
+                dependency_id=dependency_id,
+                required_effect_types=tuple(sorted(resolver_types)),
+            ),
+        )
     return ()
+
+
+def _has_direct_known_progress_option(planner_input: PlannerInput) -> bool:
+    """Prove one immediately legal option without planning or suggesting one."""
+
+    nodes = [item for item in planner_input.known_world.nodes if item.get("access") == "AVAILABLE"]
+    resource_knowledge = {
+        item.get("region_key"): item for item in planner_input.known_world.resource_knowledge
+    }
+    bindings = {
+        (item.action_key, item.target_key): item for item in planner_input.target_bindings
+    }
+    for contract in planner_input.action_contracts:
+        if contract.known_preconditions or any(
+            item.get("required") is True and "default" not in item
+            for item in contract.parameters
+        ):
+            continue
+        requirements = contract.executor_requirements
+        required_role = requirements.get("required_role_key")
+        required_capabilities = requirements.get("required_capabilities", [])
+        if not isinstance(required_capabilities, list):
+            continue
+        for actor in planner_input.actors:
+            if (
+                actor.availability != "ACTIVE"
+                or contract.action_key not in actor.allowed_action_keys
+                or not set(required_capabilities).issubset(actor.capabilities)
+                or (isinstance(required_role, str) and actor.role_key != required_role)
+                or (
+                    requirements.get("command_reachability") == "ONLINE"
+                    and actor.command_reachability != "ONLINE"
+                )
+            ):
+                continue
+            if _actor_has_direct_known_target(
+                actor,
+                contract,
+                planner_input,
+                nodes,
+                bindings,
+                resource_knowledge,
+            ):
+                return True
+    return False
+
+
+def _actor_has_direct_known_target(
+    actor: PlannerActorState,
+    contract: PlannerActionContract,
+    planner_input: PlannerInput,
+    nodes: list[dict[str, object]],
+    bindings: dict[tuple[str, str], PlannerTargetBinding],
+    resource_knowledge: dict[object, dict[str, object]],
+) -> bool:
+    """Check direct target legality only; never search a recovery sequence."""
+
+    target_kind = contract.target_contract.get("kind")
+    locality = contract.locality.get("type")
+    if target_kind == "ACTOR":
+        required_reachability = contract.target_contract.get("command_reachability")
+        return any(
+            target.actor_key != actor.actor_key
+            and (
+                not isinstance(required_reachability, str)
+                or target.command_reachability == required_reachability
+            )
+            and (
+                locality != "ACTOR_SAME_REGION"
+                or (
+                    actor.current_region is not None
+                    and target.current_region == actor.current_region
+                )
+            )
+            for target in planner_input.actors
+        )
+    required_interaction = contract.target_contract.get("required_interaction_key")
+    for node in nodes:
+        target_key = node.get("key")
+        interactions = node.get("interactions")
+        if not isinstance(target_key, str) or not isinstance(interactions, list):
+            continue
+        if isinstance(required_interaction, str) and required_interaction not in interactions:
+            continue
+        binding = bindings.get((contract.action_key, target_key))
+        if binding is not None and binding.requirements:
+            continue
+        if locality in {"REGION", "ACTOR_SAME_REGION"} and (
+            actor.current_region is None or target_key != actor.current_region
+        ):
+            continue
+        if locality not in {"NONE", "REGION", "ACTOR_SAME_REGION"}:
+            continue
+        if any(
+            effect.get("type") == "RESOURCE_SURVEY_COMPLETED"
+            for effect in contract.deterministic_effects
+        ) and resource_knowledge.get(target_key, {}).get("resource_survey_completed") is not False:
+            continue
+        return True
+    return False
+
+
+def _submitted_step_matches_dependency(
+    step: object,
+    dependency: dict[str, object],
+    resolver_types: set[str],
+    effects: Sequence[dict[str, object]],
+) -> bool:
+    """Judge the submitted acquisition binding; never choose one for the Planner."""
+
+    target_key = getattr(step, "target_key", None)
+    dimension = dependency.get("dimension")
+    for effect in effects:
+        effect_type = effect.get("type")
+        if effect_type not in resolver_types:
+            continue
+        if dimension == "RESOURCE_SOURCE":
+            scope_region = dependency.get("scope_region")
+            if not isinstance(scope_region, str) or target_key != scope_region:
+                continue
+            if effect.get("target") == "target_region":
+                return True
+            if effect.get("region_key") == scope_region:
+                return True
+            continue
+        subject_key = dependency.get("subject_key")
+        if isinstance(subject_key, str) and target_key == subject_key:
+            return True
+    return False
 
 
 def _safe_provider_diagnostic(code: str) -> str:

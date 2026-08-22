@@ -209,6 +209,8 @@ def build_dependency_closure(
                         "RESOURCE_POOL_KNOWLEDGE",
                     ],
                 }
+                if target_region is not None:
+                    unknown["scope_region"] = target_region
                 unknown["dependency_id"] = _dependency_id(
                     "RESOURCE_SOURCE",
                     resource_key=dependency.subject,

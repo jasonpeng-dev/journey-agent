@@ -615,6 +615,7 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
                     "dependency_id": "dependency-resource-source-test",
                     "dimension": "RESOURCE_SOURCE",
                     "resource_key": "repair_parts",
+                    "scope_region": "region",
                     "status": "UNKNOWN",
                     "blocks": "SOURCE_SELECTION",
                     "resolvable_by_effect_types": ["REGION_RESOURCE_KNOWLEDGE"],
@@ -639,14 +640,18 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=(acquisition,)),
         planner_input,
     ) == ()
-    assert _validate_plan_segment_contract(
+    boundary_not_allowed = _validate_plan_segment_contract(
         PlanProposal(
             stop_reason="OBJECTIVE_COMPLETION",
             boundary_dependency_id=dependency_id,
             steps=(acquisition,),
         ),
         planner_input,
-    )[0]["code"] == "BOUNDARY_DEPENDENCY_NOT_ALLOWED"
+    )[0]
+    assert boundary_not_allowed.code == "BOUNDARY_DEPENDENCY_NOT_ALLOWED"
+    assert boundary_not_allowed.dimension == "SEGMENT_TERMINATION"
+    assert boundary_not_allowed.required == "NO_BOUNDARY_DEPENDENCY"
+    assert boundary_not_allowed.actual == dependency_id
 
     missing_acquisition = PlanProposal(
         stop_reason="INFORMATION_BOUNDARY",
@@ -660,25 +665,156 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
             ),
         ),
     )
-    assert _validate_plan_segment_contract(missing_acquisition, planner_input)[0]["code"] == (
+    assert _validate_plan_segment_contract(missing_acquisition, planner_input)[0].code == (
         "INFORMATION_BOUNDARY_ACQUISITION_MISSING"
     )
-    assert _validate_plan_segment_contract(
+    wrong_scope = valid.model_copy(
+        update={
+            "steps": (
+                acquisition.model_copy(update={"target_key": "different-region"}),
+            )
+        }
+    )
+    wrong_scope_violation = _validate_plan_segment_contract(wrong_scope, planner_input)[0]
+    assert wrong_scope_violation.code == "INFORMATION_BOUNDARY_ACQUISITION_MISSING"
+    assert wrong_scope_violation.dependency_id == dependency_id
+    assert wrong_scope_violation.required == "MATCHING_SUBMITTED_KNOWLEDGE_ACQUISITION"
+    assert wrong_scope_violation.actual == "NO_MATCHING_SUBMITTED_STEP"
+    not_relevant = _validate_plan_segment_contract(
         valid,
         planner_input.model_copy(
             update={"known_world": PlannerKnownWorldSlice(unknown_dependencies=())}
         ),
-    )[0]["code"] == "INFORMATION_BOUNDARY_NOT_RELEVANT"
+    )[0]
+    assert not_relevant.code == "INFORMATION_BOUNDARY_NOT_RELEVANT"
+    assert not_relevant.dimension == "INFORMATION_BOUNDARY"
+    assert not_relevant.required == "ACTIVE_UNKNOWN_BLOCKING_DEPENDENCY"
+    assert not_relevant.actual == dependency_id
 
     blocked = PlanProposal(stop_reason="BLOCKED", steps=())
     assert _validate_plan_segment_contract(blocked, PlannerInput()) == ()
-    assert _validate_plan_segment_contract(blocked, planner_input)[0]["code"] == (
-        "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS"
+    assert _validate_plan_segment_contract(blocked, planner_input) == ()
+    direct_progress = PlannerInput(
+        actors=(
+            PlannerActorState(
+                actor_key="actor",
+                role_key="observer",
+                capabilities=("INSPECT_STATE",),
+                allowed_action_keys=("survey",),
+                availability="ACTIVE",
+                current_region="region",
+                command_reachability="ONLINE",
+            ),
+        ),
+        action_contracts=(
+            PlannerActionContract(
+                action_key="survey",
+                executor_requirements={
+                    "command_reachability": "ONLINE",
+                    "required_capabilities": ["INSPECT_STATE"],
+                },
+                target_contract={
+                    "kind": "NODE",
+                    "required_interaction_key": "survey_resources",
+                },
+                locality={"type": "ACTOR_SAME_REGION"},
+                deterministic_effects=(
+                    {"type": "RESOURCE_SURVEY_COMPLETED", "target": "target_region"},
+                ),
+            ),
+        ),
+        known_world=PlannerKnownWorldSlice(
+            nodes=(
+                {
+                    "key": "region",
+                    "type": "region",
+                    "access": "AVAILABLE",
+                    "interactions": ["survey_resources"],
+                },
+            ),
+            resource_knowledge=(
+                {"region_key": "region", "resource_survey_completed": False},
+            ),
+        ),
     )
+    progress_violation = _validate_plan_segment_contract(blocked, direct_progress)[0]
+    assert progress_violation.model_dump(
+        mode="json", exclude_none=True, exclude_defaults=True
+    ) == {
+        "code": "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS",
+        "failure_code": "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS",
+        "dimension": "SEGMENT_TERMINATION",
+        "required": "NO_DIRECT_KNOWN_LEGAL_PROGRESS_OPTION",
+        "actual": "DIRECT_KNOWN_LEGAL_PROGRESS_OPTION_EXISTS",
+    }
+    progress_json = json.dumps(progress_violation.model_dump(mode="json"))
+    for forbidden in (
+        "recommended_action",
+        "suggested_actor",
+        "suggested_target",
+        "suggested_route",
+        "next_step",
+        "recovery_plan",
+    ):
+        assert forbidden not in progress_json
+    already_surveyed = direct_progress.model_copy(
+        update={
+            "known_world": direct_progress.known_world.model_copy(
+                update={
+                    "resource_knowledge": (
+                        {"region_key": "region", "resource_survey_completed": True},
+                    )
+                }
+            )
+        }
+    )
+    assert _validate_plan_segment_contract(blocked, already_surveyed) == ()
+    composed_only = PlannerInput(
+        actors=(
+            PlannerActorState(
+                actor_key="disconnected-worker",
+                role_key="worker",
+                capabilities=("EXECUTE_ACTION",),
+                allowed_action_keys=("repair", "travel"),
+                availability="ACTIVE",
+                current_region="remote-region",
+                command_reachability="DISCONNECTED",
+            ),
+        ),
+        action_contracts=(
+            PlannerActionContract(
+                action_key="repair",
+                executor_requirements={
+                    "command_reachability": "ONLINE",
+                    "required_capabilities": ["EXECUTE_ACTION"],
+                },
+                target_contract={"kind": "NODE", "required_interaction_key": "repair"},
+                locality={"type": "FACILITY_REGION"},
+            ),
+            PlannerActionContract(
+                action_key="travel",
+                executor_requirements={
+                    "command_reachability": "ONLINE",
+                    "required_capabilities": ["EXECUTE_ACTION"],
+                },
+                target_contract={"kind": "NODE", "required_interaction_key": "travel"},
+                locality={"type": "ONE_HOP_TRANSPORT"},
+            ),
+        ),
+    )
+    assert _validate_plan_segment_contract(blocked, composed_only) == ()
     assert _validate_plan_segment_contract(
         blocked.model_copy(update={"boundary_dependency_id": dependency_id}),
         PlannerInput(),
-    )[0]["code"] == "BOUNDARY_DEPENDENCY_NOT_ALLOWED"
+    )[0].code == "BOUNDARY_DEPENDENCY_NOT_ALLOWED"
+    blocked_steps = _validate_plan_segment_contract(
+        blocked.model_copy(update={"steps": (acquisition,)}),
+        PlannerInput(),
+    )[0]
+    assert blocked_steps.code == "BLOCKED_SEGMENT_HAS_STEPS"
+    assert blocked_steps.dimension == "SEGMENT_STEPS"
+    assert blocked_steps.required == "EMPTY"
+    assert blocked_steps.actual == 1
     unknown_route = planner_input.model_copy(
         update={
             "known_world": PlannerKnownWorldSlice(
@@ -700,7 +836,7 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         boundary_dependency_id="dependency-route-test",
         steps=(acquisition,),
     )
-    assert _validate_plan_segment_contract(route_boundary, unknown_route)[0]["code"] == (
+    assert _validate_plan_segment_contract(route_boundary, unknown_route)[0].code == (
         "INFORMATION_BOUNDARY_NOT_RELEVANT"
     )
     duplicate = PlanProposal(
@@ -709,9 +845,26 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
             acquisition.model_copy(update={"action_key": "another"}),
         )
     )
-    assert _validate_plan_segment_contract(duplicate, planner_input)[0]["code"] == (
+    assert _validate_plan_segment_contract(duplicate, planner_input)[0].code == (
         "STEP_ID_DUPLICATE"
     )
+    duplicate_violation = _validate_plan_segment_contract(duplicate, planner_input)[0]
+    assert duplicate_violation.dimension == "STEP_ID"
+    assert duplicate_violation.required == "UNIQUE"
+    assert duplicate_violation.actual == "DUPLICATE"
+    blank = acquisition.model_copy(update={"step_id": ""})
+    blank_violation = _validate_plan_segment_contract(
+        PlanProposal(steps=(blank,)), planner_input
+    )[0]
+    assert blank_violation.code == "STEP_ID_INVALID"
+    assert blank_violation.required == "NON_BLANK"
+    assert blank_violation.actual == "BLANK"
+    no_steps = _validate_plan_segment_contract(
+        PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=()), planner_input
+    )[0]
+    assert no_steps.code == "NO_STEPS"
+    assert no_steps.required == "AT_LEAST_ONE_STEP"
+    assert no_steps.actual == 0
 
 
 def test_information_boundary_exhaustion_generates_replan_from_latest_state(
