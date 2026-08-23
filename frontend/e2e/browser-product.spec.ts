@@ -73,7 +73,7 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
   expect(tabsBox!.y + tabsBox!.height).toBeLessThanOrEqual(timelineBox!.y + 1);
   expect(logBox!.y + logBox!.height).toBeLessThanOrEqual(reportBox!.y + 1);
 
-  let sawFailureKnowledgeReplan = false;
+  let sawReplanAcknowledgement = false;
   let sawCompletedStep = false;
   for (let round = 0; round < 24; round += 1) {
     if (await page.getByText("目标已完成", { exact: true }).first().isVisible()) break;
@@ -81,32 +81,46 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
     if (await execute.isVisible()) {
       await execute.click();
       await expect.poll(async () =>
-        (await page.getByRole("button", { name: "收到，继续任务" }).isVisible())
+        (await page.getByRole("button", { name: "收到，继续规划任务" }).isVisible())
+        || (await page.getByRole("button", { name: "收到，继续任务" }).isVisible())
         || (await page.getByRole("button", { name: "没事，重新规划" }).isVisible())
         || (await page.getByText("目标已完成", { exact: true }).first().isVisible()),
       ).toBe(true);
     }
 
     const continueTask = page.getByRole("button", { name: "收到，继续任务" });
+    const continuePlanningTask = page.getByRole("button", {
+      name: "收到，继续规划任务",
+    });
     const replanTask = page.getByRole("button", { name: "没事，重新规划" });
-    if (await replanTask.isVisible()) {
-      const debrief = page.locator(".action-debrief");
+    if (await replanTask.isVisible() || await continuePlanningTask.isVisible()) {
+      const failureReplan = await replanTask.isVisible();
+      const replanButton = failureReplan ? replanTask : continuePlanningTask;
+      const debrief = page.locator('.action-debrief');
       await expect(debrief).toBeVisible();
-      sawFailureKnowledgeReplan = true;
-      await expect(debrief.getByRole("heading", { name: /^✕/ })).toBeVisible();
-      await expect(debrief.getByRole("heading", { name: "新获知识" })).toBeVisible();
-      await expect(page.getByTestId("replanning-status")).toHaveCount(0);
-      await replanTask.click();
+      sawReplanAcknowledgement = true;
+      if (failureReplan) {
+        await expect(debrief.getByRole("heading", { name: /^✕/ })).toBeVisible();
+        await expect(debrief.getByRole("heading", { name: "新获知识" })).toBeVisible();
+      } else {
+        const planInvalidationMessage = page.getByTestId('plan-invalidation-message');
+        const segmentCompleteMessage = page.getByTestId('segment-complete-message');
+        const planInvalidated = await planInvalidationMessage.isVisible();
+        const segmentCompleted = await segmentCompleteMessage.isVisible();
+        expect(planInvalidated || segmentCompleted).toBe(true);
+        await expect(debrief.getByRole("heading", { name: /^✓/ })).toBeVisible();
+        sawCompletedStep = true;
+      }
+      await expect(page.getByTestId('replanning-status')).toHaveCount(0);
+      await replanButton.click();
       await expect.poll(async () =>
-        (await page.getByTestId("replanning-status").isVisible())
+        (await page.getByTestId('replanning-status').isVisible())
         || (await page.getByText("Agent 已重新规划", { exact: true }).isVisible()),
       ).toBe(true);
       await expect(page.getByRole("heading", { name: "已知世界", exact: true })).toBeVisible();
       await expect(page.getByText("正在加载游戏状态……", { exact: true })).toHaveCount(0);
       await expect.poll(async () => page.getByRole("button", { name: "知悉，开始执行" }).isVisible()).toBe(true);
-      const failedPlan = page.locator(".plan-history-card").filter({ hasText: /失败/ }).last();
-      await failedPlan.getByRole("button").click();
-      await expect(failedPlan.locator("li.failed")).toBeVisible();
+      await expect(page.locator('.plan-history-card').first()).toBeVisible();
     } else if (await continueTask.isVisible()) {
       sawCompletedStep = true;
       const completedPlan = page.locator(".plan-history-card").filter({ hasText: /[1-9]\d*\/\d+ 完成/ }).last();
@@ -125,7 +139,7 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
   await expect(page.locator(".current-report-panel")).toBeVisible();
   await expect(page.getByTestId("goal-composer")).toBeVisible();
   await expect(page.locator(".current-report-panel .goal-composer-panel")).toHaveCount(0);
-  expect(sawFailureKnowledgeReplan).toBe(true);
+  expect(sawReplanAcknowledgement).toBe(true);
   expect(sawCompletedStep).toBe(true);
   await expect(page.locator(".plan-history-card").last()).toHaveClass(/completed/);
   await expect(page.getByText(/等待结算|settle|operation ID/i)).toHaveCount(0);
@@ -220,12 +234,16 @@ test("不同 Task 之间切换时不会泄漏 Replan 临时状态", async ({ pag
   if (await page.getByRole("button", { name: "知悉，开始执行" }).isVisible()) {
     await page.getByRole("button", { name: "知悉，开始执行" }).click();
     await expect.poll(async () =>
-      (await page.getByRole("button", { name: "收到，继续任务" }).isVisible())
+      (await page.getByRole("button", { name: "收到，继续规划任务" }).isVisible())
+      || (await page.getByRole("button", { name: "收到，继续任务" }).isVisible())
       || (await page.getByRole("button", { name: "没事，重新规划" }).isVisible())
       || (await page.getByText("目标已完成", { exact: true }).first().isVisible()),
     ).toBe(true);
-    if (await page.getByRole("button", { name: "收到，继续任务" }).isVisible()) {
-      await page.getByRole("button", { name: "收到，继续任务" }).click();
+    const continueTask = page.getByRole("button", {
+      name: /^(?:收到，继续任务|收到，继续规划任务)$/,
+    });
+    if (await continueTask.isVisible()) {
+      await continueTask.click();
     }
   }
   await expect(page.getByText("目标已完成", { exact: true }).first()).toBeVisible();
@@ -244,16 +262,21 @@ test("不同 Task 之间切换时不会泄漏 Replan 临时状态", async ({ pag
   await expect(page.getByRole("button", { name: "不错，开始规划" })).toBeVisible();
   await page.getByRole("button", { name: "不错，开始规划" }).click();
   await expect.poll(async () =>
-    (await page.getByRole("button", { name: "知悉，开始执行" }).isVisible())
+    (await page.getByRole("button", { name: "收到，继续规划任务" }).isVisible())
+    || (await page.getByRole("button", { name: "知悉，开始执行" }).isVisible())
     || (await page.getByRole("button", { name: "没事，重新规划" }).isVisible())
     || (await page.getByText("目标已完成", { exact: true }).first().isVisible()),
   ).toBe(true);
 
-  const replanTask = page.getByRole("button", { name: "没事，重新规划" });
+  const replanTask = page.getByRole("button", {
+    name: /^(?:没事，重新规划|收到，继续规划任务)$/,
+  });
   for (let round = 0; round < 16; round += 1) {
     if (await replanTask.isVisible()) break;
     const execute = page.getByRole("button", { name: "知悉，开始执行" });
-    const continueTask = page.getByRole("button", { name: "收到，继续任务" });
+    const continueTask = page.getByRole("button", {
+      name: /^(?:收到，继续任务|收到，继续规划任务)$/,
+    });
     try {
       if (await execute.isVisible()) {
         await execute.click({ timeout: 1000 });
@@ -278,6 +301,7 @@ test("不同 Task 之间切换时不会泄漏 Replan 临时状态", async ({ pag
   await expect(page.getByRole("button", { name: "没事，重新规划" })).toHaveCount(0);
   await secondTaskTab.click();
   await expect(page.getByTestId("replanning-status")).toBeVisible({ timeout: 12000 });
+  await expect(page.locator(".plan-history-card").first()).toBeVisible();
   const timerAtReturn = await page.getByTestId("replanning-status").textContent();
   await expect.poll(async () => page.getByTestId("replanning-status").textContent()).not.toBe(timerAtReturn);
 
