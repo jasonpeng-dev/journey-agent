@@ -33,6 +33,7 @@ from app.agent.provider import (
     PlannerTargetBinding,
     PlanningActionCandidate,
     PlanningContext,
+    PlanningContinuity,
     PlanProposal,
     PlanRequest,
     PlanViolation,
@@ -421,7 +422,13 @@ class GenericAgentService:
             self.plan(task)
         return task
 
-    def plan(self, task: AgentTask, *, reason: str | None = None) -> AgentPlan:
+    def plan(
+        self,
+        task: AgentTask,
+        *,
+        reason: str | None = None,
+        planning_continuity: PlanningContinuity | None = None,
+    ) -> AgentPlan:
         require_scope_writable(self.db, self.scope.game_instance_id)
         if reason is not None and task.replan_count >= self.MAX_REPLANS:
             raise GenericAgentError(
@@ -441,7 +448,14 @@ class GenericAgentService:
         )
         self._last_provider_stop_reason = None
         if self.provider is not None:
-            steps = self._provider_steps(task, definition, objectives, reason, next_version)
+            steps = self._provider_steps(
+                task,
+                definition,
+                objectives,
+                reason,
+                next_version,
+                planning_continuity=planning_continuity,
+            )
         if (
             not steps
             and not self.evaluate(task).completed
@@ -598,9 +612,17 @@ class GenericAgentService:
                     action_intent=candidate["action_intent"],
                     constraints={
                         "scenario_version_id": str(self.scope.scenario_version_id),
+                        "planner_purpose": str(
+                            candidate.get("planner_purpose") or candidate["description"]
+                        ),
                         **(
                             {"planner_step_id": candidate["planner_step_id"]}
                             if candidate.get("planner_step_id")
+                            else {}
+                        ),
+                        **(
+                            {"short_actor_reason": str(candidate["short_actor_reason"])}
+                            if candidate.get("short_actor_reason")
                             else {}
                         ),
                     },
@@ -1259,6 +1281,7 @@ class GenericAgentService:
         initial_memory: tuple[AntiRegressionMemoryItem, ...] = (),
         planning_cycle: PlanningCycle | None = None,
         planner_input_override: PlannerInput | None = None,
+        planning_continuity: PlanningContinuity | None = None,
     ) -> list[dict[str, object]]:
         assert self.provider is not None
         context_builder = PlanningContextBuilder(self.db, self.scope)
@@ -1323,6 +1346,7 @@ class GenericAgentService:
                 planning_action_catalog=catalog,
                 planning_context=planning_context,
                 planner_input=planner_input,
+                planning_continuity=planning_continuity,
                 rejected_segment=rejected_segment,
                 repair_attempt=repair_attempt,
                 repair_diagnostics=diagnostics,
@@ -1741,8 +1765,12 @@ class GenericAgentService:
                 )
                 break
             purpose = getattr(raw_step, "purpose", "")
+            short_actor_reason = getattr(raw_step, "short_actor_reason", None)
             if isinstance(purpose, str) and purpose.strip() and generated:
                 generated[0]["description"] = purpose.strip()[:400]
+                generated[0]["planner_purpose"] = purpose.strip()[:400]
+            if isinstance(short_actor_reason, str) and short_actor_reason.strip() and generated:
+                generated[0]["short_actor_reason"] = short_actor_reason.strip()[:240]
             if generated:
                 generated[0]["planner_step_id"] = getattr(raw_step, "step_id", "")
             result.extend(generated)

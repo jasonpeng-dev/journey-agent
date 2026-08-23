@@ -18,6 +18,7 @@ from app.agent.generic import (
     GenericGoalResolver,
     proposal_signature,
 )
+from app.agent.planning_context import PlanningContinuityBuilder
 from app.agent.provider import GenericModelProvider, GenericProviderError, PlanRequest
 from app.domain.enums import (
     AgentPlanStatus,
@@ -389,7 +390,16 @@ class PlayOrchestrator:
                     )
                 else:
                     replan_reason = task.last_error_code or "ACTION_FAILED"
-                plan = self.agent.plan(task, reason=replan_reason)
+                planning_continuity = PlanningContinuityBuilder(self.db, self.scope).build(
+                    task,
+                    replan_reason=replan_reason,
+                    trigger_step_id=failed_step.id,
+                )
+                plan = self.agent.plan(
+                    task,
+                    reason=replan_reason,
+                    planning_continuity=planning_continuity,
+                )
             except GenericProviderError as exc:
                 self._persist_provider_failure(
                     task,

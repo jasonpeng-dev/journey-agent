@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 import app.agent.provider as provider_module
 from app.agent.generic import GenericAgentError, GenericAgentService, proposal_signature
-from app.agent.planning_context import legal_candidate_id
+from app.agent.planning_context import PlanningContinuityBuilder, legal_candidate_id
 from app.agent.provider import (
     GenericProviderError,
     GoalSelection,
@@ -26,6 +26,7 @@ from app.agent.provider import (
     PlanStepProposal,
 )
 from app.core.config import Settings
+from app.domain.enums import WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import (
     AgentPlan,
@@ -429,6 +430,20 @@ def test_failure_knowledge_replan_uses_same_provider(
         provider.plan_requests[1].known_world["facts"]["enemy_north_supply_route.supply_status"]
         == "ACTIVE"
     )
+    continuity = provider.plan_requests[1].planning_continuity
+    assert continuity is not None
+    operation = session.scalar(
+        select(WorldOperation)
+        .where(WorldOperation.task_id == task.id)
+        .order_by(WorldOperation.created_at.desc())
+    )
+    assert operation is not None
+    expected_changes = tuple(
+        change
+        for change in operation.outcome.get("knowledge_changes", [])
+        if isinstance(change, dict)
+    )
+    assert continuity.latest_new_knowledge == expected_changes
 
 
 def test_starfire_catalog_evolves_from_failure_to_unlock_and_completion(
@@ -1291,3 +1306,147 @@ def test_replan_provider_failure_persists_failure_and_action_history(
         .order_by(PlanningCycle.created_at.desc())
     )
     assert cycle is not None and cycle.status == "ERROR"
+
+
+def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = RecordingProvider(proposals=[_medical_plan()])
+    monkeypatch.setattr(
+        "app.services.composition.build_generic_provider", lambda _settings: provider
+    )
+    runtime, scope = _runtime(session, MEDICAL_EMERGENCY_V2)
+    orchestrator = configured_play_orchestrator(
+        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+    )
+    task = orchestrator.submit_goal(
+        "stabilize the patient", idempotency_key=str(uuid4())
+    ).task
+    assert task is not None
+    _start_initial_plan(orchestrator, task)
+    plan = session.scalar(
+        select(AgentPlan).where(AgentPlan.task_id == task.id).order_by(AgentPlan.version.desc())
+    )
+    assert plan is not None
+    steps = tuple(
+        session.scalars(
+            select(AgentStep)
+            .where(AgentStep.plan_id == plan.id)
+            .order_by(AgentStep.sequence)
+        )
+    )
+    assert len(steps) >= 2
+    session.add_all(
+        [
+            WorldOperation(
+                player_id=scope.player_id,
+                game_instance_id=scope.game_instance_id,
+                task_id=task.id,
+                source_step_id=steps[0].id,
+                actor_key=steps[0].assigned_actor_key,
+                action_key=steps[0].action_intent or "",
+                execution_mode="SYNC",
+                target_key=str(steps[0].tool_arguments.get("target_key", "")),
+                parameters={},
+                status=WorldOperationStatus.RESOLVED,
+                outcome={"knowledge_changes": [{"key": "historical_public_fact", "value": True}]},
+                idempotency_key=f"historical-knowledge-{uuid4()}",
+            ),
+            WorldOperation(
+                player_id=scope.player_id,
+                game_instance_id=scope.game_instance_id,
+                task_id=task.id,
+                source_step_id=steps[1].id,
+                actor_key=steps[1].assigned_actor_key,
+                action_key=steps[1].action_intent or "",
+                execution_mode="SYNC",
+                target_key=str(steps[1].tool_arguments.get("target_key", "")),
+                parameters={},
+                status=WorldOperationStatus.RESOLVED,
+                outcome={"outcome_code": "NO_PUBLIC_KNOWLEDGE"},
+                idempotency_key=f"current-no-knowledge-{uuid4()}",
+            ),
+        ]
+    )
+    session.flush()
+
+    continuity = PlanningContinuityBuilder(session, scope).build(
+        task,
+        replan_reason="ACTION_FAILED",
+        trigger_step_id=steps[1].id,
+    )
+
+    assert continuity is not None
+    assert continuity.latest_new_knowledge == ()
+    assert continuity.prior_plans[0].steps[0].knowledge_changes == (
+        {"key": "historical_public_fact", "value": True},
+    )
+
+
+def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = _medical_plan()
+    invalid = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
+    provider = RecordingProvider(proposals=[initial, invalid, initial, initial, initial, initial])
+    monkeypatch.setattr(
+        "app.services.composition.build_generic_provider", lambda _settings: provider
+    )
+    runtime, _scope = _runtime(session, MEDICAL_EMERGENCY_V2)
+    orchestrator = configured_play_orchestrator(
+        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+    )
+    task = orchestrator.submit_goal(
+        "stabilize the patient", idempotency_key=str(uuid4())
+    ).task
+    assert task is not None
+    _start_initial_plan(orchestrator, task)
+    assert "planning_continuity" not in provider.plan_requests[0].provider_payload()
+    builder = PlanningContinuityBuilder(session, orchestrator.scope)
+    continuity = builder.build(task, replan_reason="TEST_REPLAN")
+    assert continuity is not None
+    assert len(continuity.prior_plans) == 1
+    assert continuity.latest_replan_trigger == "TEST_REPLAN"
+
+    orchestrator.agent.plan(
+        task,
+        reason="TEST_REPLAN",
+        planning_continuity=continuity,
+    )
+    replan_requests = provider.plan_requests[1:]
+    assert [request.call_type for request in replan_requests] == ["REPLAN", "REPAIR"]
+    assert replan_requests[0].planning_continuity == replan_requests[1].planning_continuity
+    assert replan_requests[0].planning_continuity is not None
+    assert len(replan_requests[0].planning_continuity.prior_plans) == 1
+    assert replan_requests[1].planning_continuity is not None
+    assert replan_requests[1].planning_continuity.prior_plans[0].steps[0].purpose
+    repair_payload = replan_requests[1].provider_payload()
+    assert "planning_continuity" in repair_payload
+    assert "planning_context" not in repair_payload
+    assert "candidate_catalog" not in json.dumps(repair_payload)
+
+    for index in range(3):
+        next_continuity = builder.build(task, replan_reason=f"TEST_REPLAN_{index}")
+        assert next_continuity is not None
+        orchestrator.agent.plan(
+            task,
+            reason=f"TEST_REPLAN_{index}",
+            planning_continuity=next_continuity,
+        )
+
+    latest = builder.build(task, replan_reason="TEST_REPLAN_FINAL")
+    assert latest is not None
+    assert [plan.plan_summary for plan in latest.prior_plans] == [
+        plan.strategy_summary
+        for plan in session.scalars(
+            select(AgentPlan)
+            .where(AgentPlan.task_id == task.id)
+            .order_by(AgentPlan.version.desc())
+            .limit(3)
+        )
+    ][::-1]
+    assert len(latest.prior_plans) == 3
+    attempts = tuple(
+        session.scalars(select(PlanningAttempt).where(PlanningAttempt.task_id == task.id))
+    )
+    assert any(attempt.status == "REJECTED" for attempt in attempts)

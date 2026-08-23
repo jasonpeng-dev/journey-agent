@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from typing import cast
+from uuid import UUID
 
+from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,6 +21,8 @@ from app.agent.planner_contract import (
     planner_target_contracts,
 )
 from app.agent.provider import (
+    ContinuityPlan,
+    ContinuityStep,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
@@ -26,6 +30,7 @@ from app.agent.provider import (
     PlannerTargetBinding,
     PlanningActionCandidate,
     PlanningContext,
+    PlanningContinuity,
 )
 from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import RuntimeScope
@@ -276,6 +281,170 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
         ),
         execution_context=dict(context.previous_execution_context),
     )
+
+
+class PlanningContinuityBuilder:
+    """Project compact public history for one task's next REPLAN."""
+
+    def __init__(self, db: Session, scope: RuntimeScope) -> None:
+        self.db = db
+        self.scope = scope
+
+    def build(
+        self,
+        task: AgentTask,
+        *,
+        replan_reason: str | None = None,
+        trigger_step_id: UUID | None = None,
+    ) -> PlanningContinuity | None:
+        plans = list(
+            self.db.scalars(
+                select(AgentPlan)
+                .where(
+                    AgentPlan.task_id == task.id,
+                    AgentPlan.validation_status == "PASSED",
+                )
+                .order_by(AgentPlan.version.desc())
+                .limit(3)
+            )
+        )
+        plans.reverse()
+        operations = tuple(
+            self.db.scalars(
+                select(WorldOperation)
+                .where(
+                    WorldOperation.game_instance_id == self.scope.game_instance_id,
+                    WorldOperation.task_id == task.id,
+                )
+                .order_by(WorldOperation.created_at.asc())
+            )
+        )
+        operations_by_step: dict[object, WorldOperation] = {
+            operation.source_step_id: operation
+            for operation in operations
+            if operation.source_step_id is not None
+        }
+        prior_plans = tuple(
+            self._plan_projection(plan, operations_by_step) for plan in plans
+        )
+        latest_new_knowledge = self._trigger_knowledge(
+            task,
+            trigger_step_id=trigger_step_id,
+            operations_by_step=operations_by_step,
+        )
+        trigger = (replan_reason or task.last_error_code or "").strip() or None
+        if not prior_plans and trigger is None and not latest_new_knowledge:
+            return None
+        return PlanningContinuity(
+            prior_plans=prior_plans,
+            latest_replan_trigger=trigger,
+            latest_new_knowledge=latest_new_knowledge,
+        )
+
+    def _plan_projection(
+        self,
+        plan: AgentPlan,
+        operations_by_step: dict[object, WorldOperation],
+    ) -> ContinuityPlan:
+        steps: list[ContinuityStep] = []
+        for step in self.db.scalars(
+            select(AgentStep).where(AgentStep.plan_id == plan.id).order_by(AgentStep.sequence)
+        ):
+            constraints = step.constraints if isinstance(step.constraints, dict) else {}
+            arguments = step.tool_arguments if isinstance(step.tool_arguments, dict) else {}
+            target = arguments.get("target_key")
+            purpose = constraints.get("planner_purpose")
+            if not isinstance(purpose, str) or not purpose.strip():
+                purpose = step.description
+            short_actor_reason = constraints.get("short_actor_reason")
+            if not isinstance(short_actor_reason, str) or not short_actor_reason.strip():
+                short_actor_reason = None
+            actual = step.actual_result if isinstance(step.actual_result, dict) else {}
+            outcome = actual.get("outcome", actual)
+            if not isinstance(outcome, dict):
+                outcome = {}
+            operation = operations_by_step.get(step.id)
+            if not outcome and operation is not None and isinstance(operation.outcome, dict):
+                outcome = operation.outcome
+            failure = outcome.get("failure")
+            failure_code = (
+                str(failure.get("code"))
+                if isinstance(failure, dict) and failure.get("code") is not None
+                else step.failure_code
+            )
+            outcome_code = (
+                str(outcome.get("outcome_code"))
+                if outcome.get("outcome_code") is not None
+                else None
+            )
+            raw_changes = outcome.get("knowledge_changes", [])
+            knowledge_changes = (
+                tuple(dict(item) for item in raw_changes if isinstance(item, dict))
+                if isinstance(raw_changes, list)
+                else ()
+            )
+            action_key = step.action_intent or arguments.get("action_key") or ""
+            steps.append(
+                ContinuityStep(
+                    action_key=str(action_key),
+                    actor_key=step.assigned_actor_key,
+                    target_key=str(target) if isinstance(target, str) else None,
+                    purpose=str(purpose),
+                    short_actor_reason=short_actor_reason,
+                    execution_status=str(getattr(step.status, "value", step.status)),
+                    outcome_code=outcome_code,
+                    failure_code=failure_code,
+                    knowledge_changes=knowledge_changes,
+                )
+            )
+        return ContinuityPlan(
+            plan_summary=plan.strategy_summary,
+            stop_reason=plan.stop_reason,
+            steps=tuple(steps),
+        )
+
+    def _trigger_knowledge(
+        self,
+        task: AgentTask,
+        *,
+        trigger_step_id: UUID | None,
+        operations_by_step: dict[object, WorldOperation],
+    ) -> tuple[dict[str, JsonValue], ...]:
+        """Return only the public delta produced by the triggering execution."""
+
+        if trigger_step_id is None:
+            return ()
+        trigger_step = self.db.scalar(
+            select(AgentStep)
+            .join(AgentPlan, AgentPlan.id == AgentStep.plan_id)
+            .where(
+                AgentStep.id == trigger_step_id,
+                AgentPlan.task_id == task.id,
+            )
+        )
+        if trigger_step is not None:
+            changes = self._knowledge_changes_from_payload(trigger_step.actual_result)
+            if changes is not None:
+                return changes
+        operation = operations_by_step.get(trigger_step_id)
+        if operation is None:
+            return ()
+        changes = self._knowledge_changes_from_payload(operation.outcome)
+        return changes if changes is not None else ()
+
+    @staticmethod
+    def _knowledge_changes_from_payload(
+        payload: object,
+    ) -> tuple[dict[str, JsonValue], ...] | None:
+        if not isinstance(payload, dict):
+            return None
+        outcome = payload.get("outcome", payload)
+        if not isinstance(outcome, dict) or "knowledge_changes" not in outcome:
+            return None
+        changes = outcome.get("knowledge_changes")
+        if not isinstance(changes, list):
+            return ()
+        return tuple(dict(item) for item in changes if isinstance(item, dict))
 
 
 class PlanningContextBuilder:
@@ -1466,6 +1635,7 @@ __all__ = [
     "PlanningContext",
     "PlanningContextBuilder",
     "PlanningContextV1",
+    "PlanningContinuityBuilder",
     "legal_candidate_id",
     "objective_context",
 ]

@@ -583,6 +583,23 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "known deterministic contradiction",
     ):
         assert v2_term in system_prompt
+    for v1_term in (
+        "work backward from the terminal completion requirement",
+        "Every Step must directly advance the current Objective",
+        "establish a public prerequisite needed by the Objective",
+        "multiple supporting Actions",
+        "Travel is one-hop per Step",
+        "compose multiple legal Travel Steps",
+        "Travel changes only the executing Actor's location and never moves a Resource",
+        "transport_resource is the Region-to-Region Resource transfer Action",
+        "steps MUST be empty",
+        "inability to think of the causal chain is not BLOCKED",
+        "planning_continuity",
+        "Use it to retain still-relevant causal intent",
+        "freely discard or redesign obsolete intent",
+        "Canonical PlannerInput always overrides planning_continuity",
+    ):
+        assert v1_term in system_prompt
     repair_body, _repair_size = provider._build_request_body(
         "repair",
         request.model_copy(
@@ -608,7 +625,7 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
     repair_prompt = repair_body["messages"][0]["content"]  # type: ignore[index]
     for repair_term in (
         "must eliminate every supplied validator violation",
-        "re-evaluate the corrected segment sequentially against projected known state",
+        "re-evaluate the complete corrected segment sequentially against projected Known state",
         "same dimension / required / actual contradiction",
         "complete, corrected, revalidated PlanSegment",
         "anti_regression_memory is historical contradiction evidence only",
@@ -617,6 +634,9 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "does not reintroduce contradictions represented by this memory",
     ):
         assert repair_term in repair_prompt
+    assert repair_prompt.count(
+        "re-evaluate the complete corrected segment sequentially against projected Known state"
+    ) == 1
     for forbidden_term in (
         "Linjiang",
         "Task 1",

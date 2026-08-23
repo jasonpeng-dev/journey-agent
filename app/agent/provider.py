@@ -135,6 +135,36 @@ class PlannerInput(ProviderModel):
     execution_context: dict[str, object] = Field(default_factory=dict)
 
 
+class ContinuityStep(ProviderModel):
+    """Compact public history for one step of an accepted formal plan."""
+
+    action_key: str
+    actor_key: str
+    target_key: str | None = None
+    purpose: str = ""
+    short_actor_reason: str | None = None
+    execution_status: str
+    outcome_code: str | None = None
+    failure_code: str | None = None
+    knowledge_changes: tuple[dict[str, JsonValue], ...] = ()
+
+
+class ContinuityPlan(ProviderModel):
+    """A compact, public projection of one accepted formal AgentPlan."""
+
+    plan_summary: str
+    stop_reason: str
+    steps: tuple[ContinuityStep, ...] = ()
+
+
+class PlanningContinuity(ProviderModel):
+    """Historical context for a REPLAN cycle, never authoritative state."""
+
+    prior_plans: tuple[ContinuityPlan, ...] = ()
+    latest_replan_trigger: str | None = None
+    latest_new_knowledge: tuple[dict[str, JsonValue], ...] = ()
+
+
 class PlanningActionCandidate(ProviderModel):
     """Deprecated compatibility view of an Actor x Action x Target binding.
 
@@ -253,6 +283,7 @@ class PlanRequest(ProviderModel):
     planning_action_catalog: tuple[PlanningActionCandidate, ...] = ()
     planning_context: PlanningContext | None = None
     planner_input: PlannerInput | None = None
+    planning_continuity: PlanningContinuity | None = None
     rejected_segment: dict[str, object] | None = None
     repair_attempt: int = 0
     repair_diagnostics: tuple[PlanViolation, ...] = ()
@@ -291,6 +322,8 @@ class PlanRequest(ProviderModel):
                 "call_type": self.call_type,
                 "planner_input": self.planner_input.model_dump(mode="json"),
             }
+            if self.planning_continuity is not None:
+                payload["planning_continuity"] = self.planning_continuity.model_dump(mode="json")
             if self.replan_reason:
                 payload["replan_reason"] = self.replan_reason
             if self.call_type == "REPAIR" or self.repair_attempt != 0:
@@ -308,6 +341,8 @@ class PlanRequest(ProviderModel):
                 "goal": self.goal,
                 "planning_context": self.planning_context.compact_dump(),
             }
+            if self.planning_continuity is not None:
+                payload["planning_continuity"] = self.planning_continuity.model_dump(mode="json")
             if self.replan_reason:
                 payload["replan_reason"] = self.replan_reason
             if self.call_type == "REPAIR" or self.repair_attempt != 0:
@@ -556,63 +591,90 @@ class OpenAICompatibleGenericProvider:
         )
         if purpose == "repair":
             planning_prompt = (
-                "You are repairing a rejected plan for the same frozen ObjectiveScope. "
-                "Return one complete corrected PlanSegment for that exact scope. Use the "
-                "validator_violations in the user payload as the current rejected "
-                "proposal's active violations, and "
-                "keep valid parts whenever possible. Every step must directly advance the "
-                "current Objective, satisfy a public prerequisite, obtain Knowledge needed "
-                "for that Objective, or be an explicitly necessary supporting action. Do not "
-                "add speculative or preventive corrective actions solely to guard against "
-                "unobserved or uninferred problems. Every step needs a concrete purpose "
-                "supported by the current Knowledge and task state. Repair, clearing, "
-                "recovery, and remediation actions must address a currently known failure, "
-                "blockage, unmet prerequisite, or other concrete problem. Do not "
-                "expand the ObjectiveScope, add downstream or sibling Objectives, or continue "
-                "with broader work after the current Objective can be completed. Future steps "
-                "may be currently locked or unavailable when earlier steps establish their "
-                "prerequisites. Choose the Action, Actor, Target, parameters, and ordering "
-                "yourself. A repaired PlanSegment must eliminate every supplied validator "
-                "violation. Before returning, re-evaluate the corrected segment sequentially "
-                "against projected known state. If any supplied violation would still occur "
-                "with the same dimension / required / actual contradiction, the repair is "
-                "not valid and must not be returned. Do not merely shorten the rejected "
-                "segment or delete an offending Step and return arbitrary remaining content; "
-                "return a complete, corrected, revalidated PlanSegment for the frozen scope."
-                " anti_regression_memory is historical contradiction evidence only. It "
-                "does not prescribe or preserve any previous Action, Actor, Target, "
-                "resource source, route, or ordering. You may redesign the entire "
-                "PlanSegment freely from the current canonical PlannerInput. Before "
-                "returning, ensure the new segment does not reintroduce contradictions "
-                "represented by this memory. Resolve each current violation against its "
-                "own action, actor, target, region, resource, and typed required/actual "
-                "evidence; do not carry an old violation into the new proposal as if it "
-                "were still active. After repairing, re-check actor location, command "
-                "reachability, locality, and projected resource balance sequentially."
+                "You are repairing a rejected PlanSegment for the same frozen ObjectiveScope. "
+                "Return one complete corrected PlanSegment for exactly that scope. Use "
+                "validator_violations as the active typed contradictions in the current "
+                "rejected proposal; the repaired segment must eliminate every supplied "
+                "current violation. A repaired segment must eliminate every supplied "
+                "validator violation. "
+                "Keep valid parts only when they still fit, but you may "
+                "redesign the entire PlanSegment freely from the current canonical "
+                "PlannerInput. Do not merely delete an offending Step, shorten the rejected "
+                "segment, or return arbitrary remaining content. Every Step must directly "
+                "advance the Objective, establish a public prerequisite, obtain Knowledge "
+                "needed to continue, or perform an explicitly necessary supporting Action. "
+                "Do not add speculative, preventive, unrelated, downstream, sibling, or "
+                "broader work. Choose every Action, Actor, Target, Resource source, route, "
+                "parameter, and ordering yourself; Validator feedback does not prescribe a "
+                "solution. "
+                "Interpret BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS as proof that BLOCKED was "
+                "invalid because legal progress or legal Knowledge acquisition exists. "
+                "Interpret BLOCKED_SEGMENT_HAS_STEPS as proof that BLOCKED cannot contain "
+                "partial-progress Steps: return steps=[] only for a genuinely blocked "
+                "segment, otherwise redesign it as legal progress or information "
+                "acquisition. Interpret INFORMATION_BOUNDARY_NOT_RELEVANT as proof that "
+                "the selected dependency is not a valid stopping boundary; do not reuse it "
+                "unless it genuinely blocks the next legal Target, Resource Source, "
+                "Parameter, or Precondition and a final Knowledge-acquisition Step resolves "
+                "it. These meanings do not recommend any Actor, Action, Target, route, or "
+                "Resource source. Before returning, re-evaluate the complete corrected "
+                "segment sequentially against projected Known state. Preserve the same dimension / "
+                "required / actual contradiction evidence while eliminating it. Return a complete, "
+                "corrected, revalidated PlanSegment. Apply all "
+                "declared deterministic effects from earlier Steps before checking later "
+                "Steps. Re-check Actor location, command reachability, locality, Target, "
+                "parameters, Resource balance, and public preconditions. "
+                "anti_regression_memory is historical contradiction evidence only. It does "
+                "not prescribe or preserve any previous Action, Actor, Target, Resource "
+                "source, route, or ordering. Do not treat an old violation as active unless "
+                "the new proposal reintroduces it. The new segment does not reintroduce "
+                "contradictions "
+                "represented by this memory. You may redesign the entire PlanSegment freely. "
+                "planning_continuity is the same frozen "
+                "historical Runtime context for this cycle; rejected Repair attempts do not "
+                "change it, and canonical PlannerInput overrides it. Do not expose "
+                "chain-of-thought."
             )
         elif purpose in {"initial_plan", "replan"}:
             planning_prompt = (
-                "Produce one PlanSegment for exactly the frozen ObjectiveScope in the "
-                "user payload. Every step must directly advance the current Objective, "
-                "satisfy a public prerequisite, obtain Knowledge needed for completing "
-                "the Objective, or be an explicitly necessary supporting action. Do not "
-                "add speculative or preventive corrective actions solely to guard against "
-                "unobserved or uninferred problems. Every step needs a concrete purpose "
-                "supported by the current Knowledge and task state. Repair, clearing, "
+                "Produce one complete PlanSegment for exactly the frozen ObjectiveScope in "
+                "the user payload. Every step needs a concrete purpose supported by the current "
+                "Knowledge and task state. Do not add speculative or preventive corrective actions "
+                "solely to guard against unobserved or uninferred problems. Repair, clearing, "
                 "recovery, and remediation actions must address a currently known failure, "
-                "blockage, unmet prerequisite, or other concrete problem. Do not "
-                "expand the ObjectiveScope or include downstream, sibling, broader, or "
-                "unrelated verification work. Once the current Objective can be completed, "
-                "stop planning instead of adding more work. Future steps may be currently "
-                "locked or unavailable when earlier steps are expected to establish their "
-                "prerequisites. Choose the Action, Actor, Target, parameters, and ordering "
-                "yourself. "
-                + "Before returning a PlanSegment, validate every Step in order against "
-                "the projected known state. Apply all declared deterministic effects "
-                "from earlier Steps before evaluating each later Step. Every returned "
-                "Step must satisfy all currently known executor, locality, target, "
-                "parameter, and precondition requirements in that projected state. Do "
-                "not return a Step with a known deterministic contradiction."
+                "blockage, unmet prerequisite, or other concrete problem. Every Step must directly "
+                "advance the current Objective, establish a public prerequisite "
+                "needed by the Objective, obtain Knowledge required to "
+                "continue, or perform an explicitly necessary supporting Action. Do not "
+                "expand the ObjectiveScope or add downstream, sibling, broader, unrelated, "
+                "speculative, preventive, or merely convenient work. Choose every Action, "
+                "Actor, Target, Resource source, route, parameter, and ordering yourself. "
+                "The backend will not insert prerequisites, Travel, Relay, transport, "
+                "recovery Actions, or routes for you; include them yourself when required. "
+                "A valid PlanSegment may compose multiple supporting Actions, repeated "
+                "Actions, and multiple Actors when that causal chain is required. When one "
+                "Actor establishes a prerequisite another Actor needs, connect those Actions "
+                "in causal order. Actor movement, Resource movement, command reachability, "
+                "Knowledge acquisition, world-state repair, and the terminal Objective Action "
+                "are separate state transitions. Before declaring the Objective blocked, "
+                "work backward from the terminal completion requirement, identify unmet "
+                "public executor, locality, Resource, Target, parameter, and precondition "
+                "requirements, and connect legal supporting Actions until Known state is "
+                "connected to the Objective, a genuinely blocking UNKNOWN dependency blocks "
+                "the next legal choice, or no legal progress truly exists. This is planning "
+                "guidance only; do not expose this reasoning or chain-of-thought. "
+                "Future Steps may currently be unavailable when earlier Steps establish "
+                "their prerequisites. Before returning a PlanSegment, validate every Step "
+                "in order against the projected known state. Apply all declared deterministic "
+                "effects from earlier Steps before evaluating each later Step. Every returned "
+                "Step must satisfy all currently known executor, command reachability, "
+                "locality, Target, parameter, Resource, and precondition requirements in "
+                "that projected state. Do not return a Step with a known deterministic "
+                "contradiction. The purpose field must describe causal progress or the "
+                "public prerequisite this Step establishes, not merely repeat the Action or "
+                "destination. short_actor_reason should briefly explain why the selected "
+                "Actor is appropriate. Once the frozen Objective can legally be completed "
+                "by the projected segment, stop instead of adding broader work."
             )
         else:
             planning_prompt = (
@@ -623,36 +685,49 @@ class OpenAICompatibleGenericProvider:
                 "to establish their prerequisites."
             )
         generic_guidance = (
-            "The authoritative V2 planning semantics are planner_input.objective, "
-            "planner_input.actors, planner_input.action_contracts, "
-            "planner_input.target_bindings, and planner_input.known_world. Treat each "
-            "earlier Step's declared deterministic effects as updates to the projected "
-            "known state used by every later Step, including Actor location and command "
-            "reachability. You must still choose every Action, Actor, Target, parameter, "
-            "and ordering. The backend will not insert prerequisites, Travel, Relay, or "
-            "a recovery path for you; include them yourself when required. UNKNOWN is not "
-            "false, zero, or unavailable. Do not consume "
-            "or transport resources whose availability is unknown. "
-            "Travel changes only the executing Actor's location and never moves a Resource. "
-            "transport_resource is the only Region-to-Region Resource transfer Action: "
-            "its parameters are resource_key and amount, its source is the projected "
-            "Actor Region, and its target_key is the destination Region; it does not move "
-            "the Actor. "
-            "Use OBJECTIVE_COMPLETION only when current Known state plus the segment's "
-            "projected deterministic effects legally reach the frozen Objective's "
-            "completion requirements. Use INFORMATION_BOUNDARY only when an UNKNOWN "
-            "dependency in planner_input.known_world.unknown_dependencies blocks the "
-            "next legal Target, Source, Parameter, or Precondition choice; the segment "
-            "must schedule a legal Action whose declared knowledge effect resolves it, "
-            "and further planning would otherwise guess Hidden Truth or treat UNKNOWN as "
-            "Known. A matching knowledge-acquisition Step must be the final Step and the "
-            "stop_reason must be INFORMATION_BOUNDARY; never use OBJECTIVE_COMPLETION to "
-            "continue after that acquisition. Reference that dependency only by "
-            "boundary_dependency_id. Complexity "
-            "or general uncertainty is not an information boundary. A route dependency "
-            "with attempt_policy MAY_ATTEMPT is not an information boundary. Use BLOCKED "
-            "only when the Objective is incomplete and no legal progress Action or legal "
-            "knowledge-acquisition Action exists; only BLOCKED may return steps=[]. "
+            "The authoritative V2 planning state and semantics are "
+            "planner_input.objective, planner_input.actors, planner_input.action_contracts, "
+            "planner_input.target_bindings, and planner_input.known_world. Canonical "
+            "PlannerInput overrides planning_continuity and all legacy projections. Treat "
+            "every earlier Step's declared deterministic effects as updates to the projected "
+            "known state used by every later Step, including Actor location, command "
+            "reachability, Resource balance, Knowledge, and other declared public effects. "
+            "You must choose every Action, Actor, Target, Resource source, parameter, route, "
+            "and ordering yourself. The backend will not insert prerequisites, Travel, Relay, "
+            "transport, recovery Actions, or routes for you. Include them yourself "
+            "when required. UNKNOWN is not false, zero, unavailable, or blocked. Never convert "
+            "UNKNOWN into Known state by assumption. Travel is one-hop per Step and may be "
+            "used repeatedly by the same Actor. The absence of a direct one-hop transport "
+            "relation does not by itself mean a destination is unreachable; compose multiple "
+            "legal Travel Steps yourself when needed, because the backend will not compute or "
+            "insert a multi-hop route. Travel changes only the executing Actor's location and "
+            "never moves a Resource. transport_resource is the Region-to-Region Resource "
+            "transfer Action: its source is the projected executing Actor Region, its target "
+            "is the destination Region, its parameters come from its ActionContract, and it "
+            "does not move the Actor. Do not consume or transport Resources whose required "
+            "availability is UNKNOWN. A PlanSegment may compose supporting Actions performed "
+            "by multiple Actors; apply earlier causal effects before validating later Steps. "
+            "Use OBJECTIVE_COMPLETION only when current Known state plus projected deterministic "
+            "effects legally satisfy the frozen Objective completion requirements; partial "
+            "progress is not completion. Use INFORMATION_BOUNDARY only when an UNKNOWN "
+            "dependency in planner_input.known_world.unknown_dependencies genuinely blocks "
+            "the next legal Target, Resource Source, Parameter, or Precondition choice, and "
+            "the segment includes a legal Knowledge-acquisition Action whose declared effect "
+            "resolves that dependency as its final Step. boundary_dependency_id must reference "
+            "that dependency. General uncertainty, complexity, lack of confidence, or a "
+            "attempt_policy MAY_ATTEMPT is not an information boundary. BLOCKED is a "
+            "terminal declaration that the incomplete Objective has no legal progress Action "
+            "and no legal Knowledge-acquisition Action. If stop_reason is BLOCKED, steps MUST "
+            "be empty. If even one legal progress or legal Knowledge-acquisition Action exists, "
+            "the segment is not BLOCKED; inability to think of the causal chain is not BLOCKED. "
+            "If planning_continuity is present, treat it only as historical planning context "
+            "about earlier accepted plans and public Runtime feedback. Use it to retain "
+            "still-relevant causal intent from earlier accepted plans. It is not authoritative "
+            "state or a commitment to previous Action, Actor, Target, Resource source, route, "
+            "or ordering. Re-evaluate every prior purpose against the current canonical "
+            "PlannerInput; preserve still-relevant intent when useful, but freely discard or "
+            "redesign obsolete intent when current Knowledge invalidates it. "
+            "Canonical PlannerInput always overrides planning_continuity."
             if purpose in {"initial_plan", "replan", "repair"}
             else ""
         )
