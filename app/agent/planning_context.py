@@ -231,6 +231,19 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
         )
         for (action_key, target_key), value in sorted(bindings.items())
     )
+    exposed_action_keys = {item.action_key for item in action_contracts}
+    actors = [
+        actor.model_copy(
+            update={
+                "allowed_action_keys": tuple(
+                    action_key
+                    for action_key in actor.allowed_action_keys
+                    if action_key in exposed_action_keys
+                )
+            }
+        )
+        for actor in actors
+    ]
     return PlannerInput(
         objective=dict(context.goal),
         actors=tuple(actors),
@@ -880,6 +893,7 @@ class PlanningActionCatalogBuilder:
         *,
         task: AgentTask,
         replan_reason: str | None,
+        planner_input: PlannerInput | None = None,
     ) -> tuple[PlanningActionCandidate, ...]:
         actors = tuple(
             self.db.scalars(
@@ -913,12 +927,97 @@ class PlanningActionCatalogBuilder:
         needed_refs = _unsatisfied_objective_refs(self.db, self.scope, objectives)
         public_prerequisites = _public_prerequisites(objectives)
         candidates: list[PlanningActionCandidate] = []
-        for node_state in sorted(node_states, key=lambda item: item.node_key):
-            target = definition.world.node(node_state.node_key)
-            if target is None:
+        canonical_contracts = (
+            {item.action_key: item for item in planner_input.action_contracts}
+            if planner_input is not None
+            else None
+        )
+        canonical_bindings = (
+            {
+                (item.action_key, item.target_key): item
+                for item in planner_input.target_bindings
+            }
+            if planner_input is not None
+            else None
+        )
+        canonical_actors = (
+            {item.actor_key: item for item in planner_input.actors}
+            if planner_input is not None
+            else None
+        )
+        canonical_nodes = (
+            tuple(
+                item
+                for item in planner_input.known_world.nodes
+                if isinstance(item.get("key"), str)
+            )
+            if planner_input is not None
+            else None
+        )
+        actor_by_key = {item.actor_key: item for item in actors}
+        target_rows: tuple[tuple[str, dict[str, object] | None, str], ...] = (
+            tuple(
+                (str(item["key"]), item, ActionTargetKind.NODE.value)
+                for item in canonical_nodes or ()
+                if isinstance(item.get("key"), str)
+            )
+            if canonical_nodes is not None
+            else tuple((item.node_key, None, ActionTargetKind.NODE.value) for item in node_states)
+        )
+        target_rows += tuple(
+            (actor_key, None, ActionTargetKind.ACTOR.value)
+            for actor_key in sorted(actor_by_key)
+        )
+        binding_targets: dict[str, set[str]] = {}
+        if planner_input is not None:
+            for binding in planner_input.target_bindings:
+                binding_targets.setdefault(binding.action_key, set()).add(binding.target_key)
+        for target_key, target_projection, target_kind in sorted(
+            target_rows, key=lambda item: (item[0], item[2])
+        ):
+            node_state = next(
+                (item for item in node_states if item.node_key == target_key),
+                None,
+            )
+            target = definition.world.node(target_key)
+            target_actor = actor_by_key.get(target_key)
+            if target_kind == ActionTargetKind.NODE.value and target is None:
                 continue
             for action in sorted(definition.actions, key=lambda item: item.key):
-                if action.required_interaction_key not in target.interaction_keys:
+                if action.target_kind.value != target_kind:
+                    continue
+                if canonical_contracts is not None and action.key not in canonical_contracts:
+                    continue
+                if (
+                    action.key in binding_targets
+                    and target_key not in binding_targets[action.key]
+                ):
+                    continue
+                canonical_contract = (
+                    canonical_contracts.get(action.key)
+                    if canonical_contracts is not None
+                    else None
+                )
+                if canonical_contracts is not None and canonical_contract is None:
+                    continue
+                canonical_binding = (
+                    canonical_bindings.get((action.key, target_key))
+                    if canonical_bindings is not None
+                    else None
+                )
+                target_interaction = (
+                    canonical_contract.target_contract.get("required_interaction_key")
+                    if canonical_contract is not None
+                    else action.required_interaction_key
+                )
+                if (
+                    target_kind == ActionTargetKind.NODE.value
+                    and target is not None
+                    and isinstance(target_interaction, str)
+                    and target_interaction not in target.interaction_keys
+                ):
+                    continue
+                if target_kind == ActionTargetKind.ACTOR.value and target_actor is None:
                     continue
                 visible_effects = tuple(
                     item
@@ -928,11 +1027,34 @@ class PlanningActionCatalogBuilder:
                     )
                     if (item.node_key, item.fact_key) in known_fact_refs
                 )
-                relevant = tuple(
-                    item
-                    for item in visible_effects
-                    if (item.node_key, item.fact_key) in objective_refs
-                )
+                if canonical_contract is not None:
+                    canonical_effects = (
+                        *canonical_contract.deterministic_effects,
+                        *(
+                            canonical_binding.deterministic_effects
+                            if canonical_binding is not None
+                            else ()
+                        ),
+                    )
+                    projected_refs: set[tuple[str, str]] = set()
+                    for effect in canonical_effects:
+                        if effect.get("type") != "FACT_MUTATION":
+                            continue
+                        fact_key = effect.get("fact_key")
+                        if not isinstance(fact_key, str):
+                            continue
+                        resolved_target = (
+                            target_key
+                            if effect.get("target") in {"target_key", "target_node"}
+                            else effect.get("target")
+                        )
+                        if isinstance(resolved_target, str):
+                            projected_refs.add((resolved_target, fact_key))
+                else:
+                    projected_refs = {
+                        (item.node_key, item.fact_key) for item in visible_effects
+                    }
+                relevant = projected_refs & objective_refs
                 if (
                     not relevant
                     and not action.planning.supporting_effects
@@ -945,18 +1067,78 @@ class PlanningActionCatalogBuilder:
                 for actor in sorted(actors, key=lambda item: item.actor_key):
                     if not _actor_can_execute(definition, actor, action.key):
                         continue
-                    projected_refs = {(item.node_key, item.fact_key) for item in visible_effects}
-                    if (action.key, target.key) in successful_bindings and not (
+                    canonical_actor = (
+                        canonical_actors.get(actor.actor_key)
+                        if canonical_actors is not None
+                        else None
+                    )
+                    if canonical_actors is not None and canonical_actor is None:
+                        continue
+                    if (
+                        canonical_actor is not None
+                        and action.key not in canonical_actor.allowed_action_keys
+                    ):
+                        continue
+                    if (action.key, target_key) in successful_bindings and not (
                         projected_refs & needed_refs
                     ):
                         continue
-                    candidate_id = legal_candidate_id(action.key, actor.actor_key, target.key)
+                    if (
+                        target_kind == ActionTargetKind.ACTOR.value
+                        and action.behavior == ActionBehavior.RELAY_MESSAGE
+                        and target_key == actor.actor_key
+                    ):
+                        continue
+                    candidate_id = legal_candidate_id(action.key, actor.actor_key, target_key)
                     blockers = _known_blockers(
-                        node_state.status,
+                        node_state.status if node_state is not None else NodeStatus.AVAILABLE,
                         projected_refs,
                         objectives,
                         needed_refs,
                     )
+                    if canonical_actor is not None and canonical_contracts is not None:
+                        required_reachability = canonical_contracts[
+                            action.key
+                        ].executor_requirements.get("command_reachability")
+                        if (
+                            required_reachability == "ONLINE"
+                            and canonical_actor.command_reachability != "ONLINE"
+                        ):
+                            blockers = (*blockers, {"code": "ACTOR_COMMAND_DISCONNECTED"})
+                        locality = canonical_contracts[action.key].locality.get("type")
+                        canonical_target_actor = (
+                            canonical_actors.get(target_key)
+                            if target_kind == ActionTargetKind.ACTOR.value
+                            and canonical_actors is not None
+                            else None
+                        )
+                        target_region = (
+                            canonical_target_actor.current_region
+                            if canonical_target_actor is not None
+                            else _canonical_node_region(target_projection, definition, target_key)
+                        )
+                        if locality in {
+                            "ACTOR_SAME_REGION",
+                            "TARGET_SAME_REGION",
+                            "FACILITY_REGION",
+                            "LOCAL_TARGET",
+                            "LOCAL_TARGET_FACILITY_OR_TRANSPORT",
+                            "REGION",
+                        } and canonical_actor.current_region and target_region and (
+                            canonical_actor.current_region != target_region
+                        ):
+                            blockers = (*blockers, {"code": "LOCALITY_INVALID"})
+                        target_contract = canonical_contracts[action.key].target_contract
+                        target_reachability = target_contract.get("command_reachability")
+                        if (
+                            isinstance(target_reachability, str)
+                            and canonical_target_actor is not None
+                            and canonical_target_actor.command_reachability != target_reachability
+                        ):
+                            blockers = (
+                                *blockers,
+                                {"code": "TARGET_COMMAND_REACHABILITY_INVALID"},
+                            )
                     candidates.append(
                         PlanningActionCandidate(
                             candidate_id=candidate_id,
@@ -964,27 +1146,32 @@ class PlanningActionCatalogBuilder:
                             action_name=action.name,
                             actor_key=actor.actor_key,
                             actor_name=actor.name,
-                            target_key=target.key,
-                            target_name=target.name,
+                            target_key=target_key,
+                            target_name=(
+                                target.name
+                                if target is not None
+                                else (target_actor.name if target_actor is not None else target_key)
+                            ),
                             target_kind=action.target_kind.value,
                             parameter_domain=tuple(
-                                item.model_dump(mode="json") for item in action.parameters
+                                canonical_contract.parameters
+                                if canonical_contract is not None
+                                else tuple(
+                                    item.model_dump(mode="json") for item in action.parameters
+                                )
                             ),
                             public_effects=tuple(
                                 {
-                                    "kind": (
-                                        "TERMINAL"
-                                        if item in action.planning.terminal_effects
-                                        else "SUPPORTING"
-                                    ),
-                                    "node_key": item.node_key,
-                                    "fact_key": item.fact_key,
+                                    "kind": "DECLARED",
+                                    "node_key": node_key,
+                                    "fact_key": fact_key,
                                 }
-                                for item in visible_effects
+                                for node_key, fact_key in sorted(projected_refs)
+                                if (node_key, fact_key) in known_fact_refs
                             ),
                             objective_relevance=tuple(
-                                {"node_key": item.node_key, "fact_key": item.fact_key}
-                                for item in relevant
+                                {"node_key": node_key, "fact_key": fact_key}
+                                for node_key, fact_key in sorted(projected_refs & objective_refs)
                             ),
                             currently_executable=not blockers,
                             known_blockers=blockers,
@@ -1013,6 +1200,13 @@ class PlanningActionCatalogBuilder:
                     "known_total": region_summary["known_total"],
                     "known_available": region_summary["known_available"],
                     "pools": region_summary["pools"],
+                    **(
+                        {
+                            "knowledge_status": region_summary["knowledge_status"],
+                        }
+                        if isinstance(region_summary.get("knowledge_status"), str)
+                        else {}
+                    ),
                 }
                 for region_key, region_summary in summary.get("regions", {}).items()
             }
@@ -1251,6 +1445,20 @@ def _node_context(
         "access": state.status.value,
         "interactions": list(node.interaction_keys) if node is not None else [],
     }
+
+
+def _canonical_node_region(
+    projection: dict[str, object] | None,
+    definition: ScenarioDefinitionV2,
+    target_key: str,
+) -> str | None:
+    if isinstance(projection, dict) and isinstance(projection.get("region_key"), str):
+        return str(projection["region_key"])
+    locality = definition.metadata.locality
+    target = definition.world.node(target_key)
+    if target is not None and target.node_type_key == locality.region_node_type_key:
+        return target.key
+    return None
 
 
 __all__ = [

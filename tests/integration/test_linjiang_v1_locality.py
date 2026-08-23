@@ -8,11 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import (
-    PLAN_INVALIDATED_BY_NEW_KNOWLEDGE,
     GenericAgentError,
     GenericAgentService,
 )
-from app.agent.planning_context import legal_candidate_id
+from app.agent.planning_context import PlanningContextBuilder, legal_candidate_id
 from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import AgentPlanStatus, AgentStepStatus, AgentTaskStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId
@@ -119,12 +118,6 @@ class KnowledgeRevalidationProvider:
             steps = (
                 PlanStepProposal(
                     candidate_id=legal_candidate_id(
-                        "inspect", "logistics_team_alpha", "west_freight_corridor"
-                    ),
-                    purpose="Inspect the West freight corridor before committing the route.",
-                ),
-                PlanStepProposal(
-                    candidate_id=legal_candidate_id(
                         "travel", "logistics_team_alpha", "west_logistics_district"
                     ),
                     purpose="Travel to the West logistics district.",
@@ -146,35 +139,6 @@ class KnowledgeRevalidationProvider:
                     purpose="Restore Central Hospital emergency power.",
                 ),
             )
-            if self.suffix_stays_legal:
-                steps = (
-                    steps[0],
-                    PlanStepProposal(
-                        candidate_id=legal_candidate_id(
-                            "clear_transport",
-                            "municipal_repair_team_alpha",
-                            "west_freight_corridor",
-                        ),
-                        purpose="Clear the known West corridor blockage.",
-                    ),
-                    PlanStepProposal(
-                        candidate_id=legal_candidate_id(
-                            "travel", "logistics_team_alpha", "west_logistics_district"
-                        ),
-                        purpose="Travel to the West logistics district after clearing it.",
-                    ),
-                    PlanStepProposal(
-                        candidate_id=legal_candidate_id(
-                            "transport_resource", "logistics_team_alpha", "central_district"
-                        ),
-                        purpose="Transport ten electrical repair parts to Central.",
-                        parameters={
-                            "resource_key": "electrical_repair_parts",
-                            "amount": 10,
-                        },
-                    ),
-                    steps[-1],
-                )
         else:
             steps = (
                 PlanStepProposal(
@@ -492,9 +456,9 @@ def test_unknown_transport_resource_source_diagnostic_is_actionable(session: Ses
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
-    assert diagnostic.code == "RESOURCE_INVENTORY_UNKNOWN"
-    assert diagnostic.failure_code == "RESOURCE_INVENTORY_UNKNOWN"
-    assert diagnostic.dimension == "RESOURCE_KNOWLEDGE"
+    assert diagnostic.code == "KNOWN_RESOURCE_INSUFFICIENT"
+    assert diagnostic.failure_code == "KNOWN_RESOURCE_INSUFFICIENT"
+    assert diagnostic.dimension == "RESOURCE_QUANTITY"
     assert diagnostic.step_id
     assert diagnostic.action_key == "transport_resource"
     assert diagnostic.actor_key == "logistics_team_alpha"
@@ -502,8 +466,39 @@ def test_unknown_transport_resource_source_diagnostic_is_actionable(session: Ses
     assert diagnostic.resource_key == "electrical_repair_parts"
     assert diagnostic.scope_region == "central_district"
     assert diagnostic.required_amount == 10
-    assert diagnostic.required == "KNOWN_VISIBLE_AVAILABLE"
-    assert diagnostic.actual == "UNKNOWN"
+    assert diagnostic.projected_known_available_amount == 0
+    assert diagnostic.deficit == 10
+
+
+def test_unknown_route_is_may_attempt_without_inspect_or_clear_closure_actions(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(session, "linjiang-unknown-route-may-attempt")
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore central hospital emergency power",
+        initialize_plan=False,
+    )
+    definition = agent._definition()
+    closure = PlanningContextBuilder(session, scope).build_v2_closure(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason=None,
+    )
+    action_keys = {item.action_key for item in closure.planner_input.action_contracts}
+    assert "travel" in action_keys
+    assert "inspect" not in action_keys
+    assert "clear_transport" not in action_keys
+    route_dependencies = [
+        item
+        for item in closure.planner_input.known_world.unknown_dependencies
+        if item.get("dimension") == "TRANSPORT_PASSABILITY"
+    ]
+    assert route_dependencies
+    assert all(item.get("attempt_policy") == "MAY_ATTEMPT" for item in route_dependencies)
+    assert all(item.get("status") == "UNKNOWN" for item in route_dependencies)
 
 
 def test_linjiang_vertical_slice_hidden_block_reveals_and_replans(session: Session) -> None:
@@ -558,7 +553,9 @@ def test_linjiang_vertical_slice_hidden_block_reveals_and_replans(session: Sessi
             )
         )
     }
-    assert actors["logistics_team_alpha"].current_node_key == "central_district"
+    # Transport transfers resources but does not move the logistics Actor;
+    # only the preceding Travel changes its location.
+    assert actors["logistics_team_alpha"].current_node_key == "west_logistics_district"
     assert actors["electrical_team_beta"].current_node_key == "central_district"
 
     resources = {
@@ -665,6 +662,13 @@ def test_knowledge_change_does_not_replan_when_remaining_suffix_is_legal(
     session: Session,
 ) -> None:
     runtime, scope = _runtime(session, "linjiang-v1-knowledge-no-replan")
+    passability = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "west_freight_corridor", "passable"),
+    )
+    assert passability is not None
+    passability.truth_value = True
+    session.flush()
     provider = KnowledgeRevalidationProvider(suffix_stays_legal=True)
     agent = GenericAgentService(session, scope, provider=provider)
     task = agent.create_task(
@@ -674,7 +678,7 @@ def test_knowledge_change_does_not_replan_when_remaining_suffix_is_legal(
 
     first_step = agent.execute_next(task, replan_on_failure=False)
     assert first_step is not None
-    assert first_step.action_intent == "inspect"
+    assert first_step.action_intent == "travel"
     assert first_step.status == AgentStepStatus.SUCCEEDED
     assert task.last_error_code is None
     assert not agent.has_pending_plan_invalidation(task)
@@ -689,7 +693,7 @@ def test_knowledge_change_does_not_replan_when_remaining_suffix_is_legal(
         )
         .order_by(AgentStep.sequence)
     )
-    assert next_step is not None and next_step.action_intent == "clear_transport"
+    assert next_step is not None and next_step.action_intent == "transport_resource"
 
 
 def test_known_knowledge_invalidates_only_remaining_plan_and_enters_replan(
@@ -709,12 +713,11 @@ def test_known_knowledge_invalidates_only_remaining_plan_and_enters_replan(
     assert initial_context is not None
     assert "west_freight_corridor.passable" not in initial_context.current_knowledge["facts"]
 
-    inspect_step = agent.execute_next(task, replan_on_failure=False)
-    assert inspect_step is not None
-    assert inspect_step.action_intent == "inspect"
-    assert inspect_step.status == AgentStepStatus.SUCCEEDED
-    assert agent.has_pending_plan_invalidation(task)
-    assert task.last_error_code == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
+    failed_step = agent.execute_next(task, replan_on_failure=False)
+    assert failed_step is not None
+    assert failed_step.action_intent == "travel"
+    assert failed_step.status == AgentStepStatus.FAILED
+    assert task.last_error_code == "TRAVEL_BLOCKED"
     assert len(provider.requests) == 1
 
     remaining = tuple(
@@ -725,12 +728,11 @@ def test_known_knowledge_invalidates_only_remaining_plan_and_enters_replan(
         )
     )
     assert [step.status for step in remaining] == [
-        AgentStepStatus.SUCCEEDED,
-        AgentStepStatus.SKIPPED,
-        AgentStepStatus.SKIPPED,
-        AgentStepStatus.SKIPPED,
+        AgentStepStatus.FAILED,
+        AgentStepStatus.PENDING,
+        AgentStepStatus.PENDING,
     ]
-    assert initial_plan.status == AgentPlanStatus.SUPERSEDED
+    assert initial_plan.status == AgentPlanStatus.ACTIVE
     operations = tuple(
         session.scalars(
             select(WorldOperation)
@@ -738,20 +740,25 @@ def test_known_knowledge_invalidates_only_remaining_plan_and_enters_replan(
             .order_by(WorldOperation.created_at)
         )
     )
-    assert [operation.action_key for operation in operations] == ["inspect"]
-    marker = task.objective_resolution_metadata["plan_invalidation"]
-    assert marker["reason"] == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
-    assert marker["diagnostics"][0]["code"] == "KNOWN_TRANSPORT_BLOCKED"
-    assert marker["diagnostics"][0]["sequence"] == 2
-    assert marker["diagnostics"][0]["action_key"] == "travel"
-    assert marker["diagnostics"][0]["dimension"] == "TRANSPORT_PASSABILITY"
-    assert marker["diagnostics"][0]["transport_key"] == "west_freight_corridor"
-    assert marker["diagnostics"][0]["source_region"] == "central_district"
-    assert marker["diagnostics"][0]["target_region"] == "west_logistics_district"
-    assert marker["diagnostics"][0]["required"] == "PASSABLE"
-    assert marker["diagnostics"][0]["actual"] == "BLOCKED"
+    assert [operation.action_key for operation in operations] == ["travel"]
+    outcome = operations[0].outcome
+    assert outcome["failure"]["code"] == "TRAVEL_BLOCKED"
+    assert outcome["failure"]["retryable"] is True
+    assert any(
+        item.get("kind") == "FACT_REVEALED"
+        and item.get("key") == "west_freight_corridor.passable"
+        and item.get("value") is False
+        for item in outcome["knowledge_changes"]
+    )
 
-    replanned = agent.plan(task, reason=PLAN_INVALIDATED_BY_NEW_KNOWLEDGE)
-    assert replanned.replan_reason == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
+    replanned = agent.plan(task, reason="TRAVEL_BLOCKED")
+    assert replanned.replan_reason == "TRAVEL_BLOCKED"
     assert [item.call_type for item in provider.requests] == ["INITIAL_PLAN", "REPLAN"]
-    assert task.last_error_code is None
+    assert task.last_error_code == "TRAVEL_BLOCKED"
+    first_replanned_step = session.scalar(
+        select(AgentStep)
+        .where(AgentStep.plan_id == replanned.id)
+        .order_by(AgentStep.sequence)
+    )
+    assert first_replanned_step is not None
+    assert first_replanned_step.action_intent == "clear_transport"

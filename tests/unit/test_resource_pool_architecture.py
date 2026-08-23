@@ -224,6 +224,129 @@ def test_hidden_pool_is_absent_from_shared_planner_and_player_safe_projection(
     assert runtime.instance.id == scope.game_instance_id
 
 
+def test_missing_pool_is_known_zero_only_after_completed_visible_survey(
+    session: Session,
+) -> None:
+    definition = _pool_definition()
+    runtime, scope = _runtime(session, definition, "resource-pool-known-zero-semantic")
+    projection = SharedKnowledgeProjection(session, scope, definition)
+
+    planner = projection.planner_resources()
+    central = planner["regions"]["central_district"]["resources"]
+    assert central["electrical_repair_parts"]["known_total"] == 0
+    assert central["electrical_repair_parts"]["known_available"] == 0
+    assert central["electrical_repair_parts"]["knowledge_status"] == "KNOWN_ZERO"
+    assert central["electrical_repair_parts"]["pools"] == []
+
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "central_district"),
+    )
+    assert knowledge is not None
+    knowledge.resource_inventory_visibility = ResourceInventoryVisibility.HIDDEN
+    knowledge.resource_survey_completed = False
+    session.flush()
+
+    incomplete_projection = SharedKnowledgeProjection(session, scope, definition)
+    incomplete_planner = incomplete_projection.planner_resources()
+    assert "electrical_repair_parts" not in incomplete_planner["regions"]["central_district"][
+        "resources"
+    ]
+
+    agent = GenericAgentService(session, scope)
+    projected_pools, projected_knowledge = agent._projected_resource_state(definition)
+    with pytest.raises(GenericAgentError) as error:
+        agent._consume_projected_resource(
+            "central_district",
+            "electrical_repair_parts",
+            10,
+            projected_pools,
+            projected_knowledge,
+        )
+    assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
+
+
+def test_hidden_truth_pool_presence_cannot_change_public_resource_knowledge(
+    session: Session,
+) -> None:
+    definition = _pool_definition()
+    scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
+    version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
+
+    def public_projection(
+        key: str, *, add_hidden_truth_row: bool
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        player = Player(name=key)
+        session.add(player)
+        session.flush()
+        runtime = RuntimeInitializationService(session).create(
+            player_id=player.id,
+            scenario_version_id=version.id,
+            creation_key=key,
+        )
+        if add_hidden_truth_row:
+            session.add(
+                GameInstanceResourceState(
+                    game_instance_id=runtime.instance.id,
+                    resource_identity=(
+                        "electrical_repair_parts@central_district@"
+                        "central_hidden_truth_only"
+                    ),
+                    resource_key="electrical_repair_parts",
+                    scope_node_key="central_district",
+                    pool_key="central_hidden_truth_only",
+                    facility_key="central_telecom_hub",
+                    value=40,
+                    reserved_value=0,
+                    visibility=ResourcePoolVisibility.HIDDEN,
+                    availability=ResourcePoolAvailability.AVAILABLE,
+                    survey_discoverable=True,
+                )
+            )
+            session.flush()
+        scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
+        projection = SharedKnowledgeProjection(session, scope, definition)
+        task = GenericAgentService(session, scope).create_task(
+            runtime.session,
+            "restore central hospital emergency power",
+            initialize_plan=False,
+        )
+        closure = PlanningContextBuilder(session, scope).build_v2_closure(
+            definition,
+            GenericAgentService(session, scope)._objectives(task, definition),
+            task=task,
+            replan_reason=None,
+        )
+        agent = GenericAgentService(session, scope)
+        pools, knowledge = agent._projected_resource_state(definition)
+        with pytest.raises(GenericAgentError) as error:
+            agent._consume_projected_resource(
+                "central_district",
+                "electrical_repair_parts",
+                10,
+                pools,
+                knowledge,
+            )
+        return (
+            projection.planner_resources(),
+            closure.planner_input.model_dump(mode="json"),
+            error.value.code,
+        )
+
+    no_hidden_resources, no_hidden_input, no_hidden_error = public_projection(
+        "resource-pool-anti-leak-no-hidden",
+        add_hidden_truth_row=False,
+    )
+    hidden_resources, hidden_input, hidden_error = public_projection(
+        "resource-pool-anti-leak-hidden",
+        add_hidden_truth_row=True,
+    )
+
+    assert no_hidden_resources == hidden_resources
+    assert no_hidden_input == hidden_input
+    assert no_hidden_error == hidden_error == "KNOWN_RESOURCE_INSUFFICIENT"
+
+
 def test_reserved_inventory_is_not_available_to_closure_validator_or_runtime(
     session: Session,
 ) -> None:
@@ -296,6 +419,13 @@ def test_reserved_inventory_is_not_available_to_closure_validator_or_runtime(
                     },
                 ),
                 resources={"electrical_repair_parts": raw_resource},
+                resource_knowledge=(
+                    {
+                        "region_key": "west_logistics_district",
+                        "resource_inventory_visibility": "VISIBLE",
+                        "resource_survey_completed": True,
+                    },
+                ),
             ),
         )
         return build_dependency_closure(
@@ -305,10 +435,12 @@ def test_reserved_inventory_is_not_available_to_closure_validator_or_runtime(
         )
 
     insufficient_closure = closure_for(15)
-    assert any(
+    assert all(
+        item.get("status") == "UNKNOWN"
+        for item in insufficient_closure.planner_input.known_world.unknown_dependencies
+    )
+    assert not any(
         item.get("dimension") == "RESOURCE_SOURCE"
-        and item.get("required_amount") == 15
-        and item.get("known_available_amount") == 10
         for item in insufficient_closure.planner_input.known_world.unknown_dependencies
     )
     sufficient_closure = closure_for(10)

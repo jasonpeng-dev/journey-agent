@@ -108,6 +108,11 @@ def action_planner_constraints(
             }
         )
     if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+        contract["semantics"] = {
+            "actor_location": "UNCHANGED",
+            "resource_transfer": "PROJECTED_ACTOR_REGION_TO_TARGET_REGION",
+            "parameters": ["resource_key", "amount"],
+        }
         knowledge.append(
             {
                 "type": "SOURCE_INVENTORY",
@@ -148,6 +153,11 @@ def action_planner_constraints(
         )
     if knowledge:
         contract["knowledge"] = knowledge
+    if action.behavior == ActionBehavior.TRAVEL:
+        contract["semantics"] = {
+            "actor_location": "TARGET",
+            "resource_transfer": "NONE",
+        }
     if known_preconditions:
         contract["known_preconditions"] = [dict(item) for item in known_preconditions]
     return contract
@@ -168,7 +178,14 @@ def planner_known_preconditions(
 
     result: list[dict[str, object]] = []
     for rule in definition.rules:
-        if rule.action_key != action.key or rule.phase != RulePhase.PREFLIGHT:
+        if rule.action_key != action.key or rule.phase not in {
+            RulePhase.PREFLIGHT,
+            RulePhase.RESOLVE,
+        }:
+            continue
+        if rule.phase == RulePhase.RESOLVE and not any(
+            effect.failure_code for effect in rule.effects
+        ):
             continue
         for condition in _condition_leaves(rule.condition):
             if condition.node is None or condition.fact_key is None:
@@ -264,11 +281,6 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
                     "pool": "default",
                     "resource_key": "parameters.resource_key",
                     "amount": "parameters.amount",
-                },
-                {
-                    "type": "ACTOR_LOCATION",
-                    "actor": "executor",
-                    "value": "target_key",
                 },
                 {
                     "type": "KNOWLEDGE_REVEAL_ON_FAILURE",

@@ -94,6 +94,8 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceNodeState,
     GameInstanceResourceState,
+    PlanningAttempt,
+    PlanningCycle,
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
@@ -104,7 +106,7 @@ from app.services.generic_actions import (
     GenericActionService,
     GenericApprovalRequired,
 )
-from app.services.knowledge_projection import SharedKnowledgeProjection
+from app.services.knowledge_projection import SharedKnowledgeProjection, resource_knowledge_status
 
 ObjectiveSelector = Callable[[str, tuple[ObjectiveDefinitionV2, ...]], str | None]
 
@@ -336,6 +338,7 @@ class GenericAgentService:
         self._provider_call_started_at: dict[str, float] = {}
         self._last_provider_plan_summary: str | None = None
         self._last_provider_stop_reason: str | None = None
+        self._last_provider_attempt: dict[str, object] | None = None
 
     def create_task(
         self,
@@ -428,13 +431,6 @@ class GenericAgentService:
         definition = self._definition()
         self._task_scope(task)
         objectives = self._objectives(task, definition)
-        actor = self._actor(task.owner_actor_key)
-        old_plan = self.db.scalar(
-            select(AgentPlan).where(
-                AgentPlan.task_id == task.id,
-                AgentPlan.status == AgentPlanStatus.ACTIVE,
-            )
-        )
         next_version = task.current_plan_version + 1
         steps = self._candidate_steps(
             definition,
@@ -455,11 +451,121 @@ class GenericAgentService:
                 "GENERIC_PLAN_NOT_FOUND",
                 "No exact-Version Action can advance the frozen Objective from current Knowledge",
             )
+        return self._persist_plan(task, steps, reason=reason, plan_version=next_version)
+
+    def plan_one_attempt(
+        self,
+        task: AgentTask,
+        *,
+        reason: str | None = None,
+    ) -> tuple[AgentPlan | None, PlanningCycle | None]:
+        """Run exactly one Provider attempt for a Formal Play planning cycle.
+
+        Rejected proposals remain on the durable PlanningCycle and never become
+        AgentPlan/AgentStep rows.  The next HTTP request calls this method again
+        and supplies the prior typed diagnostics as a REPAIR request.
+        """
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        if self.provider is None:
+            return self.plan(task, reason=reason), None
+        if reason is not None and task.replan_count >= self.MAX_REPLANS:
+            raise GenericAgentError(
+                "GENERIC_REPLAN_LIMIT",
+                "The Task reached the generic replan safety limit",
+            )
+        definition = self._definition()
+        self._task_scope(task)
+        objectives = self._objectives(task, definition)
+        call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
+        cycle = self.db.scalar(
+            select(PlanningCycle)
+            .where(
+                PlanningCycle.task_id == task.id,
+                PlanningCycle.base_call_type == call_type,
+                PlanningCycle.status == "RUNNING",
+            )
+            .order_by(PlanningCycle.created_at.desc())
+        )
+        if cycle is None:
+            start_attempt = 0
+            rejected_segment = None
+            diagnostics: tuple[PlanViolation, ...] = ()
+            memory: tuple[AntiRegressionMemoryItem, ...] = ()
+            planner_input_override = None
+        else:
+            start_attempt = cycle.current_attempt + 1
+            rejected_segment = cycle.rejected_segment
+            diagnostics = tuple(
+                PlanViolation.model_validate(item)
+                for item in cycle.current_violations
+                if isinstance(item, dict)
+            )
+            memory = tuple(
+                AntiRegressionMemoryItem.model_validate(item)
+                for item in cycle.anti_regression_memory
+                if isinstance(item, dict)
+            )
+            planner_input_override = PlannerInput.model_validate(cycle.planner_input)
+            if start_attempt > self.model_max_repair_attempts_per_cycle:
+                cycle.status = "REJECTED"
+                task.status = AgentTaskStatus.BLOCKED
+                task.last_error_code = "MODEL_PLAN_REJECTED"
+                self.db.flush()
+                return None, cycle
+        next_version = task.current_plan_version + 1
+        steps = self._provider_steps(
+            task,
+            definition,
+            objectives,
+            reason,
+            next_version,
+            single_attempt=True,
+            starting_repair_attempt=start_attempt,
+            rejected_segment=rejected_segment,
+            initial_diagnostics=diagnostics,
+            initial_memory=memory,
+            planning_cycle=cycle,
+            planner_input_override=planner_input_override,
+        )
+        # A fresh cycle is created inside _provider_steps for the first
+        # attempt.  Resolve it here so the caller can persist the rejection
+        # state and expose it to the next HTTP repair request.
+        if cycle is None:
+            cycle = self._latest_planning_cycle(task)
+        attempt_result = self._last_provider_attempt or {}
+        accepted = bool(attempt_result.get("accepted"))
+        if not accepted:
+            assert cycle is not None
+            if start_attempt >= self.model_max_repair_attempts_per_cycle:
+                cycle.status = "REJECTED"
+                task.status = AgentTaskStatus.BLOCKED
+                task.last_error_code = "MODEL_PLAN_REJECTED"
+                self.db.flush()
+            return None, cycle
+        plan = self._persist_plan(task, steps, reason=reason, plan_version=next_version)
+        return plan, cycle
+
+    def _persist_plan(
+        self,
+        task: AgentTask,
+        steps: list[dict[str, object]],
+        *,
+        reason: str | None,
+        plan_version: int,
+    ) -> AgentPlan:
+        actor = self._actor(task.owner_actor_key)
+        old_plan = self.db.scalar(
+            select(AgentPlan).where(
+                AgentPlan.task_id == task.id,
+                AgentPlan.status == AgentPlanStatus.ACTIVE,
+            )
+        )
         if old_plan is not None:
             old_plan.status = AgentPlanStatus.SUPERSEDED
         plan = AgentPlan(
             task_id=task.id,
-            version=next_version,
+            version=plan_version,
             status=AgentPlanStatus.ACTIVE,
             strategy_summary=(
                 getattr(self, "_last_provider_plan_summary", None)
@@ -1145,6 +1251,14 @@ class GenericAgentService:
         objectives: tuple[ObjectiveDefinitionV2, ...],
         reason: str | None,
         plan_version: int,
+        *,
+        single_attempt: bool = False,
+        starting_repair_attempt: int = 0,
+        rejected_segment: dict[str, object] | None = None,
+        initial_diagnostics: tuple[PlanViolation, ...] = (),
+        initial_memory: tuple[AntiRegressionMemoryItem, ...] = (),
+        planning_cycle: PlanningCycle | None = None,
+        planner_input_override: PlannerInput | None = None,
     ) -> list[dict[str, object]]:
         assert self.provider is not None
         context_builder = PlanningContextBuilder(self.db, self.scope)
@@ -1160,6 +1274,8 @@ class GenericAgentService:
             task=task,
             replan_reason=reason,
         )
+        if planner_input_override is not None:
+            planner_input = planner_input_override
         # The old catalog is retained only as a compatibility projection for
         # existing in-process FakeProviders. It is never serialized by the
         # OpenAI-compatible provider when ``planner_input`` is present.
@@ -1169,17 +1285,29 @@ class GenericAgentService:
             objectives,
             task=task,
             replan_reason=reason,
+            planner_input=planner_input,
         )
+        call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
         if not planning_context.relevant_actions and not self.evaluate(task).completed:
             raise GenericAgentError(
                 "GENERIC_PLAN_NOT_FOUND",
                 "No known public Action can advance the frozen ObjectiveScope",
             )
-        diagnostics: tuple[PlanViolation, ...] = ()
-        anti_regression_memory: tuple[AntiRegressionMemoryItem, ...] = ()
-        rejected_segment: dict[str, object] | None = None
-        call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
-        for repair_attempt in range(self.model_max_repair_attempts_per_cycle + 1):
+        if planning_cycle is None:
+            planning_cycle = self._start_planning_cycle(
+                task,
+                call_type=call_type,
+                planner_input=planner_input,
+                objectives=objectives,
+                replan_reason=reason,
+            )
+        diagnostics: tuple[PlanViolation, ...] = initial_diagnostics
+        anti_regression_memory: tuple[AntiRegressionMemoryItem, ...] = initial_memory
+        for repair_attempt in (
+            [starting_repair_attempt]
+            if single_attempt
+            else range(self.model_max_repair_attempts_per_cycle + 1)
+        ):
             request = PlanRequest(
                 call_type=(call_type if repair_attempt == 0 else "REPAIR"),
                 goal=task.goal_description,
@@ -1200,6 +1328,21 @@ class GenericAgentService:
                 repair_diagnostics=diagnostics,
                 anti_regression_memory=anti_regression_memory,
             )
+            planning_attempt = PlanningAttempt(
+                cycle_id=planning_cycle.id,
+                task_id=task.id,
+                attempt_index=repair_attempt,
+                call_type=request.call_type,
+                status="RUNNING",
+                provider_payload=request.provider_payload(),
+                anti_regression_memory=[
+                    item.model_dump(mode="json", exclude_none=True)
+                    for item in anti_regression_memory
+                ],
+                started_at=datetime.now(UTC),
+            )
+            self.db.add(planning_attempt)
+            self.db.flush()
             audit_id = str(uuid4())
             provider_started_at = perf_counter()
             self._provider_call_started_at[audit_id] = provider_started_at
@@ -1216,6 +1359,13 @@ class GenericAgentService:
             try:
                 proposal = self.provider.propose_plan(request)
             except GenericProviderError as exc:
+                self._finish_planning_attempt(
+                    planning_attempt,
+                    status="ERROR",
+                    finished_at=datetime.now(UTC),
+                    latency_ms=_duration_ms(provider_started_at),
+                    finish_reason=None,
+                )
                 self._notify_provider_call(
                     "FINISHED",
                     task,
@@ -1234,6 +1384,13 @@ class GenericAgentService:
                 self._provider_call_started_at.pop(audit_id, None)
                 raise
             except Exception as exc:
+                self._finish_planning_attempt(
+                    planning_attempt,
+                    status="ERROR",
+                    finished_at=datetime.now(UTC),
+                    latency_ms=_duration_ms(provider_started_at),
+                    finish_reason=None,
+                )
                 self._notify_provider_call(
                     "FINISHED",
                     task,
@@ -1282,6 +1439,27 @@ class GenericAgentService:
                 accepted=not diagnostics,
                 audit_id=audit_id,
             )
+            self._finish_planning_attempt(
+                planning_attempt,
+                status="ACCEPTED" if not diagnostics else "REJECTED",
+                finished_at=datetime.now(UTC),
+                latency_ms=_duration_ms(provider_started_at),
+                proposal=proposal.model_dump(mode="json"),
+                rejected_segment=(proposal.model_dump(mode="json") if diagnostics else None),
+                validator_violations=[
+                    violation.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+                    for violation in diagnostics
+                ],
+                stop_reason=proposal.stop_reason,
+                provider_metadata=provider_call_metadata(self.provider),
+            )
+            self._last_provider_attempt = {
+                "accepted": not diagnostics,
+                "proposal": proposal.model_dump(mode="json"),
+                "diagnostics": diagnostics,
+                "repair_attempt": repair_attempt,
+            }
+            planning_cycle.current_attempt = repair_attempt
             if repair_attempt > 0:
                 anti_regression_memory = _remember_prior_contradictions(
                     anti_regression_memory,
@@ -1290,10 +1468,27 @@ class GenericAgentService:
                 )
             self._provider_call_started_at.pop(audit_id, None)
             if not diagnostics:
+                planning_cycle.status = "ACCEPTED"
+                planning_cycle.current_violations = []
+                planning_cycle.rejected_segment = None
                 self._last_provider_plan_summary = proposal.plan_summary.strip() or None
                 self._last_provider_stop_reason = proposal.stop_reason
                 return steps
             rejected_segment = proposal.model_dump(mode="json")
+            planning_cycle.rejected_segment = rejected_segment
+            planning_cycle.current_violations = [
+                violation.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+                for violation in diagnostics
+            ]
+            planning_cycle.anti_regression_memory = [
+                item.model_dump(mode="json", exclude_none=True)
+                for item in anti_regression_memory
+            ]
+            if single_attempt:
+                self.db.flush()
+                return []
+        planning_cycle.status = "REJECTED"
+        self.db.flush()
         raise GenericAgentError(
             "MODEL_PLAN_REJECTED",
             "The model provider could not produce a backend-valid current Plan",
@@ -1353,6 +1548,7 @@ class GenericAgentService:
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
+
         successful_signatures = self._successful_proposal_signatures(task)
         result: list[dict[str, object]] = []
         step_effects: list[set[tuple[str, str]]] = []
@@ -1636,6 +1832,72 @@ class GenericAgentService:
             )
         return result, ()
 
+    def _start_planning_cycle(
+        self,
+        task: AgentTask,
+        *,
+        call_type: str,
+        planner_input: PlannerInput,
+        objectives: tuple[ObjectiveDefinitionV2, ...],
+        replan_reason: str | None = None,
+    ) -> PlanningCycle:
+        payload = planner_input.model_dump(mode="json")
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        cycle = PlanningCycle(
+            task_id=task.id,
+            game_instance_id=self.scope.game_instance_id,
+            base_call_type=call_type,
+            replan_reason=replan_reason,
+            frozen_objective_scope=[item.key for item in objectives],
+            planner_input=payload,
+            planner_input_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            status="RUNNING",
+            current_attempt=0,
+            current_violations=[],
+            anti_regression_memory=[],
+        )
+        self.db.add(cycle)
+        self.db.flush()
+        return cycle
+
+    def _latest_planning_cycle(self, task: AgentTask) -> PlanningCycle:
+        cycle = self.db.scalar(
+            select(PlanningCycle)
+            .where(PlanningCycle.task_id == task.id)
+            .order_by(PlanningCycle.created_at.desc())
+        )
+        if cycle is None:
+            raise GenericAgentError("PLANNING_CYCLE_MISSING", "No planning cycle is persisted")
+        return cycle
+
+    @staticmethod
+    def _finish_planning_attempt(
+        attempt: PlanningAttempt,
+        *,
+        status: str,
+        finished_at: datetime,
+        latency_ms: int,
+        proposal: dict[str, object] | None = None,
+        rejected_segment: dict[str, object] | None = None,
+        validator_violations: list[dict[str, object]] | None = None,
+        stop_reason: str | None = None,
+        provider_metadata: dict[str, object] | None = None,
+        finish_reason: str | None = None,
+    ) -> None:
+        attempt.status = status
+        attempt.finished_at = finished_at
+        attempt.latency_ms = latency_ms
+        attempt.proposal = proposal
+        attempt.rejected_segment = rejected_segment
+        if validator_violations is not None:
+            attempt.validator_violations = validator_violations
+        attempt.stop_reason = stop_reason
+        metadata = provider_metadata or {}
+        usage = metadata.get("usage")
+        attempt.usage = usage if isinstance(usage, dict) else None
+        raw_finish = metadata.get("finish_reason")
+        attempt.finish_reason = raw_finish if isinstance(raw_finish, str) else finish_reason
+
     def _static_proposal_bindings(
         self,
         *,
@@ -1669,6 +1931,16 @@ class GenericAgentService:
                 or item.get("locality") != "NONE"
             )
         }
+        canonical_action_keys = (
+            {item.action_key for item in planner_input.action_contracts}
+            if planner_input is not None
+            else None
+        )
+        canonical_actor_actions = (
+            {item.actor_key: set(item.allowed_action_keys) for item in planner_input.actors}
+            if planner_input is not None
+            else None
+        )
         objective_refs = {
             (requirement.node_key, requirement.fact_key)
             for objective in objectives
@@ -1753,6 +2025,21 @@ class GenericAgentService:
                     }
                 )
                 continue
+            if canonical_action_keys is not None and action_key not in canonical_action_keys:
+                diagnostics.append(
+                    {
+                        "code": "ACTION_OUTSIDE_PLANNER_CONTEXT",
+                        "failure_code": "ACTION_OUTSIDE_PLANNER_CONTEXT",
+                        "dimension": "ACTION_BINDING",
+                        "step": index,
+                        "action_key": action_key,
+                        "actor_key": actor_key,
+                        "target_key": target_key,
+                        "required": "ACTION_IN_CANONICAL_ACTION_CONTRACTS",
+                        "actual": action_key,
+                    }
+                )
+                continue
             if actor is None:
                 diagnostics.append(
                     {
@@ -1763,6 +2050,24 @@ class GenericAgentService:
                         "actor_key": actor_key,
                         "required": "KNOWN_ACTOR_KEY",
                         "actual": actor_key,
+                    }
+                )
+                continue
+            if (
+                canonical_actor_actions is not None
+                and action_key not in canonical_actor_actions.get(actor_key, set())
+            ):
+                diagnostics.append(
+                    {
+                        "code": "ACTOR_ACTION_OUTSIDE_PLANNER_CONTEXT",
+                        "failure_code": "ACTOR_ACTION_OUTSIDE_PLANNER_CONTEXT",
+                        "dimension": "ACTOR_ELIGIBILITY",
+                        "step": index,
+                        "action_key": action_key,
+                        "actor_key": actor_key,
+                        "target_key": target_key,
+                        "required": "ACTOR_ALLOWED_ACTION_IN_CANONICAL_CONTEXT",
+                        "actual": action_key,
                     }
                 )
                 continue
@@ -2767,6 +3072,38 @@ class GenericAgentService:
                 availability=ResourcePoolAvailability(row.availability),
                 survey_discoverable=row.survey_discoverable,
             )
+        # A fully surveyed, visible Region with no visible Pool row is a
+        # deterministic known-zero inventory.  Represent that fact in the
+        # in-memory projected state without creating a persisted Resource row.
+        resource_keys = {item.key for item in definition.world.resources}
+        public_pool_pairs = {
+            (item.resource_key, item.region_key)
+            for item in known_pools
+            if item.region_key is not None
+        }
+        for region_key, knowledge in projection.region_states().items():
+            for resource_key in resource_keys:
+                if (resource_key, region_key) in public_pool_pairs:
+                    continue
+                if resource_knowledge_status(
+                    inventory_visibility=knowledge.resource_inventory_visibility,
+                    survey_completed=knowledge.resource_survey_completed,
+                    has_visible_pool=False,
+                ) != "KNOWN_ZERO":
+                    continue
+                identity = resource_state_key(
+                    resource_key, region_key, "__known_zero__"
+                )
+                pools[identity] = _ProjectedResourcePool(
+                    pool_key="__known_zero__",
+                    resource_key=resource_key,
+                    region_key=region_key,
+                    facility_key=None,
+                    quantity=0,
+                    visibility=ResourcePoolVisibility.VISIBLE,
+                    availability=ResourcePoolAvailability.AVAILABLE,
+                    survey_discoverable=False,
+                )
         region_knowledge = {
             key: _ProjectedRegionResourceKnowledge(
                 visibility=value.resource_inventory_visibility,
@@ -2907,6 +3244,33 @@ class GenericAgentService:
             pool for pool in candidates if pool.availability == ResourcePoolAvailability.AVAILABLE
         ]
         if not candidates:
+            knowledge = (
+                projected_region_knowledge.get(region_key)
+                if region_key is not None
+                else None
+            )
+            knowledge_status = resource_knowledge_status(
+                inventory_visibility=(
+                    knowledge.visibility
+                    if knowledge is not None
+                    else ResourceInventoryVisibility.HIDDEN
+                ),
+                survey_completed=(knowledge.survey_completed if knowledge is not None else False),
+                has_visible_pool=False,
+            )
+            if knowledge_status == "KNOWN_ZERO":
+                raise GenericAgentError(
+                    "KNOWN_RESOURCE_INSUFFICIENT",
+                    "Known available Resource quantity is insufficient",
+                    details={
+                        "dimension": "RESOURCE_QUANTITY",
+                        "resource_key": resource_key,
+                        "scope_region": region_key,
+                        "required_amount": amount,
+                        "projected_known_available_amount": 0,
+                        "deficit": amount,
+                    },
+                )
             raise GenericAgentError(
                 "RESOURCE_INVENTORY_UNKNOWN",
                 "The source Region Resource inventory is not known",
@@ -2922,6 +3286,29 @@ class GenericAgentService:
         known_available = sum(pool.quantity for pool in available if pool.quantity is not None)
         has_unknown_available = any(pool.quantity is None for pool in available)
         if known_available < amount and not has_unknown_available:
+            knowledge = (
+                projected_region_knowledge.get(region_key)
+                if region_key is not None
+                else None
+            )
+            inventory_complete = region_key is None or (
+                knowledge is not None
+                and knowledge.visibility == ResourceInventoryVisibility.VISIBLE
+                and knowledge.survey_completed
+            )
+            if not inventory_complete:
+                raise GenericAgentError(
+                    "RESOURCE_INVENTORY_UNKNOWN",
+                    "The source Region Resource inventory is not known",
+                    details={
+                        "dimension": "RESOURCE_KNOWLEDGE",
+                        "resource_key": resource_key,
+                        "scope_region": region_key,
+                        "required_amount": amount,
+                        "required": "KNOWN_VISIBLE_AVAILABLE",
+                        "actual": "UNKNOWN",
+                    },
+                )
             raise GenericAgentError(
                 "KNOWN_RESOURCE_INSUFFICIENT",
                 "Known available Resource quantity is insufficient",
@@ -3078,7 +3465,7 @@ class GenericAgentService:
         planner_input: PlannerInput | None = None,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> None:
-        if action.behavior in (ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE):
+        if action.behavior == ActionBehavior.TRAVEL:
             projected_actor_locations[actor_key] = target_key
         location_effects: tuple[dict[str, object], ...]
         if planner_input is None:
@@ -4118,6 +4505,9 @@ def _validate_plan_segment_contract(
                     dependency_id=segment.boundary_dependency_id,
                 ),
             )
+        boundary_violation = _objective_completion_boundary_violation(segment, planner_input)
+        if boundary_violation is not None:
+            return (boundary_violation,)
         if not segment.steps:
             return (
                 PlanViolation(
@@ -4258,6 +4648,70 @@ def _validate_plan_segment_contract(
             ),
         )
     return ()
+
+
+def _objective_completion_boundary_violation(
+    segment: PlanProposal,
+    planner_input: PlannerInput,
+) -> PlanViolation | None:
+    """Prevent an acquisition step from disguising an information boundary.
+
+    The Validator does not choose an acquisition.  It only observes whether a
+    submitted step publicly resolves an active blocking UNKNOWN dependency;
+    if so, the segment must stop at that step and name the dependency.
+    """
+
+    contracts = {item.action_key: item for item in planner_input.action_contracts}
+    bindings = {
+        (item.action_key, item.target_key): item for item in planner_input.target_bindings
+    }
+    for dependency in planner_input.known_world.unknown_dependencies:
+        dependency_id = dependency.get("dependency_id")
+        if (
+            not isinstance(dependency_id, str)
+            or dependency.get("status") != "UNKNOWN"
+            or not dependency.get("blocks")
+            or dependency.get("attempt_policy") == "MAY_ATTEMPT"
+        ):
+            continue
+        raw_types = dependency.get("resolvable_by_effect_types")
+        resolver_types = (
+            {str(item) for item in raw_types}
+            if isinstance(raw_types, list) and all(isinstance(item, str) for item in raw_types)
+            else set()
+        )
+        if not resolver_types:
+            continue
+        matches: list[int] = []
+        for index, step in enumerate(segment.steps):
+            contract = contracts.get(str(step.action_key))
+            binding = bindings.get((str(step.action_key), str(step.target_key)))
+            effects = (
+                *(contract.deterministic_effects if contract is not None else ()),
+                *(binding.deterministic_effects if binding is not None else ()),
+            )
+            if _submitted_step_matches_dependency(
+                step,
+                dependency,
+                resolver_types,
+                effects,
+                planner_input=planner_input,
+            ):
+                matches.append(index)
+        if matches:
+            return PlanViolation(
+                code="INFORMATION_BOUNDARY_REQUIRED",
+                failure_code="INFORMATION_BOUNDARY_REQUIRED",
+                dimension="INFORMATION_BOUNDARY",
+                required="INFORMATION_BOUNDARY_WITH_ACQUISITION_LAST",
+                actual={
+                    "stop_reason": segment.stop_reason,
+                    "matching_step_indices": matches,
+                },
+                dependency_id=dependency_id,
+                required_effect_types=tuple(sorted(resolver_types)),
+            )
+    return None
 
 
 def _has_direct_known_progress_option(planner_input: PlannerInput) -> bool:

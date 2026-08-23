@@ -248,6 +248,34 @@ def replan_play(
 
 
 @router.post(
+    "/{game_instance_id}/play/repair-planning",
+    response_model=PlayerGameStateResponse,
+)
+def repair_planning(
+    game_instance_id: UUID,
+    request: PlayerPacingRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PlayerGameStateResponse:
+    try:
+        configured_play_orchestrator(
+            db, GameInstanceId(game_instance_id), settings
+        ).repair_planning(expected_pacing_version=request.expected_pacing_version)
+        db.commit()
+        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        GenericProviderError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
+@router.post(
     "/{game_instance_id}/approvals/{decision_id}/approve",
     response_model=PlayerGameStateResponse,
 )

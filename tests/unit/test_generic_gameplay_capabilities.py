@@ -694,10 +694,10 @@ def test_heavy_support_and_specialist_repair_wrong_objective_target_is_rejected(
     assert error.value.code == "MODEL_PLAN_REJECTED"
     assert isinstance(agent.provider, _CapabilityProvider)
     diagnostic = agent.provider.requests[1].repair_diagnostics[0]
-    assert diagnostic.code == "OBJECTIVE_COVERAGE_INCOMPLETE"
-    assert diagnostic.missing_public_requirements == (
-        {"node_key": "central_fire_rescue_station", "fact_key": "power_supply"},
-    )
+    assert diagnostic.code == "ACTION_OUTSIDE_PLANNER_CONTEXT"
+    assert diagnostic.failure_code == "ACTION_OUTSIDE_PLANNER_CONTEXT"
+    assert diagnostic.dimension == "ACTION_BINDING"
+    assert diagnostic.action_key == "deploy_heavy_engineering_support"
 
 
 def test_heavy_support_accepts_transport_corridor_target_with_generic_locality(
@@ -756,14 +756,14 @@ def test_validator_rejects_known_repair_role_mismatch(session: Session) -> None:
     assert error.value.code == "MODEL_PLAN_REJECTED"
     assert isinstance(agent.provider, _CapabilityProvider)
     diagnostic = agent.provider.requests[1].repair_diagnostics[0]
-    assert diagnostic.code == "ACTOR_ROLE_MISSING"
-    assert diagnostic.failure_code == "ACTOR_ROLE_MISSING"
-    assert diagnostic.dimension == "ACTOR_ROLE"
+    assert diagnostic.code == "ACTION_OUTSIDE_PLANNER_CONTEXT"
+    assert diagnostic.failure_code == "ACTION_OUTSIDE_PLANNER_CONTEXT"
+    assert diagnostic.dimension == "ACTION_BINDING"
     assert diagnostic.action_key == "repair_electrical"
     assert diagnostic.actor_key == "industrial_team"
     assert diagnostic.target_key == "central_hospital"
-    assert diagnostic.required == "electrical_response_team"
-    assert diagnostic.actual == "industrial_support_team"
+    assert diagnostic.required == "ACTION_IN_CANONICAL_ACTION_CONTRACTS"
+    assert diagnostic.actual == "repair_electrical"
 
 
 def test_validator_rejects_unknown_power_relation_without_pathfinding(session: Session) -> None:

@@ -455,6 +455,60 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class PlanningCycle(UUIDPrimaryKey, TimestampMixin, Base):
+    """Durable boundary for one INITIAL/REPLAN attempt sequence."""
+
+    __tablename__ = "planning_cycles"
+    __table_args__ = (
+        Index("ix_planning_cycles_task_status", "task_id", "status"),
+        Index("ix_planning_cycles_task_created", "task_id", "created_at"),
+    )
+
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE")
+    )
+    base_call_type: Mapped[str] = mapped_column(String(20))
+    replan_reason: Mapped[str | None] = mapped_column(String(160))
+    frozen_objective_scope: Mapped[list[str]] = mapped_column(JSON, default=list)
+    planner_input: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    planner_input_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(30), default="RUNNING")
+    current_attempt: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_segment: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    current_violations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    anti_regression_memory: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+
+
+class PlanningAttempt(UUIDPrimaryKey, TimestampMixin, Base):
+    """Durable audit record for one Provider proposal attempt."""
+
+    __tablename__ = "planning_attempts"
+    __table_args__ = (
+        UniqueConstraint("cycle_id", "attempt_index"),
+        Index("ix_planning_attempts_cycle_attempt", "cycle_id", "attempt_index"),
+    )
+
+    cycle_id: Mapped[UUID] = mapped_column(
+        ForeignKey("planning_cycles.id", ondelete="CASCADE")
+    )
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
+    attempt_index: Mapped[int] = mapped_column(Integer)
+    call_type: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="RUNNING")
+    provider_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    proposal: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    rejected_segment: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    validator_violations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    anti_regression_memory: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    stop_reason: Mapped[str | None] = mapped_column(String(40))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    finish_reason: Mapped[str | None] = mapped_column(String(80))
+
+
 class PlayerExecutionCheckpoint(TimestampMixin, Base):
     """Phase D presentation pacing, deliberately separate from AgentTask state."""
 

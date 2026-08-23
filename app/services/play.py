@@ -35,6 +35,7 @@ from app.infrastructure.db.models import (
     AgentStep,
     AgentTask,
     ConversationSession,
+    PlanningCycle,
     PlayerExecutionCheckpoint,
     WorldOperation,
 )
@@ -232,7 +233,15 @@ class PlayOrchestrator:
             )
         planning_started = perf_counter()
         try:
-            plan = self.agent.plan(task)
+            plan, _cycle = self.agent.plan_one_attempt(task)
+            if plan is None:
+                if task.status in (AgentTaskStatus.BLOCKED, AgentTaskStatus.FAILED):
+                    checkpoint.phase = self._phase_after_cycle(task)
+                else:
+                    checkpoint.phase = PlayerExecutionPhase.AWAITING_PLAN_ATTEMPT
+                checkpoint.version += 1
+                self.db.flush()
+                return task
         except GenericProviderError as exc:
             self._persist_provider_failure(
                 task,
@@ -384,7 +393,15 @@ class PlayOrchestrator:
                     )
                 else:
                     replan_reason = task.last_error_code or "ACTION_FAILED"
-                plan = self.agent.plan(task, reason=replan_reason)
+                plan, _cycle = self.agent.plan_one_attempt(task, reason=replan_reason)
+                if plan is None:
+                    if task.status in (AgentTaskStatus.BLOCKED, AgentTaskStatus.FAILED):
+                        checkpoint.phase = self._phase_after_cycle(task)
+                    else:
+                        checkpoint.phase = PlayerExecutionPhase.AWAITING_PLAN_ATTEMPT
+                    checkpoint.version += 1
+                    self.db.flush()
+                    return task
             except GenericProviderError as exc:
                 self._persist_provider_failure(
                     task,
@@ -425,6 +442,85 @@ class PlayOrchestrator:
         self.db.flush()
         return task
 
+    def repair_planning(self, *, expected_pacing_version: int) -> AgentTask:
+        """Run the next single REPAIR attempt of the current PlanningCycle."""
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        task = self._current_task()
+        if task is None:
+            raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Game has no active Task")
+        checkpoint = self._checkpoint(task, expected_pacing_version=expected_pacing_version)
+        if checkpoint.phase != PlayerExecutionPhase.AWAITING_PLAN_ATTEMPT:
+            raise PlayError(
+                "PLAY_PLANNING_ATTEMPT_NOT_REQUIRED",
+                "The Task is not waiting for another planning attempt",
+            )
+        cycle = self.db.scalar(
+            select(PlanningCycle)
+            .where(
+                PlanningCycle.task_id == task.id,
+                PlanningCycle.status == "RUNNING",
+            )
+            .order_by(PlanningCycle.created_at.desc())
+        )
+        if cycle is None:
+            raise PlayError("PLAY_PLANNING_CYCLE_MISSING", "No active planning cycle exists")
+        started = perf_counter()
+        try:
+            plan, _cycle = self.agent.plan_one_attempt(task, reason=cycle.replan_reason)
+        except GenericProviderError as exc:
+            self._persist_provider_failure(
+                task,
+                checkpoint,
+                exc,
+                operation_kind=(
+                    "INITIAL_PLANNING_FAILURE"
+                    if cycle.base_call_type == "INITIAL_PLAN"
+                    else "REPLANNING_FAILURE"
+                ),
+                duration_ms=_duration_ms(started),
+            )
+            raise
+        except GenericAgentError as exc:
+            if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
+                raise
+            task.status = AgentTaskStatus.BLOCKED
+            task.last_error_code = (
+                "MODEL_PLAN_REJECTED"
+                if exc.code in _MODEL_PLAN_CODES
+                else "UNREACHABLE_IN_CURRENT_STATE"
+            )
+            checkpoint.phase = PlayerExecutionPhase.BLOCKED
+            checkpoint.version += 1
+            self.db.flush()
+            return task
+        if plan is None:
+            if task.status in (AgentTaskStatus.BLOCKED, AgentTaskStatus.FAILED):
+                checkpoint.phase = self._phase_after_cycle(task)
+            else:
+                checkpoint.phase = PlayerExecutionPhase.AWAITING_PLAN_ATTEMPT
+            checkpoint.version += 1
+            self.db.flush()
+            return task
+        self._record_operation_duration(
+            task,
+            kind=(
+                "INITIAL_PLANNING"
+                if cycle.base_call_type == "INITIAL_PLAN"
+                else "REPLANNING"
+            ),
+            duration_ms=_duration_ms(started),
+            plan_version=plan.version,
+        )
+        checkpoint.phase = (
+            PlayerExecutionPhase.AWAITING_ACTION_ACK
+            if task.status == AgentTaskStatus.ACTIVE
+            else self._phase_after_cycle(task)
+        )
+        checkpoint.version += 1
+        self.db.flush()
+        return task
+
     def advance_sandbox_until_pause(self, task: AgentTask) -> AgentTask:
         """Auto-drive action checkpoints for the isolated Draft sandbox only."""
 
@@ -435,6 +531,8 @@ class PlayOrchestrator:
                 return task
             if phase == PlayerExecutionPhase.AWAITING_PLAN_START:
                 self.start_initial_planning(expected_pacing_version=checkpoint.version)
+            elif phase == PlayerExecutionPhase.AWAITING_PLAN_ATTEMPT:
+                self.repair_planning(expected_pacing_version=checkpoint.version)
             elif phase == PlayerExecutionPhase.AWAITING_ACTION_ACK:
                 self.acknowledge_action(expected_pacing_version=checkpoint.version)
             elif phase == PlayerExecutionPhase.AWAITING_REPLAN_ACK:

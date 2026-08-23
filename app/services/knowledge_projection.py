@@ -36,6 +36,28 @@ from app.infrastructure.db.models import (
 )
 
 
+def resource_knowledge_status(
+    *,
+    inventory_visibility: ResourceInventoryVisibility,
+    survey_completed: bool,
+    has_visible_pool: bool,
+) -> str:
+    """Classify the public Knowledge state of one Region/resource pair.
+
+    This helper intentionally depends only on public Knowledge.  Persisted
+    hidden Pool rows are Truth and must never change the Planner/Validator
+    classification.  A visible Pool is known; an absent visible Pool is a
+    known zero only after a visible, completed survey.
+    """
+
+    if (
+        inventory_visibility == ResourceInventoryVisibility.VISIBLE
+        and survey_completed
+    ):
+        return "KNOWN" if has_visible_pool else "KNOWN_ZERO"
+    return "KNOWN" if has_visible_pool else "UNKNOWN"
+
+
 @dataclass(frozen=True, slots=True)
 class RegionResourceKnowledgeView:
     region_key: str
@@ -610,6 +632,42 @@ class SharedKnowledgeProjection:
             resource["global"] = planner_summary
             resource["known_total"] += summary["known_total"]
             resource["known_available"] += summary["known_available"]
+
+        # A completed, visible Region is also authoritative for resources that
+        # have no persisted Pool row.  Keep this as a Planner-only projection:
+        # no synthetic DB row is created and the Player resource list remains a
+        # faithful view of persisted resources.
+        zero_resource_definitions = tuple(self.definition.world.resources)
+        for region_key, state in self.region_states().items():
+            planner_region = planner_regions[region_key]
+            region_resources = planner_region.setdefault("resources", {})
+            for definition_resource in zero_resource_definitions:
+                if definition_resource.key in region_resources:
+                    continue
+                if resource_knowledge_status(
+                    inventory_visibility=state.resource_inventory_visibility,
+                    survey_completed=state.resource_survey_completed,
+                    has_visible_pool=False,
+                ) != "KNOWN_ZERO":
+                    continue
+                zero_summary = {
+                    "resource_name": definition_resource.name,
+                    "known_total": 0,
+                    "known_available": 0,
+                    "knowledge_status": "KNOWN_ZERO",
+                    "pools": [],
+                }
+                region_resources[definition_resource.key] = zero_summary
+                planner_resource = by_resource.setdefault(
+                    definition_resource.key,
+                    {"regions": {}, "known_total": 0, "known_available": 0},
+                )
+                planner_resource["regions"][region_key] = {
+                    "known_total": 0,
+                    "known_available": 0,
+                    "knowledge_status": "KNOWN_ZERO",
+                    "pools": [],
+                }
         return {
             "regions": planner_regions,
             "resources": by_resource,
@@ -734,4 +792,5 @@ __all__ = [
     "KnownResourcePoolView",
     "RegionResourceKnowledgeView",
     "SharedKnowledgeProjection",
+    "resource_knowledge_status",
 ]

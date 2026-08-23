@@ -113,6 +113,8 @@ class PlannerKnownWorldSlice(ProviderModel):
 
     @model_validator(mode="after")
     def validate_unknown_dependency_ids(self) -> PlannerKnownWorldSlice:
+        if any(item.get("status") != "UNKNOWN" for item in self.unknown_dependencies):
+            raise ValueError("unknown_dependencies may contain only UNKNOWN dependencies")
         dependency_ids = [item.get("dependency_id") for item in self.unknown_dependencies]
         if any(not isinstance(item, str) or not item.strip() for item in dependency_ids):
             raise ValueError("Every UNKNOWN dependency needs a non-blank dependency_id")
@@ -582,7 +584,11 @@ class OpenAICompatibleGenericProvider:
                 "resource source, route, or ordering. You may redesign the entire "
                 "PlanSegment freely from the current canonical PlannerInput. Before "
                 "returning, ensure the new segment does not reintroduce contradictions "
-                "represented by this memory."
+                "represented by this memory. Resolve each current violation against its "
+                "own action, actor, target, region, resource, and typed required/actual "
+                "evidence; do not carry an old violation into the new proposal as if it "
+                "were still active. After repairing, re-check actor location, command "
+                "reachability, locality, and projected resource balance sequentially."
             )
         elif purpose in {"initial_plan", "replan"}:
             planning_prompt = (
@@ -627,6 +633,11 @@ class OpenAICompatibleGenericProvider:
             "a recovery path for you; include them yourself when required. UNKNOWN is not "
             "false, zero, or unavailable. Do not consume "
             "or transport resources whose availability is unknown. "
+            "Travel changes only the executing Actor's location and never moves a Resource. "
+            "transport_resource is the only Region-to-Region Resource transfer Action: "
+            "its parameters are resource_key and amount, its source is the projected "
+            "Actor Region, and its target_key is the destination Region; it does not move "
+            "the Actor. "
             "Use OBJECTIVE_COMPLETION only when current Known state plus the segment's "
             "projected deterministic effects legally reach the frozen Objective's "
             "completion requirements. Use INFORMATION_BOUNDARY only when an UNKNOWN "
@@ -634,7 +645,10 @@ class OpenAICompatibleGenericProvider:
             "next legal Target, Source, Parameter, or Precondition choice; the segment "
             "must schedule a legal Action whose declared knowledge effect resolves it, "
             "and further planning would otherwise guess Hidden Truth or treat UNKNOWN as "
-            "Known. Reference that dependency only by boundary_dependency_id. Complexity "
+            "Known. A matching knowledge-acquisition Step must be the final Step and the "
+            "stop_reason must be INFORMATION_BOUNDARY; never use OBJECTIVE_COMPLETION to "
+            "continue after that acquisition. Reference that dependency only by "
+            "boundary_dependency_id. Complexity "
             "or general uncertainty is not an information boundary. A route dependency "
             "with attempt_policy MAY_ATTEMPT is not an information boundary. Use BLOCKED "
             "only when the Objective is incomplete and no legal progress Action or legal "

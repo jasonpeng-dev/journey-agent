@@ -15,6 +15,7 @@ import type {
   ActionLocation,
   PublicPlanHistory,
   PublicPlanHistoryStep,
+  PublicPlanningAttempt,
   PlayerGameState,
   ResourceIntelligence,
   PublicTask,
@@ -306,6 +307,66 @@ export function PlanHistory({ task }: { task: PublicTask }) {
         );
       })}
     </div>
+  );
+}
+
+export function PlanningAttemptHistory({
+  task,
+  pending,
+  startedAt,
+}: {
+  task: PublicTask;
+  pending: boolean;
+  startedAt: number | null;
+}) {
+  const cycle = task.planning_cycle;
+  if (!cycle) return null;
+  const rejected = cycle.attempts.filter((attempt) => attempt.status === "REJECTED");
+  if (!rejected.length && !pending) return null;
+  const renderDraft = (attempt: PublicPlanningAttempt) => (
+    <article className="planning-attempt-draft" key={attempt.id} data-testid={`planning-attempt-${attempt.attempt_index}`}>
+      <strong>草案 {attempt.attempt_index + 1} · 未通过验证</strong>
+      {attempt.validator_violations.length > 0 ? (
+        <ul>
+          {attempt.validator_violations.map((violation, index) => (
+            <li key={`${attempt.id}-violation-${index}`}>
+              {violation.summary}
+              {violation.step_id ? `（步骤 ${violation.step_id}）` : ""}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>未通过公开约束。</p>
+      )}
+      {attempt.proposal_steps.length > 0 && (
+        <details>
+          <summary>展开完整步骤</summary>
+          <ol>
+            {attempt.proposal_steps.map((step) => (
+              <li key={step.step_id}>
+                {step.action_key ?? "Action"} · {step.actor_key ?? "Actor"} · {step.target_key ?? "Target"}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </article>
+  );
+  return (
+    <section className="planning-attempt-history" data-testid="planning-attempt-history">
+      {rejected.map(renderDraft)}
+      {pending && (
+        <div className="planning-attempt-pending" data-testid="planning-attempt-pending">
+          <strong>尝试 {cycle.current_attempt + 2}/3 · REPAIR</strong>
+          {startedAt !== null ? (
+            <WaitingStatus startedAt={startedAt} label="Agent 正在修正方案" testId="planning-repair-status" />
+          ) : (
+            <p>Agent 正在修正方案……</p>
+          )}
+        </div>
+      )}
+      {!pending && cycle.status === "REJECTED" && <p>模型方案未通过验证。</p>}
+    </section>
   );
 }
 
@@ -949,6 +1010,24 @@ export function GamePage() {
         operation?.kind === "replanning" ? null : operation,
       ),
   });
+  const repairPlanning = useMutation({
+    mutationFn: ({ version }: { version: number; taskId: string; baseCallType: "INITIAL_PLAN" | "REPLAN" }) =>
+      api.repairPlanning(gameId, version),
+    onMutate: ({ taskId, baseCallType }) =>
+      setActiveOperation({
+        kind: baseCallType === "REPLAN" ? "replanning" : "planning",
+        taskId,
+        startedAt: Date.now(),
+      }),
+    onSuccess: syncLivePlay,
+    onError: () => setActiveOperation(null),
+    onSettled: () =>
+      setActiveOperation((operation) =>
+        operation?.kind === "planning" || operation?.kind === "replanning"
+          ? null
+          : operation,
+      ),
+  });
   const developer = useQuery({
     queryKey: ["developer", gameId, developerToken],
     queryFn: () => api.developerSnapshot(gameId, developerToken),
@@ -958,6 +1037,42 @@ export function GamePage() {
   const loadedTask = play.data?.current_task ?? null;
   const resolvingGoal = submit.isPending || pendingGoal !== null;
   const goalResolving = resolvingGoal && activeOperation?.kind === "goal";
+  const pendingPlanningTask = loadedTask ?? acceptedTask;
+  const pendingPlanningAttempt =
+    pendingPlanningTask?.execution_phase === "AWAITING_PLAN_ATTEMPT" &&
+    pendingPlanningTask.planning_cycle?.status === "RUNNING";
+  const pendingPlanningTaskId = pendingPlanningTask?.id ?? null;
+  const pendingPlanningPacingVersion = pendingPlanningTask?.pacing_version ?? null;
+  const pendingPlanningBaseCallType =
+    pendingPlanningTask?.planning_cycle?.base_call_type ?? "INITIAL_PLAN";
+  const repairPlanningMutate = repairPlanning.mutate;
+  useEffect(() => {
+    if (
+      !pendingPlanningAttempt ||
+      pendingPlanningTaskId === null ||
+      pendingPlanningPacingVersion === null ||
+      repairPlanning.isPending ||
+      startPlanning.isPending ||
+      replan.isPending
+    ) {
+      return;
+    }
+    repairPlanningMutate({
+      version: pendingPlanningPacingVersion,
+      taskId: pendingPlanningTaskId,
+      baseCallType: pendingPlanningBaseCallType,
+    });
+  }, [
+    pendingPlanningAttempt,
+    pendingPlanningTaskId,
+    pendingPlanningPacingVersion,
+    pendingPlanningBaseCallType,
+    pendingPlanningTask?.planning_cycle?.current_attempt,
+    repairPlanning.isPending,
+    startPlanning.isPending,
+    replan.isPending,
+    repairPlanningMutate,
+  ]);
 
   if (!play.data || !livePlay.data) {
     return <main className="page"><p>正在加载游戏状态……</p></main>;
@@ -994,9 +1109,10 @@ export function GamePage() {
     archive.isPending ||
     decision.isPending ||
     pacing.isPending ||
-    replan.isPending;
+    replan.isPending ||
+    repairPlanning.isPending;
   const mutationError =
-    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? decision.error ?? pacing.error ?? replan.error;
+    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? decision.error ?? pacing.error ?? replan.error ?? repairPlanning.error;
   const resolutionMessage =
     submit.data && submit.data.status !== "ACCEPTED"
       ? submit.data.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。"
@@ -1074,6 +1190,17 @@ export function GamePage() {
                   startedAt={activeOperation.startedAt}
                   label="Agent 正在根据最新情况重新规划"
                   testId="replanning-status"
+                />
+              )}
+              {task && (
+                <PlanningAttemptHistory
+                  task={task}
+                  pending={pendingPlanningAttempt}
+                  startedAt={
+                    pendingPlanningAttempt && activeOperation?.kind !== "goal"
+                      ? activeOperation?.startedAt ?? null
+                      : null
+                  }
                 />
               )}
               {selectedTaskLoading && (
@@ -1175,11 +1302,11 @@ export function GamePage() {
           <header className="command-panel-heading"><div><p>03 · 计划</p><h1>计划演进</h1></div></header>
           {planningForTask && <p className="plan-waiting-message">正在生成初始方案……</p>}
           {replanningForTask && <p className="plan-waiting-message">正在生成调整方案……</p>}
-          {task && goalAccepted && !planningForTask && <p className="plan-waiting-message">尚未开始规划。</p>}
+          {task && goalAccepted && !planningForTask && !replanningForTask && <p className="plan-waiting-message">尚未开始规划。</p>}
           {!task && !selectedTaskLoading && <p className="console-empty">等待下达第一个目标。</p>}
           {selectedTaskLoading && <p className="plan-waiting-message">正在加载所选任务记录……</p>}
           {task && <div className="task-brief"><small>当前目标</small><strong>{task.goal}</strong><span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span><p>{task.objective_names.join(" · ")}</p>{task.explanation && <code>{uiLabel(task.explanation)}</code>}</div>}
-           {task && !planningForTask && !replanningForTask && <PlanHistory task={task} />}
+          {task && !planningForTask && <PlanHistory task={task} />}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>

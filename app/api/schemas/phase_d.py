@@ -106,6 +106,7 @@ class MissionRoadmapStageStatus(StrEnum):
 
 class PublicExecutionPhase(StrEnum):
     AWAITING_PLAN_START = "AWAITING_PLAN_START"
+    AWAITING_PLAN_ATTEMPT = "AWAITING_PLAN_ATTEMPT"
     AWAITING_ACTION_ACK = "AWAITING_ACTION_ACK"
     AWAITING_DEBRIEF_ACK = "AWAITING_DEBRIEF_ACK"
     AWAITING_REPLAN_ACK = "AWAITING_REPLAN_ACK"
@@ -348,6 +349,48 @@ class PublicPlanHistoryResponse(ApiModel):
     steps: list[PublicPlanHistoryStepResponse]
 
 
+class PublicPlanningDraftStepResponse(ApiModel):
+    step_id: str
+    purpose: str = ""
+    action_key: str | None = None
+    actor_key: str | None = None
+    target_key: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublicPlanningViolationResponse(ApiModel):
+    """Player-safe summary of one rejected planning constraint."""
+
+    category: str
+    dimension: str | None = None
+    summary: str
+    step_id: str | None = None
+    actor_key: str | None = None
+    action_key: str | None = None
+    target_key: str | None = None
+
+
+class PublicPlanningAttemptResponse(ApiModel):
+    id: UUID
+    attempt_index: int = Field(ge=0)
+    call_type: Literal["INITIAL_PLAN", "REPLAN", "REPAIR"]
+    status: Literal["RUNNING", "REJECTED", "ACCEPTED", "ERROR"]
+    stop_reason: str | None = None
+    proposal_steps: list[PublicPlanningDraftStepResponse] = Field(default_factory=list)
+    validator_violations: list[PublicPlanningViolationResponse] = Field(default_factory=list)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    latency_ms: int | None = Field(default=None, ge=0)
+
+
+class PublicPlanningCycleResponse(ApiModel):
+    id: UUID
+    base_call_type: Literal["INITIAL_PLAN", "REPLAN"]
+    status: str
+    current_attempt: int = Field(ge=0)
+    attempts: list[PublicPlanningAttemptResponse] = Field(default_factory=list)
+
+
 class MissionRoadmapStageResponse(ApiModel):
     key: str
     name: str
@@ -424,6 +467,7 @@ class PublicTaskResponse(ApiModel):
     roadmap: MissionRoadmapResponse
     plan: PublicPlanResponse | None = None
     plan_history: list[PublicPlanHistoryResponse] = Field(default_factory=list)
+    planning_cycle: PublicPlanningCycleResponse | None = None
     timeline: list[PublicTimelineEventResponse] = Field(default_factory=list)
     briefing: PublicActionBriefingResponse | None = None
     debrief: PublicActionDebriefResponse | None = None

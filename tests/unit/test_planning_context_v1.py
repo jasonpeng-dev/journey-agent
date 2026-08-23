@@ -236,6 +236,16 @@ def test_legacy_catalog_is_not_in_canonical_provider_payload(session: Session) -
     assert "planning_context" not in payload
     assert "candidate_id" not in payload
     assert request.planning_action_catalog
+    assert request.planner_input is not None
+    canonical_actions = {item.action_key for item in request.planner_input.action_contracts}
+    canonical_actor_actions = {
+        item.actor_key: set(item.allowed_action_keys) for item in request.planner_input.actors
+    }
+    assert all(item.action_key in canonical_actions for item in request.planning_action_catalog)
+    assert all(
+        item.action_key in canonical_actor_actions.get(item.actor_key, set())
+        for item in request.planning_action_catalog
+    )
 
 
 def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
@@ -673,10 +683,12 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         steps=(acquisition,),
     )
     assert _validate_plan_segment_contract(valid, planner_input) == ()
-    assert _validate_plan_segment_contract(
+    objective_completion_bypass = _validate_plan_segment_contract(
         PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=(acquisition,)),
         planner_input,
-    ) == ()
+    )
+    assert len(objective_completion_bypass) == 1
+    assert objective_completion_bypass[0].code == "INFORMATION_BOUNDARY_REQUIRED"
     acquisition_not_last = _validate_plan_segment_contract(
         valid.model_copy(
             update={

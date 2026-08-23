@@ -73,6 +73,7 @@ from app.infrastructure.db.models import (
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import require_scope_writable
+from app.services.knowledge_projection import resource_knowledge_status
 
 
 class GenericGameError(ValueError):
@@ -653,6 +654,19 @@ class GenericGameService:
             target_region = region_for_node(definition, target_node_key)
             source_pools = self._known_source_pools(state, source_region, resource_key)
             if not source_pools:
+                source_knowledge = state.region_resource_knowledge.get(source_region)
+                if (
+                    source_knowledge is not None
+                    and source_knowledge.resource_inventory_visibility
+                    == ResourceInventoryVisibility.VISIBLE
+                    and source_knowledge.resource_survey_completed
+                ):
+                    return self._blocked_outcome(
+                        outcome,
+                        code="TRANSPORT_RESOURCE_INSUFFICIENT",
+                        message="The source Region lacks the requested Resource amount",
+                        retryable=True,
+                    )
                 return self._blocked_outcome(
                     outcome,
                     code="TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
@@ -704,7 +718,6 @@ class GenericGameService:
             return replace(
                 outcome,
                 resource_mutations=(*outcome.resource_mutations, *mutations),
-                actor_location_update=target_region,
             )
         return outcome
 
@@ -1281,17 +1294,24 @@ class GenericGameService:
                 expanded.append(mutation)
                 continue
             remaining = -mutation.amount
-            rows = sorted(
+            all_rows = tuple(
                 self.db.scalars(
                     select(GameInstanceResourceState).where(
                         GameInstanceResourceState.game_instance_id == self.scope.game_instance_id,
                         GameInstanceResourceState.resource_key == mutation.resource_key,
                         GameInstanceResourceState.scope_node_key == mutation.scope_node_key,
-                        GameInstanceResourceState.visibility == ResourcePoolVisibility.VISIBLE,
-                        GameInstanceResourceState.availability
-                        == ResourcePoolAvailability.AVAILABLE,
                     )
-                ).all(),
+                )
+            )
+            visible_rows = tuple(
+                row for row in all_rows if row.visibility == ResourcePoolVisibility.VISIBLE
+            )
+            rows = sorted(
+                (
+                    row
+                    for row in visible_rows
+                    if row.availability == ResourcePoolAvailability.AVAILABLE
+                ),
                 key=lambda row: row.pool_key,
             )
             knowledge = self.db.get(
@@ -1309,7 +1329,30 @@ class GenericGameService:
                     == ResourceInventoryVisibility.VISIBLE
                 )
             ]
-            if not rows:
+            inventory_status = resource_knowledge_status(
+                inventory_visibility=(
+                    ResourceInventoryVisibility(knowledge.resource_inventory_visibility)
+                    if knowledge is not None
+                    else (
+                        ResourceInventoryVisibility.VISIBLE
+                        if mutation.scope_node_key is None
+                        else ResourceInventoryVisibility.HIDDEN
+                    )
+                ),
+                survey_completed=(
+                    bool(knowledge.resource_survey_completed)
+                    if knowledge is not None
+                    else mutation.scope_node_key is None
+                ),
+                has_visible_pool=bool(visible_rows),
+            )
+            if not rows and inventory_status == "KNOWN_ZERO":
+                raise GenericGameError(
+                    "KNOWN_RESOURCE_INSUFFICIENT",
+                    "Known available Resource quantity is insufficient",
+                    retryable=True,
+                )
+            if not rows and inventory_status == "UNKNOWN":
                 raise GenericGameError(
                     "RESOURCE_INVENTORY_UNKNOWN",
                     "The Resource inventory is not known or available",
@@ -1320,6 +1363,12 @@ class GenericGameService:
             }
             available = sum(free_by_pool.values())
             if available < remaining:
+                if inventory_status == "UNKNOWN":
+                    raise GenericGameError(
+                        "RESOURCE_INVENTORY_UNKNOWN",
+                        "The Resource inventory is not known or available",
+                        retryable=True,
+                    )
                 raise GenericGameError(
                     "KNOWN_RESOURCE_INSUFFICIENT",
                     "Known available Resource quantity is insufficient",

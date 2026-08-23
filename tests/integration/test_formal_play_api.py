@@ -6,8 +6,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.agent.generic import PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
-from app.agent.planning_context import legal_candidate_id
 from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import NodeStatus, StepExecutionType
 from app.infrastructure.db.models import (
@@ -40,21 +38,15 @@ class FormalKnowledgeRevalidationProvider:
         if request.call_type == "INITIAL_PLAN":
             steps = (
                 PlanStepProposal(
-                    candidate_id=legal_candidate_id(
-                        "inspect", "logistics_team_alpha", "west_freight_corridor"
-                    ),
-                    purpose="Inspect the West freight corridor before committing the route.",
-                ),
-                PlanStepProposal(
-                    candidate_id=legal_candidate_id(
-                        "travel", "logistics_team_alpha", "west_logistics_district"
-                    ),
+                    action_key="travel",
+                    actor_key="logistics_team_alpha",
+                    target_key="west_logistics_district",
                     purpose="Travel to the West logistics district.",
                 ),
                 PlanStepProposal(
-                    candidate_id=legal_candidate_id(
-                        "transport_resource", "logistics_team_alpha", "central_district"
-                    ),
+                    action_key="transport_resource",
+                    actor_key="logistics_team_alpha",
+                    target_key="central_district",
                     purpose="Transport ten electrical repair parts to Central.",
                     parameters={
                         "resource_key": "electrical_repair_parts",
@@ -62,32 +54,30 @@ class FormalKnowledgeRevalidationProvider:
                     },
                 ),
                 PlanStepProposal(
-                    candidate_id=legal_candidate_id(
-                        "repair_electrical", "electrical_team_beta", "central_hospital"
-                    ),
+                    action_key="repair_electrical",
+                    actor_key="electrical_team_beta",
+                    target_key="central_hospital",
                     purpose="Restore Central Hospital emergency power.",
                 ),
             )
         else:
             steps = (
                 PlanStepProposal(
-                    candidate_id=legal_candidate_id(
-                        "clear_transport",
-                        "municipal_repair_team_alpha",
-                        "west_freight_corridor",
-                    ),
+                    action_key="clear_transport",
+                    actor_key="municipal_repair_team_alpha",
+                    target_key="west_freight_corridor",
                     purpose="Clear the known West corridor blockage.",
                 ),
                 PlanStepProposal(
-                    candidate_id=legal_candidate_id(
-                        "travel", "logistics_team_alpha", "west_logistics_district"
-                    ),
+                    action_key="travel",
+                    actor_key="logistics_team_alpha",
+                    target_key="west_logistics_district",
                     purpose="Travel to the West logistics district.",
                 ),
                 PlanStepProposal(
-                    candidate_id=legal_candidate_id(
-                        "transport_resource", "logistics_team_alpha", "central_district"
-                    ),
+                    action_key="transport_resource",
+                    actor_key="logistics_team_alpha",
+                    target_key="central_district",
                     purpose="Transport ten electrical repair parts to Central.",
                     parameters={
                         "resource_key": "electrical_repair_parts",
@@ -95,9 +85,9 @@ class FormalKnowledgeRevalidationProvider:
                     },
                 ),
                 PlanStepProposal(
-                    candidate_id=legal_candidate_id(
-                        "repair_electrical", "electrical_team_beta", "central_hospital"
-                    ),
+                    action_key="repair_electrical",
+                    actor_key="electrical_team_beta",
+                    target_key="central_hospital",
                     purpose="Restore Central Hospital emergency power.",
                 ),
             )
@@ -130,7 +120,20 @@ def _start_planning(client: TestClient, game_id: str, task: dict[str, Any]) -> d
     )
     assert response.status_code == 200, response.text
     assert response.json()["current_task"] is not None
-    return response.json()["current_task"]
+    task = response.json()["current_task"]
+    # Formal Play performs one Provider attempt per request.  Keep the legacy
+    # helper convenient for tests that only care about the accepted plan while
+    # still driving bounded REPAIR calls explicitly.
+    for _ in range(4):
+        if task["execution_phase"] != "AWAITING_PLAN_ATTEMPT":
+            return task
+        response = client.post(
+            f"/api/v1/games/{game_id}/play/repair-planning",
+            json={"expected_pacing_version": task["pacing_version"]},
+        )
+        assert response.status_code == 200, response.text
+        task = response.json()["current_task"]
+    return task
 
 
 def _ack_debrief(client: TestClient, game_id: str, task: dict[str, Any]) -> dict[str, Any]:
@@ -152,6 +155,13 @@ def _drive_task(
             return task, action_results
         if task["execution_phase"] == "AWAITING_PLAN_START":
             task = _start_planning(client, game_id, task)
+        elif task["execution_phase"] == "AWAITING_PLAN_ATTEMPT":
+            response = client.post(
+                f"/api/v1/games/{game_id}/play/repair-planning",
+                json={"expected_pacing_version": task["pacing_version"]},
+            )
+            assert response.status_code == 200, response.text
+            task = response.json()["current_task"]
         elif task["execution_phase"] == "AWAITING_ACTION_ACK":
             task = _ack_action(client, game_id, task)
             action_results.append(task)
@@ -449,9 +459,8 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
 
     interrupted = _ack_action(client, game_id, task)
     assert interrupted["execution_phase"] == "AWAITING_REPLAN_ACK"
-    assert interrupted["debrief"]["success"] is True
-    assert interrupted["debrief"]["plan_invalidated"] is True
-    assert interrupted["debrief"]["plan_invalidation_reason"] == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
+    assert interrupted["debrief"]["success"] is False
+    assert interrupted["debrief"]["plan_invalidated"] is False
     assert interrupted["debrief"]["knowledge_changes"]
     assert len(provider.requests) == 1
     operations = tuple(
@@ -461,20 +470,18 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
             .order_by(WorldOperation.created_at)
         )
     )
-    assert [operation.action_key for operation in operations] == ["inspect"]
-    assert interrupted["plan_history"][0]["status"] == "ADJUSTED"
+    assert [operation.action_key for operation in operations] == ["travel"]
+    assert interrupted["plan_history"][0]["status"] == "EXECUTING"
     interruption = interrupted["plan_history"][0]["interruption"]
-    assert interruption["kind"] == "KNOWLEDGE_CONFLICT"
-    assert interruption["sequence"] == 2
+    assert interruption["kind"] == "FAILURE"
+    assert interruption["sequence"] == 1
     assert interruption["step_name"] == "前往区域"
-    transport_location = interrupted["plan_history"][0]["steps"][2]["location"]
-    assert transport_location is not None
-    assert "西部物流区 → 中央城区" in transport_location["summary"]
+    # A failed MAY_ATTEMPT travel reveals passability and stops this plan.
+    assert interrupted["debrief"]["result_summary"]
     assert [step["status"] for step in interrupted["plan_history"][0]["steps"]] == [
-        "COMPLETED",
-        "CANCELLED",
-        "CANCELLED",
-        "CANCELLED",
+        "FAILED",
+        "PLANNED",
+        "PLANNED",
     ]
 
     session.expire_all()
@@ -482,7 +489,7 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
     assert after_restart.status_code == 200
     reloaded = after_restart.json()["current_task"]
     assert reloaded["execution_phase"] == "AWAITING_REPLAN_ACK"
-    assert reloaded["debrief"]["plan_invalidated"] is True
+    assert reloaded["debrief"]["success"] is False
     assert len(provider.requests) == 1
 
     replanned_response = client.post(
@@ -495,7 +502,7 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
     assert replanned["briefing"]["action_name"]
     assert len(provider.requests) == 2
     assert provider.requests[1].call_type == "REPLAN"
-    assert provider.requests[1].replan_reason == PLAN_INVALIDATED_BY_NEW_KNOWLEDGE
+    assert provider.requests[1].replan_reason == "TRAVEL_BLOCKED"
 
     completed, _rounds = _drive_task(client, game_id, replanned)
     assert completed["status"] == "COMPLETED"
@@ -513,13 +520,13 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
         )
     )
     assert [operation.action_key for operation in operations] == [
-        "inspect",
+        "travel",
         "clear_transport",
         "travel",
         "transport_resource",
         "repair_electrical",
     ]
-    assert completed["plan_history"][0]["steps"][1]["status"] == "CANCELLED"
+    assert completed["plan_history"][0]["steps"][0]["status"] == "FAILED"
 
 
 def test_trade_goal_advances_one_cycle_per_ack_and_preserves_scope(

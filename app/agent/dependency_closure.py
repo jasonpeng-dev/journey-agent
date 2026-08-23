@@ -15,7 +15,9 @@ from app.agent.provider import (
     PlannerKnownWorldSlice,
     PlannerTargetBinding,
 )
+from app.domain.enums import ResourceInventoryVisibility
 from app.domain.scenario_v2 import ObjectiveDefinitionV2, ScenarioDefinitionV2
+from app.services.knowledge_projection import resource_knowledge_status
 
 
 class DependencyClosureError(ValueError):
@@ -180,6 +182,48 @@ def build_dependency_closure(
                 continue
             _queue_binding_resource_dependencies(binding, path, action_key)
 
+        # A selected Action may have a public, known preflight contradiction
+        # (for example, a route is still ACTIVE when the next Action requires
+        # it to be DISRUPTED).  Expose deterministic public producers for that
+        # contradiction without choosing a target/actor or synthesizing a
+        # recovery step.  This is deliberately limited to concrete FACT
+        # mutations already present in canonical Action contracts.
+        for precondition in contract.known_preconditions:
+            if not _known_precondition_is_true(precondition):
+                continue
+            node_key = precondition.get("node_key")
+            fact_key = precondition.get("fact_key")
+            current_value = precondition.get("current_value")
+            if not isinstance(node_key, str) or not isinstance(fact_key, str):
+                continue
+            # The contradiction witness is public Known state; retain its
+            # node so a selected producer has a legal public target context.
+            relevant_nodes.add(node_key)
+            for producer_key, producer in contracts.items():
+                for effect in producer.deterministic_effects:
+                    if (
+                        effect.get("type") != "FACT_MUTATION"
+                        or effect.get("fact_key") != fact_key
+                    ):
+                        continue
+                    target = effect.get("target")
+                    if target not in {"target_key", "target_node", node_key}:
+                        continue
+                    effect_value = effect.get("value")
+                    if isinstance(effect_value, dict):
+                        literal = effect_value.get("literal")
+                        if literal is None or literal == current_value:
+                            continue
+                        effect_value = literal
+                    if effect_value == current_value:
+                        continue
+                    select_action(
+                        producer_key,
+                        (*path, f"known_precondition:{node_key}.{fact_key}"),
+                        repr(TypedDependency("FACT", node_key, fact_key)),
+                    )
+                    break
+
         # Resource requirements declared by the canonical Action contract are
         # source-agnostic. Queue the knowledge dependency without selecting a
         # source Region; the Planner may choose any public acquisition target.
@@ -317,7 +361,12 @@ def build_dependency_closure(
                 planner_input,
                 dependency.key,
             )
-            if known_available_amount < required_amount:
+            inventory_status = _resource_inventory_status(
+                known_resource,
+                planner_input,
+                required_amount=required_amount,
+            )
+            if inventory_status == "UNKNOWN":
                 unknown: dict[str, object] = {
                     "dimension": "RESOURCE_SOURCE",
                     "resource_key": dependency.subject,
@@ -351,6 +400,12 @@ def build_dependency_closure(
                         for effect in contract.deterministic_effects
                     ):
                         select_action(action_key, path, repr(dependency))
+            elif known_available_amount < required_amount:
+                # A known quantity deficit is a deterministic contradiction,
+                # not an UNKNOWN dependency.  Keep it in the canonical
+                # resource summary/precondition and let Validator emit the
+                # typed shortage diagnostic for a submitted proposal.
+                continue
             elif not _has_known_available_resource_at(
                 known_resource, destination_region, required_amount
             ):
@@ -365,6 +420,15 @@ def build_dependency_closure(
 
     selected_actor_keys: set[str] = set()
     actor_states = {item.actor_key: item for item in planner_input.actors}
+    explicit_effect_actor_keys = {
+        str(effect.get("target"))
+        for contract in contracts.values()
+        if contract.action_key in selected_actions
+        for effect in contract.deterministic_effects
+        if effect.get("type") == "ACTOR_COMMAND_REACHABILITY"
+        and isinstance(effect.get("target"), str)
+        and effect.get("target") in actor_states
+    }
     for action_key in selected_actions:
         selected_contract = contracts.get(action_key)
         if selected_contract is None:
@@ -376,10 +440,20 @@ def build_dependency_closure(
                 continue
             if isinstance(role_key, str) and profile.role_key != role_key:
                 continue
-            if role_key or state.command_reachability == "ONLINE":
-                selected_actor_keys.add(profile.key)
-                if state.current_region:
-                    relevant_nodes.add(state.current_region)
+            # Keep online executors, role-bound executors, and Actors named by
+            # a public deterministic reachability effect.  A disconnected
+            # Actor is otherwise not an executable candidate; retaining every
+            # disconnected profile would turn the sparse closure into a
+            # scenario-wide Actor catalog.
+            if (
+                state.command_reachability != "ONLINE"
+                and not isinstance(role_key, str)
+                and profile.key not in explicit_effect_actor_keys
+            ):
+                continue
+            selected_actor_keys.add(profile.key)
+            if state.current_region:
+                relevant_nodes.add(state.current_region)
 
     for binding_key in selected_bindings:
         relevant_nodes.add(binding_key[1])
@@ -430,10 +504,15 @@ def build_dependency_closure(
                 continue
             if isinstance(role_key, str) and profile.role_key != role_key:
                 continue
-            if role_key or state.command_reachability == "ONLINE":
-                selected_actor_keys.add(profile.key)
-                if state.current_region:
-                    relevant_nodes.add(state.current_region)
+            if (
+                state.command_reachability != "ONLINE"
+                and not isinstance(role_key, str)
+                and profile.key not in explicit_effect_actor_keys
+            ):
+                continue
+            selected_actor_keys.add(profile.key)
+            if state.current_region:
+                relevant_nodes.add(state.current_region)
     known_world = _slice_known_world(
         planner_input.known_world,
         relevant_nodes,
@@ -544,6 +623,105 @@ def _known_available_resource_amount(raw: object) -> int:
         and isinstance(value.get("known_available"), int)
         and not isinstance(value.get("known_available"), bool)
     )
+
+
+def _known_precondition_is_true(precondition: dict[str, object]) -> bool:
+    """Return whether a public projected preflight failure is currently true."""
+
+    condition = precondition.get("failure_condition")
+    current = precondition.get("current_value")
+    if not isinstance(condition, dict):
+        return False
+    kind = condition.get("kind")
+    if kind == "FACT_EQUALS":
+        return current == condition.get("value")
+    if kind == "FACT_NOT_EQUALS":
+        return current != condition.get("value")
+    if kind == "FACT_IN":
+        values = condition.get("values")
+        return isinstance(values, list) and current in values
+    return False
+
+
+def _resource_inventory_status(
+    raw: object,
+    planner_input: PlannerInput,
+    *,
+    required_amount: int | None = None,
+) -> str:
+    """Return the shared public inventory status for a resource source.
+
+    Region scopes explicitly present in the canonical projection are known,
+    including a zero summary.  A missing scope is unknown only while that
+    Region's inventory is incomplete/hidden; a fully surveyed visible Region
+    with no Pool is known zero.
+    """
+
+    if not isinstance(raw, dict):
+        return "UNKNOWN"
+    if (
+        required_amount is not None
+        and _known_available_resource_amount(raw) >= required_amount
+    ):
+        return "KNOWN"
+    scopes = raw.get("scopes")
+    if not isinstance(scopes, dict):
+        return "KNOWN" if "global" in raw or "known_total" in raw else "UNKNOWN"
+    regional_scopes = {key for key in scopes if key != "global"}
+    if not regional_scopes:
+        return "KNOWN" if "global" in scopes else "UNKNOWN"
+    if any(
+        isinstance(entry, dict) and entry.get("knowledge_status") == "UNKNOWN"
+        for entry in scopes.values()
+    ):
+        return "UNKNOWN"
+    knowledge_by_region = {
+        item.get("region_key"): item
+        for item in planner_input.known_world.resource_knowledge
+        if isinstance(item, dict) and isinstance(item.get("region_key"), str)
+    }
+    for region_key in sorted(regional_scopes):
+        entry = scopes.get(region_key)
+        if not isinstance(entry, dict):
+            return "UNKNOWN"
+        knowledge = knowledge_by_region.get(region_key)
+        visibility = entry.get("resource_inventory_visibility")
+        survey_completed = entry.get("resource_survey_completed")
+        if knowledge is not None:
+            visibility = knowledge.get("resource_inventory_visibility", visibility)
+            survey_completed = knowledge.get("resource_survey_completed", survey_completed)
+        if not isinstance(visibility, str) or not isinstance(survey_completed, bool):
+            return "UNKNOWN"
+        if (
+            ResourceInventoryVisibility(visibility) != ResourceInventoryVisibility.VISIBLE
+            or not survey_completed
+        ):
+            # A visible Pool can be consumed when it is sufficient, but a
+            # shortfall in an incomplete inventory is still UNKNOWN because
+            # an undiscovered Pool may exist.
+            return "UNKNOWN"
+        status = resource_knowledge_status(
+            inventory_visibility=ResourceInventoryVisibility(visibility),
+            survey_completed=survey_completed,
+            has_visible_pool=bool(entry.get("pools")),
+        )
+        if status == "UNKNOWN":
+            return "UNKNOWN"
+    for region_key, entry in knowledge_by_region.items():
+        if region_key in regional_scopes:
+            continue
+        visibility = entry.get("resource_inventory_visibility")
+        survey_completed = entry.get("resource_survey_completed")
+        if not isinstance(visibility, str) or not isinstance(survey_completed, bool):
+            return "UNKNOWN"
+        status = resource_knowledge_status(
+            inventory_visibility=ResourceInventoryVisibility(visibility),
+            survey_completed=survey_completed,
+            has_visible_pool=False,
+        )
+        if status == "UNKNOWN":
+            return "UNKNOWN"
+    return "KNOWN"
 
 
 def _has_known_available_resource_at(

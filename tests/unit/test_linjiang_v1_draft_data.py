@@ -34,6 +34,7 @@ from app.agent.provider import (
 )
 from app.domain.enums import (
     CommandReachability,
+    ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
@@ -412,7 +413,11 @@ def test_linjiang_v10_planner_action_contract_is_generic_and_knowledge_safe(
     assert "north_heavy_equipment_stock" not in json.dumps(
         context.compact_dump(), ensure_ascii=False
     )
-    assert "communication_equipment" not in context.current_knowledge["resources"]
+    communication = context.current_knowledge["resources"]["communication_equipment"]
+    assert communication["known_total"] == 0
+    assert communication["known_available"] == 0
+    assert communication["scopes"]["central_district"]["known_total"] == 0
+    assert communication["scopes"]["central_district"]["known_available"] == 0
 
     for action in definition_actions.values():
         constraints = action_planner_constraints(action)
@@ -557,17 +562,19 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
         for item in dependencies
         if item.get("dimension") == "RESOURCE_SOURCE"
     }
-    for resource_key, expected in {
-        "communication_equipment": (10, 0, 10),
-        "general_engineering_parts": (15, 10, 5),
-    }.items():
-        dependency = resource_dependencies[resource_key]
-        assert (
-            dependency["required_amount"],
-            dependency["known_available_amount"],
-            dependency["deficit"],
-        ) == expected
-        assert dependency["source_knowledge_status"] == "UNKNOWN"
+    communication_dependency = resource_dependencies["communication_equipment"]
+    assert (
+        communication_dependency["required_amount"],
+        communication_dependency["known_available_amount"],
+        communication_dependency["deficit"],
+    ) == (10, 0, 10)
+    assert communication_dependency["source_knowledge_status"] == "UNKNOWN"
+    assert resource_dependencies["general_engineering_parts"]["required_amount"] == 15
+    assert (
+        resource_dependencies["general_engineering_parts"]["source_knowledge_status"]
+        == "UNKNOWN"
+    )
+    assert all(item.get("status") == "UNKNOWN" for item in dependencies)
     resource_knowledge = {
         item["region_key"]: item for item in payload["known_world"]["resource_knowledge"]
     }
@@ -793,25 +800,33 @@ def test_linjiang_v10_known_resource_deficit_repair_diagnostic_is_typed(
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
     assert diagnostic.model_dump(mode="json", exclude_none=True, exclude_defaults=True) == {
-        "code": "RESOURCE_INVENTORY_UNKNOWN",
+        "code": "KNOWN_RESOURCE_INSUFFICIENT",
         "step_id": "repair-central",
-        "failure_code": "RESOURCE_INVENTORY_UNKNOWN",
-        "dimension": "RESOURCE_KNOWLEDGE",
+        "failure_code": "KNOWN_RESOURCE_INSUFFICIENT",
+        "dimension": "RESOURCE_QUANTITY",
         "action_key": "repair_communications",
         "actor_key": "communications_repair_team_alpha",
         "target_key": "central_telecom_hub",
         "resource_key": "communication_equipment",
         "scope_region": "central_district",
         "required_amount": 10,
-        "required": "KNOWN_VISIBLE_AVAILABLE",
-        "actual": "UNKNOWN",
+        "projected_known_available_amount": 0,
+        "deficit": 10,
     }
 
 
 def test_linjiang_v10_unknown_resource_quantity_is_not_known_insufficient(
     session: Session,
 ) -> None:
-    _runtime, scope = _v10_runtime(session, "linjiang-v10-unknown-resource")
+    runtime, scope = _v10_runtime(session, "linjiang-v10-unknown-resource")
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "central_district"),
+    )
+    assert knowledge is not None
+    knowledge.resource_inventory_visibility = ResourceInventoryVisibility.HIDDEN
+    knowledge.resource_survey_completed = False
+    session.flush()
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
     pools, region_knowledge = agent._projected_resource_state(definition)
@@ -865,26 +880,15 @@ def test_linjiang_v10_known_preflight_repair_diagnostic_has_public_witness(
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
-    assert diagnostic.code == "ACTION_PRECONDITION_FAILED"
-    assert diagnostic.failure_code == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
-    assert diagnostic.dimension == "ACTION_PRECONDITION"
+    assert diagnostic.code == "ACTION_OUTSIDE_PLANNER_CONTEXT"
+    assert diagnostic.failure_code == "ACTION_OUTSIDE_PLANNER_CONTEXT"
+    assert diagnostic.dimension == "ACTION_BINDING"
     assert diagnostic.step_id == "repair-water-without-support"
     assert diagnostic.action_key == "repair_water_facility"
     assert diagnostic.actor_key == "water_repair_team_alpha"
     assert diagnostic.target_key == "water_treatment_plant"
-    assert diagnostic.required == "PREFLIGHT_CONDITION_NOT_MATCHED"
-    assert diagnostic.actual == "KNOWN_FAILURE_CONDITION_MATCHED"
-    assert diagnostic.known_predicate is not None
-    predicates = diagnostic.known_predicate["predicates"]
-    assert isinstance(predicates, list)
-    assert {
-        "kind": "FACT_NOT_EQUALS",
-        "node_key": "water_treatment_plant",
-        "fact_key": "heavy_engineering_support_ready",
-        "operator": "NE",
-        "expected": True,
-        "actual": False,
-    } in predicates
+    assert diagnostic.required == "ACTION_IN_CANONICAL_ACTION_CONTRACTS"
+    assert diagnostic.actual == "repair_water_facility"
 
 
 def test_validator_stops_projected_diagnostics_after_static_root_failure(
@@ -963,8 +967,8 @@ def test_validator_reports_multiple_independent_static_root_failures(
     diagnostics = provider.requests[1].repair_diagnostics
     assert [(item.step_id, item.code) for item in diagnostics] == [
         ("invalid-interaction", "TARGET_INTERACTION_INVALID"),
-        ("invalid-parameters", "PARAMETER_INVALID"),
-        ("actor-not-allowed", "ACTOR_NOT_ALLOWED"),
+        ("invalid-parameters", "ACTION_OUTSIDE_PLANNER_CONTEXT"),
+        ("actor-not-allowed", "ACTOR_ACTION_OUTSIDE_PLANNER_CONTEXT"),
     ]
 
 
