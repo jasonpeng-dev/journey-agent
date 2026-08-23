@@ -752,10 +752,7 @@ class OpenAICompatibleGenericProvider:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
         }
-        if (
-            purpose in {"initial_plan", "replan", "repair"}
-            and self._max_output_tokens is not None
-        ):
+        if purpose in {"initial_plan", "replan", "repair"} and self._max_output_tokens is not None:
             request_body["max_tokens"] = self._max_output_tokens
         request_size_bytes = len(
             json.dumps(request_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1063,9 +1060,9 @@ def _planning_context_bytes(payload: dict[str, object]) -> int | None:
     if context_key not in payload:
         return None
     return len(
-        json.dumps(
-            payload.get(context_key, {}), ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(payload.get(context_key, {}), ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
     )
 
 

@@ -1,161 +1,194 @@
-# Current architecture
+# Journey Agent Architecture
 
-This document is the source of truth for the running Journey Agent architecture. It describes
-the generic runtime used by the browser product; it is not a historical phase plan.
+This document is the canonical high-level architecture for the current
+Journey Agent runtime. Detailed planning and validation semantics live in
+[Agent Planning V2](agent-planning-v2.md). Scenario authoring semantics live
+in [Scenario authoring](scenario-authoring.md). Historical design and
+migration notes live under [docs/archive](archive/) and are not current
+implementation authority.
 
-## Boundary and identity
+## 1. Product and system goal
 
-Journey Agent is a data-driven, goal-directed agent runtime for interactive scenarios. Source
-code supplies the generic interpreter and persistence services. An immutable `ScenarioVersion`
-supplies the world, actors, actions, rules, objectives, and planning metadata that make one
-scenario different from another.
+Journey Agent is a generic, data-driven scenario runtime with:
 
-The runtime identity chain is:
+* natural-language goal resolution;
+* an LLM Planner;
+* deterministic validation;
+* an explicit Truth/Knowledge boundary;
+* declarative Action and Rule execution;
+* auditable Formal PLAY;
+* Knowledge-aware replanning.
 
-```text
-Player
-  -> GameInstance
-       -> exact published ScenarioVersion
-            -> RuntimeScope
-                 -> generic Agent / Action / Rule services
-```
+Scenario content is supplied by an immutable published ScenarioVersion.
+The runtime interprets that content through generic source code. A Scenario
+must not require a scenario-key branch in Planner, Validator, Runtime, or
+persistence code.
 
-There is one mutable Current Draft per Scenario. Editing a Draft never changes a published
-snapshot. Publishing validates the Draft and creates a new immutable Version. A formal
-`GameInstance` can only be initialized from a published Version and keeps that exact Version
-for its entire lifetime; it never follows a latest pointer.
+## 2. Runtime identity hierarchy
 
-Scenario definitions use the closed `ScenarioDefinitionV2` contract and the
-`declarative-rule-engine` version 1 contract. Authors provide data and supported structured
-primitives, not Python/JavaScript gameplay code, a custom interpreter, or a model-specific
-runtime.
+The durable identity hierarchy is:
 
-## Agent request path
+    Player
+      -> GameInstance
+           -> exact published ScenarioVersion
+                -> AgentTask
+                     -> ObjectiveScope
+                     -> AgentPlan / AgentStep
+                          -> WorldOperation
 
-The application layer composes a provider once and injects it into the generic goal resolver and
-agent service. Routers and React components only adapt requests and projections; they do not
-evaluate rules or implement gameplay.
+A Scenario has one mutable Current Draft and immutable published Versions.
+Creating a GameInstance binds it to one exact Version and content hash. Editing
+or publishing a later Version never changes an existing GameInstance.
 
-```text
-natural-language Goal
-  -> exact-match Goal Resolver
-       -> optional configured provider fallback
-  -> AgentTask with frozen ObjectiveScope
-  -> PlanningContext V1 from the exact Version and current Knowledge
-  -> deterministic planner or structured model PlanProposal
-  -> backend Plan Validator
-       -> accepted Plan
-       -> bounded Repair (provider mode), or a safe model-plan error
-  -> generic Action execution
-  -> declarative Rule evaluation and world operation settlement
-  -> Truth / Knowledge update
-  -> objective verification
-  -> completion, bounded Replan, approval, or a reliable blocked state
-```
+ObjectiveScope is created when a Goal becomes an AgentTask. It is frozen for
+the Task lifetime and is not expanded by REPAIR or REPLAN.
 
-### Goal resolution and ObjectiveScope
+## 3. Scenario authoring boundary
 
-The resolver first normalizes and matches the submitted text against the exact Version's
-Objective keys, names, aliases, and examples. If the Scenario permits LLM fallback and an
-OpenAI-compatible provider is configured, the provider may choose only from the supplied
-Objective candidates. Unknown keys are rejected; the model cannot invent an Objective.
+A ScenarioDefinitionV2 contains declarative:
 
-An accepted Goal creates one persistent `AgentTask`. Its non-empty, canonical
-`ObjectiveScope`, exact ScenarioVersion reference, scope hash, and resolution metadata are
-frozen at task creation. Objective completion is evaluated against the scoped Objectives and
-their `ObjectiveRequirementV2` values; a Goal completing does not archive the GameInstance.
+* metadata;
+* world Nodes, Facts, Relations, Interactions, and Resources;
+* Roles and Actors;
+* Actions and parameters;
+* preflight and resolution Rules;
+* Objectives and completion requirements;
+* goal-resolution and planning metadata;
+* initialization.
 
-### Planning, Repair, and Replan
+Authors provide stable machine keys, public names, descriptions, structured
+contracts, and data. They do not add executable gameplay code, a custom
+interpreter, a model-specific provider, or a scenario-specific runtime branch.
 
-`PlanningContext V1` is the canonical model input. It contains a goal projection, current
-player-safe Knowledge, relevant Actions, Actors, Targets, previous execution context, and
-Scenario planning hints. It is entity-oriented: the provider chooses Action, Actor, Target,
-parameters, and ordering from the supplied context. The compatibility Candidate Catalog remains
-an internal migration view and is not the canonical OpenAI-compatible payload.
+## 4. Agent runtime overview
 
-The deterministic path is used in mock/offline operation. In provider mode, an initial plan or
-replan is a proposal only. The backend validates keys, parameter shapes, exact-Version
-bindings, public relevance/coverage/order, authority constraints, and rejected-proposal
-signatures before persistence. A rejected proposal receives structured diagnostics and may be
-repaired a bounded number of times. Provider timeouts, HTTP failures, malformed responses, and
-plans that remain invalid surface as explicit application errors or blocked states; they do not
-silently turn into a different planner.
+The request path is:
 
-Replan keeps the same frozen ObjectiveScope. It is requested after an execution failure,
-proposal rejection/approval decision, or an exhausted plan when the objective is not complete.
-The generic agent has safety bounds for repairs and replans. A player rejection records the
-proposal signature as a runtime constraint, so the same proposal cannot be emitted again for
-that Task.
+    Goal
+      -> exact-Version Goal Resolver
+      -> frozen ObjectiveScope
+      -> Dependency Closure
+      -> canonical PlannerInput V2
+      -> Provider PlanSegment
+      -> deterministic Validator
+      -> bounded internal REPAIR if needed
+      -> accepted AgentPlan
+      -> Runtime Action execution
+      -> Truth and public Knowledge update
+      -> remaining-plan validation
+      -> Player pacing / acknowledgement
+      -> REPLAN or objective completion
 
-## Generic world execution
+The application composes the configured provider once and injects it into
+the generic resolver and Agent service. API routes and React components are
+adapters; they do not duplicate Rule evaluation, objective completion,
+authority, or Version semantics.
 
-`GenericActionService` checks the exact Version Action, Actor capabilities and authority, target
-visibility/access, parameters, resources, and approval policy. It creates an instance-scoped
-`WorldOperation`; operation settlement and Rule evaluation remain deterministic backend work.
+## 5. Truth and Knowledge boundary
 
-Rules are declarative `ConditionV2` trees (`ALL`, `ANY`, `NOT`, fact/resource/parameter
-comparisons, visibility/access, and relation existence) with supported `EffectV2` primitives
-such as fact/node visibility changes, node access, resource adjustments/reservations, outcomes,
-failures, and memory events. The Rule Engine does not contain Starfire or Medical branches.
+Truth is the authoritative mutable instance state used by Rule evaluation
+and objective verification. Knowledge is the public projection used by
+Planner, Validator, and normal Player responses.
 
-Truth is the authoritative instance state used for Rule evaluation and objective verification.
-Knowledge is the visibility-filtered projection used for planning and normal player responses.
-The player projection reads only known Nodes/Facts and public Resources/Actors/Task history.
-Developer access is a separate server route and may expose Truth and internal runtime data.
+Hidden Truth is never serialized into PlannerInput. UNKNOWN is not false,
+zero, unavailable, or blocked. Runtime may reveal new public Knowledge through
+survey, inspect, public Action effects, or an explicit deterministic failure.
+Inference alone does not reveal hidden state.
 
-## Formal Play and persistence
+Player projections expose known Nodes/Facts/Relations/Resources, accepted
+formal Plan History, safe action results, and pacing state. Developer
+projections are separate and credential-gated. Provider payloads, Rule ASTs,
+credentials, and raw model reasoning are not player data.
 
-Formal Play is a thin orchestration layer over the generic services. It persists player pacing in
-`PlayerExecutionCheckpoint` and exposes explicit phases such as plan start, action
-acknowledgement, debrief, replan, approval-required, completed, blocked, and aborted. The UI
-shows the selected Task's Mission Log and Plan History while the GameInstance can continue after
-one Goal completes. One GameInstance permits one active Task at a time; historical Tasks remain
-read-only.
+## 6. Planning / validation / execution ownership
 
-Abandoning a Task or archiving a Game cancels pending approvals and unsettled operations that
-have not produced a world mutation. Existing mutations are not rolled back. Archived Games are
-read-only, while their published ScenarioVersion remains available for new instances.
+PlannerInput construction and Dependency Closure select bounded public
+relevance. The LLM chooses Action, Actor, Target, Resource source,
+parameters, route, and ordering.
 
-Runtime rows are scoped by `game_instance_id` and persisted with SQLAlchemy/Alembic. Idempotent
-creation keys, checkpoints, task/plan/operation rows, and instance projections allow recovery
-after a request or backend restart without rebinding to a different Version.
+The Validator is deterministic authority over a submitted PlanSegment. It
+checks bindings, parameters, locality, command reachability, public
+preconditions, resources, target contracts, objective relevance, stop
+semantics, and sequential projected state. It only rejects Known
+deterministic contradictions.
 
-## Player and Developer API boundary
+Runtime is the only layer that mutates Truth and settles WorldOperations.
+Knowledge projection and objective verification consume the resulting state.
+No layer inserts a missing prerequisite or computes a recovery route for the
+Planner.
 
-The FastAPI application exposes two intentionally different response surfaces:
+See Agent Planning V2 for the detailed contract and invariants.
 
-| Surface | Prefix | Purpose |
-| --- | --- | --- |
-| Health | `/health`, `/ready` | Liveness/readiness checks |
-| Scenario authoring | `/api/v1/scenarios` | Scenario/Draft/Version lifecycle, validation, references, and sandbox |
-| Player Games | `/api/v1/games` | Published-Version GameInstances, Knowledge-safe Play, history, approvals, and archive |
-| Developer Games | `/api/v1/developer/games` | Credential-gated Truth and internal runtime snapshots/history |
+## 7. Formal PLAY lifecycle
 
-Player DTOs never include hidden Truth, Rule ASTs, provider payloads, or raw model internals.
-The Developer route uses the configured server-side developer credential gate; this is a
-single-user platform boundary, not a full multi-user RBAC system.
+Formal PLAY uses a single synchronous HTTP request for each initial planning
+or replan action:
 
-## Provider boundary
+    user starts planning
+      -> INITIAL_PLAN or REPLAN
+      -> internal Provider / Validator / REPAIR loop
+      -> one final response
+      -> accepted formal Plan History or terminal error
 
-`MODEL_PROVIDER=mock` builds no HTTP provider and exercises deterministic resolution/planning.
-`MODEL_PROVIDER=openai_compatible` constructs the generic OpenAI-compatible adapter with
-`MODEL_BASE_URL`, `MODEL_NAME`, `MODEL_API_KEY`, and `MODEL_TIMEOUT_SECONDS`. DeepSeek is used by
-pointing that adapter at its compatible endpoint; the ScenarioVersion never names a provider or
-model. Provider audit metadata records call type, latency, context bytes, and token usage when
-the provider returns it, without logging the API key.
+After an accepted Plan, the player acknowledges and executes each Action.
+The UI then shows an action briefing/debrief and the next pacing phase. A
+Runtime failure, a Knowledge change that invalidates the remaining plan, or a
+naturally exhausted INFORMATION_BOUNDARY segment can require player
+acknowledgement followed by REPLAN. A completed Objective enters COMPLETED and
+does not replan.
 
-## Where to look in the repository
+Rejected Provider proposals are internal audit records. They are not
+player-facing plans and do not create AgentStep or WorldOperation rows.
+
+## 8. Persistence and audit
+
+The main lifecycle entities are:
+
+| Entity | Role |
+| --- | --- |
+| PlanningCycle | One INITIAL or REPLAN cycle with frozen canonical input |
+| PlanningAttempt | One Provider attempt, proposal, violations, and telemetry |
+| AgentPlan | Validator-passing executable formal plan |
+| AgentStep | Ordered executable Action step |
+| WorldOperation | Runtime operation and public outcome |
+| PlayerExecutionCheckpoint | Player pacing state, not gameplay authority |
+
+Provider audit metadata is secret-safe and may include model settings,
+timestamps, latency, token usage, request size, finish reason, parsed
+proposal, and Validator diagnostics. Raw chain-of-thought and API keys are
+not persisted.
+
+All runtime rows are scoped by GameInstance and exact ScenarioVersion
+ownership. Idempotency keys and checkpoints support recovery without
+rebinding an instance to a different Version.
+
+## 9. API and repository boundaries
+
+| Surface | Purpose |
+| --- | --- |
+| /api/v1/scenarios | Draft, validation, publication, references, and sandbox |
+| /api/v1/games | Player-safe GameInstance and Formal PLAY |
+| /api/v1/developer/games | Credential-gated Truth/internal snapshots |
+| /health and /ready | Process and database readiness |
+
+Repository map:
 
 | Path | Responsibility |
 | --- | --- |
-| `app/domain/` | Frozen ScenarioDefinitionV2, ObjectiveScope, world and runtime value objects |
-| `app/agent/` | Generic resolver, PlanningContext, provider boundary, plan validation, and agent loop |
-| `app/services/` | Scenario lifecycle, Game lifecycle, Formal Play, projections, actions, and sandbox |
-| `app/scenarios/` | V2 parsing/validation, persistence, built-in Starfire and Medical definitions |
-| `app/api/` | FastAPI adapters and Player/Developer DTOs |
-| `frontend/src/` | React/Vite Scenario Library, Editor, Games, Formal Play, and Developer toggle |
-| `tests/` | Unit, contract, integration, lifecycle, provider, and dual-scenario coverage |
-| `migrations/` | Alembic schema history; run migrations through `alembic upgrade head` |
+| app/domain | ScenarioDefinitionV2, ObjectiveScope, world/runtime values |
+| app/agent | Goal resolution, PlannerInput, provider, validation, Agent loop |
+| app/services | Scenario/Game lifecycle, Formal PLAY, actions, projections |
+| app/scenarios | V2 parsing, validation, persistence, built-in definitions |
+| app/api | FastAPI adapters and Player/Developer DTOs |
+| frontend/src | React/Vite Scenario Library, Editor, and Formal PLAY |
+| tests | Unit, contract, integration, lifecycle, provider, and E2E support |
+| migrations | Alembic schema history |
+| docs | Current architecture, planning, authoring, and historical notes |
 
-For the detailed provider payload contract see [`planning-context-v1.md`](planning-context-v1.md).
-For authoring and publishing rules see [`scenario-authoring.md`](scenario-authoring.md).
+## 10. Current canonical documents
+
+* [Agent Planning V2](agent-planning-v2.md): detailed Planner, Validator,
+  Runtime, Knowledge, REPAIR, REPLAN, and continuity contract.
+* [Scenario authoring](scenario-authoring.md): Draft, Editor, validation,
+  sandbox, publication, and Version lifecycle.
+* [Archive](archive/): historical design and migration notes only.

@@ -263,7 +263,7 @@ class GameInstanceResourceState(TimestampMixin, Base):
     survey_discoverable: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
-        server_default="0",
+        server_default=text("false"),
         nullable=False,
     )
     availability_requirement: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -489,9 +489,7 @@ class PlanningAttempt(UUIDPrimaryKey, TimestampMixin, Base):
         Index("ix_planning_attempts_cycle_attempt", "cycle_id", "attempt_index"),
     )
 
-    cycle_id: Mapped[UUID] = mapped_column(
-        ForeignKey("planning_cycles.id", ondelete="CASCADE")
-    )
+    cycle_id: Mapped[UUID] = mapped_column(ForeignKey("planning_cycles.id", ondelete="CASCADE"))
     task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
     attempt_index: Mapped[int] = mapped_column(Integer)
     call_type: Mapped[str] = mapped_column(String(20))

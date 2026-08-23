@@ -201,10 +201,7 @@ def build_dependency_closure(
             relevant_nodes.add(node_key)
             for producer_key, producer in contracts.items():
                 for effect in producer.deterministic_effects:
-                    if (
-                        effect.get("type") != "FACT_MUTATION"
-                        or effect.get("fact_key") != fact_key
-                    ):
+                    if effect.get("type") != "FACT_MUTATION" or effect.get("fact_key") != fact_key:
                         continue
                     target = effect.get("target")
                     if target not in {"target_key", "target_node", node_key}:
@@ -562,9 +559,8 @@ def _contract_can_produce_fact_for_target(
         return False
     required_interaction = contract.target_contract.get("required_interaction_key")
     interactions = target.get("interactions")
-    if (
-        isinstance(required_interaction, str)
-        and (not isinstance(interactions, list) or required_interaction not in interactions)
+    if isinstance(required_interaction, str) and (
+        not isinstance(interactions, list) or required_interaction not in interactions
     ):
         return False
     accepted_values: object = dependency.required
@@ -577,9 +573,7 @@ def _contract_can_produce_fact_for_target(
         accepted_values = (accepted_values,)
     for effect in contract.deterministic_effects:
         effect_value = effect.get("value")
-        if isinstance(effect_value, dict) and isinstance(
-            effect_value.get("from_parameter"), str
-        ):
+        if isinstance(effect_value, dict) and isinstance(effect_value.get("from_parameter"), str):
             parameter = next(
                 (
                     item
@@ -659,10 +653,7 @@ def _resource_inventory_status(
 
     if not isinstance(raw, dict):
         return "UNKNOWN"
-    if (
-        required_amount is not None
-        and _known_available_resource_amount(raw) >= required_amount
-    ):
+    if required_amount is not None and _known_available_resource_amount(raw) >= required_amount:
         return "KNOWN"
     scopes = raw.get("scopes")
     if not isinstance(scopes, dict):
@@ -900,13 +891,9 @@ def _slice_known_world(
         for item in known_world.relations
         if item.get("source_node_key") in node_keys and item.get("target_node_key") in node_keys
     )
-    resources = {
-        key: value for key, value in known_world.resources.items() if key in resource_keys
-    }
+    resources = {key: value for key, value in known_world.resources.items() if key in resource_keys}
     resource_knowledge = tuple(
-        item
-        for item in known_world.resource_knowledge
-        if item.get("region_key") in node_keys
+        item for item in known_world.resource_knowledge if item.get("region_key") in node_keys
     )
     return PlannerKnownWorldSlice(
         nodes=nodes,

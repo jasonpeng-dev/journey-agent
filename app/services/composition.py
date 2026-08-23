@@ -18,9 +18,7 @@ def configured_play_orchestrator(
         db,
         game_instance_id,
         provider=provider,
-        model_max_repair_attempts_per_cycle=(
-            settings.model_max_repair_attempts_per_cycle
-        ),
+        model_max_repair_attempts_per_cycle=(settings.model_max_repair_attempts_per_cycle),
     )
 
 

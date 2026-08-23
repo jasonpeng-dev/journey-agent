@@ -340,9 +340,7 @@ def validate_action_locality(
                         "required": "LOCAL_TARGET",
                         "actual": {
                             "actor_region": actor_region,
-                            "target_region": _require_facility_region(
-                                definition, target_node_key
-                            ),
+                            "target_region": _require_facility_region(definition, target_node_key),
                         },
                         "source_region": actor_region,
                         "target_region": _require_facility_region(definition, target_node_key),

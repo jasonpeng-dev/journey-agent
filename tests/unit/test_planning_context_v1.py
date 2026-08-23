@@ -217,9 +217,7 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     assert "repair_attempt" not in initial_payload
     assert "repair_diagnostics" not in initial_payload
     assert initial_payload["planner_input"]["schema_version"] == 2
-    assert "enemy_north_supply_route" not in json.dumps(
-        initial_payload, ensure_ascii=False
-    )
+    assert "enemy_north_supply_route" not in json.dumps(initial_payload, ensure_ascii=False)
     assert "planning_context" not in initial_payload
     assert task.current_plan_version == 1
 
@@ -286,9 +284,7 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
         ),
     ).provider_payload()
     assert replan_payload["replan_reason"] == "TRAVEL_BLOCKED"
-    assert replan_payload["planner_input"]["execution_context"] == {
-        "previous_plan_version": 1
-    }
+    assert replan_payload["planner_input"]["execution_context"] == {"previous_plan_version": 1}
     assert "repair_attempt" not in replan_payload
     assert "repair_diagnostics" not in replan_payload
     assert replan_payload["planner_input"]["actors"][0] == canonical_actor
@@ -634,9 +630,12 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "does not reintroduce contradictions represented by this memory",
     ):
         assert repair_term in repair_prompt
-    assert repair_prompt.count(
-        "re-evaluate the complete corrected segment sequentially against projected Known state"
-    ) == 1
+    assert (
+        repair_prompt.count(
+            "re-evaluate the complete corrected segment sequentially against projected Known state"
+        )
+        == 1
+    )
     for forbidden_term in (
         "Linjiang",
         "Task 1",
@@ -757,11 +756,7 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         "INFORMATION_BOUNDARY_ACQUISITION_MISSING"
     )
     wrong_scope = valid.model_copy(
-        update={
-            "steps": (
-                acquisition.model_copy(update={"target_key": "different-region"}),
-            )
-        }
+        update={"steps": (acquisition.model_copy(update={"target_key": "different-region"}),)}
     )
     wrong_scope_violation = _validate_plan_segment_contract(wrong_scope, planner_input)[0]
     assert wrong_scope_violation.code == "INFORMATION_BOUNDARY_ACQUISITION_MISSING"
@@ -820,15 +815,11 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
                     "interactions": ["survey_resources"],
                 },
             ),
-            resource_knowledge=(
-                {"region_key": "region", "resource_survey_completed": False},
-            ),
+            resource_knowledge=({"region_key": "region", "resource_survey_completed": False},),
         ),
     )
     progress_violation = _validate_plan_segment_contract(blocked, direct_progress)[0]
-    assert progress_violation.model_dump(
-        mode="json", exclude_none=True, exclude_defaults=True
-    ) == {
+    assert progress_violation.model_dump(mode="json", exclude_none=True, exclude_defaults=True) == {
         "code": "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS",
         "failure_code": "BLOCKED_SEGMENT_HAS_PROGRESS_OPTIONS",
         "dimension": "SEGMENT_TERMINATION",
@@ -861,20 +852,14 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         update={
             "known_world": direct_progress.known_world.model_copy(
                 update={
-                    "resources": {
-                        "survey_parts": {
-                            "scopes": {"region": {"known_available": 5}}
-                        }
-                    }
+                    "resources": {"survey_parts": {"scopes": {"region": {"known_available": 5}}}}
                 }
             ),
             "target_bindings": (
                 PlannerTargetBinding(
                     action_key="survey",
                     target_key="region",
-                    requirements=(
-                        {"cost": {"survey_parts": 5}},
-                    ),
+                    requirements=({"cost": {"survey_parts": 5}},),
                 ),
             ),
         }
@@ -886,11 +871,7 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         update={
             "known_world": binding_cost_is_known.known_world.model_copy(
                 update={
-                    "resources": {
-                        "survey_parts": {
-                            "scopes": {"region": {"known_available": 4}}
-                        }
-                    }
+                    "resources": {"survey_parts": {"scopes": {"region": {"known_available": 4}}}}
                 }
             )
         }
@@ -930,10 +911,13 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         ),
     )
     assert _validate_plan_segment_contract(blocked, composed_only) == ()
-    assert _validate_plan_segment_contract(
-        blocked.model_copy(update={"boundary_dependency_id": dependency_id}),
-        PlannerInput(),
-    )[0].code == "BOUNDARY_DEPENDENCY_NOT_ALLOWED"
+    assert (
+        _validate_plan_segment_contract(
+            blocked.model_copy(update={"boundary_dependency_id": dependency_id}),
+            PlannerInput(),
+        )[0].code
+        == "BOUNDARY_DEPENDENCY_NOT_ALLOWED"
+    )
     blocked_steps = _validate_plan_segment_contract(
         blocked.model_copy(update={"steps": (acquisition,)}),
         PlannerInput(),
@@ -980,9 +964,9 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     assert duplicate_violation.required == "UNIQUE"
     assert duplicate_violation.actual == "DUPLICATE"
     blank = acquisition.model_copy(update={"step_id": ""})
-    blank_violation = _validate_plan_segment_contract(
-        PlanProposal(steps=(blank,)), planner_input
-    )[0]
+    blank_violation = _validate_plan_segment_contract(PlanProposal(steps=(blank,)), planner_input)[
+        0
+    ]
     assert blank_violation.code == "STEP_ID_INVALID"
     assert blank_violation.required == "NON_BLANK"
     assert blank_violation.actual == "BLANK"

@@ -29,7 +29,12 @@ def upgrade() -> None:
             sa.Column("availability", sa.String(length=20), server_default="AVAILABLE", nullable=False)
         )
         batch_op.add_column(
-            sa.Column("survey_discoverable", sa.Boolean(), server_default=sa.text("0"), nullable=False)
+            sa.Column(
+                "survey_discoverable",
+                sa.Boolean(),
+                server_default=sa.text("false"),
+                nullable=False,
+            )
         )
         batch_op.add_column(sa.Column("availability_requirement", sa.JSON(), nullable=True))
 

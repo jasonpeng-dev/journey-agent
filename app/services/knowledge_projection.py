@@ -50,10 +50,7 @@ def resource_knowledge_status(
     known zero only after a visible, completed survey.
     """
 
-    if (
-        inventory_visibility == ResourceInventoryVisibility.VISIBLE
-        and survey_completed
-    ):
+    if inventory_visibility == ResourceInventoryVisibility.VISIBLE and survey_completed:
         return "KNOWN" if has_visible_pool else "KNOWN_ZERO"
     return "KNOWN" if has_visible_pool else "UNKNOWN"
 
@@ -644,11 +641,14 @@ class SharedKnowledgeProjection:
             for definition_resource in zero_resource_definitions:
                 if definition_resource.key in region_resources:
                     continue
-                if resource_knowledge_status(
-                    inventory_visibility=state.resource_inventory_visibility,
-                    survey_completed=state.resource_survey_completed,
-                    has_visible_pool=False,
-                ) != "KNOWN_ZERO":
+                if (
+                    resource_knowledge_status(
+                        inventory_visibility=state.resource_inventory_visibility,
+                        survey_completed=state.resource_survey_completed,
+                        has_visible_pool=False,
+                    )
+                    != "KNOWN_ZERO"
+                ):
                     continue
                 zero_summary = {
                     "resource_name": definition_resource.name,

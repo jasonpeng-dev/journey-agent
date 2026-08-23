@@ -446,9 +446,7 @@ def test_known_blocked_connector_is_rejected_without_reading_hidden_truth(sessio
 
 def test_unknown_transport_resource_source_diagnostic_is_actionable(session: Session) -> None:
     runtime, scope = _runtime(session, "linjiang-unknown-resource-plan")
-    provider = FixedPlanProvider(
-        (_transport_step("west_logistics_district"), _repair_step())
-    )
+    provider = FixedPlanProvider((_transport_step("west_logistics_district"), _repair_step()))
     with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
@@ -756,9 +754,7 @@ def test_known_knowledge_invalidates_only_remaining_plan_and_enters_replan(
     assert [item.call_type for item in provider.requests] == ["INITIAL_PLAN", "REPLAN"]
     assert task.last_error_code == "TRAVEL_BLOCKED"
     first_replanned_step = session.scalar(
-        select(AgentStep)
-        .where(AgentStep.plan_id == replanned.id)
-        .order_by(AgentStep.sequence)
+        select(AgentStep).where(AgentStep.plan_id == replanned.id).order_by(AgentStep.sequence)
     )
     assert first_replanned_step is not None
     assert first_replanned_step.action_intent == "clear_transport"

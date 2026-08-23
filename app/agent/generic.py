@@ -333,9 +333,7 @@ class GenericAgentService:
         self.provider = provider
         self.goal_resolver = goal_resolver or GenericGoalResolver(provider=provider)
         self.provider_call_observer = provider_call_observer
-        self.model_max_repair_attempts_per_cycle = (
-            model_max_repair_attempts_per_cycle
-        )
+        self.model_max_repair_attempts_per_cycle = model_max_repair_attempts_per_cycle
         self._provider_call_started_at: dict[str, float] = {}
         self._last_provider_plan_summary: str | None = None
         self._last_provider_stop_reason: str | None = None
@@ -1454,9 +1452,7 @@ class GenericAgentService:
                     planner_input=planner_input,
                     stop_reason=proposal.stop_reason,
                 )
-                diagnostics = tuple(
-                    PlanViolation.model_validate(item) for item in raw_diagnostics
-                )
+                diagnostics = tuple(PlanViolation.model_validate(item) for item in raw_diagnostics)
             self._record_provider_plan_call(
                 task,
                 request=request,
@@ -1511,8 +1507,7 @@ class GenericAgentService:
                 for violation in diagnostics
             ]
             planning_cycle.anti_regression_memory = [
-                item.model_dump(mode="json", exclude_none=True)
-                for item in anti_regression_memory
+                item.model_dump(mode="json", exclude_none=True) for item in anti_regression_memory
             ]
             if single_attempt:
                 self.db.flush()
@@ -1608,9 +1603,7 @@ class GenericAgentService:
             projected_command_reachability=projected_command_reachability,
         )
         if diagnostics:
-            return [], tuple(
-                _diagnostic_with_step_id(item, proposed_steps) for item in diagnostics
-            )
+            return [], tuple(_diagnostic_with_step_id(item, proposed_steps) for item in diagnostics)
 
         for static_binding in static_bindings:
             index = static_binding.index
@@ -1792,9 +1785,7 @@ class GenericAgentService:
             )
 
         if diagnostics:
-            return [], tuple(
-                _diagnostic_with_step_id(item, proposed_steps) for item in diagnostics
-            )
+            return [], tuple(_diagnostic_with_step_id(item, proposed_steps) for item in diagnostics)
 
         covered_before: set[tuple[str, str]] = set()
         for index, effects in enumerate(step_effects, start=1):
@@ -2136,9 +2127,7 @@ class GenericAgentService:
                     }
                 )
                 continue
-            failure_code = self._planning_action_failure_code(
-                definition, action, actor, target_key
-            )
+            failure_code = self._planning_action_failure_code(definition, action, actor, target_key)
             if failure_code is not None:
                 diagnostics.append(
                     _structured_plan_diagnostic(
@@ -2258,11 +2247,7 @@ class GenericAgentService:
         effect_changes_location = action.behavior == ActionBehavior.TRAVEL
         if planner_input is not None:
             contract = next(
-                (
-                    item
-                    for item in planner_input.action_contracts
-                    if item.action_key == action.key
-                ),
+                (item for item in planner_input.action_contracts if item.action_key == action.key),
                 None,
             )
             binding = next(
@@ -2537,11 +2522,10 @@ class GenericAgentService:
                 projected_known_nodes,
                 projected_known_relations,
             )
-        if (
-            action.locality.value == "NONE"
-            and action.behavior
-            not in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
-        ):
+        if action.locality.value == "NONE" and action.behavior not in {
+            ActionBehavior.TRAVEL,
+            ActionBehavior.TRANSPORT_RESOURCE,
+        }:
             return None
         connector = self._validate_projected_plan_locality(
             definition,
@@ -2554,8 +2538,7 @@ class GenericAgentService:
             projected_command_reachability=projected_command_reachability,
         )
         if (
-            action.behavior
-            in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
+            action.behavior in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
             and connector is not None
             and projected_known_passability.get(connector) is False
         ):
@@ -3119,15 +3102,16 @@ class GenericAgentService:
             for resource_key in resource_keys:
                 if (resource_key, region_key) in public_pool_pairs:
                     continue
-                if resource_knowledge_status(
-                    inventory_visibility=knowledge.resource_inventory_visibility,
-                    survey_completed=knowledge.resource_survey_completed,
-                    has_visible_pool=False,
-                ) != "KNOWN_ZERO":
+                if (
+                    resource_knowledge_status(
+                        inventory_visibility=knowledge.resource_inventory_visibility,
+                        survey_completed=knowledge.resource_survey_completed,
+                        has_visible_pool=False,
+                    )
+                    != "KNOWN_ZERO"
+                ):
                     continue
-                identity = resource_state_key(
-                    resource_key, region_key, "__known_zero__"
-                )
+                identity = resource_state_key(resource_key, region_key, "__known_zero__")
                 pools[identity] = _ProjectedResourcePool(
                     pool_key="__known_zero__",
                     resource_key=resource_key,
@@ -3279,9 +3263,7 @@ class GenericAgentService:
         ]
         if not candidates:
             knowledge = (
-                projected_region_knowledge.get(region_key)
-                if region_key is not None
-                else None
+                projected_region_knowledge.get(region_key) if region_key is not None else None
             )
             knowledge_status = resource_knowledge_status(
                 inventory_visibility=(
@@ -3321,9 +3303,7 @@ class GenericAgentService:
         has_unknown_available = any(pool.quantity is None for pool in available)
         if known_available < amount and not has_unknown_available:
             knowledge = (
-                projected_region_knowledge.get(region_key)
-                if region_key is not None
-                else None
+                projected_region_knowledge.get(region_key) if region_key is not None else None
             )
             inventory_complete = region_key is None or (
                 knowledge is not None
@@ -3432,11 +3412,7 @@ class GenericAgentService:
                         if pool.pool_key == effect.pool_key:
                             pool.availability = effect.availability
             elif effect.kind == EffectKind.ADJUST_RESOURCE:
-                if (
-                    effect.resource_key is None
-                    or effect.amount is None
-                    or actor_node_key is None
-                ):
+                if effect.resource_key is None or effect.amount is None or actor_node_key is None:
                     continue
                 amount = self._projected_integer_effect(effect.amount, parameters)
                 try:
@@ -3654,9 +3630,7 @@ class GenericAgentService:
                     )
             elif effect.kind in {EffectKind.REVEAL_NODE, EffectKind.HIDE_NODE} and node_key:
                 node_visibility.setdefault(node_key, set()).add(
-                    Visibility.KNOWN
-                    if effect.kind == EffectKind.REVEAL_NODE
-                    else Visibility.HIDDEN
+                    Visibility.KNOWN if effect.kind == EffectKind.REVEAL_NODE else Visibility.HIDDEN
                 )
             elif (
                 effect.kind == EffectKind.SET_RELATION_VISIBILITY
@@ -3915,9 +3889,7 @@ class GenericAgentService:
             "proposal_candidate_ids": list(proposal_candidate_ids),
             "proposal_stop_reason": proposal_stop_reason,
             "validator_violations": [
-                violation.model_dump(
-                    mode="json", exclude_none=True, exclude_defaults=True
-                )
+                violation.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
                 for violation in diagnostics
             ],
             "validation": "ACCEPTED" if accepted else "REJECTED",
@@ -4696,9 +4668,7 @@ def _objective_completion_boundary_violation(
     """
 
     contracts = {item.action_key: item for item in planner_input.action_contracts}
-    bindings = {
-        (item.action_key, item.target_key): item for item in planner_input.target_bindings
-    }
+    bindings = {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
     for dependency in planner_input.known_world.unknown_dependencies:
         dependency_id = dependency.get("dependency_id")
         if (
@@ -4759,9 +4729,7 @@ def _has_direct_known_progress_option(planner_input: PlannerInput) -> bool:
     resource_knowledge = {
         item.get("region_key"): item for item in planner_input.known_world.resource_knowledge
     }
-    bindings = {
-        (item.action_key, item.target_key): item for item in planner_input.target_bindings
-    }
+    bindings = {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
     for contract in planner_input.action_contracts:
         if not _direct_known_parameters(contract) or not _direct_known_preconditions(contract):
             continue
@@ -4846,10 +4814,13 @@ def _actor_has_direct_known_target(
             planner_input,
         ):
             continue
-        if any(
-            effect.get("type") == "RESOURCE_SURVEY_COMPLETED"
-            for effect in contract.deterministic_effects
-        ) and resource_knowledge.get(target_key, {}).get("resource_survey_completed") is not False:
+        if (
+            any(
+                effect.get("type") == "RESOURCE_SURVEY_COMPLETED"
+                for effect in contract.deterministic_effects
+            )
+            and resource_knowledge.get(target_key, {}).get("resource_survey_completed") is not False
+        ):
             continue
         if not _direct_known_resource_option(
             actor,
@@ -4995,13 +4966,13 @@ def _direct_known_preconditions(contract: PlannerActionContract) -> bool:
         if kind not in {"FACT_EQUALS", "FACT_NOT_EQUALS", "FACT_IN"}:
             return False
         blocked = (
-            kind == "FACT_EQUALS" and current == expected
-        ) or (
-            kind == "FACT_NOT_EQUALS" and current != expected
-        ) or (
-            kind == "FACT_IN"
-            and isinstance(failure.get("values"), list)
-            and current in failure["values"]
+            (kind == "FACT_EQUALS" and current == expected)
+            or (kind == "FACT_NOT_EQUALS" and current != expected)
+            or (
+                kind == "FACT_IN"
+                and isinstance(failure.get("values"), list)
+                and current in failure["values"]
+            )
         )
         if blocked:
             return False
@@ -5203,9 +5174,7 @@ def _submitted_step_matches_dependency(
                 (
                     item
                     for item in (
-                        planner_input.known_world.resource_knowledge
-                        if planner_input
-                        else ()
+                        planner_input.known_world.resource_knowledge if planner_input else ()
                     )
                     if item.get("region_key") == target_key
                 ),
@@ -5269,10 +5238,7 @@ def _remember_prior_contradictions(
                 mode="json",
                 exclude_none=True,
                 exclude_defaults=True,
-                exclude=(
-                    _ANTI_REGRESSION_LOCATION_FIELDS
-                    | _ANTI_REGRESSION_OCCURRENCE_FIELDS
-                ),
+                exclude=(_ANTI_REGRESSION_LOCATION_FIELDS | _ANTI_REGRESSION_OCCURRENCE_FIELDS),
             )
         ): index
         for index, item in enumerate(result)

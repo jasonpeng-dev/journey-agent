@@ -479,15 +479,12 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     serialized = json.dumps(payload, ensure_ascii=False)
 
     assert payload["schema_version"] == 2
-    assert payload["objective"]["objective_scope"] == [
-        "restore_central_communication_capability"
-    ]
-    assert payload["objective"]["completion_requirements"][0]["node_key"] == (
-        "central_telecom_hub"
-    )
+    assert payload["objective"]["objective_scope"] == ["restore_central_communication_capability"]
+    assert payload["objective"]["completion_requirements"][0]["node_key"] == ("central_telecom_hub")
     actors = {item["actor_key"]: item for item in payload["actors"]}
     assert all(
-        set(actor) == {
+        set(actor)
+        == {
             "actor_key",
             "role_key",
             "capabilities",
@@ -506,7 +503,8 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     assert communications["command_reachability"] == "DISCONNECTED"
     assert communications["execution_state"]["status"] == "KNOWN_BLOCKED"
     repair_contract = next(
-        item for item in payload["action_contracts"]
+        item
+        for item in payload["action_contracts"]
         if item["action_key"] == "repair_communications"
     )
     assert set(repair_contract["executor_requirements"]["required_capabilities"]).issubset(
@@ -525,8 +523,7 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
         "travel",
     }, closure.relevance_reason
     assert all(
-        set(actor["allowed_action_keys"]).issubset(action_keys)
-        for actor in payload["actors"]
+        set(actor["allowed_action_keys"]).issubset(action_keys) for actor in payload["actors"]
     )
     assert actors["logistics_team_alpha"]["allowed_action_keys"] == [
         "relay_message",
@@ -571,8 +568,7 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     assert communication_dependency["source_knowledge_status"] == "UNKNOWN"
     assert resource_dependencies["general_engineering_parts"]["required_amount"] == 15
     assert (
-        resource_dependencies["general_engineering_parts"]["source_knowledge_status"]
-        == "UNKNOWN"
+        resource_dependencies["general_engineering_parts"]["source_knowledge_status"] == "UNKNOWN"
     )
     assert all(item.get("status") == "UNKNOWN" for item in dependencies)
     resource_knowledge = {
@@ -585,15 +581,18 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     }
     assert resource_knowledge["southeast_heights_district"]["resource_survey_completed"] is False
     assert len(resource_knowledge) == 6
-    repeated = PlanningContextBuilder(session, scope).build_v2_closure(
-        definition,
-        agent._objectives(task, definition),
-        task=task,
-        replan_reason=None,
-    ).planner_input.model_dump(mode="json")
+    repeated = (
+        PlanningContextBuilder(session, scope)
+        .build_v2_closure(
+            definition,
+            agent._objectives(task, definition),
+            task=task,
+            replan_reason=None,
+        )
+        .planner_input.model_dump(mode="json")
+    )
     assert [item["dependency_id"] for item in dependencies] == [
-        item["dependency_id"]
-        for item in repeated["known_world"]["unknown_dependencies"]
+        item["dependency_id"] for item in repeated["known_world"]["unknown_dependencies"]
     ]
     assert {item["actor_key"] for item in payload["actors"]} == {
         "communications_repair_team_alpha",
@@ -638,9 +637,7 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
     assert "clear_transport" in {
         item.action_key for item in replanned.planner_input.action_contracts
     }
-    replanned_action_keys = {
-        item.action_key for item in replanned.planner_input.action_contracts
-    }
+    replanned_action_keys = {item.action_key for item in replanned.planner_input.action_contracts}
     assert all(
         set(actor.allowed_action_keys).issubset(replanned_action_keys)
         for actor in replanned.planner_input.actors
@@ -1181,13 +1178,9 @@ def test_projected_ambiguous_rules_apply_only_common_effects_once(
         relations,
     )
     effect_payloads = [item.model_dump(mode="json") for item in effects]
-    resource_effects = [
-        item for item in effect_payloads if item["kind"] == "ADJUST_RESOURCE"
-    ]
+    resource_effects = [item for item in effect_payloads if item["kind"] == "ADJUST_RESOURCE"]
     reachability_effects = [
-        item
-        for item in effect_payloads
-        if item["kind"] == "SET_ACTOR_COMMAND_REACHABILITY"
+        item for item in effect_payloads if item["kind"] == "SET_ACTOR_COMMAND_REACHABILITY"
     ]
 
     assert [(item["resource_key"], item["amount"]["literal"]) for item in resource_effects] == [
@@ -1300,9 +1293,7 @@ def test_linjiang_v10_clear_transport_uses_endpoint_locality_not_passability(
     }
     action = next(item for item in definition.actions if item.key == "clear_transport")
     projected_locations = {key: item.current_node_key for key, item in actors.items()}
-    projected_reachability = {
-        key: CommandReachability.ONLINE for key in actors
-    }
+    projected_reachability = {key: CommandReachability.ONLINE for key in actors}
     projected_passability = {"central_river_tunnel": False}
     projected_facts = agent._known_fact_projection()
     projected_nodes = agent._known_node_keys()
@@ -1326,20 +1317,23 @@ def test_linjiang_v10_clear_transport_uses_endpoint_locality_not_passability(
     assert wrong_endpoint.value.code == "LOCALITY_TRANSPORT_ENDPOINT_INVALID"
 
     projected_locations["municipal_transport_team"] = "central_district"
-    assert agent._validate_projected_action_state(
-        definition,
-        action,
-        "municipal_transport_team",
-        "central_river_tunnel",
-        {},
-        projected_locations,
-        projected_passability,
-        projected_facts,
-        projected_nodes,
-        projected_relations,
-        actors=actors,
-        projected_command_reachability=projected_reachability,
-    ) is None
+    assert (
+        agent._validate_projected_action_state(
+            definition,
+            action,
+            "municipal_transport_team",
+            "central_river_tunnel",
+            {},
+            projected_locations,
+            projected_passability,
+            projected_facts,
+            projected_nodes,
+            projected_relations,
+            actors=actors,
+            projected_command_reachability=projected_reachability,
+        )
+        is None
+    )
 
     travel = next(item for item in definition.actions if item.key == "travel")
     projected_locations["municipal_transport_team"] = "west_logistics_district"
@@ -1382,20 +1376,23 @@ def test_linjiang_v10_clear_transport_uses_endpoint_locality_not_passability(
         projected_command_reachability=projected_reachability,
     )
     assert projected_locations["municipal_transport_team"] == "central_district"
-    assert agent._validate_projected_action_state(
-        definition,
-        action,
-        "municipal_transport_team",
-        "central_river_tunnel",
-        {},
-        projected_locations,
-        projected_passability,
-        projected_facts,
-        projected_nodes,
-        projected_relations,
-        actors=actors,
-        projected_command_reachability=projected_reachability,
-    ) is None
+    assert (
+        agent._validate_projected_action_state(
+            definition,
+            action,
+            "municipal_transport_team",
+            "central_river_tunnel",
+            {},
+            projected_locations,
+            projected_passability,
+            projected_facts,
+            projected_nodes,
+            projected_relations,
+            actors=actors,
+            projected_command_reachability=projected_reachability,
+        )
+        is None
+    )
 
 
 def test_linjiang_v10_hidden_block_is_discovered_only_during_runtime(
@@ -1530,8 +1527,7 @@ def test_projected_canonical_actor_location_effect_updates_following_step(
     projected_nodes = agent._known_node_keys()
     projected_relations = agent._known_relation_keys(definition)
     projected_reachability = {
-        key: CommandReachability(actor.command_reachability)
-        for key, actor in actors.items()
+        key: CommandReachability(actor.command_reachability) for key, actor in actors.items()
     }
     action = next(item for item in definition.actions if item.key == "repair_communications")
     planner_input = PlannerInput(
@@ -1563,14 +1559,17 @@ def test_projected_canonical_actor_location_effect_updates_following_step(
 
     assert projected_locations["logistics_team_alpha"] == "west_logistics_district"
     travel = next(item for item in definition.actions if item.key == "travel")
-    assert agent._validate_projected_plan_locality(
-        definition,
-        travel,
-        "logistics_team_alpha",
-        "central_district",
-        {},
-        projected_locations,
-    ) == "west_freight_corridor"
+    assert (
+        agent._validate_projected_plan_locality(
+            definition,
+            travel,
+            "logistics_team_alpha",
+            "central_district",
+            {},
+            projected_locations,
+        )
+        == "west_freight_corridor"
+    )
 
 
 def test_linjiang_v10_known_route_remains_one_hop_after_hidden_route_failure() -> None:

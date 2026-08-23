@@ -249,9 +249,10 @@ def test_missing_pool_is_known_zero_only_after_completed_visible_survey(
 
     incomplete_projection = SharedKnowledgeProjection(session, scope, definition)
     incomplete_planner = incomplete_projection.planner_resources()
-    assert "electrical_repair_parts" not in incomplete_planner["regions"]["central_district"][
-        "resources"
-    ]
+    assert (
+        "electrical_repair_parts"
+        not in incomplete_planner["regions"]["central_district"]["resources"]
+    )
 
     agent = GenericAgentService(session, scope)
     projected_pools, projected_knowledge = agent._projected_resource_state(definition)
@@ -289,8 +290,7 @@ def test_hidden_truth_pool_presence_cannot_change_public_resource_knowledge(
                 GameInstanceResourceState(
                     game_instance_id=runtime.instance.id,
                     resource_identity=(
-                        "electrical_repair_parts@central_district@"
-                        "central_hidden_truth_only"
+                        "electrical_repair_parts@central_district@central_hidden_truth_only"
                     ),
                     resource_key="electrical_repair_parts",
                     scope_node_key="central_district",
@@ -365,9 +365,9 @@ def test_reserved_inventory_is_not_available_to_closure_validator_or_runtime(
     pool = next(
         item for item in projection.visible_resource_pools() if item.pool_key == "west_pool_a"
     )
-    summary = projection.resource_intelligence()["regions"]["west_logistics_district"][
-        "resources"
-    ]["electrical_repair_parts"]
+    summary = projection.resource_intelligence()["regions"]["west_logistics_district"]["resources"][
+        "electrical_repair_parts"
+    ]
     assert pool.quantity == 20
     assert pool.available_quantity == 10
     assert summary["known_total"] == 20
@@ -382,9 +382,7 @@ def test_reserved_inventory_is_not_available_to_closure_validator_or_runtime(
             }
         }
     }
-    assert not _has_known_available_resource_at(
-        raw_resource, "west_logistics_district", 15
-    )
+    assert not _has_known_available_resource_at(raw_resource, "west_logistics_district", 15)
     assert _has_known_available_resource_at(raw_resource, "west_logistics_district", 10)
 
     objective = definition.objectives[0]

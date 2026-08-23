@@ -324,9 +324,7 @@ class PlanningContinuityBuilder:
             for operation in operations
             if operation.source_step_id is not None
         }
-        prior_plans = tuple(
-            self._plan_projection(plan, operations_by_step) for plan in plans
-        )
+        prior_plans = tuple(self._plan_projection(plan, operations_by_step) for plan in plans)
         latest_new_knowledge = self._trigger_knowledge(
             task,
             trigger_step_id=trigger_step_id,
@@ -1102,10 +1100,7 @@ class PlanningActionCatalogBuilder:
             else None
         )
         canonical_bindings = (
-            {
-                (item.action_key, item.target_key): item
-                for item in planner_input.target_bindings
-            }
+            {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
             if planner_input is not None
             else None
         )
@@ -1116,9 +1111,7 @@ class PlanningActionCatalogBuilder:
         )
         canonical_nodes = (
             tuple(
-                item
-                for item in planner_input.known_world.nodes
-                if isinstance(item.get("key"), str)
+                item for item in planner_input.known_world.nodes if isinstance(item.get("key"), str)
             )
             if planner_input is not None
             else None
@@ -1134,8 +1127,7 @@ class PlanningActionCatalogBuilder:
             else tuple((item.node_key, None, ActionTargetKind.NODE.value) for item in node_states)
         )
         target_rows += tuple(
-            (actor_key, None, ActionTargetKind.ACTOR.value)
-            for actor_key in sorted(actor_by_key)
+            (actor_key, None, ActionTargetKind.ACTOR.value) for actor_key in sorted(actor_by_key)
         )
         binding_targets: dict[str, set[str]] = {}
         if planner_input is not None:
@@ -1157,15 +1149,10 @@ class PlanningActionCatalogBuilder:
                     continue
                 if canonical_contracts is not None and action.key not in canonical_contracts:
                     continue
-                if (
-                    action.key in binding_targets
-                    and target_key not in binding_targets[action.key]
-                ):
+                if action.key in binding_targets and target_key not in binding_targets[action.key]:
                     continue
                 canonical_contract = (
-                    canonical_contracts.get(action.key)
-                    if canonical_contracts is not None
-                    else None
+                    canonical_contracts.get(action.key) if canonical_contracts is not None else None
                 )
                 if canonical_contracts is not None and canonical_contract is None:
                     continue
@@ -1220,9 +1207,7 @@ class PlanningActionCatalogBuilder:
                         if isinstance(resolved_target, str):
                             projected_refs.add((resolved_target, fact_key))
                 else:
-                    projected_refs = {
-                        (item.node_key, item.fact_key) for item in visible_effects
-                    }
+                    projected_refs = {(item.node_key, item.fact_key) for item in visible_effects}
                 relevant = projected_refs & objective_refs
                 if (
                     not relevant
@@ -1286,15 +1271,19 @@ class PlanningActionCatalogBuilder:
                             if canonical_target_actor is not None
                             else _canonical_node_region(target_projection, definition, target_key)
                         )
-                        if locality in {
-                            "ACTOR_SAME_REGION",
-                            "TARGET_SAME_REGION",
-                            "FACILITY_REGION",
-                            "LOCAL_TARGET",
-                            "LOCAL_TARGET_FACILITY_OR_TRANSPORT",
-                            "REGION",
-                        } and canonical_actor.current_region and target_region and (
-                            canonical_actor.current_region != target_region
+                        if (
+                            locality
+                            in {
+                                "ACTOR_SAME_REGION",
+                                "TARGET_SAME_REGION",
+                                "FACILITY_REGION",
+                                "LOCAL_TARGET",
+                                "LOCAL_TARGET_FACILITY_OR_TRANSPORT",
+                                "REGION",
+                            }
+                            and canonical_actor.current_region
+                            and target_region
+                            and (canonical_actor.current_region != target_region)
                         ):
                             blockers = (*blockers, {"code": "LOCALITY_INVALID"})
                         target_contract = canonical_contracts[action.key].target_contract

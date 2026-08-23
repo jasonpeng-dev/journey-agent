@@ -1,5 +1,12 @@
 import { expect, test } from "@playwright/test";
 
+async function fillCustomGoal(page: import("@playwright/test").Page, value: string) {
+  const objectiveSelect = page.getByLabel("选择任务");
+  await expect(objectiveSelect).toBeEnabled();
+  await objectiveSelect.selectOption("__custom_goal__");
+  await page.getByLabel("自定义目标").fill(value);
+}
+
 test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除游戏", async ({ page }) => {
   const apiOrigin = process.env.E2E_API_ORIGIN;
   await page.route("**/api/**", async (route) => {
@@ -33,7 +40,7 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
   await expect(page.locator(".current-report-panel")).toHaveCount(0);
   await expect(page.getByTestId("goal-composer")).toBeVisible();
   await expect(page.getByText("当前 · 下达目标")).toBeVisible();
-  await page.getByLabel("下达高层目标").fill("open the northern trade route");
+  await fillCustomGoal(page, "open the northern trade route");
   await page.getByRole("button", { name: "开始目标" }).click();
   await expect(page.getByTestId("goal-resolving-status")).toBeVisible();
   await expect(page.getByTestId("goal-accepted-card")).toBeVisible();
@@ -124,7 +131,7 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
   await expect(page.getByText(/等待结算|settle|operation ID/i)).toHaveCount(0);
   await expect(page.getByText(/方案 v\d/)).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "已知世界", exact: true })).toBeVisible();
-  await page.getByLabel("下达高层目标").fill("gather valley intelligence");
+  await fillCustomGoal(page, "gather valley intelligence");
   await page.getByRole("button", { name: "开始目标" }).click();
   await expect(page.getByTestId("goal-composer")).toBeVisible();
   await expect(page.getByTestId("goal-resolving-status")).toBeVisible();
@@ -202,7 +209,7 @@ test("不同 Task 之间切换时不会泄漏 Replan 临时状态", async ({ pag
   const gameId = new URL(page.url()).pathname.split("/").at(-1) ?? "";
 
   // Finish Task 1 first so Task 2 can be used as the long-running Replan case.
-  await page.getByLabel("下达高层目标").fill("gather valley intelligence");
+  await fillCustomGoal(page, "gather valley intelligence");
   await page.getByRole("button", { name: "开始目标" }).click();
   await expect(page.getByTestId("goal-accepted-card")).toBeVisible();
   await page.getByRole("button", { name: "不错，开始规划" }).click();
@@ -223,7 +230,7 @@ test("不同 Task 之间切换时不会泄漏 Replan 临时状态", async ({ pag
   }
   await expect(page.getByText("目标已完成", { exact: true }).first()).toBeVisible();
 
-  await page.getByLabel("下达高层目标").fill("open the northern trade route");
+  await fillCustomGoal(page, "open the northern trade route");
   await page.getByRole("button", { name: "开始目标" }).click();
   await expect(page.locator(".task-tabs button")).toHaveCount(2);
   const firstTaskTab = page.locator(".task-tabs button").first();

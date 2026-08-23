@@ -234,9 +234,7 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
     cycle = session.scalar(select(PlanningCycle).where(PlanningCycle.task_id == task.id))
     assert cycle is not None
     assert cycle.status == "REJECTED"
-    attempt = session.scalar(
-        select(PlanningAttempt).where(PlanningAttempt.cycle_id == cycle.id)
-    )
+    attempt = session.scalar(select(PlanningAttempt).where(PlanningAttempt.cycle_id == cycle.id))
     assert attempt is not None
     assert attempt.status == "REJECTED"
     assert attempt.call_type == "INITIAL_PLAN"
@@ -261,9 +259,7 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key=str(uuid4())
-    ).task
+    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
     assert task is not None
 
     final_task = _start_initial_plan(orchestrator, task)
@@ -684,9 +680,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         },
     )
     assert provider.plan_requests[1].rejected_segment is not None
-    assert provider.plan_requests[1].rejected_segment["steps"][0]["step_id"] == (
-        unknown[0].step_id
-    )
+    assert provider.plan_requests[1].rejected_segment["steps"][0]["step_id"] == (unknown[0].step_id)
     assert provider.plan_requests[1].anti_regression_memory == ()
     parameter_diagnostic = provider.plan_requests[2].repair_diagnostics[0]
     assert parameter_diagnostic.code == "PARAMETER_INVALID"
@@ -723,22 +717,42 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         )
     )
     assert [item.status for item in attempts] == ["REJECTED", "REJECTED", "ACCEPTED"]
-    assert len({
-        json.dumps(request.planner_input.model_dump(mode="json"), sort_keys=True)
-        for request in provider.plan_requests
-    }) == 1
-    assert len({
-        json.dumps(request.objective_scope, sort_keys=True)
-        for request in provider.plan_requests
-    }) == 1
+    assert (
+        len(
+            {
+                json.dumps(request.planner_input.model_dump(mode="json"), sort_keys=True)
+                for request in provider.plan_requests
+            }
+        )
+        == 1
+    )
+    assert (
+        len(
+            {
+                json.dumps(request.objective_scope, sort_keys=True)
+                for request in provider.plan_requests
+            }
+        )
+        == 1
+    )
     assert provider.plan_requests[1].rejected_segment is not None
     assert provider.plan_requests[2].rejected_segment is not None
-    assert session.scalar(select(func.count()).select_from(AgentPlan).where(
-        AgentPlan.task_id == submission.task.id
-    )) == 1
-    assert session.scalar(select(func.count()).select_from(WorldOperation).where(
-        WorldOperation.task_id == submission.task.id
-    )) == 0
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(AgentPlan)
+            .where(AgentPlan.task_id == submission.task.id)
+        )
+        == 1
+    )
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(WorldOperation)
+            .where(WorldOperation.task_id == submission.task.id)
+        )
+        == 0
+    )
     rejected_provider = RecordingProvider(proposals=[unknown, unknown, unknown])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: rejected_provider
@@ -764,23 +778,28 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         .order_by(PlanningCycle.created_at.desc())
     )
     assert rejected_cycle is not None and rejected_cycle.status == "REJECTED"
-    assert session.scalar(
-        select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == rejected.task.id)
-    ) == 0
-    assert session.scalar(
-        select(func.count()).select_from(WorldOperation).where(
-            WorldOperation.task_id == rejected.task.id
+    assert (
+        session.scalar(
+            select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == rejected.task.id)
         )
-    ) == 0
+        == 0
+    )
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(WorldOperation)
+            .where(WorldOperation.task_id == rejected.task.id)
+        )
+        == 0
+    )
+
 
 def test_provider_repair_attempt_limit_comes_from_settings(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert Settings(_env_file=None).model_max_repair_attempts_per_cycle == 2
     unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
-    provider = RecordingProvider(
-        proposals=[unknown, unknown, unknown, unknown, _medical_plan()]
-    )
+    provider = RecordingProvider(proposals=[unknown, unknown, unknown, unknown, _medical_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -792,9 +811,7 @@ def test_provider_repair_attempt_limit_comes_from_settings(
         session, GameInstanceId(runtime.instance.id), settings
     )
 
-    submission = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key=str(uuid4())
-    )
+    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
     assert submission.task is not None
     _start_initial_plan(orchestrator, submission.task)
@@ -981,9 +998,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
 
     provider = OpenAICompatibleGenericProvider(
         settings,
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(503, request=request)
-        ),
+        transport=httpx.MockTransport(lambda request: httpx.Response(503, request=request)),
     )
     with pytest.raises(GenericProviderError) as http_error:
         provider.select_objectives(request)
@@ -1004,9 +1019,7 @@ def test_provider_total_deadline_bounds_a_slow_sync_provider_call() -> None:
             request=_request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        settings, transport=httpx.MockTransport(slow_post)
-    )
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(slow_post))
     with pytest.raises(GenericProviderError) as timed_out:
         provider.select_objectives(request)
 
@@ -1031,6 +1044,7 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
             error=lambda event, **fields: events.append((event, fields)),
         ),
     )
+
     def http_error_response(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             503,
@@ -1100,9 +1114,7 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        settings, transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
     context = provider_module.PlanningContext(
         goal={"objective_keys": ["known_objective"]},
         current_knowledge={"facts": {}},
@@ -1225,8 +1237,7 @@ def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
     assert task_row is not None
     assert session.scalar(select(AgentPlan).where(AgentPlan.task_id == task_row.id)) is None
     assert (
-        session.scalar(select(WorldOperation).where(WorldOperation.task_id == task_row.id))
-        is None
+        session.scalar(select(WorldOperation).where(WorldOperation.task_id == task_row.id)) is None
     )
 
 
@@ -1319,9 +1330,7 @@ def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key=str(uuid4())
-    ).task
+    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
     assert task is not None
     _start_initial_plan(orchestrator, task)
     plan = session.scalar(
@@ -1330,9 +1339,7 @@ def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
     assert plan is not None
     steps = tuple(
         session.scalars(
-            select(AgentStep)
-            .where(AgentStep.plan_id == plan.id)
-            .order_by(AgentStep.sequence)
+            select(AgentStep).where(AgentStep.plan_id == plan.id).order_by(AgentStep.sequence)
         )
     )
     assert len(steps) >= 2
@@ -1396,9 +1403,7 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key=str(uuid4())
-    ).task
+    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
     assert task is not None
     _start_initial_plan(orchestrator, task)
     assert "planning_continuity" not in provider.plan_requests[0].provider_payload()

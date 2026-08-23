@@ -1358,9 +1358,7 @@ class GenericGameService:
                     "The Resource inventory is not known or available",
                     retryable=True,
                 )
-            free_by_pool = {
-                row.pool_key: max(0, row.value - row.reserved_value) for row in rows
-            }
+            free_by_pool = {row.pool_key: max(0, row.value - row.reserved_value) for row in rows}
             available = sum(free_by_pool.values())
             if available < remaining:
                 if inventory_status == "UNKNOWN":
