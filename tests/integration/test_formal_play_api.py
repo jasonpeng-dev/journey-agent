@@ -120,20 +120,7 @@ def _start_planning(client: TestClient, game_id: str, task: dict[str, Any]) -> d
     )
     assert response.status_code == 200, response.text
     assert response.json()["current_task"] is not None
-    task = response.json()["current_task"]
-    # Formal Play performs one Provider attempt per request.  Keep the legacy
-    # helper convenient for tests that only care about the accepted plan while
-    # still driving bounded REPAIR calls explicitly.
-    for _ in range(4):
-        if task["execution_phase"] != "AWAITING_PLAN_ATTEMPT":
-            return task
-        response = client.post(
-            f"/api/v1/games/{game_id}/play/repair-planning",
-            json={"expected_pacing_version": task["pacing_version"]},
-        )
-        assert response.status_code == 200, response.text
-        task = response.json()["current_task"]
-    return task
+    return response.json()["current_task"]
 
 
 def _ack_debrief(client: TestClient, game_id: str, task: dict[str, Any]) -> dict[str, Any]:
@@ -155,13 +142,6 @@ def _drive_task(
             return task, action_results
         if task["execution_phase"] == "AWAITING_PLAN_START":
             task = _start_planning(client, game_id, task)
-        elif task["execution_phase"] == "AWAITING_PLAN_ATTEMPT":
-            response = client.post(
-                f"/api/v1/games/{game_id}/play/repair-planning",
-                json={"expected_pacing_version": task["pacing_version"]},
-            )
-            assert response.status_code == 200, response.text
-            task = response.json()["current_task"]
         elif task["execution_phase"] == "AWAITING_ACTION_ACK":
             task = _ack_action(client, game_id, task)
             action_results.append(task)

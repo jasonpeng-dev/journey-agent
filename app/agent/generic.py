@@ -1366,6 +1366,9 @@ class GenericAgentService:
                     latency_ms=_duration_ms(provider_started_at),
                     finish_reason=None,
                 )
+                planning_cycle.current_attempt = repair_attempt
+                planning_cycle.status = "ERROR"
+                self.db.flush()
                 self._notify_provider_call(
                     "FINISHED",
                     task,
@@ -1391,6 +1394,9 @@ class GenericAgentService:
                     latency_ms=_duration_ms(provider_started_at),
                     finish_reason=None,
                 )
+                planning_cycle.current_attempt = repair_attempt
+                planning_cycle.status = "ERROR"
+                self.db.flush()
                 self._notify_provider_call(
                     "FINISHED",
                     task,

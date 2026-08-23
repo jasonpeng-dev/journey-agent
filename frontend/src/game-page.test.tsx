@@ -5,7 +5,6 @@ import {
   GoalComposer,
   KnownWorldAccordions,
   PlanHistory,
-  PlanningAttemptHistory,
   TaskTabs,
   Timeline,
   WaitingStatus,
@@ -21,7 +20,6 @@ import {
 import type {
   PlayerGameState,
   PublicPlanStep,
-  PublicPlanningAttempt,
   PublicTask,
 } from "./types";
 
@@ -133,84 +131,6 @@ describe("Formal Play player projections", () => {
     expect(screen.getByLabelText("自定义目标")).toHaveValue("打开北部贸易路线");
     fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps every rejected planning draft separate from the next repair attempt", () => {
-    const attempts: PublicPlanningAttempt[] = [
-      {
-        id: "attempt-0",
-        attempt_index: 0,
-        call_type: "INITIAL_PLAN",
-        status: "REJECTED",
-        stop_reason: "OBJECTIVE_COMPLETION",
-        proposal_steps: [
-          {
-            step_id: "draft-0-step",
-            purpose: "first draft",
-            action_key: "travel",
-            actor_key: "actor-a",
-            target_key: "west",
-            parameters: {},
-          },
-        ],
-        validator_violations: [
-          {
-            category: "LOCALITY",
-            dimension: "LOCALITY",
-            summary: "当前行动位置不匹配",
-            step_id: "draft-0-step",
-            actor_key: "actor-a",
-            action_key: "travel",
-            target_key: "west",
-          },
-        ],
-        started_at: null,
-        finished_at: null,
-        latency_ms: 1,
-      },
-      {
-        id: "attempt-1",
-        attempt_index: 1,
-        call_type: "REPAIR",
-        status: "REJECTED",
-        stop_reason: "OBJECTIVE_COMPLETION",
-        proposal_steps: [],
-        validator_violations: [
-          {
-            category: "RESOURCE",
-            dimension: "RESOURCE_QUANTITY",
-            summary: "已知资源数量不足",
-            step_id: null,
-            actor_key: null,
-            action_key: null,
-            target_key: null,
-          },
-        ],
-        started_at: null,
-        finished_at: null,
-        latency_ms: 2,
-      },
-    ];
-    const planningTask: PublicTask = {
-      ...task,
-      execution_phase: "AWAITING_PLAN_ATTEMPT",
-      planning_cycle: {
-        id: "cycle-1",
-        base_call_type: "INITIAL_PLAN",
-        status: "RUNNING",
-        current_attempt: 1,
-        attempts,
-      },
-    };
-
-    render(<PlanningAttemptHistory task={planningTask} pending startedAt={null} />);
-
-    expect(screen.getByTestId("planning-attempt-0")).toBeVisible();
-    expect(screen.getByTestId("planning-attempt-1")).toBeVisible();
-    expect(screen.getByTestId("planning-attempt-pending")).toHaveTextContent("3/3");
-    expect(screen.getByText(/当前行动位置不匹配/)).toBeVisible();
-    expect(screen.getByText(/已知资源数量不足/)).toBeVisible();
-    expect(screen.queryByText("INTERNAL_VALIDATOR_CODE")).not.toBeInTheDocument();
   });
 
   it("synchronously updates the active PLAY cache without overwriting another task history", () => {

@@ -29,10 +29,6 @@ from app.api.schemas.phase_d import (
     PublicPlanHistoryStepStatus,
     PublicPlanInterruptionKind,
     PublicPlanInterruptionResponse,
-    PublicPlanningAttemptResponse,
-    PublicPlanningCycleResponse,
-    PublicPlanningDraftStepResponse,
-    PublicPlanningViolationResponse,
     PublicPlanResponse,
     PublicPlanStepResponse,
     PublicRelationResponse,
@@ -62,8 +58,6 @@ from app.infrastructure.db.models import (
     GameInstance,
     GameInstanceActor,
     GameInstanceResourceState,
-    PlanningAttempt,
-    PlanningCycle,
     PlayerExecutionCheckpoint,
     ScenarioVersion,
     WorldOperation,
@@ -449,7 +443,6 @@ class PlayerProjectionService:
             last_action_step = self.db.get(AgentStep, checkpoint.last_action_step_id)
         else:
             last_action_step = None
-        planning_cycle = _public_planning_cycle(self.db, task.id)
         return PublicTaskResponse(
             id=task.id,
             version=task.version,
@@ -499,7 +492,6 @@ class PlayerProjectionService:
                 )
                 for plan in plans
             ],
-            planning_cycle=planning_cycle,
             timeline=self._timeline(
                 task,
                 definition,
@@ -1312,130 +1304,6 @@ def _provider_calls(task: AgentTask) -> tuple[dict[str, object], ...]:
     if not isinstance(calls, list):
         return ()
     return tuple(item for item in calls if isinstance(item, dict))
-
-
-_PUBLIC_PLANNING_VIOLATION_SUMMARIES = {
-    "TARGET_INTERACTION": ("TARGET_INTERACTION", "目标不满足行动所需的公开交互条件。"),
-    "LOCALITY": ("LOCALITY", "行动者与目标不在允许的本地范围。"),
-    "TRANSPORT_PASSABILITY": ("TRANSPORT", "当前公开交通状态不允许该通行。"),
-    "RESOURCE_QUANTITY": ("RESOURCE", "公开已知资源数量不足。"),
-    "RESOURCE_KNOWLEDGE": ("RESOURCE_KNOWLEDGE", "所需资源的公开库存信息尚未完整。"),
-    "RESOURCE_SOURCE": ("RESOURCE_SOURCE", "所需资源来源尚未由公开信息确定。"),
-    "OBJECTIVE_COVERAGE": ("OBJECTIVE", "方案没有覆盖当前目标要求。"),
-    "OBJECTIVE": ("OBJECTIVE", "方案没有覆盖当前目标要求。"),
-    "ACTOR_COMMAND_REACHABILITY": ("ACTOR", "行动者当前无法接收指令。"),
-    "ACTOR_ELIGIBILITY": ("ACTOR", "所选行动者不满足公开资格约束。"),
-    "PARAMETER": ("PARAMETER", "行动参数不符合公开约束。"),
-    "INFORMATION_BOUNDARY": ("INFORMATION", "需要先获取新的公开信息后再继续规划。"),
-    "SEGMENT_TERMINATION": ("TERMINATION", "方案终止方式不符合当前公开约束。"),
-}
-
-
-def _public_planning_violation(raw: object) -> PublicPlanningViolationResponse:
-    """Project persisted Validator data without exposing internal evidence."""
-
-    item = raw if isinstance(raw, dict) else {}
-    dimension = item.get("dimension")
-    dimension_value = dimension if isinstance(dimension, str) else None
-    category, summary = _PUBLIC_PLANNING_VIOLATION_SUMMARIES.get(
-        dimension_value or "",
-        ("PLAN_CONSTRAINT", "方案违反了一个公开约束。"),
-    )
-
-    def public_key(name: str) -> str | None:
-        value = item.get(name)
-        return value if isinstance(value, str) else None
-
-    return PublicPlanningViolationResponse(
-        category=category,
-        dimension=dimension_value,
-        summary=summary,
-        step_id=public_key("step_id"),
-        actor_key=public_key("actor_key"),
-        action_key=public_key("action_key"),
-        target_key=public_key("target_key"),
-    )
-
-
-def _public_planning_cycle(
-    db: Session,
-    task_id: UUID,
-) -> PublicPlanningCycleResponse | None:
-    cycle = db.scalar(
-        select(PlanningCycle)
-        .where(PlanningCycle.task_id == task_id)
-        .order_by(PlanningCycle.created_at.desc())
-    )
-    if cycle is None:
-        return None
-    attempts = tuple(
-        db.scalars(
-            select(PlanningAttempt)
-            .where(PlanningAttempt.cycle_id == cycle.id)
-            .order_by(PlanningAttempt.attempt_index)
-        )
-    )
-    public_attempts: list[PublicPlanningAttemptResponse] = []
-    for attempt in attempts:
-        proposal = attempt.proposal if isinstance(attempt.proposal, dict) else {}
-        raw_steps = proposal.get("steps", [])
-        steps: list[PublicPlanningDraftStepResponse] = []
-        if isinstance(raw_steps, list):
-            for raw in raw_steps:
-                if not isinstance(raw, dict):
-                    continue
-                step_id = raw.get("step_id")
-                if not isinstance(step_id, str):
-                    continue
-                parameters = raw.get("parameters")
-                steps.append(
-                    PublicPlanningDraftStepResponse(
-                        step_id=step_id,
-                        purpose=str(raw.get("purpose") or ""),
-                        action_key=(
-                            str(raw["action_key"])
-                            if isinstance(raw.get("action_key"), str)
-                            else None
-                        ),
-                        actor_key=(
-                            str(raw["actor_key"])
-                            if isinstance(raw.get("actor_key"), str)
-                            else None
-                        ),
-                        target_key=(
-                            str(raw["target_key"])
-                            if isinstance(raw.get("target_key"), str)
-                            else None
-                        ),
-                        parameters=(parameters if isinstance(parameters, dict) else {}),
-                    )
-                )
-        violations = attempt.validator_violations
-        public_attempts.append(
-            PublicPlanningAttemptResponse(
-                id=attempt.id,
-                attempt_index=attempt.attempt_index,
-                call_type=attempt.call_type,
-                status=attempt.status,
-                stop_reason=attempt.stop_reason,
-                proposal_steps=steps,
-                validator_violations=(
-                    [_public_planning_violation(item) for item in violations]
-                    if isinstance(violations, list)
-                    else []
-                ),
-                started_at=attempt.started_at,
-                finished_at=attempt.finished_at,
-                latency_ms=attempt.latency_ms,
-            )
-        )
-    return PublicPlanningCycleResponse(
-        id=cycle.id,
-        base_call_type=cycle.base_call_type,
-        status=cycle.status,
-        current_attempt=cycle.current_attempt,
-        attempts=public_attempts,
-    )
 
 
 def _call_latency_ms(call: dict[str, object]) -> int:

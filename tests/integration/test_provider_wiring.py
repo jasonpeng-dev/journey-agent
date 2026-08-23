@@ -45,7 +45,6 @@ from app.scenarios.builtin import (
 )
 from app.services.composition import configured_play_orchestrator
 from app.services.game_instances import GameInstanceService
-from app.services.player_projection import _public_planning_cycle
 from app.services.runtime_initialization import RuntimeInitializationService
 
 
@@ -117,13 +116,7 @@ def _runtime(session: Session, definition=STARFIRE_V2):  # type: ignore[no-untyp
 
 def _start_initial_plan(orchestrator, task):  # type: ignore[no-untyped-def]
     checkpoint = orchestrator._ensure_checkpoint(task)
-    task = orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
-    for _ in range(6):
-        checkpoint = orchestrator._ensure_checkpoint(task)
-        if checkpoint.phase != "AWAITING_PLAN_ATTEMPT":
-            return task
-        task = orchestrator.repair_planning(expected_pacing_version=checkpoint.version)
-    return task
+    return orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
 
 
 def _medical_plan() -> tuple[PlanStepProposal, ...]:
@@ -214,7 +207,9 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
 ) -> None:
     provider = RecordingProvider(
         proposals=[
-            (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
+            (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),),
+            (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),),
+            (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),),
         ]
     )
     monkeypatch.setattr(
@@ -229,13 +224,15 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
     checkpoint = orchestrator._ensure_checkpoint(submission.task)
 
     task = orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
-    assert orchestrator._ensure_checkpoint(task).phase == "AWAITING_PLAN_ATTEMPT"
+    assert orchestrator._ensure_checkpoint(task).phase == "BLOCKED"
+    assert task.status.value == "BLOCKED"
+    assert task.last_error_code == "MODEL_PLAN_REJECTED"
     assert session.scalar(select(AgentPlan).where(AgentPlan.task_id == task.id)) is None
     assert session.scalar(select(WorldOperation).where(WorldOperation.task_id == task.id)) is None
 
     cycle = session.scalar(select(PlanningCycle).where(PlanningCycle.task_id == task.id))
     assert cycle is not None
-    assert cycle.status == "RUNNING"
+    assert cycle.status == "REJECTED"
     attempt = session.scalar(
         select(PlanningAttempt).where(PlanningAttempt.cycle_id == cycle.id)
     )
@@ -243,6 +240,54 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
     assert attempt.status == "REJECTED"
     assert attempt.call_type == "INITIAL_PLAN"
     assert attempt.validator_violations
+    assert (task.objective_resolution_metadata or {}).get("operation_durations")
+    assert len(provider.plan_requests) == 3
+
+
+def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = RecordingProvider(
+        proposals=[
+            (PlanStepProposal(candidate_id="candidate_invented"),),
+            _medical_plan(),
+        ]
+    )
+    monkeypatch.setattr(
+        "app.services.composition.build_generic_provider", lambda _settings: provider
+    )
+    runtime, _scope = _runtime(session, MEDICAL_EMERGENCY_V2)
+    orchestrator = configured_play_orchestrator(
+        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+    )
+    task = orchestrator.submit_goal(
+        "stabilize the patient", idempotency_key=str(uuid4())
+    ).task
+    assert task is not None
+
+    final_task = _start_initial_plan(orchestrator, task)
+    assert final_task.status.value == "ACTIVE"
+    assert orchestrator._ensure_checkpoint(final_task).phase == "AWAITING_ACTION_ACK"
+    assert [request.call_type for request in provider.plan_requests] == [
+        "INITIAL_PLAN",
+        "REPAIR",
+    ]
+    cycle = session.scalar(select(PlanningCycle).where(PlanningCycle.task_id == task.id))
+    assert cycle is not None and cycle.status == "ACCEPTED"
+    attempts = tuple(
+        session.scalars(
+            select(PlanningAttempt)
+            .where(PlanningAttempt.cycle_id == cycle.id)
+            .order_by(PlanningAttempt.attempt_index)
+        )
+    )
+    assert [attempt.status for attempt in attempts] == ["REJECTED", "ACCEPTED"]
+    assert (
+        session.scalar(
+            select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == task.id)
+        )
+        == 1
+    )
 
 
 def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
@@ -461,8 +506,6 @@ def test_starfire_catalog_evolves_from_failure_to_unlock_and_completion(
             break
         if checkpoint.phase == "AWAITING_PLAN_START":
             orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
-        elif checkpoint.phase == "AWAITING_PLAN_ATTEMPT":
-            orchestrator.repair_planning(expected_pacing_version=checkpoint.version)
         elif checkpoint.phase == "AWAITING_ACTION_ACK":
             orchestrator.acknowledge_action(expected_pacing_version=checkpoint.version)
         elif checkpoint.phase == "AWAITING_REPLAN_ACK":
@@ -681,20 +724,6 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert session.scalar(select(func.count()).select_from(WorldOperation).where(
         WorldOperation.task_id == submission.task.id
     )) == 0
-    public_cycle = _public_planning_cycle(session, submission.task.id)
-    assert public_cycle is not None
-    assert [item.status for item in public_cycle.attempts] == [
-        "REJECTED",
-        "REJECTED",
-        "ACCEPTED",
-    ]
-    assert all(
-        "code" not in violation.model_dump()
-        and "required" not in violation.model_dump()
-        for attempt in public_cycle.attempts
-        for violation in attempt.validator_violations
-    )
-
     rejected_provider = RecordingProvider(proposals=[unknown, unknown, unknown])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: rejected_provider
@@ -728,14 +757,6 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
             WorldOperation.task_id == rejected.task.id
         )
     ) == 0
-    rejected_public = _public_planning_cycle(session, rejected.task.id)
-    assert rejected_public is not None
-    assert [item.status for item in rejected_public.attempts] == [
-        "REJECTED",
-        "REJECTED",
-        "REJECTED",
-    ]
-
 
 def test_provider_repair_attempt_limit_comes_from_settings(
     session: Session, monkeypatch: pytest.MonkeyPatch
@@ -1142,6 +1163,56 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
     assert calls[-1]["context_bytes"] is not None
     assert calls[-1]["request_size_bytes"] is not None
     assert calls[-1]["latency_ms"] >= 0
+    cycle = session.scalar(
+        select(PlanningCycle)
+        .where(PlanningCycle.task_id == persisted.id)
+        .order_by(PlanningCycle.created_at.desc())
+    )
+    assert cycle is not None and cycle.status == "ERROR"
+
+
+def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
+    client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rejected = (PlanStepProposal(candidate_id="candidate_invented"),)
+    provider = RecordingProvider(proposals=[rejected, rejected, rejected])
+    monkeypatch.setattr(
+        "app.services.composition.build_generic_provider", lambda _settings: provider
+    )
+    version = require_builtin_v2_version(session, MEDICAL_EMERGENCY_V2)
+    session.commit()
+    game = client.post(
+        "/api/v1/games",
+        json={"scenario_version_id": str(version.id), "idempotency_key": str(uuid4())},
+    )
+    assert game.status_code == 201, game.text
+    game_id = str(game.json()["id"])
+    goal = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
+    )
+    assert goal.status_code == 200, goal.text
+    task = goal.json()["task"]
+
+    response = client.post(
+        f"/api/v1/games/{game_id}/play/start-planning",
+        json={"expected_pacing_version": task["pacing_version"]},
+    )
+
+    assert response.status_code == 200, response.text
+    final_task = response.json()["current_task"]
+    assert final_task["status"] == "MODEL_PLAN_REJECTED"
+    assert final_task["execution_phase"] == "BLOCKED"
+    assert final_task["plan_history"] == []
+    assert "planning_cycle" not in final_task
+    assert len(provider.plan_requests) == 3
+    task_row = session.get(AgentTask, UUID(final_task["id"]))
+    assert task_row is not None
+    assert session.scalar(select(AgentPlan).where(AgentPlan.task_id == task_row.id)) is None
+    assert (
+        session.scalar(select(WorldOperation).where(WorldOperation.task_id == task_row.id))
+        is None
+    )
 
 
 def test_replan_provider_failure_persists_failure_and_action_history(
@@ -1214,3 +1285,9 @@ def test_replan_provider_failure_persists_failure_and_action_history(
     assert calls[-1]["outcome"] == "TIMEOUT"
     assert calls[-1]["call_type"] == "REPLAN"
     assert calls[-1]["latency_ms"] >= 0
+    cycle = session.scalar(
+        select(PlanningCycle)
+        .where(PlanningCycle.task_id == persisted.id)
+        .order_by(PlanningCycle.created_at.desc())
+    )
+    assert cycle is not None and cycle.status == "ERROR"

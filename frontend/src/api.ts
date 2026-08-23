@@ -81,7 +81,6 @@ export const api = {
   startInitialPlanning: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/start-planning`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   acknowledgeDebrief: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/acknowledge-debrief`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   replan: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/replan`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
-  repairPlanning: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/repair-planning`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   abandonTask: (id: string, taskId: string) => request<{ task_id: string; status: string }>(`/api/v1/games/${id}/tasks/${taskId}/abandon`, { method: "POST" }),
   decideApproval: (id: string, decisionId: string, approve: boolean, taskVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/approvals/${decisionId}/${approve ? "approve" : "reject"}`, { method: "POST", body: JSON.stringify({ expected_task_version: taskVersion }) }),
   developerSnapshot: (id: string, token: string) => request<DeveloperSnapshot>(`/api/v1/developer/games/${id}/snapshot`, { headers: { "x-developer-token": token } }),
