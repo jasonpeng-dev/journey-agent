@@ -915,7 +915,7 @@ export function GamePage() {
     onSuccess: () => void refresh(),
   });
   const archive = useMutation({
-    mutationFn: () => api.archiveGame(gameId),
+    mutationFn: (revision: number) => api.archiveGame(gameId, revision),
     onSuccess: () => void refresh(),
   });
   const decision = useMutation({
@@ -1183,7 +1183,7 @@ export function GamePage() {
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>
-      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span></div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <button className="danger-button" disabled={busy} onClick={() => archive.mutate()}>结束并归档游戏</button>}</div></section>
+      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span></div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <button className="danger-button" disabled={busy || gameHasActiveTask} onClick={() => archive.mutate(liveGame.runtime_revision)}>结束并归档游戏</button>}</div></section>
       {developerOpen && <section className="developer-panel-v2"><label>开发者凭证<input type="password" value={developerToken} onChange={(event) => setDeveloperToken(event.target.value)} /></label>{developer.error && <p className="developer-error">开发者访问被拒绝。</p>}{developer.data && <><h2>内部运行时快照</h2><pre>{JSON.stringify(developer.data, null, 2)}</pre></>}</section>}
     </main>
   );

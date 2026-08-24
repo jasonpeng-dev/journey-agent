@@ -689,9 +689,17 @@ def test_unsupported_goal_does_not_create_a_task(client: TestClient) -> None:
     assert no_task.json()["error"]["code"] == "AGENT_TASK_NOT_ACTIVE"
     missing_task = client.post(f"/api/v1/games/{game_id}/tasks/{uuid4()}/abandon")
     assert missing_task.status_code in (404, 409)
-    assert client.post(f"/api/v1/games/{game_id}/archive").status_code == 200
-    archived_again = client.post(f"/api/v1/games/{game_id}/archive")
-    assert archived_again.status_code == 200
+    game = client.get(f"/api/v1/games/{game_id}").json()
+    assert client.post(
+        f"/api/v1/games/{game_id}/archive",
+        json={"expected_runtime_revision": game["runtime_revision"]},
+    ).status_code == 200
+    archived_again = client.post(
+        f"/api/v1/games/{game_id}/archive",
+        json={"expected_runtime_revision": game["runtime_revision"] + 1},
+    )
+    assert archived_again.status_code == 409
+    assert archived_again.json()["error"]["code"] == "GAME_INSTANCE_TRANSITION_INVALID"
     archived_goal = client.post(
         f"/api/v1/games/{game_id}/goals",
         json={"goal": "gather valley intelligence", "idempotency_key": str(uuid4())},

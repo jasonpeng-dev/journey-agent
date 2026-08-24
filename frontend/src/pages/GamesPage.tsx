@@ -8,7 +8,11 @@ import { errorText, uiLabel } from "../ui";
 function GameCards({ games, archived }: { games: GameSummary[] | undefined; archived: boolean }) {
   const queryClient = useQueryClient();
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["games"] });
-  const archive = useMutation({ mutationFn: (id: string) => api.archiveGame(id), onSuccess: () => void refresh() });
+  const archive = useMutation({
+    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
+      api.archiveGame(id, revision),
+    onSuccess: () => void refresh(),
+  });
   const remove = useMutation({ mutationFn: (id: string) => api.deleteGame(id), onSuccess: () => void refresh() });
   const permanentlyDelete = (id: string) => {
     if (window.confirm("永久删除该游戏及其任务、计划和执行历史？\n\n此操作无法恢复。")) remove.mutate(id);
@@ -22,7 +26,7 @@ function GameCards({ games, archived }: { games: GameSummary[] | undefined; arch
         <h2>游戏 {game.id.slice(0, 8)}</h2><p>场景版本 {game.scenario_version_number}</p>
         <code>{game.scenario_content_hash.slice(0, 12)}</code>
       </Link>
-      <div className="game-card-actions"><Link className="secondary-button" to={`/games/${game.id}`}>{archived ? "查看记录" : "继续游戏"}</Link>{!archived && <button disabled={archive.isPending || remove.isPending} onClick={() => archive.mutate(game.id)}>结束并归档</button>}<button className="danger-button" disabled={archive.isPending || remove.isPending} onClick={() => permanentlyDelete(game.id)}>永久删除</button></div>
+      <div className="game-card-actions"><Link className="secondary-button" to={`/games/${game.id}`}>{archived ? "查看记录" : "继续游戏"}</Link>{!archived && <button disabled={archive.isPending || remove.isPending} onClick={() => archive.mutate({ id: game.id, revision: game.runtime_revision })}>结束并归档</button>}<button className="danger-button" disabled={archive.isPending || remove.isPending} onClick={() => permanentlyDelete(game.id)}>永久删除</button></div>
     </article>)}</div>
   </>;
 }

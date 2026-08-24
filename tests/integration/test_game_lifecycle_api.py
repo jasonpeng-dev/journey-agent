@@ -101,10 +101,18 @@ def test_abandon_cancels_unsettled_operation_and_archive_is_read_only(
     ]
     assert history.json()["operations"][0]["status"] == "CANCELLED"
 
-    archived = client.post(f"/api/v1/games/{game.id}/archive")
+    archived = client.post(
+        f"/api/v1/games/{game.id}/archive",
+        json={"expected_runtime_revision": game.runtime_revision},
+    )
     assert archived.status_code == 200
     assert archived.json()["status"] == "ARCHIVED"
-    assert client.post(f"/api/v1/games/{game.id}/archive").status_code == 200
+    archived_again = client.post(
+        f"/api/v1/games/{game.id}/archive",
+        json={"expected_runtime_revision": archived.json()["runtime_revision"]},
+    )
+    assert archived_again.status_code == 409
+    assert archived_again.json()["error"]["code"] == "GAME_INSTANCE_TRANSITION_INVALID"
     assert client.get("/api/v1/games?status=archived").json()[0]["id"] == str(game.id)
     with pytest.raises(GameLifecycleError, match="Only an active GameInstance"):
         GenericGameService(session, scope).execute(
@@ -233,6 +241,10 @@ def test_archived_game_can_be_permanently_deleted(client: TestClient, session: S
         },
     ).json()
     game_id = created["id"]
-    assert client.post(f"/api/v1/games/{game_id}/archive").status_code == 200
+    game = client.get(f"/api/v1/games/{game_id}").json()
+    assert client.post(
+        f"/api/v1/games/{game_id}/archive",
+        json={"expected_runtime_revision": game["runtime_revision"]},
+    ).status_code == 200
     assert client.delete(f"/api/v1/games/{game_id}").status_code == 204
     assert all(game["id"] != game_id for game in client.get("/api/v1/games?status=archived").json())

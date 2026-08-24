@@ -13,6 +13,7 @@ from app.agent.generic import GenericAgentError
 from app.agent.provider import GenericProviderError
 from app.api.schemas.phase_d import (
     ApprovalDecisionRequest,
+    ArchiveGameRequest,
     GameSummaryResponse,
     GoalSubmissionRequest,
     GoalSubmissionResponse,
@@ -276,9 +277,16 @@ def reject_action(
 
 
 @router.post("/{game_instance_id}/archive", response_model=GameSummaryResponse)
-def archive_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> GameSummaryResponse:
+def archive_game(
+    game_instance_id: UUID,
+    request: ArchiveGameRequest,
+    db: Session = Depends(get_db),
+) -> GameSummaryResponse:
     try:
-        game = GameLifecycleService(db).archive(game_instance_id)
+        game = GameLifecycleService(db).archive(
+            game_instance_id,
+            expected_runtime_revision=request.expected_runtime_revision,
+        )
         db.commit()
         return game_summary(db, game)
     except GameLifecycleError as exc:
@@ -370,6 +378,7 @@ def game_summary(db: Session, game: GameInstance) -> GameSummaryResponse:
         scenario_version_number=version.version_number,
         scenario_content_hash=version.content_hash,
         status=PublicGameStatus(game.status.value),
+        runtime_revision=game.runtime_revision,
         active_task_id=active_task,
         created_at=game.created_at,
         updated_at=game.updated_at,

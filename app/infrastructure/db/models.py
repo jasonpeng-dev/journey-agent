@@ -147,6 +147,15 @@ class GameInstance(UUIDPrimaryKey, TimestampMixin, Base):
     scenario_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("scenario_versions.id", ondelete="RESTRICT")
     )
+    forked_from_game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "game_instances.id",
+            name="fk_game_instances_forked_from_game_instance",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[GameInstanceStatus] = mapped_column(
         Enum(GameInstanceStatus, native_enum=False, length=30),
         default=GameInstanceStatus.PENDING_INITIALIZATION,

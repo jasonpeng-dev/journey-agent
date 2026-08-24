@@ -280,6 +280,10 @@ class NewGameRequest(ApiModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class ArchiveGameRequest(ApiModel):
+    expected_runtime_revision: int = Field(ge=0)
+
+
 class GameSummaryResponse(ApiModel):
     id: UUID
     scenario_id: UUID
@@ -287,6 +291,7 @@ class GameSummaryResponse(ApiModel):
     scenario_version_number: int = Field(ge=1)
     scenario_content_hash: str = Field(min_length=64, max_length=64)
     status: PublicGameStatus
+    runtime_revision: int = Field(ge=0)
     active_task_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
