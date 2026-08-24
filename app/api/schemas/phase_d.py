@@ -284,6 +284,10 @@ class ArchiveGameRequest(ApiModel):
     expected_runtime_revision: int = Field(ge=0)
 
 
+class ForkGameRequest(ApiModel):
+    creation_key: str = Field(min_length=1, max_length=160)
+
+
 class GameSummaryResponse(ApiModel):
     id: UUID
     scenario_id: UUID

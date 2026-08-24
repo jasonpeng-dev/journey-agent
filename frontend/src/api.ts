@@ -77,6 +77,10 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ expected_runtime_revision: expectedRuntimeRevision }),
   }),
+  forkGame: (id: string, creationKey: string) => request<GameSummary>(`/api/v1/games/${id}/fork`, {
+    method: "POST",
+    body: JSON.stringify({ creation_key: creationKey }),
+  }),
   deleteGame: (id: string) => request<void>(`/api/v1/games/${id}`, { method: "DELETE" }),
   playState: (id: string, taskId?: string | null) => request<PlayerGameState>(`/api/v1/games/${id}/play${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
   submitGoal: (id: string, goal: string, idempotencyKey: string) => request<GoalSubmission>(`/api/v1/games/${id}/goals`, { method: "POST", body: JSON.stringify({ goal, idempotency_key: idempotencyKey }) }),

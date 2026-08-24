@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.enums import (
@@ -195,6 +195,11 @@ class GameLifecycleService:
             GameInstanceNodeState,
         ):
             self.db.execute(sql_delete(model).where(model.game_instance_id == deleted_id))
+        self.db.execute(
+            update(GameInstance)
+            .where(GameInstance.forked_from_game_instance_id == deleted_id)
+            .values(forked_from_game_instance_id=None)
+        )
         self.db.execute(sql_delete(GameInstance).where(GameInstance.id == deleted_id))
         self.db.flush()
         return deleted_id
