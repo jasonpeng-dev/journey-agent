@@ -690,10 +690,13 @@ def test_unsupported_goal_does_not_create_a_task(client: TestClient) -> None:
     missing_task = client.post(f"/api/v1/games/{game_id}/tasks/{uuid4()}/abandon")
     assert missing_task.status_code in (404, 409)
     game = client.get(f"/api/v1/games/{game_id}").json()
-    assert client.post(
-        f"/api/v1/games/{game_id}/archive",
-        json={"expected_runtime_revision": game["runtime_revision"]},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/v1/games/{game_id}/archive",
+            json={"expected_runtime_revision": game["runtime_revision"]},
+        ).status_code
+        == 200
+    )
     archived_again = client.post(
         f"/api/v1/games/{game_id}/archive",
         json={"expected_runtime_revision": game["runtime_revision"] + 1},

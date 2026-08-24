@@ -44,7 +44,7 @@ afterEach(() => {
 
 describe("Game lifecycle actions", () => {
   it("offers Fork from an archived card and navigates to the new target", async () => {
-    vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue("creation-key");
+    vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000001");
     const fork = vi.spyOn(api, "forkGame").mockResolvedValue({
       ...archivedGame,
       id: "forked-game",
@@ -55,7 +55,7 @@ describe("Game lifecycle actions", () => {
 
     expect(screen.getByRole("link", { name: "查看记录" })).toBeVisible();
     screen.getByRole("button", { name: "以归档状态新开一局" }).click();
-    await waitFor(() => expect(fork).toHaveBeenCalledWith("source-game", "creation-key"));
+    await waitFor(() => expect(fork).toHaveBeenCalledWith("source-game", "00000000-0000-0000-0000-000000000001"));
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/games/forked-game"));
   });
 

@@ -234,9 +234,7 @@ class GameForkService:
             )
         )
         node_definitions = {item.key: item for item in definition.world.nodes}
-        fact_keys = {
-            (node.key, fact.key) for node in definition.world.nodes for fact in node.facts
-        }
+        fact_keys = {(node.key, fact.key) for node in definition.world.nodes for fact in node.facts}
         expected_regions = {
             node.key
             for node in definition.world.nodes
@@ -283,9 +281,7 @@ class GameForkService:
             )
         return nodes, facts, resources, regions, relations, actors
 
-    def _copy_nodes(
-        self, target: GameInstance, rows: tuple[GameInstanceNodeState, ...]
-    ) -> None:
+    def _copy_nodes(self, target: GameInstance, rows: tuple[GameInstanceNodeState, ...]) -> None:
         for row in rows:
             target_state = GameInstanceNodeState(
                 game_instance_id=target.id,
@@ -296,9 +292,7 @@ class GameForkService:
             )
             self.db.add(target_state)
 
-    def _copy_facts(
-        self, target: GameInstance, rows: tuple[GameInstanceFactState, ...]
-    ) -> None:
+    def _copy_facts(self, target: GameInstance, rows: tuple[GameInstanceFactState, ...]) -> None:
         for row in rows:
             self.db.add(
                 GameInstanceFactState(

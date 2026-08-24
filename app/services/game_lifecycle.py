@@ -93,9 +93,7 @@ class GameLifecycleService:
             raise GameLifecycleError("GAME_INSTANCE_NOT_FOUND", "The Game does not exist")
         return instance
 
-    def archive(
-        self, game_instance_id: UUID, *, expected_runtime_revision: int
-    ) -> GameInstance:
+    def archive(self, game_instance_id: UUID, *, expected_runtime_revision: int) -> GameInstance:
         instance = self._locked_owned_instance(game_instance_id)
         if instance.status != GameInstanceStatus.ACTIVE:
             raise GameLifecycleError(
@@ -339,11 +337,10 @@ def require_active_instance(instance: GameInstance) -> None:
 
 
 def require_scope_writable(db: Session, game_instance_id: UUID) -> None:
-    instance = db.scalar(
-        select(GameInstance)
-        .where(GameInstance.id == game_instance_id)
-        .with_for_update()
-    )
+    with db.no_autoflush:
+        instance = db.scalar(
+            select(GameInstance).where(GameInstance.id == game_instance_id).with_for_update()
+        )
     if instance is None:
         raise GameLifecycleError("GAME_INSTANCE_NOT_FOUND", "The Game does not exist")
     require_active_instance(instance)

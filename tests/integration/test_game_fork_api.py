@@ -164,25 +164,42 @@ def test_archived_source_forks_exact_state_without_history(
         source_actor.command_reachability,
         source_actor.status,
     )
-    assert session.scalar(
-        select(func.count()).select_from(ConversationSession).where(
-            ConversationSession.game_instance_id == target_id
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ConversationSession)
+            .where(ConversationSession.game_instance_id == target_id)
         )
-    ) == 1
-    assert session.scalar(
-        select(func.count()).select_from(ConversationMessage).join(
-            ConversationSession,
-            ConversationMessage.session_id == ConversationSession.id,
-        ).where(ConversationSession.game_instance_id == target_id)
-    ) == 0
-    assert session.scalar(
-        select(func.count()).select_from(AgentTask).where(AgentTask.game_instance_id == target_id)
-    ) == 0
-    assert session.scalar(
-        select(func.count()).select_from(WorldOperation).where(
-            WorldOperation.game_instance_id == target_id
+        == 1
+    )
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ConversationMessage)
+            .join(
+                ConversationSession,
+                ConversationMessage.session_id == ConversationSession.id,
+            )
+            .where(ConversationSession.game_instance_id == target_id)
         )
-    ) == 0
+        == 0
+    )
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(AgentTask)
+            .where(AgentTask.game_instance_id == target_id)
+        )
+        == 0
+    )
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(WorldOperation)
+            .where(WorldOperation.game_instance_id == target_id)
+        )
+        == 0
+    )
 
     goal = client.post(
         f"/api/v1/games/{target_id}/goals",
@@ -197,15 +214,9 @@ def test_same_archive_supports_multiple_forks_and_retry_is_idempotent(
 ) -> None:
     source = _prepare_archived_game(client, session)
     source_id = source["id"]
-    first = client.post(
-        f"/api/v1/games/{source_id}/fork", json={"creation_key": "repeat-one"}
-    )
-    retry = client.post(
-        f"/api/v1/games/{source_id}/fork", json={"creation_key": "repeat-one"}
-    )
-    second = client.post(
-        f"/api/v1/games/{source_id}/fork", json={"creation_key": "repeat-two"}
-    )
+    first = client.post(f"/api/v1/games/{source_id}/fork", json={"creation_key": "repeat-one"})
+    retry = client.post(f"/api/v1/games/{source_id}/fork", json={"creation_key": "repeat-one"})
+    second = client.post(f"/api/v1/games/{source_id}/fork", json={"creation_key": "repeat-two"})
     assert first.status_code == retry.status_code == second.status_code == 201
     assert first.json()["id"] == retry.json()["id"]
     assert first.json()["id"] != second.json()["id"]
@@ -222,13 +233,9 @@ def test_active_source_and_reused_key_conflicts_are_rejected(
     assert rejected.json()["error"]["code"] == "FORK_SOURCE_NOT_ARCHIVED"
 
     source = _prepare_archived_game(client, session)
-    first = client.post(
-        f"/api/v1/games/{source['id']}/fork", json={"creation_key": "shared-key"}
-    )
+    first = client.post(f"/api/v1/games/{source['id']}/fork", json={"creation_key": "shared-key"})
     other = _prepare_archived_game(client, session)
-    conflict = client.post(
-        f"/api/v1/games/{other['id']}/fork", json={"creation_key": "shared-key"}
-    )
+    conflict = client.post(f"/api/v1/games/{other['id']}/fork", json={"creation_key": "shared-key"})
     assert first.status_code == 201
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "FORK_CREATION_KEY_REUSED"
@@ -246,16 +253,17 @@ def test_fork_failure_rolls_back_target_and_source_delete_keeps_target(
     original_name = actor.name
     actor.name = "tampered archived actor"
     session.commit()
-    failed = client.post(
-        f"/api/v1/games/{source_id}/fork", json={"creation_key": "rollback-key"}
-    )
+    failed = client.post(f"/api/v1/games/{source_id}/fork", json={"creation_key": "rollback-key"})
     assert failed.status_code == 409
     assert failed.json()["error"]["code"] == "FORK_SOURCE_RUNTIME_INVALID"
-    assert session.scalar(
-        select(func.count()).select_from(GameInstance).where(
-            GameInstance.creation_key == "rollback-key"
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(GameInstance)
+            .where(GameInstance.creation_key == "rollback-key")
         )
-    ) == 0
+        == 0
+    )
 
     actor.name = original_name
     session.commit()

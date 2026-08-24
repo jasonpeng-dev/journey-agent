@@ -242,9 +242,12 @@ def test_archived_game_can_be_permanently_deleted(client: TestClient, session: S
     ).json()
     game_id = created["id"]
     game = client.get(f"/api/v1/games/{game_id}").json()
-    assert client.post(
-        f"/api/v1/games/{game_id}/archive",
-        json={"expected_runtime_revision": game["runtime_revision"]},
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/v1/games/{game_id}/archive",
+            json={"expected_runtime_revision": game["runtime_revision"]},
+        ).status_code
+        == 200
+    )
     assert client.delete(f"/api/v1/games/{game_id}").status_code == 204
     assert all(game["id"] != game_id for game in client.get("/api/v1/games?status=archived").json())

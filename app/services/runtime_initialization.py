@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.domain.enums import GameInstanceStatus, NodeStatus, RelationVisibility
 from app.domain.resources import (
@@ -97,16 +97,61 @@ class RuntimeInitializationService:
             )
         definition = ScenarioVersionRepository(self.db).load(scenario_version_id).definition
         start_key = definition.initialization.start_node_key
-        instance = GameInstance(
-            player_id=player_id,
-            scenario_version_id=scenario_version_id,
-            status=GameInstanceStatus.PENDING_INITIALIZATION,
-            current_node_key=start_key,
-            creation_key=creation_key,
-            runtime_revision=0,
-        )
-        self.db.add(instance)
-        self.db.flush()
+        if self._supports_fork_provenance_schema():
+            instance = GameInstance(
+                player_id=player_id,
+                scenario_version_id=scenario_version_id,
+                status=GameInstanceStatus.PENDING_INITIALIZATION,
+                current_node_key=start_key,
+                creation_key=creation_key,
+                runtime_revision=0,
+            )
+            self.db.add(instance)
+            self.db.flush()
+        else:
+            instance_id = uuid4()
+            now = datetime.now(UTC)
+            self.db.execute(
+                text(
+                    """
+                    INSERT INTO game_instances (
+                        player_id, scenario_version_id, status, current_node_key,
+                        creation_key, runtime_revision, id, created_at, updated_at
+                    ) VALUES (
+                        :player_id, :scenario_version_id, :status, :current_node_key,
+                        :creation_key, :runtime_revision, :id, :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "player_id": player_id.hex,
+                    "scenario_version_id": scenario_version_id.hex,
+                    "status": GameInstanceStatus.PENDING_INITIALIZATION.value,
+                    "current_node_key": start_key,
+                    "creation_key": creation_key,
+                    "runtime_revision": 0,
+                    "id": instance_id.hex,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            loaded_instance = self.db.scalar(
+                select(GameInstance)
+                .options(
+                    load_only(
+                        GameInstance.id,
+                        GameInstance.player_id,
+                        GameInstance.scenario_version_id,
+                        GameInstance.status,
+                        GameInstance.current_node_key,
+                        GameInstance.creation_key,
+                        GameInstance.runtime_revision,
+                    )
+                )
+                .where(GameInstance.id == instance_id)
+            )
+            assert loaded_instance is not None
+            instance = loaded_instance
         for node in definition.world.nodes:
             status = (
                 NodeStatus.ENTERED
@@ -308,12 +353,31 @@ class RuntimeInitializationService:
         return InitializedRuntime(instance=instance, session=session, created=True)
 
     def _existing(self, player_id: UUID, creation_key: str) -> GameInstance | None:
+        # Keep the idempotency probe compatible with databases at the r8
+        # migration boundary.  Provenance is introduced later, but replay
+        # only needs the stable initialization columns below.
         return self.db.scalar(
-            select(GameInstance).where(
+            select(GameInstance)
+            .options(
+                load_only(
+                    GameInstance.id,
+                    GameInstance.player_id,
+                    GameInstance.scenario_version_id,
+                    GameInstance.status,
+                    GameInstance.current_node_key,
+                    GameInstance.creation_key,
+                    GameInstance.runtime_revision,
+                )
+            )
+            .where(
                 GameInstance.player_id == player_id,
                 GameInstance.creation_key == creation_key,
             )
         )
+
+    def _supports_fork_provenance_schema(self) -> bool:
+        columns = inspect(self.db.connection()).get_columns("game_instances")
+        return "forked_from_game_instance_id" in {str(item["name"]) for item in columns}
 
     def _supports_scoped_resource_schema(self) -> bool:
         # Use the Session's active connection.  Inspecting the Engine would
