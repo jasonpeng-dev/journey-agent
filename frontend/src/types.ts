@@ -48,6 +48,7 @@ export type ScenarioExample = { key: string; name: string; description: string; 
 export type GameSummary = {
   id: string; scenario_id: string; scenario_version_id: string; scenario_version_number: number;
   scenario_content_hash: string; status: "ACTIVE" | "SUSPENDED" | "ARCHIVED" | "FAILED" | "COMPLETED";
+  runtime_revision: number;
   active_task_id: string | null; created_at: string; updated_at: string;
 };
 

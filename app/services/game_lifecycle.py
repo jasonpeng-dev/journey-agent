@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.enums import (
@@ -93,15 +93,37 @@ class GameLifecycleService:
             raise GameLifecycleError("GAME_INSTANCE_NOT_FOUND", "The Game does not exist")
         return instance
 
-    def archive(self, game_instance_id: UUID) -> GameInstance:
-        instance = self.get(game_instance_id)
-        if instance.status == GameInstanceStatus.ARCHIVED:
-            return instance
-        if instance.status not in {GameInstanceStatus.ACTIVE, GameInstanceStatus.SUSPENDED}:
+    def archive(self, game_instance_id: UUID, *, expected_runtime_revision: int) -> GameInstance:
+        instance = self._locked_owned_instance(game_instance_id)
+        if instance.status != GameInstanceStatus.ACTIVE:
             raise GameLifecycleError(
-                "GAME_INSTANCE_TRANSITION_INVALID", "Only an active or suspended Game can archive"
+                "GAME_INSTANCE_TRANSITION_INVALID", "Only an active Game can archive"
             )
-        self._cancel_pending(instance.id, abort_task=True)
+        if instance.runtime_revision != expected_runtime_revision:
+            raise GameLifecycleError(
+                "GAME_INSTANCE_CONFLICT",
+                "The GameInstance changed before the lifecycle transition",
+            )
+        if self._has_non_terminal_task(instance.id):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_TASK_ACTIVE",
+                "The Game has an active Task and cannot archive",
+            )
+        if self._has_pending_operation(instance.id):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_OPERATION_PENDING",
+                "The Game has a pending WorldOperation and cannot archive",
+            )
+        if self._has_pending_decision(instance.id):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_DECISION_PENDING",
+                "The Game has a pending ActionDecisionRequest and cannot archive",
+            )
+        if self._has_reservation(instance.id):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_RESERVATION_ACTIVE",
+                "The Game has reserved resources and cannot archive",
+            )
         instance.status = GameInstanceStatus.ARCHIVED
         instance.runtime_revision += 1
         self.db.flush()
@@ -171,12 +193,17 @@ class GameLifecycleService:
             GameInstanceNodeState,
         ):
             self.db.execute(sql_delete(model).where(model.game_instance_id == deleted_id))
+        self.db.execute(
+            update(GameInstance)
+            .where(GameInstance.forked_from_game_instance_id == deleted_id)
+            .values(forked_from_game_instance_id=None)
+        )
         self.db.execute(sql_delete(GameInstance).where(GameInstance.id == deleted_id))
         self.db.flush()
         return deleted_id
 
     def abandon_task(self, game_instance_id: UUID, task_id: UUID) -> AgentTask:
-        instance = self.get(game_instance_id)
+        instance = self._locked_owned_instance(game_instance_id)
         require_active_instance(instance)
         task = self.db.get(AgentTask, task_id)
         if task is None or task.game_instance_id != instance.id:
@@ -190,6 +217,72 @@ class GameLifecycleService:
         task.completed_at = datetime.now(UTC)
         self.db.flush()
         return task
+
+    def _locked_owned_instance(self, game_instance_id: UUID) -> GameInstance:
+        player = self.platform_player()
+        instance = self.db.scalar(
+            select(GameInstance)
+            .where(
+                GameInstance.id == game_instance_id,
+                GameInstance.player_id == player.id,
+            )
+            .with_for_update()
+        )
+        if instance is None:
+            raise GameLifecycleError("GAME_INSTANCE_NOT_FOUND", "The Game does not exist")
+        return instance
+
+    def _has_non_terminal_task(self, game_instance_id: UUID) -> bool:
+        return (
+            self.db.scalar(
+                select(func.count())
+                .select_from(AgentTask)
+                .where(
+                    AgentTask.game_instance_id == game_instance_id,
+                    AgentTask.status.in_(_NON_TERMINAL_TASK_STATUSES),
+                )
+            )
+            or 0
+        ) > 0
+
+    def _has_pending_operation(self, game_instance_id: UUID) -> bool:
+        return (
+            self.db.scalar(
+                select(func.count())
+                .select_from(WorldOperation)
+                .where(
+                    WorldOperation.game_instance_id == game_instance_id,
+                    WorldOperation.status == WorldOperationStatus.PENDING,
+                )
+            )
+            or 0
+        ) > 0
+
+    def _has_pending_decision(self, game_instance_id: UUID) -> bool:
+        return (
+            self.db.scalar(
+                select(func.count())
+                .select_from(ActionDecisionRequest)
+                .where(
+                    ActionDecisionRequest.game_instance_id == game_instance_id,
+                    ActionDecisionRequest.status == DecisionStatus.PENDING,
+                )
+            )
+            or 0
+        ) > 0
+
+    def _has_reservation(self, game_instance_id: UUID) -> bool:
+        return (
+            self.db.scalar(
+                select(func.count())
+                .select_from(GameInstanceResourceState)
+                .where(
+                    GameInstanceResourceState.game_instance_id == game_instance_id,
+                    GameInstanceResourceState.reserved_value != 0,
+                )
+            )
+            or 0
+        ) > 0
 
     def _cancel_pending(
         self,
@@ -244,7 +337,10 @@ def require_active_instance(instance: GameInstance) -> None:
 
 
 def require_scope_writable(db: Session, game_instance_id: UUID) -> None:
-    instance = db.get(GameInstance, game_instance_id)
+    with db.no_autoflush:
+        instance = db.scalar(
+            select(GameInstance).where(GameInstance.id == game_instance_id).with_for_update()
+        )
     if instance is None:
         raise GameLifecycleError("GAME_INSTANCE_NOT_FOUND", "The Game does not exist")
     require_active_instance(instance)

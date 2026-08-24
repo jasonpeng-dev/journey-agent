@@ -355,6 +355,7 @@ class PlayerProjectionService:
             scenario_version_number=version.version_number,
             scenario_content_hash=version.content_hash,
             status=PublicGameStatus(game.status.value),
+            runtime_revision=game.runtime_revision,
             active_task_id=active_task_id,
             created_at=game.created_at,
             updated_at=game.updated_at,

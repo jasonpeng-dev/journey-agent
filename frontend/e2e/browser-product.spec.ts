@@ -7,6 +7,15 @@ async function fillCustomGoal(page: import("@playwright/test").Page, value: stri
   await page.getByLabel("自定义目标").fill(value);
 }
 
+async function abandonCurrentTaskBeforeArchive(page: import("@playwright/test").Page) {
+  const abandon = page.getByRole("button", { name: "放弃当前目标" });
+  if (await abandon.count() === 0) return;
+  await expect(abandon).toBeVisible();
+  await expect(abandon).toBeEnabled({ timeout: 30000 });
+  await abandon.click();
+  await expect(abandon).toHaveCount(0);
+}
+
 test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除游戏", async ({ page }) => {
   const apiOrigin = process.env.E2E_API_ORIGIN;
   await page.route("**/api/**", async (route) => {
@@ -182,6 +191,8 @@ test("Formal Play 展示真实计划演进、逐轮执行，并可永久删除�
   await expect(page.getByRole("button", { name: "知悉，开始执行" })).toHaveCount(0);
   await secondTaskTab.click();
   await expect(page.getByTestId("planning-status")).toBeVisible();
+  await expect(page.getByTestId("planning-status")).toHaveCount(0, { timeout: 30000 });
+  await abandonCurrentTaskBeforeArchive(page);
   await page.getByRole("button", { name: "结束并归档游戏" }).click();
   await expect(page.getByText("游戏已归档，当前为只读状态。")).toBeVisible();
 
@@ -305,6 +316,8 @@ test("不同 Task 之间切换时不会泄漏 Replan 临时状态", async ({ pag
   const timerAtReturn = await page.getByTestId("replanning-status").textContent();
   await expect.poll(async () => page.getByTestId("replanning-status").textContent()).not.toBe(timerAtReturn);
 
+  await expect(page.getByTestId("replanning-status")).toHaveCount(0, { timeout: 30000 });
+  await abandonCurrentTaskBeforeArchive(page);
   await page.getByRole("button", { name: "结束并归档游戏" }).click();
   await expect(page.getByText("游戏已归档，当前为只读状态。")).toBeVisible();
   await page.goto("/games");

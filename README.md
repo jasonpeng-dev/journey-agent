@@ -20,8 +20,8 @@ the browser product.
   deterministic Validator, bounded internal REPAIR, and Knowledge-aware
   REPLAN.
 * Declarative Action/Rule execution, Truth mutation, public Knowledge
-  projection, Player-safe Formal PLAY, approvals, checkpoints, and plan
-  history.
+  projection, Player-safe Formal PLAY, approvals, immutable archived runtime
+  sources, Fork, and plan history.
 * Generic built-in scenarios running through the same runtime and browser
   product. Scenario-specific gameplay branches are not part of the engine.
 
@@ -45,6 +45,13 @@ See [docs/README.md](docs/README.md) for the documentation authority map,
 [docs/architecture.md](docs/architecture.md) for high-level runtime
 boundaries, and [docs/agent-planning-v2.md](docs/agent-planning-v2.md) for
 the detailed planning contract.
+
+An ACTIVE GameInstance can be archived only when it has no non-terminal Task,
+pending WorldOperation, pending ActionDecisionRequest, or reserved resource
+value. ARCHIVED instances are immutable, read-only runtime sources. Fork
+materializes a new independent ACTIVE instance from that source with the same
+exact ScenarioVersion, fresh runtime identity, empty execution history, and
+an auditable source link.
 
 ## Provider configuration
 
@@ -113,6 +120,11 @@ Frontend, in a second terminal:
 
 Open http://127.0.0.1:4173. Vite proxies API requests to the backend.
 
+The browser lifecycle surface is intentionally small: an active game can be
+archived from its detail or list card, and an archived game can be Forked from
+either location. A Fork request uses one creation key for retry-safe
+idempotency and navigates to the new target on success.
+
 ## Main HTTP surfaces
 
 | Area | Routes |
@@ -139,6 +151,7 @@ Frontend, from frontend:
     npm run typecheck
     npm test
     npm run build
+    npm run e2e
 
 Real provider calls are not part of CI. Provider tests use deterministic fakes
 or mocked HTTP responses. Real-model runs are bounded manual evaluations.

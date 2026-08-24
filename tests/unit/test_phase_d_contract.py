@@ -86,6 +86,7 @@ def test_player_contract_rejects_hidden_truth_and_developer_contract_owns_it() -
         scenario_version_number=1,
         scenario_content_hash="a" * 64,
         status=PublicGameStatus.ACTIVE,
+        runtime_revision=1,
         created_at=now,
         updated_at=now,
     )

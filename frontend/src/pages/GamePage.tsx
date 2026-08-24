@@ -4,6 +4,7 @@ import { useParams } from "react-router-dom";
 
 import { api } from "../api";
 import { groupActorsByTask } from "../actorPresentation";
+import { useForkGame } from "../hooks/useForkGame";
 import {
   factDisplayLabel,
   factDisplayValue,
@@ -829,6 +830,7 @@ function scenarioObjectiveOptions(
 export function GamePage() {
   const { gameId = "" } = useParams();
   const queryClient = useQueryClient();
+  const fork = useForkGame();
   const [goal, setGoal] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [pendingGoal, setPendingGoal] = useState<string | null>(null);
@@ -915,7 +917,7 @@ export function GamePage() {
     onSuccess: () => void refresh(),
   });
   const archive = useMutation({
-    mutationFn: () => api.archiveGame(gameId),
+    mutationFn: (revision: number) => api.archiveGame(gameId, revision),
     onSuccess: () => void refresh(),
   });
   const decision = useMutation({
@@ -992,11 +994,12 @@ export function GamePage() {
     startPlanning.isPending ||
     abandon.isPending ||
     archive.isPending ||
+    fork.isPending ||
     decision.isPending ||
     pacing.isPending ||
     replan.isPending;
   const mutationError =
-    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? decision.error ?? pacing.error ?? replan.error;
+    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? fork.error ?? decision.error ?? pacing.error ?? replan.error;
   const resolutionMessage =
     submit.data && submit.data.status !== "ACCEPTED"
       ? submit.data.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。"
@@ -1183,7 +1186,7 @@ export function GamePage() {
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>
-      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span></div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <button className="danger-button" disabled={busy} onClick={() => archive.mutate()}>结束并归档游戏</button>}</div></section>
+      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span>{game.status === "ACTIVE" && gameHasActiveTask && <small className="lifecycle-help">当前有活动任务，完成或放弃后才能归档。</small>}</div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <button className="danger-button" disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate(liveGame.runtime_revision)}>结束并归档游戏</button>}{game.status === "ARCHIVED" && <button disabled={busy} onClick={() => fork.fork(gameId)}>以此归档状态新开一局</button>}</div></section>
       {developerOpen && <section className="developer-panel-v2"><label>开发者凭证<input type="password" value={developerToken} onChange={(event) => setDeveloperToken(event.target.value)} /></label>{developer.error && <p className="developer-error">开发者访问被拒绝。</p>}{developer.data && <><h2>内部运行时快照</h2><pre>{JSON.stringify(developer.data, null, 2)}</pre></>}</section>}
     </main>
   );
