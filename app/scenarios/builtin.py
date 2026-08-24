@@ -25,10 +25,10 @@ def load_builtin_scenario(filename: str) -> ScenarioDefinitionV2:
     return ScenarioDefinitionV2.model_validate(payload)
 
 
-STARFIRE_V2 = load_builtin_scenario("starfire_v2.yaml")
-MEDICAL_EMERGENCY_V2 = load_builtin_scenario("medical_emergency_v2.yaml")
+STARFIRE_V2 = load_builtin_scenario("starfire_command.yaml")
+MEDICAL_EMERGENCY_V2 = load_builtin_scenario("medical_emergency.yaml")
 LINJIANG_INFRASTRUCTURE_RECOVERY_V1 = load_builtin_scenario(
-    "linjiang_infrastructure_recovery_v0.yaml"
+    "linjiang_infrastructure_recovery.yaml"
 )
 # Keep the old import name stable for callers that used the V0 world skeleton;
 # the built-in file now carries the V1 gameplay contract.
