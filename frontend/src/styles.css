@@ -279,7 +279,8 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .console-button.full { width: 100%; margin-top: 15px; }
 .console-empty { color: var(--console-soft); }
 .developer-bar-v2 { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 16px 20px; border: 1px solid var(--console-line); border-radius: 15px; background: rgb(255 255 255 / 78%); }
-.developer-bar-v2 span { color: var(--console-soft); font-size: 11px; }
+.developer-bar-v2 span, .lifecycle-help { color: var(--console-soft); font-size: 11px; }
+.lifecycle-help { display: block; margin-top: 6px; }
 .developer-bar-v2 > div:last-child { display: flex; gap: 9px; }
 .developer-bar-v2 button { color: var(--console-ink); border: 1px solid var(--console-line); background: white; }
 .developer-panel-v2 { margin-top: 12px; padding: 20px; border-radius: 15px; color: #dce9e4; background: #132a23; }
