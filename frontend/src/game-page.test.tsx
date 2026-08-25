@@ -1138,6 +1138,7 @@ describe("Formal Play player projections", () => {
             region_name: "North Region",
             associated_known_resources: [
               {
+                resource_key: "general_engineering_parts",
                 resource_name: "General Engineering Parts",
                 quantity: 50,
                 availability: "UNAVAILABLE",
@@ -1147,6 +1148,7 @@ describe("Formal Play player projections", () => {
             ],
           },
           { key: "unknown_facility", name: "Unknown Facility", accessible: true, node_type_key: "facility", region_key: "north", region_name: "North Region" },
+          { key: "emergency_generator", name: "Emergency Generator", accessible: true, node_type_key: "facility", region_key: "north", region_name: "North Region" },
         ]}
         actors={[]}
         knownFacts={[
@@ -1156,6 +1158,7 @@ describe("Formal Play player projections", () => {
           { node_key: "utility_service_depot", fact_key: "power_supply", name: "Power supply", value: "UNAVAILABLE", node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
           { node_key: "utility_service_depot", fact_key: "power_generation_capable", name: "Power generation capable", value: false, node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
           { node_key: "utility_service_depot", fact_key: "heavy_engineering_support", name: "Heavy engineering support", value: "UNAVAILABLE", node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
+          { node_key: "emergency_generator", fact_key: "power_generation_capable", name: "Power generation capable", value: true, node_name: "Emergency Generator", node_type_key: "facility", region_key: "north", region_name: "North Region" },
         ]}
         knownRelations={[
           {
@@ -1181,32 +1184,57 @@ describe("Formal Play player projections", () => {
     );
     fireEvent.click(within(screen.getByTestId("knowledge-accordion-locations")).getByRole("button"));
     fireEvent.click(screen.getByText("North Region"));
+    const locationBefore = window.location.href;
     const utility = screen.getByTestId("facility-card-utility_service_depot");
     expect(utility).toHaveTextContent("\u672a\u4f9b\u7535");
     expect(utility).toHaveTextContent("\u5f85\u4fee\u590d");
     const utilitySummary = utility.querySelector("summary")!;
     expect(utilitySummary).not.toHaveTextContent(/\u4f9b\u7535\s+\u672a\u4f9b\u7535/);
     expect(utilitySummary).not.toHaveTextContent(/\u8bbe\u65bd\s+\u5f85\u4fee\u590d/);
+    expect(utilitySummary).toHaveTextContent("+");
+    expect(utilitySummary).not.toHaveTextContent("-");
     expect(utility).not.toHaveAttribute("open");
     expect(screen.queryByText("\u53ef\u8bbf\u95ee")).not.toBeInTheDocument();
     expect(screen.getByTestId("facility-card-unknown_facility")).not.toHaveTextContent("\u5f85\u4fee\u590d");
     fireEvent.click(utilitySummary);
     expect(utility).toHaveAttribute("open");
-    expect(utility).toHaveTextContent("General Engineering Parts");
+    expect(utilitySummary).toHaveTextContent("-");
+    expect(utilitySummary).not.toHaveTextContent("+");
+    expect(window.location.href).toBe(locationBefore);
+    expect(screen.getByTestId("knowledge-accordion-locations")).toBeInTheDocument();
+    expect(utility).toHaveTextContent("通用工程部件");
     expect(utility).toHaveTextContent("×5");
     expect(utility).toHaveTextContent("×20");
-    expect(utility).not.toHaveTextContent("\u53d1\u7535\u80fd\u529b\uff1a\u4e0d\u5177\u5907");
-    expect(utility).toHaveTextContent("\u4fee\u590d\u9700\u6c42\uff1a");
-    expect(utility).toHaveTextContent("\u5173\u8054\u8d44\u6e90\uff1aGeneral Engineering Parts");
-    expect(utility).toHaveTextContent("\u91cd\u578b\u5de5\u7a0b\u652f\u63f4\uff1a\u4e0d\u53ef\u7528");
-    expect(utility).toHaveTextContent("\u4fee\u590d\u540e\u8bbe\u5907\u6b63\u5e38");
-    expect(utility).toHaveTextContent("\u4fee\u590d\u540e\u53ef\u7528");
+    expect(utility).toHaveTextContent("修复需求：通用工程部件 ×5、市政维修材料 ×20");
+    expect(utility).toHaveTextContent("执行队伍：Industrial Repair Team");
+    expect(utility).toHaveTextContent("关联资源：通用工程部件 ×50，暂不可用，修复后可用");
+    expect(utility).toHaveTextContent("重型工程支援：不可用");
+    expect(utility).not.toHaveTextContent("修复效果：");
+    expect(utility).not.toHaveTextContent("修复后设备正常");
+    expect(utility).not.toHaveTextContent("发电能力：不具备");
     fireEvent.click(utilitySummary);
     expect(utility).not.toHaveAttribute("open");
+    const unknownFacility = screen.getByTestId("facility-card-unknown_facility");
+    const unknownSummary = unknownFacility.querySelector("summary")!;
+    expect(unknownSummary.querySelector(".knowledge-facility-toggle")).toHaveTextContent("+");
+    fireEvent.click(unknownSummary);
+    expect(unknownFacility).toHaveAttribute("open");
+    expect(screen.getByTestId("knowledge-accordion-locations")).toBeInTheDocument();
+    fireEvent.click(unknownSummary);
+    expect(unknownFacility).not.toHaveAttribute("open");
     fireEvent.click(screen.getByText("East Region"));
     const substation = screen.getByTestId("facility-card-east_distribution_station");
-    fireEvent.click(substation.querySelector("summary")!);
-    expect(substation).toHaveTextContent("\u53ef\u4f9b\u7535\uff1aEast Community Hospital");
+    const substationSummary = substation.querySelector("summary")!;
+    expect(substationSummary.querySelectorAll(".knowledge-facility-status")).toHaveLength(2);
+    expect(substationSummary.querySelector(".knowledge-facility-toggle")).toHaveTextContent("+");
+    fireEvent.click(substationSummary);
+    expect(substationSummary.querySelector(".knowledge-facility-toggle")).toHaveTextContent("-");
+    expect(substation).toHaveTextContent("送电能力：未具备");
+    expect(substation).toHaveTextContent("可供电：East Community Hospital");
+    expect(substation).not.toHaveTextContent("发电能力：");
+    const generator = screen.getByTestId("facility-card-emergency_generator");
+    fireEvent.click(generator.querySelector("summary")!);
+    expect(generator).toHaveTextContent("发电能力：已具备");
     expect(screen.queryByTestId("knowledge-accordion-facts")).not.toBeInTheDocument();
     expect(screen.queryByTestId("knowledge-accordion-relations")).not.toBeInTheDocument();
   });
@@ -1239,6 +1267,8 @@ describe("Formal Play player projections", () => {
     expect(unknown.querySelector("summary")).toBeNull();
     expect(open.querySelector("summary")).toBeNull();
     expect(blocked.querySelector("summary")).toBeNull();
+    expect(unknown.querySelector(".knowledge-facility-toggle")).toBeNull();
+    expect(unknown.querySelectorAll(".knowledge-transport-column-spacer")).toHaveLength(1);
   });
   it("keeps uncategorized known facts and relations available without empty global sections", () => {
     render(

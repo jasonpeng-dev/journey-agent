@@ -5,6 +5,21 @@ import type {
 } from "./types";
 import { uiLabel } from "./ui";
 
+const RESOURCE_LABELS: Record<string, string> = {
+  communication_equipment: "通信设备",
+  electrical_repair_parts: "电力维修部件",
+  general_engineering_parts: "通用工程部件",
+  municipal_repair_materials: "市政维修材料",
+  water_system_parts: "水务系统部件",
+};
+
+export function resourceDisplayName(key: string, candidate?: string): string {
+  const mapped = RESOURCE_LABELS[key];
+  if (mapped) return mapped;
+  if (candidate && candidate !== key && !/^[a-z0-9_]+$/.test(candidate)) return candidate;
+  return candidate ?? "已知资源";
+}
+
 const STRUCTURAL_RELATION_TYPES = new Set(["located_in", "endpoint"]);
 
 const RELATION_DESCRIPTIONS: Record<string, string> = {
@@ -71,7 +86,9 @@ const MACHINE_VALUE_LABELS: Record<string, string> = {
 };
 
 export function factDisplayLabel(fact: PlayerGameState["known_facts"][number]): string {
-  return FACT_LABELS[fact.fact_key] ?? fact.name;
+  if (FACT_LABELS[fact.fact_key]) return FACT_LABELS[fact.fact_key];
+  if (fact.name && fact.name !== fact.fact_key && !/^[a-z0-9_]+$/.test(fact.name)) return fact.name;
+  return "已知状态";
 }
 
 export function factDisplayValue(
@@ -114,6 +131,14 @@ export function facilityStatusDisplayValue(
   if (fact.fact_key === "operational" && typeof fact.value === "boolean") {
     return fact.value ? "设备正常" : "待修复";
   }
+  return factDisplayValue(fact);
+}
+
+export function generationCapabilityDisplayValue(
+  fact: PlayerGameState["known_facts"][number],
+): string {
+  if (fact.value === true || fact.value === "AVAILABLE") return "已具备";
+  if (fact.value === false || fact.value === "UNAVAILABLE") return "未具备";
   return factDisplayValue(fact);
 }
 
