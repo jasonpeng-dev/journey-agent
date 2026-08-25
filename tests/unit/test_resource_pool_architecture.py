@@ -36,7 +36,7 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     Player,
 )
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1, load_builtin_scenario
+from app.scenarios.builtin import load_builtin_scenario
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
@@ -45,14 +45,15 @@ from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import LINJIANG_V1_TEST
 
-LINJIANG_INFRASTRUCTURE_RECOVERY_V10 = load_builtin_scenario(
-    "linjiang_infrastructure_recovery_v10.yaml"
+LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0 = load_builtin_scenario(
+    "linjiang_infrastructure_recovery_v2_0.yaml"
 )
 
 
 def _pool_definition() -> ScenarioDefinitionV2:
-    document: dict[str, Any] = deepcopy(LINJIANG_INFRASTRUCTURE_RECOVERY_V1.model_dump(mode="json"))
+    document: dict[str, Any] = deepcopy(LINJIANG_V1_TEST.model_dump(mode="json"))
     document["metadata"]["key"] = "resource_pool_architecture_test"
     document["metadata"]["name"] = "Resource Pool Architecture Test"
     document["world"]["key"] = "resource_pool_architecture_test"
@@ -144,7 +145,7 @@ def _canonical_general_parts_definition(
     west_quantity: int = 10,
 ) -> ScenarioDefinitionV2:
     document: dict[str, Any] = deepcopy(
-        LINJIANG_INFRASTRUCTURE_RECOVERY_V10.model_dump(mode="json")
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.model_dump(mode="json")
     )
     document["metadata"]["key"] = key
     document["metadata"]["name"] = key
@@ -188,7 +189,7 @@ def test_legacy_balance_becomes_default_visible_available_pool_and_region_defaul
 ) -> None:
     runtime, _scope = _runtime(
         session,
-        LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
+        LINJIANG_V1_TEST,
         "resource-pool-legacy-defaults",
     )
     row = session.get(
@@ -700,7 +701,7 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
 ) -> None:
     runtime, scope = _runtime(
         session,
-        LINJIANG_INFRASTRUCTURE_RECOVERY_V10,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
         "resource-pool-player-facility-separation",
         use_platform_player=True,
     )
@@ -727,7 +728,7 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
         pool.visibility = ResourcePoolVisibility.VISIBLE
     session.flush()
 
-    shared = SharedKnowledgeProjection(session, scope, LINJIANG_INFRASTRUCTURE_RECOVERY_V10)
+    shared = SharedKnowledgeProjection(session, scope, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
     shared_summary = shared.resource_intelligence()["regions"]["north_industrial_district"][
         "resources"
     ]["general_engineering_parts"]
@@ -1104,7 +1105,7 @@ def test_region_visibility_effect_does_not_complete_survey_or_reveal_hidden_pool
 def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
     session: Session,
 ) -> None:
-    document: dict[str, Any] = deepcopy(LINJIANG_INFRASTRUCTURE_RECOVERY_V1.model_dump(mode="json"))
+    document: dict[str, Any] = deepcopy(LINJIANG_V1_TEST.model_dump(mode="json"))
     document["metadata"]["key"] = "resource_pool_planning_guidance_test"
     document["metadata"]["name"] = "Resource Pool Planning Guidance Test"
     document["world"]["key"] = "resource_pool_planning_guidance_test"

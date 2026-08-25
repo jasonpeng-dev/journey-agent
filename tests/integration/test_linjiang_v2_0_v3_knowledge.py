@@ -27,7 +27,7 @@ from app.services.generic_game import GenericGameService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
 
-V10 = load_builtin_scenario("linjiang_infrastructure_recovery_v10.yaml")
+V2_0 = load_builtin_scenario("linjiang_infrastructure_recovery_v2_0.yaml")
 
 
 def _definition_with_pool(
@@ -38,7 +38,7 @@ def _definition_with_pool(
     region_key: str,
     quantity: int,
 ) -> ScenarioDefinitionV2:
-    document = deepcopy(V10.model_dump(mode="json"))
+    document = deepcopy(V2_0.model_dump(mode="json"))
     document["metadata"]["key"] = key
     document["metadata"]["name"] = key
     document["world"]["key"] = key
@@ -102,7 +102,7 @@ def _fact(session: Session, instance_id, node_key: str, fact_key: str):
 
 
 def test_v3_initializes_facility_and_route_knowledge_boundaries(session: Session) -> None:
-    definition = V10
+    definition = V2_0
     facilities = [
         node
         for node in definition.world.nodes
@@ -144,7 +144,7 @@ def test_v3_initializes_facility_and_route_knowledge_boundaries(session: Session
 
 
 def test_inspect_reveals_non_resource_facility_facts_only(session: Session) -> None:
-    runtime, scope = _runtime(session, V10, "linjiang-v10-inspect")
+    runtime, scope = _runtime(session, V2_0, "linjiang-v2_0-inspect")
     _set_actor(session, runtime.instance.id, "logistics_team_alpha", "north_industrial_district")
     result = GenericGameService(session, scope).execute(
         actor_key="logistics_team_alpha",
@@ -153,7 +153,7 @@ def test_inspect_reveals_non_resource_facility_facts_only(session: Session) -> N
         parameters={},
     )
     assert result.outcome.failure is None
-    definition = V10
+    definition = V2_0
     facility = definition.world.node("utility_service_depot")
     assert facility is not None
     assert all(
@@ -180,13 +180,13 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
     session: Session,
 ) -> None:
     definition = _definition_with_pool(
-        "linjiang_v10_repair_communications",
+        "linjiang_v2_0_repair_communications",
         pool_key="north_communication_test",
         resource_key="communication_equipment",
         region_key="north_industrial_district",
         quantity=10,
     )
-    runtime, scope = _runtime(session, definition, "linjiang_v10_repair_communications")
+    runtime, scope = _runtime(session, definition, "linjiang_v2_0_repair_communications")
     _set_actor(
         session,
         runtime.instance.id,
@@ -244,13 +244,13 @@ def test_route_attempts_reveal_truth_and_clear_requires_known_blocked(
     session: Session,
 ) -> None:
     definition = _definition_with_pool(
-        "linjiang_v10_route_reveal",
+        "linjiang_v2_0_route_reveal",
         pool_key="central_municipal_test",
         resource_key="municipal_repair_materials",
         region_key="central_district",
         quantity=10,
     )
-    runtime, scope = _runtime(session, definition, "linjiang_v10_route_reveal")
+    runtime, scope = _runtime(session, definition, "linjiang_v2_0_route_reveal")
     game = GenericGameService(session, scope)
     _set_actor(session, runtime.instance.id, "logistics_team_alpha", "south_waterfront_district")
     travelled = game.execute(
@@ -319,7 +319,7 @@ def test_route_attempts_reveal_truth_and_clear_requires_known_blocked(
 
 
 def test_clear_transport_rejects_unknown_route(session: Session) -> None:
-    runtime, scope = _runtime(session, V10, "linjiang-v10-clear-unknown")
+    runtime, scope = _runtime(session, V2_0, "linjiang-v2_0-clear-unknown")
     _set_actor(session, runtime.instance.id, "municipal_transport_team", "central_district")
     result = GenericGameService(session, scope).execute(
         actor_key="municipal_transport_team",

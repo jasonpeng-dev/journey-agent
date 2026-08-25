@@ -1,7 +1,7 @@
 schema_version: 2
 metadata:
-  key: linjiang_infrastructure_recovery_v10
-  name: 临江市灾后基础设施恢复 V10 草案
+  key: linjiang_infrastructure_recovery_v2_0
+  name: 临江市灾后基础设施恢复 v2.0
   description: 临江灾后基础设施恢复：通信、交通、电力、水务与资源情报。
   locality:
     enabled: true
@@ -142,8 +142,8 @@ initialization:
     resource_inventory_visibility: HIDDEN
     resource_survey_completed: false
 world:
-  key: linjiang_infrastructure_recovery_v10
-  name: 临江市灾后基础设施恢复 V10 草案
+  key: linjiang_infrastructure_recovery_v2_0
+  name: 临江市灾后基础设施恢复 v2.0
   node_types:
   - key: facility
     name: 设施

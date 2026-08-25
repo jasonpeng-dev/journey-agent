@@ -57,7 +57,6 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     Player,
 )
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
 from app.scenarios.linjiang_v1_draft import build_linjiang_v1_definition
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.scenarios.validation import ScenarioDefinitionValidator
@@ -66,6 +65,7 @@ from app.services.generic_actions import GenericActionService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import LINJIANG_V1_TEST
 
 
 def _rule_state(
@@ -111,8 +111,8 @@ def test_dependency_closure_uses_known_available_not_total_at_scope() -> None:
     assert not _has_known_available_resource_at(resource, "central_district", 6)
 
 
-def _v10_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
-    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+def _v2_0_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
+    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
     player = Player(name=key)
@@ -143,10 +143,10 @@ class _RepeatingPlanProvider:
 
 
 def test_linjiang_v1_draft_is_complete_and_does_not_mutate_v9() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
 
-    assert LINJIANG_INFRASTRUCTURE_RECOVERY_V1.metadata.key == "linjiang_infrastructure_recovery"
-    assert definition.metadata.key == "linjiang_infrastructure_recovery_v10"
+    assert LINJIANG_V1_TEST.metadata.key == "linjiang_infrastructure_recovery"
+    assert definition.metadata.key == "linjiang_infrastructure_recovery_v2_0"
     assert len([node for node in definition.world.nodes if node.node_type_key == "region"]) == 6
     assert len([node for node in definition.world.nodes if node.node_type_key == "facility"]) == 30
     assert len([node for node in definition.world.nodes if node.node_type_key == "transport"]) == 6
@@ -190,7 +190,7 @@ def test_linjiang_v1_draft_is_complete_and_does_not_mutate_v9() -> None:
 
 
 def test_linjiang_v1_draft_passes_scenario_readiness_validation() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
 
     result = ScenarioDefinitionValidator().validate(definition.model_dump(mode="json"))
 
@@ -199,10 +199,10 @@ def test_linjiang_v1_draft_passes_scenario_readiness_validation() -> None:
     assert all(objective.planning_guidance for objective in definition.objectives)
 
 
-def test_linjiang_v10_planning_context_uses_sparse_target_requirements(
+def test_linjiang_v2_0_planning_context_uses_sparse_target_requirements(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-sparse-planning-context")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-sparse-planning-context")
     agent = GenericAgentService(session, scope)
     task = agent.create_task(
         runtime.session,
@@ -251,10 +251,10 @@ def test_linjiang_v10_planning_context_uses_sparse_target_requirements(
     assert task.current_plan_version == 0
 
 
-def test_linjiang_v10_planner_action_contract_is_generic_and_knowledge_safe(
+def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-planner-action-contract")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-planner-action-contract")
     agent = GenericAgentService(session, scope)
     task = agent.create_task(
         runtime.session,
@@ -443,7 +443,7 @@ def test_linjiang_v10_planner_action_contract_is_generic_and_knowledge_safe(
 def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
     session: Session,
 ) -> None:
-    _runtime_value, scope = _v10_runtime(session, "linjiang-v10-hidden-target-requirement")
+    _runtime_value, scope = _v2_0_runtime(session, "linjiang-v2_0-hidden-target-requirement")
     definition = GenericAgentService(session, scope)._definition()
     fact = session.get(
         GameInstanceFactState,
@@ -457,10 +457,10 @@ def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
     assert all(item["target_key"] != "water_treatment_plant" for item in sparse)
 
 
-def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
+def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-planner-input-v2")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-planner-input-v2")
     agent = GenericAgentService(session, scope)
     task = agent.create_task(
         runtime.session,
@@ -647,7 +647,7 @@ def test_linjiang_v10_provider_input_is_canonical_v2_and_knowledge_safe(
 def test_locality_dependency_closure_keeps_relocation_capability_for_local_actions(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-locality-closure-relocation")
+    runtime, scope = _v2_0_runtime(session, "linjiang-locality-closure-relocation")
     route = session.get(
         GameInstanceFactState,
         (scope.game_instance_id, "central_river_tunnel", "passable"),
@@ -682,7 +682,7 @@ def test_locality_dependency_closure_keeps_relocation_capability_for_local_actio
 def test_historical_travel_success_requires_current_location_redundancy_proof(
     session: Session,
 ) -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
     travel = next(item for item in definition.actions if item.key == "travel")
     actor = GameInstanceActor(
         game_instance_id=uuid4(),
@@ -729,10 +729,10 @@ def test_historical_travel_success_requires_current_location_redundancy_proof(
     )
 
 
-def test_linjiang_v10_completed_survey_repair_diagnostic_is_typed(
+def test_linjiang_v2_0_completed_survey_repair_diagnostic_is_typed(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-survey-diagnostic")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-survey-diagnostic")
     provider = _RepeatingPlanProvider(
         (
             PlanStepProposal(
@@ -765,10 +765,10 @@ def test_linjiang_v10_completed_survey_repair_diagnostic_is_typed(
     }
 
 
-def test_linjiang_v10_known_resource_deficit_repair_diagnostic_is_typed(
+def test_linjiang_v2_0_known_resource_deficit_repair_diagnostic_is_typed(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-resource-diagnostic")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-resource-diagnostic")
     communications = session.get(
         GameInstanceActor,
         (runtime.instance.id, "communications_repair_team_alpha"),
@@ -812,10 +812,10 @@ def test_linjiang_v10_known_resource_deficit_repair_diagnostic_is_typed(
     }
 
 
-def test_linjiang_v10_unknown_resource_quantity_is_not_known_insufficient(
+def test_linjiang_v2_0_unknown_resource_quantity_is_not_known_insufficient(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-unknown-resource")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-unknown-resource")
     knowledge = session.get(
         GameInstanceRegionResourceKnowledge,
         (runtime.instance.id, "central_district"),
@@ -848,10 +848,10 @@ def test_linjiang_v10_unknown_resource_quantity_is_not_known_insufficient(
     }
 
 
-def test_linjiang_v10_known_preflight_repair_diagnostic_has_public_witness(
+def test_linjiang_v2_0_known_preflight_repair_diagnostic_has_public_witness(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-known-preflight-diagnostic")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-known-preflight-diagnostic")
     actor = session.get(
         GameInstanceActor,
         (runtime.instance.id, "water_repair_team_alpha"),
@@ -891,7 +891,7 @@ def test_linjiang_v10_known_preflight_repair_diagnostic_has_public_witness(
 def test_validator_stops_projected_diagnostics_after_static_root_failure(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-static-root-no-cascade")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-static-root-no-cascade")
     provider = _RepeatingPlanProvider(
         (
             PlanStepProposal(
@@ -930,7 +930,7 @@ def test_validator_stops_projected_diagnostics_after_static_root_failure(
 def test_validator_reports_multiple_independent_static_root_failures(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-multiple-static-roots")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-multiple-static-roots")
     provider = _RepeatingPlanProvider(
         (
             PlanStepProposal(
@@ -972,7 +972,7 @@ def test_validator_reports_multiple_independent_static_root_failures(
 def test_validator_reports_actor_capability_mismatch_from_public_actor_state(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-actor-capability-diagnostic")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-actor-capability-diagnostic")
     actor = session.get(
         GameInstanceActor,
         (runtime.instance.id, "communications_repair_team_alpha"),
@@ -1020,7 +1020,7 @@ def test_validator_reports_actor_capability_mismatch_from_public_actor_state(
 def test_validator_stops_after_first_projected_state_root_failure(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-state-root-no-cascade")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-state-root-no-cascade")
     provider = _RepeatingPlanProvider(
         (
             PlanStepProposal(
@@ -1050,10 +1050,10 @@ def test_validator_stops_after_first_projected_state_root_failure(
     assert diagnostics[0].step_id == "same-region-travel"
 
 
-def test_linjiang_v10_projected_repair_applies_selected_target_cost_once(
+def test_linjiang_v2_0_projected_repair_applies_selected_target_cost_once(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-selected-target-cost")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-selected-target-cost")
     communications = session.get(
         GameInstanceActor,
         (runtime.instance.id, "communications_repair_team_alpha"),
@@ -1114,10 +1114,10 @@ def test_linjiang_v10_projected_repair_applies_selected_target_cost_once(
     assert len(provider.requests) == 1
 
 
-def test_linjiang_v10_projected_repair_does_not_leak_cross_target_reachability(
+def test_linjiang_v2_0_projected_repair_does_not_leak_cross_target_reachability(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-target-reachability")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-target-reachability")
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
     action = next(item for item in definition.actions if item.key == "repair_communications")
@@ -1158,7 +1158,7 @@ def test_linjiang_v10_projected_repair_does_not_leak_cross_target_reachability(
 def test_projected_ambiguous_rules_apply_only_common_effects_once(
     session: Session,
 ) -> None:
-    _runtime, scope = _v10_runtime(session, "linjiang-v10-ambiguous-effects")
+    _runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-ambiguous-effects")
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
     action = next(item for item in definition.actions if item.key == "repair_communications")
@@ -1205,8 +1205,8 @@ def test_projected_ambiguous_rules_apply_only_common_effects_once(
     assert facts[("central_telecom_hub", "operational")].value is True
 
 
-def test_linjiang_v10_all_regions_have_the_generic_travel_target_contract() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+def test_linjiang_v2_0_all_regions_have_the_generic_travel_target_contract() -> None:
+    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
     regions = {node.key: node for node in definition.world.nodes if node.node_type_key == "region"}
 
     assert set(regions) == {
@@ -1221,10 +1221,10 @@ def test_linjiang_v10_all_regions_have_the_generic_travel_target_contract() -> N
     assert all("surveyable" in node.interaction_keys for node in regions.values())
 
 
-def test_linjiang_v10_central_east_hidden_route_is_accepted_by_validator(
+def test_linjiang_v2_0_central_east_hidden_route_is_accepted_by_validator(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-central-east-validator")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-central-east-validator")
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
     actors = {
@@ -1277,10 +1277,10 @@ def test_linjiang_v10_central_east_hidden_route_is_accepted_by_validator(
     assert connector == "central_river_tunnel"
 
 
-def test_linjiang_v10_clear_transport_uses_endpoint_locality_not_passability(
+def test_linjiang_v2_0_clear_transport_uses_endpoint_locality_not_passability(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-clear-transport-locality")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-clear-transport-locality")
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
     actors = {
@@ -1395,10 +1395,10 @@ def test_linjiang_v10_clear_transport_uses_endpoint_locality_not_passability(
     )
 
 
-def test_linjiang_v10_hidden_block_is_discovered_only_during_runtime(
+def test_linjiang_v2_0_hidden_block_is_discovered_only_during_runtime(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-central-east-runtime")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-central-east-runtime")
     fact = session.get(
         GameInstanceFactState,
         (runtime.instance.id, "central_river_tunnel", "passable"),
@@ -1410,7 +1410,7 @@ def test_linjiang_v10_hidden_block_is_discovered_only_during_runtime(
         action_key="travel",
         target_key="east_residential_district",
         parameters={},
-        idempotency_key="linjiang-v10-central-east-blocked",
+        idempotency_key="linjiang-v2_0-central-east-blocked",
     )
 
     assert result.applied is not None
@@ -1423,10 +1423,10 @@ def test_linjiang_v10_hidden_block_is_discovered_only_during_runtime(
     )
 
 
-def test_linjiang_v10_relay_recovery_path_is_sequentially_validated(
+def test_linjiang_v2_0_relay_recovery_path_is_sequentially_validated(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-v10-relay-path")
+    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-relay-path")
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
     actors = {
@@ -1510,7 +1510,7 @@ def test_linjiang_v10_relay_recovery_path_is_sequentially_validated(
 def test_projected_canonical_actor_location_effect_updates_following_step(
     session: Session,
 ) -> None:
-    runtime, scope = _v10_runtime(session, "linjiang-projected-actor-location-effect")
+    runtime, scope = _v2_0_runtime(session, "linjiang-projected-actor-location-effect")
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
     actors = {
@@ -1572,8 +1572,8 @@ def test_projected_canonical_actor_location_effect_updates_following_step(
     )
 
 
-def test_linjiang_v10_known_route_remains_one_hop_after_hidden_route_failure() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+def test_linjiang_v2_0_known_route_remains_one_hop_after_hidden_route_failure() -> None:
+    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
     travel = next(item for item in definition.actions if item.key == "travel")
     projected_locations = {"logistics_team_alpha": "central_district"}
     route = (
@@ -1601,7 +1601,7 @@ def test_linjiang_v10_known_route_remains_one_hop_after_hidden_route_failure() -
 
 
 def test_linjiang_v1_task_three_repairs_and_task_four_support_gate() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
     action = next(item for item in definition.actions if item.key == "repair_industrial_facility")
     assert action.required_actor_role_key == "industrial_repair_team"
     assert {item.node_key for item in action.planning.terminal_effects} >= {
@@ -1768,7 +1768,7 @@ def test_linjiang_v1_task_three_repairs_and_task_four_support_gate() -> None:
 
 
 def test_linjiang_v1_runtime_initializes_knowledge_and_reachability(session: Session) -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
     player = Player(name="linjiang-v1-draft-runtime")

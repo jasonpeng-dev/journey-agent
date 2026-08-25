@@ -1,22 +1,22 @@
 from typing import Any
 
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from tests.scenario_fixtures import LINJIANG_V1_TEST, create_test_scenario
 
 
 def test_linjiang_v1_draft_round_trip_preserves_topology_and_localization(
     client: TestClient,
+    session: Session,
 ) -> None:
-    created = client.post(
-        "/api/v1/scenarios",
-        json={
-            "mode": "EXAMPLE",
-            "key": "linjiang_world_v1_test",
-            "name": "临江市灾后基础设施恢复测试",
-            "example_key": "linjiang_infrastructure_recovery",
-        },
+    created = create_test_scenario(
+        session,
+        LINJIANG_V1_TEST,
+        key="linjiang_world_v1_test",
+        name="临江市灾后基础设施恢复测试",
     )
-    assert created.status_code == 201
-    scenario_id = created.json()["id"]
+    scenario_id = str(created.id)
 
     draft_response = client.get(f"/api/v1/scenarios/{scenario_id}/draft")
     assert draft_response.status_code == 200

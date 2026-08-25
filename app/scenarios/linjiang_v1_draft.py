@@ -16,10 +16,8 @@ from typing import Any
 
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 
-LINJIANG_V1_DRAFT_KEY = "linjiang_infrastructure_recovery_v10"
-LINJIANG_V1_DRAFT_NAME = (
-    "\u4e34\u6c5f\u5e02\u707e\u540e\u57fa\u7840\u8bbe\u65bd\u6062\u590d V10 \u8349\u6848"
-)
+LINJIANG_V1_DRAFT_KEY = "linjiang_infrastructure_recovery_v2_0"
+LINJIANG_V1_DRAFT_NAME = "\u4e34\u6c5f\u5e02\u707e\u540e\u57fa\u7840\u8bbe\u65bd\u6062\u590d v2.0"
 
 _KNOWN = "KNOWN"
 _HIDDEN = "HIDDEN"

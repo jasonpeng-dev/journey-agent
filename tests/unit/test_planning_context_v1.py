@@ -31,9 +31,10 @@ from app.core.config import Settings
 from app.domain.enums import AgentPlanStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import AgentPlan, Player
-from app.scenarios.builtin import STARFIRE_V2, require_builtin_v2_version
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
+from tests.scenario_fixtures import STARFIRE_TEST
 
 
 class DirectBindingProvider:
@@ -91,7 +92,7 @@ class DirectBindingProvider:
 
 
 def _runtime(session: Session):  # type: ignore[no-untyped-def]
-    version = require_builtin_v2_version(session, STARFIRE_V2)
+    version = require_builtin_v2_version(session, STARFIRE_TEST)
     player = Player(name=f"planning-context-{uuid4().hex[:8]}")
     session.add(player)
     session.flush()

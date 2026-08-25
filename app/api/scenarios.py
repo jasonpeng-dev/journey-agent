@@ -43,11 +43,7 @@ from app.core.errors import AppError
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.infrastructure.db.session import get_db
-from app.scenarios.builtin import (
-    LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
-    MEDICAL_EMERGENCY_V2,
-    STARFIRE_V2,
-)
+from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from app.scenarios.validation import ScenarioValidationIssue
 from app.services.draft_sandbox import DraftSandboxService
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
@@ -55,16 +51,8 @@ from app.services.scenarios import ScenarioLifecycleError, ScenarioService
 router = APIRouter(prefix="/api/v1", tags=["scenarios"])
 
 _EXAMPLES = {
-    "medical_emergency": (
-        MEDICAL_EMERGENCY_V2,
-        ReadinessLevel.PUBLISH_READY,
-    ),
-    "starfire_command": (
-        STARFIRE_V2,
-        ReadinessLevel.PUBLISH_READY,
-    ),
-    "linjiang_infrastructure_recovery": (
-        LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
+    "linjiang_infrastructure_recovery_v2_0": (
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
         ReadinessLevel.PUBLISH_READY,
     ),
 }

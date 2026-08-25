@@ -1,9 +1,9 @@
 from app.domain.scenario_v2 import ScenarioDefinitionV2
-from app.scenarios.builtin import MEDICAL_EMERGENCY_V2, STARFIRE_V2
 from app.services.mission_roadmap import (
     MissionRoadmapProjector,
     MissionRoadmapStageStatus,
 )
+from tests.scenario_fixtures import MEDICAL_TEST, STARFIRE_TEST
 
 
 def _initial_knowledge(
@@ -20,9 +20,9 @@ def _initial_knowledge(
 def test_starfire_high_level_objective_has_future_non_executable_stages() -> None:
     scope = ("open_northern_trade_route",)
     roadmap = MissionRoadmapProjector().project(
-        STARFIRE_V2,
+        STARFIRE_TEST,
         scope,
-        _initial_knowledge(STARFIRE_V2),
+        _initial_knowledge(STARFIRE_TEST),
     )
 
     assert scope == ("open_northern_trade_route",)
@@ -39,7 +39,7 @@ def test_starfire_high_level_objective_has_future_non_executable_stages() -> Non
 
 def test_roadmap_updates_from_knowledge_without_changing_objective_scope() -> None:
     scope = ("open_northern_trade_route",)
-    knowledge = _initial_knowledge(STARFIRE_V2)
+    knowledge = _initial_knowledge(STARFIRE_TEST)
     knowledge.update(
         {
             ("northern_valley", "valley_security"): "SAFE",
@@ -48,7 +48,7 @@ def test_roadmap_updates_from_knowledge_without_changing_objective_scope() -> No
         }
     )
 
-    roadmap = MissionRoadmapProjector().project(STARFIRE_V2, scope, knowledge)
+    roadmap = MissionRoadmapProjector().project(STARFIRE_TEST, scope, knowledge)
 
     assert scope == ("open_northern_trade_route",)
     assert [stage.status for stage in roadmap.stages] == [
@@ -61,9 +61,9 @@ def test_roadmap_updates_from_knowledge_without_changing_objective_scope() -> No
 
 def test_medical_uses_the_same_generic_roadmap_projection() -> None:
     roadmap = MissionRoadmapProjector().project(
-        MEDICAL_EMERGENCY_V2,
+        MEDICAL_TEST,
         ("stabilize_patient",),
-        _initial_knowledge(MEDICAL_EMERGENCY_V2),
+        _initial_knowledge(MEDICAL_TEST),
     )
 
     assert [stage.objective_key for stage in roadmap.stages] == [

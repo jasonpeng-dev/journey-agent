@@ -13,7 +13,6 @@ from app.domain.enums import AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import GameInstanceActor, GameInstanceFactState, Player
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
@@ -22,6 +21,7 @@ from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import LINJIANG_V1_TEST
 
 
 def _fact(
@@ -66,7 +66,7 @@ def _condition(
 
 
 def _definition() -> ScenarioDefinitionV2:
-    document: dict[str, Any] = deepcopy(LINJIANG_INFRASTRUCTURE_RECOVERY_V1.model_dump(mode="json"))
+    document: dict[str, Any] = deepcopy(LINJIANG_V1_TEST.model_dump(mode="json"))
     document["metadata"]["key"] = "generic_gameplay_capabilities"
     document["metadata"]["name"] = "Generic Gameplay Capabilities"
     document["world"]["key"] = "generic_gameplay_capabilities"

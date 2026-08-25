@@ -22,12 +22,12 @@ from app.infrastructure.db.models import (
     Player,
     PlayerExecutionCheckpoint,
 )
-from app.scenarios.builtin import STARFIRE_V2
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.play import PlayError, PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import STARFIRE_TEST
 from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
 
 
@@ -97,7 +97,7 @@ def test_goal_resolver_uses_only_exact_version_candidates() -> None:
 
 def test_objective_subsumption_is_normalized_before_scope_freeze() -> None:
     assert normalize_objective_keys(
-        STARFIRE_V2,
+        STARFIRE_TEST,
         ("full_northern_recovery", "open_northern_trade_route"),
     ) == ("full_northern_recovery",)
 

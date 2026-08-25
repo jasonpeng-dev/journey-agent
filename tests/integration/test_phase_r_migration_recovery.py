@@ -10,9 +10,10 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import AgentTask, Player
-from app.scenarios.builtin import MEDICAL_EMERGENCY_V2, require_builtin_v2_version
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
+from tests.scenario_fixtures import MEDICAL_TEST
 
 
 def test_existing_r8_database_migrates_scope_and_recovers(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -24,7 +25,7 @@ def test_existing_r8_database_migrates_scope_and_recovers(monkeypatch, tmp_path)
 
     engine = create_engine(url)
     with Session(engine) as db:
-        version = require_builtin_v2_version(db, MEDICAL_EMERGENCY_V2)
+        version = require_builtin_v2_version(db, MEDICAL_TEST)
         player = Player(name="existing-r8-player")
         db.add(player)
         db.flush()
@@ -57,7 +58,7 @@ def test_existing_r8_database_migrates_scope_and_recovers(monkeypatch, tmp_path)
                 "actor": runtime.session.actor_key,
                 "session": runtime.session.id.hex,
                 "goal": "stabilize the patient",
-                "scenario": MEDICAL_EMERGENCY_V2.metadata.key,
+                "scenario": MEDICAL_TEST.metadata.key,
                 "keys": json.dumps(["stabilize_patient"]),
                 "catalog": f"scenario-version:{version.id}",
                 "now": now,

@@ -17,11 +17,8 @@ from app.infrastructure.db.models import (
     GameInstanceNodeState,
     WorldOperation,
 )
-from app.scenarios.builtin import (
-    LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
-    MEDICAL_EMERGENCY_V2,
-    require_builtin_v2_version,
-)
+from app.scenarios.builtin import require_builtin_v2_version
+from tests.scenario_fixtures import LINJIANG_V1_TEST, MEDICAL_TEST
 
 
 class FormalKnowledgeRevalidationProvider:
@@ -256,7 +253,7 @@ def test_goal_submission_stops_at_first_briefing_and_ack_runs_one_action_cycle(
 def test_medical_uses_same_stepwise_play_and_game_remains_active(
     client: TestClient, session: Session
 ) -> None:
-    version = require_builtin_v2_version(session, MEDICAL_EMERGENCY_V2)
+    version = require_builtin_v2_version(session, MEDICAL_TEST)
     session.commit()
     game_id = _new_game(client, str(version.id))
     first = client.post(
@@ -296,7 +293,7 @@ def test_linjiang_goal_aliases_create_confirmed_single_objective_scope(
     session: Session,
     goal: str,
 ) -> None:
-    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    version = require_builtin_v2_version(session, LINJIANG_V1_TEST)
     session.commit()
     game_id = _new_game(client, str(version.id))
 
@@ -320,7 +317,7 @@ def test_linjiang_unrelated_goal_is_unsupported_without_a_task(
     client: TestClient,
     session: Session,
 ) -> None:
-    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    version = require_builtin_v2_version(session, LINJIANG_V1_TEST)
     session.commit()
     game_id = _new_game(client, str(version.id))
 
@@ -421,7 +418,7 @@ def test_formal_play_revalidates_known_block_and_survives_restart(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    version = require_builtin_v2_version(session, LINJIANG_V1_TEST)
     session.commit()
     game_id = _new_game(client, str(version.id))
 

@@ -16,15 +16,12 @@ from app.infrastructure.db.models import (
     Player,
     WorldOperation,
 )
-from app.scenarios.builtin import (
-    MEDICAL_EMERGENCY_V2,
-    STARFIRE_V2,
-    require_builtin_v2_version,
-)
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
+from tests.scenario_fixtures import MEDICAL_TEST, STARFIRE_TEST
 
 
 def _drive(
@@ -57,8 +54,8 @@ def test_two_different_v2_games_run_isolated_and_recover_exact_versions(
     engine = create_engine(database_url)
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        starfire_version = require_builtin_v2_version(db, STARFIRE_V2)
-        medical_version = require_builtin_v2_version(db, MEDICAL_EMERGENCY_V2)
+        starfire_version = require_builtin_v2_version(db, STARFIRE_TEST)
+        medical_version = require_builtin_v2_version(db, MEDICAL_TEST)
         player = Player(name="dual-scenario-player")
         db.add(player)
         db.flush()
@@ -142,7 +139,7 @@ def test_two_different_v2_games_run_isolated_and_recover_exact_versions(
             is None
         )
 
-        changed_payload = deepcopy(STARFIRE_V2.model_dump(mode="json"))
+        changed_payload = deepcopy(STARFIRE_TEST.model_dump(mode="json"))
         changed_payload["metadata"]["name"] = "Starfire Later Version"
         changed_payload["world"]["name"] = "Starfire Later Version"
         later_version = require_builtin_v2_version(

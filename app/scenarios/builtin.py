@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.scenario_v2 import ScenarioDefinitionV2
-from app.infrastructure.db.models import ScenarioDraft, ScenarioVersion
+from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.scenarios.serialization import scenario_content_hash
 from app.services.scenarios import ScenarioService
@@ -25,12 +25,31 @@ def load_builtin_scenario(filename: str) -> ScenarioDefinitionV2:
     return ScenarioDefinitionV2.model_validate(payload)
 
 
-STARFIRE_V2 = load_builtin_scenario("starfire_command.yaml")
-MEDICAL_EMERGENCY_V2 = load_builtin_scenario("medical_emergency.yaml")
-LINJIANG_INFRASTRUCTURE_RECOVERY_V1 = load_builtin_scenario("linjiang_infrastructure_recovery.yaml")
-# Keep the old import name stable for callers that used the V0 world skeleton;
-# the built-in file now carries the V1 gameplay contract.
-LINJIANG_INFRASTRUCTURE_RECOVERY_V0 = LINJIANG_INFRASTRUCTURE_RECOVERY_V1
+LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0 = load_builtin_scenario(
+    "linjiang_infrastructure_recovery_v2_0.yaml"
+)
+
+
+def ensure_builtin_scenario(
+    db: Session,
+    definition: ScenarioDefinitionV2,
+) -> Scenario:
+    """Bootstrap a built-in Scenario only when its series does not exist yet.
+
+    Existing Scenario series are intentionally left untouched.  In particular,
+    changing a canonical authoring file must not silently publish a new
+    ScenarioVersion during an ordinary restart.
+    """
+
+    repository = ScenarioDefinitionRepository(db)
+    scenario = repository.find_scenario(definition.metadata.key)
+    if scenario is not None:
+        return scenario
+    version = require_builtin_v2_version(db, definition)
+    scenario = db.get(Scenario, version.scenario_id)
+    if scenario is None:
+        raise ValueError("Built-in Scenario bootstrap did not create its Scenario")
+    return scenario
 
 
 def require_builtin_v2_version(
@@ -72,10 +91,8 @@ def require_builtin_v2_version(
 
 
 __all__ = [
-    "LINJIANG_INFRASTRUCTURE_RECOVERY_V0",
-    "LINJIANG_INFRASTRUCTURE_RECOVERY_V1",
-    "MEDICAL_EMERGENCY_V2",
-    "STARFIRE_V2",
+    "LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0",
+    "ensure_builtin_scenario",
     "load_builtin_scenario",
     "require_builtin_v2_version",
 ]

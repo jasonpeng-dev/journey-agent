@@ -9,14 +9,14 @@ from sqlalchemy.orm import Session
 from app.infrastructure.db.models import Scenario, ScenarioVersion
 
 
-def _create_medical(client: TestClient, *, key: str = "clinic_one") -> dict[str, object]:
+def _create_example(client: TestClient, *, key: str = "clinic_one") -> dict[str, object]:
     response = client.post(
         "/api/v1/scenarios",
         json={
             "mode": "EXAMPLE",
             "key": key,
             "name": "Clinic One",
-            "example_key": "medical_emergency",
+            "example_key": "linjiang_infrastructure_recovery_v2_0",
         },
     )
     assert response.status_code == 201, response.text
@@ -71,7 +71,7 @@ def test_publish_versions_restore_clone_and_archive_are_isolated(
     client: TestClient,
     session: Session,
 ) -> None:
-    created = _create_medical(client)
+    created = _create_example(client)
     scenario_id = created["id"]
     draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
 
@@ -167,7 +167,7 @@ def test_scenario_library_detail_identity_and_not_found_contract(
     client: TestClient,
     session: Session,
 ) -> None:
-    created = _create_medical(client, key="library_case")
+    created = _create_example(client, key="library_case")
     scenario_id = created["id"]
 
     listing = client.get("/api/v1/scenarios")
@@ -196,14 +196,16 @@ def test_scenario_library_detail_identity_and_not_found_contract(
 
 
 def test_reference_navigation_atomic_rename_and_guarded_delete(client: TestClient) -> None:
-    created = _create_medical(client, key="reference_case")
+    created = _create_example(client, key="reference_case")
     scenario_id = created["id"]
 
+    document = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()["definition_document"]
+    interaction_key = document["actions"][0]["required_interaction_key"]
     references = client.get(f"/api/v1/scenarios/{scenario_id}/draft/references")
     assert references.status_code == 200
     assert any(
         edge["target"]["object_kind"] == "interaction"
-        and edge["target"]["object_key"] == "diagnosable"
+        and edge["target"]["object_key"] == interaction_key
         for edge in references.json()["references"]
     )
 
@@ -212,7 +214,7 @@ def test_reference_navigation_atomic_rename_and_guarded_delete(client: TestClien
         json={
             "expected_revision": 1,
             "object_kind": "interaction",
-            "object_key": "diagnosable",
+            "object_key": interaction_key,
         },
     )
     assert blocked.status_code == 409
@@ -223,7 +225,7 @@ def test_reference_navigation_atomic_rename_and_guarded_delete(client: TestClien
         json={
             "expected_revision": 1,
             "object_kind": "interaction",
-            "old_key": "diagnosable",
+            "old_key": interaction_key,
             "new_key": "diagnosis_capability",
         },
     )
@@ -234,7 +236,7 @@ def test_reference_navigation_atomic_rename_and_guarded_delete(client: TestClien
     )
 
 
-@pytest.mark.parametrize("example_key", ["starfire_command", "medical_emergency"])
+@pytest.mark.parametrize("example_key", ["linjiang_infrastructure_recovery_v2_0"])
 def test_generic_editor_round_trip_remains_engine_parseable(
     client: TestClient,
     example_key: str,
@@ -285,16 +287,14 @@ def test_examples_expose_the_two_complete_templates_and_world_v0(client: TestCli
     assert examples.status_code == 200
     maturity = {item["key"]: item["maturity"] for item in examples.json()}
     assert maturity == {
-        "medical_emergency": "PUBLISH_READY",
-        "starfire_command": "PUBLISH_READY",
-        "linjiang_infrastructure_recovery": "PUBLISH_READY",
+        "linjiang_infrastructure_recovery_v2_0": "PUBLISH_READY",
     }
 
 
 def test_warning_does_not_block_publish_but_missing_playability_does(
     client: TestClient,
 ) -> None:
-    created = _create_medical(client, key="warning_case")
+    created = _create_example(client, key="warning_case")
     scenario_id = created["id"]
     draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
     document = draft["definition_document"]
@@ -323,7 +323,7 @@ def test_warning_does_not_block_publish_but_missing_playability_does(
     )
     assert published.status_code == 200
 
-    blocked = _create_medical(client, key="not_playable")
+    blocked = _create_example(client, key="not_playable")
     blocked_id = blocked["id"]
     blocked_draft = client.get(f"/api/v1/scenarios/{blocked_id}/draft").json()
     blocked_document = blocked_draft["definition_document"]

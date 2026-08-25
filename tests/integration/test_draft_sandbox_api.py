@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.infrastructure.db.models import GameInstance, Scenario, ScenarioDraft, ScenarioVersion
+from tests.scenario_fixtures import MEDICAL_TEST, create_test_scenario
 
 
 def _create_example(client: TestClient, *, example_key: str, suffix: str) -> dict[str, object]:
@@ -95,8 +96,13 @@ def test_starfire_sandbox_runs_generic_play_without_main_database_mutation(
 def test_medical_uses_same_disposable_sandbox_and_formal_game_rejects_draft_identity(
     client: TestClient, session: Session
 ) -> None:
-    created = _create_example(client, example_key="medical_emergency", suffix="medical")
-    scenario_id = str(created["id"])
+    created = create_test_scenario(
+        session,
+        MEDICAL_TEST,
+        key=f"sandbox_medical_{uuid4().hex[:8]}",
+        name="Sandbox Medical",
+    )
+    scenario_id = str(created.id)
     games_before = session.scalar(select(func.count()).select_from(GameInstance))
     response = client.post(
         f"/api/v1/scenarios/{scenario_id}/draft/sandbox",

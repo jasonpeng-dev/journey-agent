@@ -1,9 +1,8 @@
-schema_version: 2
+﻿schema_version: 2
 metadata:
-  key: linjiang_infrastructure_recovery_acceptance
-  name: Linjiang Acceptance Mission (Developer/Test Only)
-  description: Developer/test-only playable Acceptance Mission for the Linjiang post-knowledge Revalidation and Formal Replan
-    flow.
+  key: linjiang_infrastructure_recovery
+  name: 临江市灾后基础设施恢复
+  description: 临江市灾后基础设施恢复的 Generic Locality V1 场景。
   locality:
     enabled: true
     scoped_resources: true
@@ -24,17 +23,9 @@ initialization:
     scope_node_key: west_logistics_district
     value: 10
     reserved_value: 0
-  - resource_key: electrical_repair_parts
-    scope_node_key: north_industrial_district
-    value: 0
-    reserved_value: 0
-  - resource_key: electrical_repair_parts
-    scope_node_key: central_district
-    value: 0
-    reserved_value: 0
 world:
-  key: linjiang_infrastructure_recovery_acceptance
-  name: Linjiang Acceptance Mission (Developer/Test Only)
+  key: linjiang_infrastructure_recovery
+  name: 临江市灾后基础设施恢复
   node_types:
   - key: facility
     name: 设施
@@ -651,14 +642,6 @@ actions:
     value_type: INTEGER
     required: true
     minimum: 1
-    maximum: null
-    allowed_values: []
-    default: null
-  - key: destination_region_key
-    name: 目标区域
-    value_type: STRING
-    required: true
-    minimum: null
     maximum: null
     allowed_values: []
     default: null

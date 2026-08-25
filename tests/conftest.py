@@ -11,7 +11,8 @@ from app.core.config import Settings, get_settings
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.session import get_db
 from app.main import app
-from app.services.seed import seed_demo_world
+from app.scenarios.builtin import require_builtin_v2_version
+from tests.scenario_fixtures import STARFIRE_TEST
 
 
 @pytest.fixture
@@ -25,7 +26,8 @@ def session() -> Generator[Session, None, None]:
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as db:
         with db.begin():
-            seed_demo_world(db)
+            # Generic runtime tests use this test-only fixture; production seed remains v2.0-only.
+            require_builtin_v2_version(db, STARFIRE_TEST)
         yield db
 
 

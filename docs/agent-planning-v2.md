@@ -522,7 +522,7 @@ hidden reasoning are excluded.
 A read-only evidence export for the current successful baseline recorded:
 
 * GameInstance prefix: 99c5d772
-* Scenario: linjiang_infrastructure_recovery_v10
+* Scenario: linjiang_infrastructure_recovery_v2_0
 * Objective: restore_central_communication_capability
 * Result: completed
 * four PlanningCycles;

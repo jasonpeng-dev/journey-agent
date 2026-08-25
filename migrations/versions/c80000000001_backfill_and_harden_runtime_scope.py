@@ -11,13 +11,14 @@ resolved by content hash, never by the current/latest published pointer.
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import sqlalchemy as sa
+import yaml
 from alembic import op
 
 from app.scenarios.documents import SCENARIO_DOCUMENT_SCHEMA_VERSION
-from app.scenarios.builtin import STARFIRE_V2
 from app.scenarios.serialization import canonical_document, scenario_content_hash
 
 revision: str = "c80000000001"
@@ -33,12 +34,20 @@ _OWNED_TABLES = (
     "player_decision_requests",
 )
 _LEGACY_CREATION_KEY = "legacy-default"
+_LEGACY_STARFIRE_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "c800_legacy_starfire.yaml"
+)
 
 
 def upgrade() -> None:
     bind = op.get_bind()
-    version_id = _bootstrap_legacy_starfire_version(bind)
-    instance_by_player = _create_default_instances(bind, version_id)
+    if _legacy_players_exist(bind):
+        version_id = _bootstrap_legacy_starfire_version(bind)
+        instance_by_player = _create_default_instances(bind, version_id)
+    else:
+        # An empty fresh database has no legacy runtime graph to backfill.  Do not
+        # create an unused historical Scenario compatibility anchor there.
+        instance_by_player = {}
     _backfill_instance_state(bind, instance_by_player)
     _backfill_direct_owners(bind, instance_by_player)
     _validate_runtime_graph(bind)
@@ -79,12 +88,17 @@ def _tables(bind: sa.Connection, *names: str) -> dict[str, sa.Table]:
     return {name: sa.Table(name, metadata, autoload_with=bind) for name in names}
 
 
+def _legacy_players_exist(bind: sa.Connection) -> bool:
+    players = _tables(bind, "players")["players"]
+    return bool(bind.scalar(sa.select(sa.func.count()).select_from(players)))
+
+
 def _bootstrap_legacy_starfire_version(bind: sa.Connection) -> UUID:
     tables = _tables(bind, "scenarios", "scenario_drafts", "scenario_versions")
     scenarios = tables["scenarios"]
     drafts = tables["scenario_drafts"]
     versions = tables["scenario_versions"]
-    draft_payload = STARFIRE_V2.model_dump(mode="json")
+    draft_payload = _load_legacy_starfire_fixture()
     canonical = canonical_document(draft_payload).model_dump(mode="json")
     content_hash = scenario_content_hash(canonical)
     now = datetime.now(UTC)
@@ -99,7 +113,7 @@ def _bootstrap_legacy_starfire_version(bind: sa.Connection) -> UUID:
             scenarios.insert().values(
                 id=_db_uuid(bind, scenario_id),
                 key="starfire_command",
-                name=STARFIRE_V2.metadata.name,
+                name=canonical["metadata"]["name"],
                 status="PUBLISHED",
                 version=1,
                 current_published_version_id=None,
@@ -177,6 +191,13 @@ def _bootstrap_legacy_starfire_version(bind: sa.Connection) -> UUID:
             .values(base_scenario_version_id=_db_uuid(bind, version_id))
         )
     return UUID(str(version_id))
+
+
+def _load_legacy_starfire_fixture() -> dict[str, object]:
+    payload = yaml.safe_load(_LEGACY_STARFIRE_FIXTURE.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("c800 legacy Starfire fixture must contain one document")
+    return payload
 
 
 def _create_default_instances(bind: sa.Connection, version_id: UUID) -> dict[UUID, UUID]:

@@ -20,7 +20,7 @@ from app.infrastructure.db.models import (
     Player,
 )
 from app.scenarios.builtin import (
-    LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
+    LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
     load_builtin_scenario,
     require_builtin_v2_version,
 )
@@ -34,9 +34,9 @@ from app.services.spatial_projection import SpatialDisplayProjector
 def _runtime_task(
     session: Session,
     key: str,
-    definition=LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
+    definition=LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
     *,
-    goal: str = "restore central hospital emergency power",
+    goal: str = "restore central communications",
 ):  # type: ignore[no-untyped-def]
     version = require_builtin_v2_version(session, definition)
     player = Player(name=key)
@@ -130,10 +130,10 @@ def _step(
 
 def _locations(session: Session, task, plans, steps_by_plan):  # type: ignore[no-untyped-def]
     service = PlayerProjectionService(session)
-    spatial = SpatialDisplayProjector(LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    spatial = SpatialDisplayProjector(LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
     return service._locations_by_step(
         task,
-        LINJIANG_INFRASTRUCTURE_RECOVERY_V1,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
         spatial,
         tuple(plans),
         steps_by_plan,
@@ -240,7 +240,7 @@ def test_replan_projection_uses_its_own_frozen_position_not_scenario_initial(
 def test_relay_projection_uses_target_actor_plan_time_region_and_name(
     session: Session,
 ) -> None:
-    definition = load_builtin_scenario("linjiang_infrastructure_recovery_v10.yaml")
+    definition = load_builtin_scenario("linjiang_infrastructure_recovery_v2_0.yaml")
     runtime, task = _runtime_task(
         session,
         "player-projection-relay-subtitle",
@@ -305,7 +305,7 @@ def test_relay_projection_uses_target_actor_plan_time_region_and_name(
 def test_player_projection_exposes_known_target_contracts_without_hidden_targets(
     session: Session,
 ) -> None:
-    definition = load_builtin_scenario("linjiang_infrastructure_recovery_v10.yaml")
+    definition = load_builtin_scenario("linjiang_infrastructure_recovery_v2_0.yaml")
     version = require_builtin_v2_version(session, definition)
     player = GameLifecycleService(session).platform_player()
     runtime = RuntimeInitializationService(session).create(

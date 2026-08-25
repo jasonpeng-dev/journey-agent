@@ -1,10 +1,10 @@
 from app.domain.scenario_v2 import ActionBehavior
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
 from app.services.spatial_projection import SpatialDisplayProjector
+from tests.scenario_fixtures import LINJIANG_V1_TEST
 
 
 def test_linjiang_nodes_resources_and_transport_use_generic_spatial_projection() -> None:
-    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V1
+    definition = LINJIANG_V1_TEST
     projector = SpatialDisplayProjector(definition)
 
     hospital = projector.node("central_hospital")
@@ -30,7 +30,7 @@ def test_linjiang_nodes_resources_and_transport_use_generic_spatial_projection()
 
 
 def test_action_location_formats_route_transport_facility_and_connector() -> None:
-    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V1
+    definition = LINJIANG_V1_TEST
     projector = SpatialDisplayProjector(definition)
     actions = {action.key: action for action in definition.actions}
 

@@ -26,10 +26,11 @@ from app.infrastructure.db.models import (
     Player,
     WorldOperation,
 )
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1, require_builtin_v2_version
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionError, GenericActionService
 from app.services.runtime_initialization import InitializedRuntime, RuntimeInitializationService
+from tests.scenario_fixtures import LINJIANG_V1_TEST
 
 
 class LinjiangProvider:
@@ -229,7 +230,7 @@ def _repair_step() -> PlanStepProposal:
 
 
 def _runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
-    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V1)
+    version = require_builtin_v2_version(session, LINJIANG_V1_TEST)
     player = Player(name=key)
     session.add(player)
     session.flush()

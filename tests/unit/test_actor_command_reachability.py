@@ -18,16 +18,16 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     Player,
 )
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionError, GenericActionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import LINJIANG_V1_TEST
 
 
 def _relay_definition() -> ScenarioDefinitionV2:
-    document: dict[str, Any] = deepcopy(LINJIANG_INFRASTRUCTURE_RECOVERY_V1.model_dump(mode="json"))
+    document: dict[str, Any] = deepcopy(LINJIANG_V1_TEST.model_dump(mode="json"))
     document["metadata"]["key"] = "actor_reachability_test"
     document["metadata"]["name"] = "Actor Reachability Test"
     document["world"]["key"] = "actor_reachability_test"

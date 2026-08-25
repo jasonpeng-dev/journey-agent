@@ -1,8 +1,8 @@
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
+from tests.scenario_fixtures import LINJIANG_V1_TEST
 
 
 def test_linjiang_v1_preserves_topology_and_adds_gameplay() -> None:
-    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V1
+    definition = LINJIANG_V1_TEST
     nodes_by_type = {
         node_type.key: {
             node.key for node in definition.world.nodes if node.node_type_key == node_type.key
