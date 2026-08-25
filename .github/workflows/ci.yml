@@ -28,7 +28,11 @@ jobs:
   browser-e2e:
     runs-on: ubuntu-latest
     env:
-      DATABASE_URL: sqlite+pysqlite:///./journey_e2e.db
+      E2E_DB_DIR: ${{ github.workspace }}/.e2e
+      E2E_FIXTURE_DB: ${{ github.workspace }}/.e2e/journey_e2e.db
+      DATABASE_URL: "sqlite+pysqlite:///${{ github.workspace }}/.e2e/journey_e2e.db"
+      E2E_API_ORIGIN: http://127.0.0.1:8000
+      E2E_PYTHON: ${{ github.workspace }}/.venv/bin/python
       MODEL_PROVIDER: mock
       DEVELOPER_API_TOKEN: ci-developer
     steps:
@@ -46,12 +50,40 @@ jobs:
         working-directory: frontend
       - run: npx playwright install --with-deps chromium
         working-directory: frontend
-      - run: uv run alembic upgrade head
-      - run: uv run python -m app.seed
-      - run: uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 &
-      - run: npm run e2e
+      - name: Prepare isolated E2E database
+        run: |
+          mkdir -p "$E2E_DB_DIR"
+          uv run alembic upgrade head
+          uv run python -m app.seed
+      - name: Prepare platform player for concurrent smoke requests
+        run: |
+          uv run python -c 'from app.infrastructure.db.session import SessionLocal; from app.services.game_lifecycle import GameLifecycleService; db = SessionLocal(); GameLifecycleService(db).platform_player(); db.commit(); db.close()'
+      - name: Start backend
+        run: |
+          uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/journey-e2e-backend.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/journey-e2e-backend.pid"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/ready > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/journey-e2e-backend.log"
+          exit 1
+      - name: Run browser E2E
+        run: npm run e2e
         working-directory: frontend
-
+      - name: Cleanup isolated E2E environment
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/journey-e2e-backend.pid" ]; then
+            backend_pid="$(cat "$RUNNER_TEMP/journey-e2e-backend.pid")"
+            kill "$backend_pid" 2>/dev/null || true
+            wait "$backend_pid" 2>/dev/null || true
+          fi
+          rm -f "$E2E_FIXTURE_DB"
+          rmdir "$E2E_DB_DIR" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/journey-e2e-backend.pid" "$RUNNER_TEMP/journey-e2e-backend.log"
   verify:
     runs-on: ubuntu-latest
     services:
@@ -76,7 +108,7 @@ jobs:
           python-version: "3.12"
       - run: uv sync --frozen --extra dev
       - run: uv run ruff check .
-      - run: uv run ruff format --check app evals tests
+      - run: uv run ruff format --check app evals tests frontend/e2e/prepare_history_fixture.py
       - run: uv run mypy app evals
       - run: uv run alembic upgrade head
       - run: uv run pytest --cov=app --cov-report=term-missing

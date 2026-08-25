@@ -35,7 +35,6 @@ from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
 
-
 SCENARIO_KEY = "linjiang_infrastructure_recovery_v2_0"
 
 
@@ -54,9 +53,7 @@ def create_fixture(kind: str) -> dict[str, str]:
         definition = ScenarioVersionRepository(db).load(version.id).definition
         objective = definition.objectives[0]
         action = next(item for item in definition.actions if item.key == "inspect")
-        target = next(
-            item for item in definition.world.nodes if item.key == "central_telecom_hub"
-        )
+        target = next(item for item in definition.world.nodes if item.key == "central_telecom_hub")
 
         runtime = GameLifecycleService(db).create(
             scenario_version_id=version.id,
@@ -81,9 +78,7 @@ def create_fixture(kind: str) -> dict[str, str]:
             task_id=task.id,
             version=1,
             status=(
-                AgentPlanStatus.ACTIVE
-                if kind == "presentation"
-                else AgentPlanStatus.SUCCEEDED
+                AgentPlanStatus.ACTIVE if kind == "presentation" else AgentPlanStatus.SUCCEEDED
             ),
             strategy_summary="Deterministic browser presentation fixture",
             replan_reason=None,
@@ -201,7 +196,6 @@ def append_post_fork_task(game_id: str) -> dict[str, str]:
         game = db.get(GameInstance, UUID(game_id))
         if game is None:
             raise RuntimeError("forked fixture GameInstance is unavailable")
-        runtime = GameInstanceService(db).load(GameInstanceId(game.id))
         session = db.scalar(
             select(ConversationSession)
             .where(ConversationSession.game_instance_id == game.id)
@@ -244,9 +238,7 @@ def main() -> None:
     if len(sys.argv) == 3 and sys.argv[1] == "append":
         print(json.dumps(append_post_fork_task(sys.argv[2])))
         return
-    raise ValueError(
-        "usage: prepare_history_fixture.py presentation|fork | append GAME_ID"
-    )
+    raise ValueError("usage: prepare_history_fixture.py presentation|fork | append GAME_ID")
 
 
 if __name__ == "__main__":
