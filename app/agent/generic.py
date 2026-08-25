@@ -4638,13 +4638,13 @@ def _validate_plan_segment_contract(
                 required_effect_types=tuple(sorted(resolver_types)),
             ),
         )
-    if acquisition_indices[-1] != len(segment.steps) - 1:
+    if acquisition_indices[0] != len(segment.steps) - 1:
         return (
             PlanViolation(
                 code="INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST",
                 failure_code="INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST",
                 dimension="INFORMATION_BOUNDARY_ACQUISITION",
-                required="MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP",
+                required="FIRST_MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP",
                 actual={
                     "matching_step_indices": acquisition_indices,
                     "segment_step_count": len(segment.steps),

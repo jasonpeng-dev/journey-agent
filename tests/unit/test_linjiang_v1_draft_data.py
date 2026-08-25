@@ -24,10 +24,13 @@ from app.agent.planner_contract import (
     action_planner_effects,
     declarative_action_effects,
 )
-from app.agent.planning_context import PlanningContextBuilder
+from app.agent.planning_context import PlanningContextBuilder, _canonical_planner_input
 from app.agent.provider import (
     PlannerActionContract,
+    PlannerActorState,
     PlannerInput,
+    PlannerKnownWorldSlice,
+    PlannerTargetBinding,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -40,6 +43,7 @@ from app.domain.enums import (
 )
 from app.domain.resources import resource_state_key
 from app.domain.runtime_scope import GameInstanceId
+from app.domain.scenario_v2 import ObjectiveDefinitionV2, ObjectiveRequirementV2
 from app.domain.world import AccessState, Visibility
 from app.engine.locality import transport_between
 from app.engine.rules import (
@@ -56,6 +60,10 @@ from app.infrastructure.db.models import (
     GameInstanceRelationKnowledge,
     GameInstanceResourceState,
     Player,
+)
+from app.scenarios.builtin import (
+    LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    require_builtin_v2_version,
 )
 from app.scenarios.linjiang_v1_draft import build_linjiang_v1_definition
 from app.scenarios.persistence import ScenarioDefinitionRepository
@@ -127,6 +135,20 @@ def _v2_0_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
     return runtime, scope
 
 
+def _linjiang_v4_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
+    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
+    player = Player(name=key)
+    session.add(player)
+    session.flush()
+    runtime = RuntimeInitializationService(session).create(
+        player_id=player.id,
+        scenario_version_id=version.id,
+        creation_key=key,
+    )
+    scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
+    return runtime, scope
+
+
 class _RepeatingPlanProvider:
     model_name = "typed-diagnostic-test-provider"
 
@@ -140,6 +162,40 @@ class _RepeatingPlanProvider:
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.requests.append(request)
         return PlanProposal(plan_summary=request.call_type, steps=self.steps)
+
+
+class _InspectBoundaryProvider:
+    model_name = "inspect-boundary-test-provider"
+
+    def select_objectives(self, request: object) -> object:
+        raise AssertionError(f"exact objective should not call goal selection: {request}")
+
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        planner_input = request.planner_input
+        dependency = next(
+            item
+            for item in planner_input.known_world.unknown_dependencies
+            if item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
+        )
+        assert any(item.action_key == "inspect" for item in planner_input.action_contracts)
+        assert any(item.actor_key == "logistics_team_alpha" for item in planner_input.actors)
+        assert any(
+            item.action_key == "inspect" and item.target_key == "central_telecom_hub"
+            for item in planner_input.target_bindings
+        )
+        return PlanProposal(
+            plan_summary="Inspect the unknown communication hub state.",
+            stop_reason="INFORMATION_BOUNDARY",
+            boundary_dependency_id=str(dependency["dependency_id"]),
+            steps=(
+                PlanStepProposal(
+                    purpose="Inspect the central communication hub.",
+                    action_key="inspect",
+                    actor_key="logistics_team_alpha",
+                    target_key="central_telecom_hub",
+                ),
+            ),
+        )
 
 
 def test_linjiang_v1_draft_is_complete_and_does_not_mutate_v9() -> None:
@@ -641,6 +697,588 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     assert all(
         set(actor.allowed_action_keys).issubset(replanned_action_keys)
         for actor in replanned.planner_input.actors
+    )
+
+
+def test_linjiang_v4_unknown_objective_fact_keeps_inspect_dependency_closure(
+    session: Session,
+) -> None:
+    runtime, scope = _linjiang_v4_runtime(session, "linjiang-v4-unknown-fact-closure")
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore central communication capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            "restore_central_communication_capability",
+            ("restore_central_communication_capability",),
+        ),
+        initialize_plan=False,
+    )
+    definition = agent._definition()
+    planner_input = (
+        PlanningContextBuilder(session, scope)
+        .build_v2_closure(
+            definition,
+            agent._objectives(task, definition),
+            task=task,
+            replan_reason=None,
+        )
+        .planner_input
+    )
+
+    action_keys = {item.action_key for item in planner_input.action_contracts}
+    actor_keys = {item.actor_key for item in planner_input.actors}
+    bindings = {(item.action_key, item.target_key) for item in planner_input.target_bindings}
+    dependency = next(
+        item
+        for item in planner_input.known_world.unknown_dependencies
+        if item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
+    )
+
+    assert "central_telecom_hub.operational" not in planner_input.known_world.facts
+    assert "inspect" in action_keys
+    assert "logistics_team_alpha" in actor_keys
+    assert ("inspect", "central_telecom_hub") in bindings
+    assert dependency["subject_key"] == "central_telecom_hub"
+    assert dependency["fact_key"] == "operational"
+    assert dependency["status"] == "UNKNOWN"
+    assert dependency["blocks"] == "OBJECTIVE_PROGRESSION"
+    assert dependency["resolvable_by_effect_types"] == ["KNOWLEDGE_REVEAL"]
+    logistics = next(
+        item for item in planner_input.actors if item.actor_key == "logistics_team_alpha"
+    )
+    assert "inspect" in logistics.allowed_action_keys
+    payload = PlanRequest(call_type="INITIAL_PLAN", planner_input=planner_input).provider_payload()
+    assert payload["planner_input"]["action_contracts"]
+    assert payload["planner_input"]["actors"]
+    assert payload["planner_input"]["target_bindings"]
+
+
+def test_dependency_closure_expands_each_new_binding_after_action_selection() -> None:
+    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
+    objective = ObjectiveDefinitionV2(
+        key="binding_expansion",
+        name="Binding expansion",
+        description="Exercise independent target binding expansion.",
+        completion_requirements=(
+            ObjectiveRequirementV2(
+                key="hospital",
+                node_key="central_hospital",
+                fact_key="operational",
+                accepted_values=(True,),
+                description="Hospital is operational.",
+            ),
+            ObjectiveRequirementV2(
+                key="telecom",
+                node_key="central_telecom_hub",
+                fact_key="operational",
+                accepted_values=(True,),
+                description="Telecom hub is operational.",
+            ),
+        ),
+    )
+    actor = PlannerActorState(
+        actor_key="test_executor",
+        role_key="test_role",
+        capabilities=("EXECUTE_ACTION",),
+        allowed_action_keys=("repair_test",),
+        availability="ACTIVE",
+        current_region="central_district",
+        command_reachability="ONLINE",
+    )
+    contract = PlannerActionContract(
+        action_key="repair_test",
+        executor_requirements={
+            "command_reachability": "ONLINE",
+            "required_capabilities": ["EXECUTE_ACTION"],
+        },
+        deterministic_effects=(
+            {
+                "type": "FACT_MUTATION",
+                "target": "target_key",
+                "fact_key": "operational",
+                "value": True,
+            },
+        ),
+    )
+    result = build_dependency_closure(
+        definition,
+        (objective,),
+        PlannerInput(
+            actors=(actor,),
+            action_contracts=(contract,),
+            target_bindings=(
+                PlannerTargetBinding(
+                    action_key="repair_test",
+                    target_key="central_hospital",
+                    requirements=({"cost": {"hospital_parts": 2}},),
+                    deterministic_effects=(
+                        {
+                            "type": "FACT_MUTATION",
+                            "target": "target_key",
+                            "fact_key": "operational",
+                            "value": True,
+                        },
+                    ),
+                ),
+                PlannerTargetBinding(
+                    action_key="repair_test",
+                    target_key="central_telecom_hub",
+                    requirements=({"cost": {"telecom_parts": 3}},),
+                    deterministic_effects=(
+                        {
+                            "type": "FACT_MUTATION",
+                            "target": "target_key",
+                            "fact_key": "operational",
+                            "value": True,
+                        },
+                    ),
+                ),
+            ),
+            known_world=PlannerKnownWorldSlice(
+                nodes=(
+                    {
+                        "key": "central_hospital",
+                        "access": "AVAILABLE",
+                        "interactions": [],
+                    },
+                    {
+                        "key": "central_telecom_hub",
+                        "access": "AVAILABLE",
+                        "interactions": [],
+                    },
+                ),
+                resources={
+                    "hospital_parts": {"known_available": 2, "known_total": 2},
+                    "telecom_parts": {"known_available": 3, "known_total": 3},
+                },
+            ),
+        ),
+    )
+
+    assert {
+        (item.action_key, item.target_key) for item in result.planner_input.target_bindings
+    } == {
+        ("repair_test", "central_hospital"),
+        ("repair_test", "central_telecom_hub"),
+    }
+    assert {"hospital_parts", "telecom_parts"}.issubset(result.planner_input.known_world.resources)
+
+
+def _v4_blocked_route_planner_base(
+    session: Session,
+    key: str,
+) -> tuple[object, object, object, object, PlannerInput]:
+    runtime, scope = _linjiang_v4_runtime(session, key)
+    route = session.get(
+        GameInstanceFactState,
+        (scope.game_instance_id, "central_river_tunnel", "passable"),
+    )
+    west_knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (scope.game_instance_id, "west_logistics_district"),
+    )
+    assert route is not None and west_knowledge is not None
+    route.visibility = Visibility.KNOWN
+    route.truth_value = False
+    west_knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    west_knowledge.resource_survey_completed = True
+    session.flush()
+
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore central communication capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            "restore_central_communication_capability",
+            ("restore_central_communication_capability",),
+        ),
+        initialize_plan=False,
+    )
+    definition = agent._definition()
+    context = PlanningContextBuilder(session, scope).build(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason="TRAVEL_BLOCKED",
+    )
+    return runtime, scope, task, definition, _canonical_planner_input(context)
+
+
+def test_dependency_closure_keeps_generic_resource_transport_for_late_action(
+    session: Session,
+) -> None:
+    _runtime, scope, task, definition, base = _v4_blocked_route_planner_base(
+        session,
+        "linjiang-v4-resource-support",
+    )
+    closure = build_dependency_closure(
+        definition,
+        GenericAgentService(session, scope)._objectives(task, definition),
+        base,
+    )
+    action_keys = {item.action_key for item in closure.planner_input.action_contracts}
+    assert {"clear_transport", "transport_resource"}.issubset(action_keys)
+    transport_contract = next(
+        item
+        for item in closure.planner_input.action_contracts
+        if item.action_key == "transport_resource"
+    )
+    assert {item["key"] for item in transport_contract.parameters} == {
+        "amount",
+        "resource_key",
+    }
+    region_keys = {
+        item["key"]
+        for item in closure.planner_input.known_world.nodes
+        if item.get("type") == "region"
+    }
+    assert {"central_district", "west_logistics_district"}.issubset(region_keys)
+    logistics = next(
+        item for item in closure.planner_input.actors if item.actor_key == "logistics_team_alpha"
+    )
+    assert "transport_resource" in logistics.allowed_action_keys
+    assert any(
+        "resource:municipal_repair_materials" in item["dependency_path"]
+        for item in closure.relevance_reason["transport_resource"]
+    )
+    assert len(closure.planner_input.action_contracts) <= len(base.action_contracts)
+    assert len(closure.planner_input.actors) <= len(base.actors)
+    assert len(closure.planner_input.target_bindings) <= len(base.target_bindings) + 8
+    assert len(closure.planner_input.known_world.nodes) <= len(base.known_world.nodes)
+    assert len(closure.planner_input.known_world.resources) <= len(base.known_world.resources)
+
+
+def test_dependency_closure_keeps_recoverable_disconnected_executor_and_relay(
+    session: Session,
+) -> None:
+    _runtime, scope, task, definition, base = _v4_blocked_route_planner_base(
+        session,
+        "linjiang-v4-recoverable-executor",
+    )
+    closure = build_dependency_closure(
+        definition,
+        GenericAgentService(session, scope)._objectives(task, definition),
+        base,
+    )
+
+    action_keys = {item.action_key for item in closure.planner_input.action_contracts}
+    actor_keys = {item.actor_key for item in closure.planner_input.actors}
+    assert {"clear_transport", "relay_message"}.issubset(action_keys)
+    assert {"municipal_transport_team", "logistics_team_alpha"}.issubset(actor_keys)
+
+
+def test_dependency_closure_drops_disconnected_executor_without_reachability_producer(
+    session: Session,
+) -> None:
+    _runtime, scope, task, definition, base = _v4_blocked_route_planner_base(
+        session,
+        "linjiang-v4-no-reachability-producer",
+    )
+    action_contracts = tuple(
+        item for item in base.action_contracts if item.action_key != "relay_message"
+    )
+    actors = tuple(
+        actor.model_copy(
+            update={
+                "allowed_action_keys": tuple(
+                    key for key in actor.allowed_action_keys if key != "relay_message"
+                )
+            }
+        )
+        for actor in base.actors
+    )
+    closure = build_dependency_closure(
+        definition,
+        GenericAgentService(session, scope)._objectives(task, definition),
+        base.model_copy(update={"action_contracts": action_contracts, "actors": actors}),
+    )
+
+    assert "clear_transport" not in {
+        item.action_key for item in closure.planner_input.action_contracts
+    }
+
+
+def test_dependency_closure_rejects_recoverable_executor_with_role_mismatch(
+    session: Session,
+) -> None:
+    _runtime, scope, task, definition, base = _v4_blocked_route_planner_base(
+        session,
+        "linjiang-v4-recoverable-role-mismatch",
+    )
+    actors = tuple(
+        actor.model_copy(update={"role_key": "wrong_role"})
+        if actor.actor_key == "municipal_transport_team"
+        else actor
+        for actor in base.actors
+    )
+    closure = build_dependency_closure(
+        definition,
+        GenericAgentService(session, scope)._objectives(task, definition),
+        base.model_copy(update={"actors": actors}),
+    )
+
+    assert "clear_transport" not in {
+        item.action_key for item in closure.planner_input.action_contracts
+    }
+
+
+def test_dependency_closure_does_not_add_transport_when_target_has_resource(
+    session: Session,
+) -> None:
+    runtime, scope = _linjiang_v4_runtime(session, "linjiang-v4-resource-already-at-target")
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore central communication capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            "restore_central_communication_capability",
+            ("restore_central_communication_capability",),
+        ),
+        initialize_plan=False,
+    )
+    inspected = GenericActionService(session, scope).execute_action(
+        actor_key="logistics_team_alpha",
+        action_key="inspect",
+        target_key="central_telecom_hub",
+        parameters={},
+        idempotency_key="linjiang-v4-resource-already-at-target-inspect",
+    )
+    assert inspected.applied is not None and inspected.applied.outcome.failure is None
+    session.expire_all()
+    scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
+    agent = GenericAgentService(session, scope)
+    definition = agent._definition()
+    context = PlanningContextBuilder(session, scope).build(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason="INSPECTION_KNOWLEDGE_CHANGED",
+    )
+    base = _canonical_planner_input(context)
+    resources = json.loads(json.dumps(base.known_world.resources))
+    for resource_key, amount in (
+        ("communication_equipment", 10),
+        ("general_engineering_parts", 15),
+    ):
+        resource = resources[resource_key]
+        resource["known_total"] = amount
+        resource["known_available"] = amount
+        central = resource["scopes"]["central_district"]
+        central["value"] = amount
+        central["known_total"] = amount
+        central["known_available"] = amount
+        central["knowledge_status"] = "KNOWN"
+    base = base.model_copy(
+        update={
+            "known_world": base.known_world.model_copy(update={"resources": resources}),
+        }
+    )
+    closure = build_dependency_closure(
+        definition,
+        agent._objectives(task, definition),
+        base,
+    )
+    action_keys = {item.action_key for item in closure.planner_input.action_contracts}
+    assert "repair_communications" in action_keys
+    assert "transport_resource" not in action_keys
+
+
+def test_unknown_resource_source_does_not_select_transport_without_known_source(
+    session: Session,
+) -> None:
+    runtime, scope = _linjiang_v4_runtime(session, "linjiang-v4-unknown-resource-source")
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore central communication capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            "restore_central_communication_capability",
+            ("restore_central_communication_capability",),
+        ),
+        initialize_plan=False,
+    )
+    inspected = GenericActionService(session, scope).execute_action(
+        actor_key="logistics_team_alpha",
+        action_key="inspect",
+        target_key="central_telecom_hub",
+        parameters={},
+        idempotency_key="linjiang-v4-unknown-resource-source-inspect",
+    )
+    assert inspected.applied is not None and inspected.applied.outcome.failure is None
+    session.expire_all()
+    scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
+    agent = GenericAgentService(session, scope)
+    definition = agent._definition()
+    planner_input = (
+        PlanningContextBuilder(session, scope)
+        .build_v2_closure(
+            definition,
+            agent._objectives(task, definition),
+            task=task,
+            replan_reason="INSPECTION_KNOWLEDGE_CHANGED",
+        )
+        .planner_input
+    )
+    action_keys = {item.action_key for item in planner_input.action_contracts}
+    assert "survey_resources" in action_keys
+    assert "transport_resource" not in action_keys
+    assert any(
+        item.get("dimension") == "RESOURCE_SOURCE"
+        and item.get("resource_key") == "communication_equipment"
+        and item.get("source_knowledge_status") == "UNKNOWN"
+        for item in planner_input.known_world.unknown_dependencies
+    )
+
+
+def test_resource_transport_requires_a_known_legal_transport_executor(
+    session: Session,
+) -> None:
+    _runtime, scope, task, definition, base = _v4_blocked_route_planner_base(
+        session,
+        "linjiang-v4-no-transport-executor",
+    )
+    actors = tuple(
+        actor.model_copy(
+            update={
+                "allowed_action_keys": tuple(
+                    key for key in actor.allowed_action_keys if key != "transport_resource"
+                )
+            }
+        )
+        for actor in base.actors
+    )
+    no_transport_actor_base = base.model_copy(update={"actors": actors})
+    closure = build_dependency_closure(
+        definition,
+        GenericAgentService(session, scope)._objectives(task, definition),
+        no_transport_actor_base,
+    )
+    action_keys = {item.action_key for item in closure.planner_input.action_contracts}
+    assert "clear_transport" in action_keys
+    assert "transport_resource" not in action_keys
+
+
+def test_linjiang_v4_mock_provider_can_submit_inspect_information_boundary(
+    session: Session,
+) -> None:
+    runtime, scope = _linjiang_v4_runtime(session, "linjiang-v4-mock-inspect-plan")
+    provider = _InspectBoundaryProvider()
+    task = GenericAgentService(session, scope, provider=provider).create_task(
+        runtime.session,
+        "restore central communication capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            "restore_central_communication_capability",
+            ("restore_central_communication_capability",),
+        ),
+    )
+
+    assert task.current_plan_version == 1
+    assert task.status.value != "BLOCKED"
+
+
+def test_linjiang_v4_inspect_knowledge_replan_exposes_state_producer(
+    session: Session,
+) -> None:
+    runtime, scope = _linjiang_v4_runtime(session, "linjiang-v4-inspect-replan")
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore central communication capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            "restore_central_communication_capability",
+            ("restore_central_communication_capability",),
+        ),
+        initialize_plan=False,
+    )
+    inspected = GenericActionService(session, scope).execute_action(
+        actor_key="logistics_team_alpha",
+        action_key="inspect",
+        target_key="central_telecom_hub",
+        parameters={},
+        idempotency_key="linjiang-v4-inspect-replan",
+    )
+    assert inspected.applied is not None
+    assert inspected.applied.outcome.failure is None
+    session.expire_all()
+    scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
+    agent = GenericAgentService(session, scope)
+    task = session.get(type(task), task.id)
+    assert task is not None
+    definition = agent._definition()
+    replanned = (
+        PlanningContextBuilder(session, scope)
+        .build_v2_closure(
+            definition,
+            agent._objectives(task, definition),
+            task=task,
+            replan_reason="INSPECTION_KNOWLEDGE_CHANGED",
+        )
+        .planner_input
+    )
+
+    assert replanned.known_world.facts["central_telecom_hub.operational"] is False
+    assert "repair_communications" in {item.action_key for item in replanned.action_contracts}
+    assert ("repair_communications", "central_telecom_hub") in {
+        (item.action_key, item.target_key) for item in replanned.target_bindings
+    }
+    assert not any(
+        item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
+        and item.get("subject_key") == "central_telecom_hub"
+        and item.get("fact_key") == "operational"
+        for item in replanned.known_world.unknown_dependencies
+    )
+
+
+def test_unknown_fact_without_legal_knowledge_producer_does_not_invent_inspect(
+    session: Session,
+) -> None:
+    runtime, scope = _linjiang_v4_runtime(session, "linjiang-v4-no-knowledge-producer")
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore central communication capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            "restore_central_communication_capability",
+            ("restore_central_communication_capability",),
+        ),
+        initialize_plan=False,
+    )
+    definition = agent._definition()
+    base = PlanningContextBuilder(session, scope).build_v2(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason=None,
+    )
+    action_contracts = tuple(item for item in base.action_contracts if item.action_key != "inspect")
+    actors = tuple(
+        item.model_copy(
+            update={
+                "allowed_action_keys": tuple(
+                    key for key in item.allowed_action_keys if key != "inspect"
+                )
+            }
+        )
+        for item in base.actors
+    )
+    result = build_dependency_closure(
+        definition,
+        agent._objectives(task, definition),
+        base.model_copy(update={"action_contracts": action_contracts, "actors": actors}),
+    )
+    action_keys = {item.action_key for item in result.planner_input.action_contracts}
+    assert "inspect" not in action_keys
+    assert any(
+        item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE" and item.get("status") == "UNKNOWN"
+        for item in result.planner_input.known_world.unknown_dependencies
     )
 
 

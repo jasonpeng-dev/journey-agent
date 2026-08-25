@@ -109,10 +109,13 @@ def build_dependency_closure(
     relevant_resources: set[str] = set()
     unknowns: dict[str, dict[str, object]] = {}
     audit: dict[str, list[dict[str, object]]] = {}
+    selected_actor_targets: set[str] = set()
+    selected_diagnostic_actor_keys: set[str] = set()
+    state_changed = False
 
-    def select_action(action_key: str, path: tuple[str, ...], producer_for: str) -> None:
+    def select_action(action_key: str, path: tuple[str, ...], producer_for: str) -> bool:
         if action_key in selected_actions:
-            return
+            return False
         if len(selected_actions) >= action_limit:
             raise DependencyClosureError(
                 f"dependency closure action bound {action_limit} exceeded at {action_key}; "
@@ -124,33 +127,50 @@ def build_dependency_closure(
         )
         contract = contracts.get(action_key)
         if contract is None:
-            return
+            return True
+        if not action_has_legal_executor(contract):
+            diagnostic_actors = _capability_diagnostic_actor_keys(contract, planner_input)
+            if diagnostic_actors:
+                selected_diagnostic_actor_keys.update(diagnostic_actors)
+                return True
+            selected_actions.remove(action_key)
+            entries = audit.get(action_key)
+            if entries:
+                entries.pop()
+                if not entries:
+                    audit.pop(action_key, None)
+            return False
         reachability = contract.executor_requirements.get("command_reachability")
-        role_key = contract.executor_requirements.get("required_role_key")
-        eligible_profiles = [
-            profile
-            for profile in definition.actors.actor_profiles
-            if action_key in profile.allowed_action_keys
-            and (not isinstance(role_key, str) or profile.role_key == role_key)
+        eligible_actors = [
+            actor for actor in planner_input.actors if _actor_matches_executor(actor, contract)
         ]
-        for profile in eligible_profiles:
-            actor_state = next(
-                (item for item in planner_input.actors if item.actor_key == profile.key), None
-            )
-            if (
-                reachability == "ONLINE"
-                and actor_state is not None
-                and actor_state.command_reachability != "ONLINE"
-            ):
-                queue.append(
-                    (
-                        TypedDependency(
-                            "ACTOR_COMMAND_REACHABILITY", profile.key, required="ONLINE"
-                        ),
-                        (*path, f"action:{action_key}", f"executor:{profile.key}"),
-                        action_key,
+        if reachability == "ONLINE":
+            online_actors = [
+                actor for actor in eligible_actors if actor.command_reachability == "ONLINE"
+            ]
+            if not online_actors:
+                for actor_state in sorted(eligible_actors, key=lambda item: item.actor_key):
+                    if not _has_public_reachability_producer(
+                        definition,
+                        planner_input,
+                        contracts,
+                        bindings,
+                        actor_state.actor_key,
+                        seen_actions=frozenset({action_key}),
+                    ):
+                        continue
+                    queue.append(
+                        (
+                            TypedDependency(
+                                "ACTOR_COMMAND_REACHABILITY",
+                                actor_state.actor_key,
+                                required="ONLINE",
+                            ),
+                            (*path, f"action:{action_key}", f"executor:{actor_state.actor_key}"),
+                            action_key,
+                        )
                     )
-                )
+                    break
 
         locality = contract.locality.get("type")
         # A locality contract is a dependency on the executor's current
@@ -177,11 +197,6 @@ def build_dependency_closure(
                     action_key,
                 )
             )
-        for binding_key, binding in bindings.items():
-            if binding_key[0] != action_key or binding_key not in selected_bindings:
-                continue
-            _queue_binding_resource_dependencies(binding, path, action_key)
-
         # A selected Action may have a public, known preflight contradiction
         # (for example, a route is still ACTIVE when the next Action requires
         # it to be DISRUPTED).  Expose deterministic public producers for that
@@ -236,6 +251,41 @@ def build_dependency_closure(
             ):
                 continue
             _queue_resource_dependency(resource_key, -amount, "", path, action_key)
+        return True
+
+    def select_binding(
+        binding_key: tuple[str, str],
+        path: tuple[str, ...],
+        producer_for: str,
+    ) -> bool:
+        """Select and expand one Action/Target binding exactly once."""
+
+        binding = bindings.get(binding_key)
+        if binding is None or binding_key in selected_bindings:
+            return False
+        action_key, target_key = binding_key
+        if action_key not in selected_actions and not select_action(action_key, path, producer_for):
+            return False
+        selected_bindings.add(binding_key)
+        audit.setdefault(action_key, []).append(
+            {
+                "producer_for": producer_for,
+                "dependency_path": list(path),
+                "target_binding": target_key,
+            }
+        )
+        relevant_nodes.add(target_key)
+        _queue_binding_resource_dependencies(binding, path, action_key)
+        return True
+
+    def action_has_legal_executor(contract: PlannerActionContract) -> bool:
+        return _has_legal_executor(
+            definition,
+            planner_input,
+            contracts,
+            bindings,
+            contract,
+        )
 
     def _queue_resource_dependency(
         resource_key: str,
@@ -304,17 +354,57 @@ def build_dependency_closure(
                 action_key,
             )
 
-    while queue:
-        dependency, path, consumer_action = queue.popleft()
+    def process_dependency(
+        dependency: TypedDependency,
+        path: tuple[str, ...],
+        consumer_action: str | None,
+    ) -> None:
+        nonlocal state_changed
         if dependency in visited:
-            continue
+            return
         if len(visited) >= dependency_limit:
             raise DependencyClosureError(
                 f"dependency closure bound {dependency_limit} exceeded at {dependency}; "
                 f"path={' -> '.join(path)}"
             )
         visited.add(dependency)
+        state_changed = True
         if dependency.dimension == "FACT":
+            fact_identity = f"{dependency.subject}.{dependency.key}"
+            if fact_identity not in planner_input.known_world.facts:
+                objective_unknown: dict[str, object] = {
+                    "dimension": "OBJECTIVE_FACT_KNOWLEDGE",
+                    "subject_key": dependency.subject,
+                    "fact_key": dependency.key,
+                    "required": dependency.required,
+                    "status": "UNKNOWN",
+                    "blocks": "OBJECTIVE_PROGRESSION",
+                    "resolvable_by_effect_types": ["KNOWLEDGE_REVEAL"],
+                }
+                objective_unknown["dependency_id"] = _dependency_id(
+                    "OBJECTIVE_FACT_KNOWLEDGE",
+                    subject_key=dependency.subject,
+                    fact_key=dependency.key,
+                )
+                unknowns[str(objective_unknown["dependency_id"])] = objective_unknown
+                for _action_key, contract in contracts.items():
+                    if not action_has_legal_executor(contract):
+                        continue
+                    binding_key = _knowledge_producer_binding_for_target(
+                        contract,
+                        dependency,
+                        planner_input,
+                        bindings,
+                    )
+                    if binding_key is None:
+                        continue
+                    if binding_key not in bindings:
+                        bindings[binding_key] = PlannerTargetBinding(
+                            action_key=binding_key[0],
+                            target_key=binding_key[1],
+                        )
+                    relevant_nodes.add(dependency.subject)
+                    select_binding(binding_key, path, repr(dependency))
             for action_key, contract in contracts.items():
                 if not _contract_can_produce_fact_for_target(
                     contract,
@@ -330,11 +420,11 @@ def build_dependency_closure(
                         and effect.get("fact_key") == dependency.key
                         and binding.target_key == dependency.subject
                     ):
-                        selected_bindings.add(binding_key)
-                        select_action(binding.action_key, path, repr(dependency))
-                        _queue_binding_resource_dependencies(binding, path, binding.action_key)
+                        select_binding(binding_key, path, repr(dependency))
         elif dependency.dimension in {"ACTOR_COMMAND_REACHABILITY", "ACTOR_LOCATION"}:
             effect_type = dependency.dimension
+            if dependency.dimension == "ACTOR_COMMAND_REACHABILITY":
+                selected_actor_targets.add(dependency.subject)
             for action_key, contract in contracts.items():
                 if action_key == consumer_action:
                     continue
@@ -402,7 +492,7 @@ def build_dependency_closure(
                 # not an UNKNOWN dependency.  Keep it in the canonical
                 # resource summary/precondition and let Validator emit the
                 # typed shortage diagnostic for a submitted proposal.
-                continue
+                return
             elif not _has_known_available_resource_at(
                 known_resource, destination_region, required_amount
             ):
@@ -412,104 +502,157 @@ def build_dependency_closure(
                     if any(
                         effect.get("type") == "RESOURCE_TRANSFER"
                         for effect in contract.deterministic_effects
-                    ):
+                    ) and action_has_legal_executor(contract):
                         select_action(action_key, path, repr(dependency))
 
     selected_actor_keys: set[str] = set()
     actor_states = {item.actor_key: item for item in planner_input.actors}
-    explicit_effect_actor_keys = {
-        str(effect.get("target"))
-        for contract in contracts.values()
-        if contract.action_key in selected_actions
-        for effect in contract.deterministic_effects
-        if effect.get("type") == "ACTOR_COMMAND_REACHABILITY"
-        and isinstance(effect.get("target"), str)
-        and effect.get("target") in actor_states
-    }
-    for action_key in selected_actions:
-        selected_contract = contracts.get(action_key)
-        if selected_contract is None:
-            continue
-        role_key = selected_contract.executor_requirements.get("required_role_key")
-        for profile in definition.actors.actor_profiles:
-            state = actor_states.get(profile.key)
-            if state is None or action_key not in profile.allowed_action_keys:
-                continue
-            if isinstance(role_key, str) and profile.role_key != role_key:
-                continue
-            # Keep online executors, role-bound executors, and Actors named by
-            # a public deterministic reachability effect.  A disconnected
-            # Actor is otherwise not an executable candidate; retaining every
-            # disconnected profile would turn the sparse closure into a
-            # scenario-wide Actor catalog.
-            if (
-                state.command_reachability != "ONLINE"
-                and not isinstance(role_key, str)
-                and profile.key not in explicit_effect_actor_keys
-            ):
-                continue
-            selected_actor_keys.add(profile.key)
-            if state.current_region:
-                relevant_nodes.add(state.current_region)
-
-    for binding_key in selected_bindings:
-        relevant_nodes.add(binding_key[1])
-    _include_one_hop_locality(
-        definition,
-        planner_input,
-        selected_actions,
-        relevant_nodes,
-        unknowns,
-    )
-    _include_public_resource_acquisition_regions(
-        definition,
-        planner_input,
-        selected_actions,
-        relevant_nodes,
-    )
     passability_key = definition.metadata.locality.passability_fact_key
-    if passability_key is not None:
-        for node_key in tuple(relevant_nodes):
-            if planner_input.known_world.facts.get(f"{node_key}.{passability_key}") is not False:
+
+    def actor_matches_executor(
+        actor: PlannerActorState,
+        contract: PlannerActionContract,
+    ) -> bool:
+        return _actor_matches_executor(actor, contract)
+
+    def refresh_actor_slice() -> None:
+        for action_key in sorted(selected_actions):
+            contract = contracts.get(action_key)
+            if contract is None:
                 continue
-            for action_key, contract in contracts.items():
-                if any(
-                    effect.get("type") == "FACT_MUTATION"
-                    and effect.get("fact_key") == passability_key
-                    and effect.get("value") is True
-                    for effect in contract.deterministic_effects
+            all_candidates = [
+                actor for actor in planner_input.actors if actor_matches_executor(actor, contract)
+            ]
+            candidates = all_candidates
+            if contract.executor_requirements.get("command_reachability") == "ONLINE":
+                online = [
+                    actor for actor in all_candidates if actor.command_reachability == "ONLINE"
+                ]
+                if online:
+                    candidates = online
+                else:
+                    targeted = [
+                        actor
+                        for actor in all_candidates
+                        if actor.actor_key in selected_actor_targets
+                    ]
+                    if targeted:
+                        candidates = targeted
+                    else:
+                        recoverable = [
+                            actor
+                            for actor in all_candidates
+                            if _has_public_reachability_producer(
+                                definition,
+                                planner_input,
+                                contracts,
+                                bindings,
+                                actor.actor_key,
+                                seen_actions=frozenset({action_key}),
+                            )
+                        ]
+                        if recoverable:
+                            witness = sorted(recoverable, key=lambda item: item.actor_key)[0]
+                            candidates = [witness]
+                            selected_actor_targets.add(witness.actor_key)
+                        else:
+                            candidates = []
+            for actor in candidates:
+                selected_actor_keys.add(actor.actor_key)
+                if actor.current_region:
+                    relevant_nodes.add(actor.current_region)
+
+        for actor_key in sorted(selected_actor_targets):
+            target_actor = actor_states.get(actor_key)
+            if target_actor is None or target_actor.availability != "ACTIVE":
+                continue
+            selected_actor_keys.add(actor_key)
+            if target_actor.current_region:
+                relevant_nodes.add(target_actor.current_region)
+
+    state_changed = True
+    while state_changed or queue:
+        state_changed = False
+        before = (
+            len(visited),
+            len(selected_actions),
+            len(selected_bindings),
+            len(relevant_nodes),
+            len(relevant_resources),
+            len(unknowns),
+            len(selected_actor_keys),
+            len(selected_actor_targets),
+        )
+        while queue:
+            process_dependency(*queue.popleft())
+
+        for binding_key in tuple(selected_bindings):
+            relevant_nodes.add(binding_key[1])
+            if binding_key[1] in actor_states:
+                selected_actor_targets.add(binding_key[1])
+        refresh_actor_slice()
+        for actor_key in sorted(selected_diagnostic_actor_keys):
+            actor = actor_states.get(actor_key)
+            if actor is None:
+                continue
+            selected_actor_keys.add(actor_key)
+            if actor.current_region:
+                relevant_nodes.add(actor.current_region)
+        _include_one_hop_locality(
+            definition,
+            planner_input,
+            selected_actions,
+            relevant_nodes,
+            unknowns,
+        )
+        _include_public_resource_acquisition_regions(
+            definition,
+            planner_input,
+            selected_actions,
+            relevant_nodes,
+        )
+
+        if passability_key is not None:
+            for node_key in tuple(sorted(relevant_nodes)):
+                if (
+                    planner_input.known_world.facts.get(f"{node_key}.{passability_key}")
+                    is not False
                 ):
+                    continue
+                for action_key, contract in sorted(contracts.items()):
+                    if not any(
+                        effect.get("type") == "FACT_MUTATION"
+                        and effect.get("fact_key") == passability_key
+                        and effect.get("value") is True
+                        for effect in contract.deterministic_effects
+                    ):
+                        continue
                     binding_key = (action_key, node_key)
                     if binding_key in bindings:
-                        selected_bindings.add(binding_key)
-                    select_action(
-                        action_key,
-                        (f"known_fact:{node_key}.{passability_key}=false",),
-                        "KNOWN_BLOCKED_TRANSPORT",
-                    )
+                        select_binding(
+                            binding_key,
+                            (f"known_fact:{node_key}.{passability_key}=false",),
+                            "KNOWN_BLOCKED_TRANSPORT",
+                        )
+                    else:
+                        select_action(
+                            action_key,
+                            (f"known_fact:{node_key}.{passability_key}=false",),
+                            "KNOWN_BLOCKED_TRANSPORT",
+                        )
 
-    # A newly selected blocked-route producer can introduce another legal
-    # executor. Recompute the actor slice without choosing which actor to use.
-    for action_key in selected_actions:
-        selected_contract = contracts.get(action_key)
-        if selected_contract is None:
-            continue
-        role_key = selected_contract.executor_requirements.get("required_role_key")
-        for profile in definition.actors.actor_profiles:
-            state = actor_states.get(profile.key)
-            if state is None or action_key not in profile.allowed_action_keys:
-                continue
-            if isinstance(role_key, str) and profile.role_key != role_key:
-                continue
-            if (
-                state.command_reachability != "ONLINE"
-                and not isinstance(role_key, str)
-                and profile.key not in explicit_effect_actor_keys
-            ):
-                continue
-            selected_actor_keys.add(profile.key)
-            if state.current_region:
-                relevant_nodes.add(state.current_region)
+        after = (
+            len(visited),
+            len(selected_actions),
+            len(selected_bindings),
+            len(relevant_nodes),
+            len(relevant_resources),
+            len(unknowns),
+            len(selected_actor_keys),
+            len(selected_actor_targets),
+        )
+        if after != before or queue:
+            state_changed = True
     known_world = _slice_known_world(
         planner_input.known_world,
         relevant_nodes,
@@ -531,8 +674,8 @@ def build_dependency_closure(
             "action_contracts": sliced_action_contracts,
             "target_bindings": tuple(
                 item
-                for item in planner_input.target_bindings
-                if (item.action_key, item.target_key) in selected_bindings
+                for binding_key, item in sorted(bindings.items())
+                if binding_key in selected_bindings
             ),
             "known_world": known_world,
         }
@@ -596,6 +739,175 @@ def _contract_can_produce_fact_for_target(
             and effect.get("fact_key") == dependency.key
             and effect.get("target") in {"target_key", "target_node", target_key}
             and effect.get("value") in accepted_values
+        ):
+            return True
+    return False
+
+
+def _knowledge_producer_binding_for_target(
+    contract: PlannerActionContract,
+    dependency: TypedDependency,
+    planner_input: PlannerInput,
+    bindings: dict[tuple[str, str], PlannerTargetBinding],
+) -> tuple[str, str] | None:
+    """Return a legal target binding for an objective-relevant knowledge producer.
+
+    Knowledge acquisition is separate from FACT_MUTATION.  The action must
+    declare a knowledge contract and a corresponding public KNOWLEDGE_REVEAL
+    effect.  Direct inspection may use a sparse binding because its target has
+    no hidden cost or target-specific Truth requirement.  A broader region
+    reveal is accepted only when an existing target binding proves that the
+    action can be attempted from the current public state.
+    """
+
+    target_key = dependency.subject
+    target = next(
+        (item for item in planner_input.known_world.nodes if item.get("key") == target_key),
+        None,
+    )
+    if target is None or target.get("access") not in {"AVAILABLE", "ENTERED"}:
+        return None
+    required_interaction = contract.target_contract.get("required_interaction_key")
+    interactions = target.get("interactions")
+    if isinstance(required_interaction, str) and (
+        not isinstance(interactions, list) or required_interaction not in interactions
+    ):
+        return None
+    if not any(
+        effect.get("type") == "KNOWLEDGE_REVEAL" for effect in contract.deterministic_effects
+    ):
+        return None
+
+    for semantics in contract.knowledge_semantics:
+        if semantics.get("reveals") != "NON_RESOURCE_STATE":
+            continue
+        target_scope = semantics.get("target")
+        if target_scope == "INSPECT_TARGET":
+            if semantics.get("type") != "FACILITY_OR_ROUTE_KNOWLEDGE":
+                continue
+            return (contract.action_key, target_key)
+        if target_scope != "TARGET_REGION_FACILITIES":
+            continue
+        if semantics.get("type") != "REGION_FACILITY_KNOWLEDGE":
+            continue
+        # A region-wide reveal cannot bypass hidden target requirements.
+        candidate = (contract.action_key, target_key)
+        if candidate in bindings:
+            return candidate
+    return None
+
+
+def _actor_matches_executor(
+    actor: PlannerActorState,
+    contract: PlannerActionContract,
+) -> bool:
+    requirements = contract.executor_requirements
+    required_role = requirements.get("required_role_key")
+    required_capabilities = requirements.get("required_capabilities", [])
+    return (
+        actor.availability == "ACTIVE"
+        and contract.action_key in actor.allowed_action_keys
+        and (not isinstance(required_role, str) or actor.role_key == required_role)
+        and isinstance(required_capabilities, (list, tuple))
+        and all(
+            isinstance(item, str) and item in actor.capabilities for item in required_capabilities
+        )
+    )
+
+
+def _has_legal_executor(
+    definition: ScenarioDefinitionV2,
+    planner_input: PlannerInput,
+    contracts: dict[str, PlannerActionContract],
+    bindings: dict[tuple[str, str], PlannerTargetBinding],
+    contract: PlannerActionContract,
+    *,
+    seen_actions: frozenset[str] = frozenset(),
+) -> bool:
+    """Prove current or publicly recoverable execution without choosing an Actor."""
+
+    for actor in planner_input.actors:
+        if not _actor_matches_executor(actor, contract):
+            continue
+        if contract.executor_requirements.get("command_reachability") != "ONLINE":
+            return True
+        if actor.command_reachability == "ONLINE":
+            return True
+        if _has_public_reachability_producer(
+            definition,
+            planner_input,
+            contracts,
+            bindings,
+            actor.actor_key,
+            seen_actions=seen_actions | {contract.action_key},
+        ):
+            return True
+    return False
+
+
+def _capability_diagnostic_actor_keys(
+    contract: PlannerActionContract,
+    planner_input: PlannerInput,
+) -> set[str]:
+    """Keep public role-matching Actors for the existing validator diagnostic."""
+
+    requirements = contract.executor_requirements
+    required_role = requirements.get("required_role_key")
+    required_capabilities = requirements.get("required_capabilities", [])
+    if not isinstance(required_capabilities, (list, tuple)) or not all(
+        isinstance(item, str) for item in required_capabilities
+    ):
+        return set()
+    return {
+        actor.actor_key
+        for actor in planner_input.actors
+        if actor.availability == "ACTIVE"
+        and contract.action_key in actor.allowed_action_keys
+        and (not isinstance(required_role, str) or actor.role_key == required_role)
+        and not set(required_capabilities).issubset(actor.capabilities)
+    }
+
+
+def _has_public_reachability_producer(
+    definition: ScenarioDefinitionV2,
+    planner_input: PlannerInput,
+    contracts: dict[str, PlannerActionContract],
+    bindings: dict[tuple[str, str], PlannerTargetBinding],
+    actor_key: str,
+    *,
+    seen_actions: frozenset[str],
+) -> bool:
+    """Return whether a public Action can restore one known Actor to ONLINE."""
+
+    target_actor = next(
+        (item for item in planner_input.actors if item.actor_key == actor_key), None
+    )
+    if target_actor is None:
+        return False
+    for producer in sorted(contracts.values(), key=lambda item: item.action_key):
+        if producer.action_key in seen_actions:
+            continue
+        if producer.target_contract.get("kind") != "ACTOR":
+            continue
+        if producer.target_contract.get("command_reachability") not in {
+            None,
+            target_actor.command_reachability,
+        }:
+            continue
+        if not any(
+            effect.get("type") == "ACTOR_COMMAND_REACHABILITY"
+            and effect.get("value") == "ONLINE"
+            and effect.get("target") in {"target_actor", "target_key", actor_key}
+            for effect in producer.deterministic_effects
+        ):
+            continue
+        if _has_legal_executor(
+            definition,
+            planner_input,
+            contracts,
+            bindings,
+            producer,
+            seen_actions=seen_actions,
         ):
             return True
     return False

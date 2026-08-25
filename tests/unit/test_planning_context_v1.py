@@ -591,6 +591,13 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "transport_resource is the Region-to-Region Resource transfer Action",
         "steps MUST be empty",
         "inability to think of the causal chain is not BLOCKED",
+        (
+            "first submitted Knowledge-acquisition Action that matches the "
+            "active boundary_dependency_id"
+        ),
+        "MUST be the final Step of this PlanSegment",
+        "do not schedule another candidate inspect or survey",
+        "existing REPLAN lifecycle",
         "planning_continuity",
         "Use it to retain still-relevant causal intent",
         "freely discard or redesign obsolete intent",
@@ -727,7 +734,48 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     )[0]
     assert acquisition_not_last.code == "INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST"
     assert acquisition_not_last.dimension == "INFORMATION_BOUNDARY_ACQUISITION"
-    assert acquisition_not_last.required == "MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP"
+    assert acquisition_not_last.required == "FIRST_MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP"
+
+    multiple_acquisitions = _validate_plan_segment_contract(
+        valid.model_copy(
+            update={
+                "steps": (
+                    acquisition,
+                    PlanStepProposal(
+                        step_id="between-surveys",
+                        action_key="travel",
+                        actor_key="actor",
+                        target_key="region",
+                    ),
+                    acquisition.model_copy(update={"step_id": "survey-2"}),
+                )
+            }
+        ),
+        planner_input,
+    )[0]
+    assert multiple_acquisitions.code == "INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST"
+    assert multiple_acquisitions.required == (
+        "FIRST_MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP"
+    )
+    assert multiple_acquisitions.actual["matching_step_indices"] == [0, 2]
+
+    supporting_actions_before_acquisition = _validate_plan_segment_contract(
+        valid.model_copy(
+            update={
+                "steps": (
+                    PlanStepProposal(
+                        step_id="travel-to-region",
+                        action_key="travel",
+                        actor_key="actor",
+                        target_key="region",
+                    ),
+                    acquisition,
+                )
+            }
+        ),
+        planner_input,
+    )
+    assert supporting_actions_before_acquisition == ()
     boundary_not_allowed = _validate_plan_segment_contract(
         PlanProposal(
             stop_reason="OBJECTIVE_COMPLETION",
@@ -756,6 +804,49 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     assert _validate_plan_segment_contract(missing_acquisition, planner_input)[0].code == (
         "INFORMATION_BOUNDARY_ACQUISITION_MISSING"
     )
+    non_resolver_knowledge_action = _validate_plan_segment_contract(
+        PlanProposal(
+            stop_reason="INFORMATION_BOUNDARY",
+            boundary_dependency_id=dependency_id,
+            steps=(
+                PlanStepProposal(
+                    step_id="inspect-knowledge",
+                    action_key="inspect",
+                    actor_key="actor",
+                    target_key="region",
+                ),
+            ),
+        ),
+        planner_input.model_copy(
+            update={
+                "action_contracts": (
+                    PlannerActionContract(
+                        action_key="inspect",
+                        deterministic_effects=(
+                            {"type": "KNOWLEDGE_REVEAL", "target": "inspect_target"},
+                        ),
+                    ),
+                )
+            }
+        ),
+    )[0]
+    assert non_resolver_knowledge_action.code == "INFORMATION_BOUNDARY_ACQUISITION_MISSING"
+
+    thirteen_step_plan = tuple(
+        PlanStepProposal(
+            step_id=f"step-{index}",
+            action_key="survey" if index in {2, 4, 6, 9, 13} else "travel",
+            actor_key="actor",
+            target_key="region",
+        )
+        for index in range(1, 14)
+    )
+    thirteen_step_violation = _validate_plan_segment_contract(
+        valid.model_copy(update={"steps": thirteen_step_plan}),
+        planner_input,
+    )[0]
+    assert thirteen_step_violation.code == "INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST"
+    assert thirteen_step_violation.actual["matching_step_indices"] == [1, 3, 5, 8, 12]
     wrong_scope = valid.model_copy(
         update={"steps": (acquisition.model_copy(update={"target_key": "different-region"}),)}
     )
