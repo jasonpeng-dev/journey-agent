@@ -7,10 +7,11 @@ from dataclasses import dataclass
 
 from app.api.schemas.phase_d import PublicKnowledgeChangeResponse
 from app.domain.resources import resource_pool_initial_states
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import ActionBehavior, ScenarioDefinitionV2
+from app.engine.locality import LocalityEngineError, region_for_node
 
 _FACT_LABELS = {
-    "operational": "运行状态",
+    "operational": "设备状态",
     "power_supply": "供电状态",
     "power_generation_capable": "发电能力",
     "generation_capable": "发电能力",
@@ -22,8 +23,8 @@ _FACT_LABELS = {
 }
 
 _FACT_VALUE_LABELS: dict[tuple[str | None, object], str] = {
-    ("operational", True): "运行中",
-    ("operational", False): "未运行",
+    ("operational", True): "正常",
+    ("operational", False): "待修复",
     ("power_supply", True): "已供电",
     ("power_supply", False): "未供电",
     ("power_supply", "AVAILABLE"): "已供电",
@@ -83,19 +84,36 @@ class PlayerActionReportFormatter:
         self.node_names = {item.key: item.name for item in definition.world.nodes}
         self.resource_pools = tuple(resource_pool_initial_states(definition))
 
-    def format_changes(self, payload: object) -> list[PublicKnowledgeChangeResponse]:
+    def format_changes(
+        self,
+        payload: object,
+        *,
+        action_key: str | None = None,
+        target_key: str | None = None,
+    ) -> list[PublicKnowledgeChangeResponse]:
         if not isinstance(payload, list):
             return []
 
+        raw_changes = [raw for raw in payload if isinstance(raw, dict)]
+        batch_context = self._batch_facility_context(raw_changes, action_key, target_key)
         changes: list[PublicKnowledgeChangeResponse] = []
-        for raw in payload:
-            if not isinstance(raw, dict):
-                continue
+        summary_emitted = False
+        for raw in raw_changes:
             kind = raw.get("kind")
             key = raw.get("key")
             if not isinstance(kind, str) or not isinstance(key, str):
                 continue
-            name, value = self._format_change(kind, key, raw.get("name"), raw.get("value"))
+            if batch_context is not None and self._is_batch_facility_fact(raw, batch_context[1]):
+                if not summary_emitted:
+                    changes.append(
+                        self._batch_facility_summary(batch_context[0], len(batch_context[1]))
+                    )
+                    summary_emitted = True
+                continue
+            formatted = self._format_change(kind, key, raw.get("name"), raw.get("value"))
+            if formatted is None:
+                continue
+            name, value = formatted
             try:
                 changes.append(
                     PublicKnowledgeChangeResponse.model_validate(
@@ -106,13 +124,92 @@ class PlayerActionReportFormatter:
                 continue
         return changes
 
+    def _batch_facility_context(
+        self,
+        payload: list[dict[object, object]],
+        action_key: str | None,
+        target_key: str | None,
+    ) -> tuple[str, set[str]] | None:
+        """Return the Region/facilities for a semantic batch reveal action.
+
+        The action behavior is the structured marker for the current
+        ``REGION_FACILITY_KNOWLEDGE`` effect.  This deliberately does not
+        inspect a Scenario-specific action key or infer a batch from the
+        number of facts in the payload.
+        """
+
+        if action_key is None or target_key is None:
+            return None
+        action = next((item for item in self.definition.actions if item.key == action_key), None)
+        if action is None or action.behavior != ActionBehavior.REPAIR_COMMUNICATIONS:
+            return None
+
+        target_region = self._safe_region_for_node(target_key)
+        facility_node_type = self.definition.metadata.locality.facility_node_type_key
+        facility_keys: set[str] = set()
+        facility_regions: dict[str, str] = {}
+        for raw in payload:
+            if raw.get("kind") != "FACT_REVEALED":
+                continue
+            key = raw.get("key")
+            if not isinstance(key, str) or "." not in key:
+                continue
+            node_key = key.rsplit(".", maxsplit=1)[0]
+            node = self.definition.world.node(node_key)
+            if node is None or node.node_type_key != facility_node_type:
+                continue
+            region_key = self._safe_region_for_node(node_key)
+            if region_key is None or (target_region is not None and region_key != target_region):
+                continue
+            facility_keys.add(node_key)
+            facility_regions[node_key] = region_key
+
+        if not facility_keys:
+            return None
+        regions = set(facility_regions.values())
+        if target_region is not None and target_region in regions:
+            return target_region, facility_keys
+        if len(regions) == 1:
+            return next(iter(regions)), facility_keys
+        return None
+
+    @staticmethod
+    def _is_batch_facility_fact(raw: dict[object, object], facility_keys: set[str]) -> bool:
+        if raw.get("kind") != "FACT_REVEALED":
+            return False
+        key = raw.get("key")
+        if not isinstance(key, str) or "." not in key:
+            return False
+        return key.rsplit(".", maxsplit=1)[0] in facility_keys
+
+    def _batch_facility_summary(
+        self,
+        region_key: str,
+        facility_count: int,
+    ) -> PublicKnowledgeChangeResponse:
+        region_name = self.node_names.get(region_key) or "目标区域"
+        return PublicKnowledgeChangeResponse(
+            # Keep the existing public union stable: the UI renders this as
+            # one knowledge item, while the persisted payload remains raw.
+            kind="FACT_REVEALED",
+            key=f"{region_key}.facility_knowledge_summary",
+            name=f"已同步{region_name} {facility_count} 处设施状态。",
+            value=None,
+        )
+
+    def _safe_region_for_node(self, node_key: str) -> str | None:
+        try:
+            return region_for_node(self.definition, node_key)
+        except LocalityEngineError:
+            return None
+
     def _format_change(
         self,
         kind: str,
         key: str,
         raw_name: object,
         raw_value: object,
-    ) -> tuple[str, str | int | bool | None]:
+    ) -> tuple[str, str | int | bool | None] | None:
         if kind == "RESOURCE_INVENTORY_REVEALED":
             return "资源库存信息", self._display_value(raw_value)
         if kind == "RESOURCE_SURVEY_COMPLETED":
@@ -131,6 +228,9 @@ class PlayerActionReportFormatter:
             return label, self._quantity_value(raw_value)
         if kind == "FACT_REVEALED":
             fact_key = key.rsplit(".", maxsplit=1)[-1]
+            node_key = key.rsplit(".", maxsplit=1)[0]
+            if not self._should_display_fact(node_key, fact_key):
+                return None
             return (
                 _FACT_LABELS.get(fact_key, self._safe_name(raw_name, "已知状态")),
                 self._display_value(raw_value, fact_key=fact_key),
@@ -141,6 +241,21 @@ class PlayerActionReportFormatter:
         if kind == "NODE_REVEALED":
             return self.node_names.get(key, self._safe_name(raw_name, "已知地点")), None
         return self._safe_name(raw_name, "已知信息"), self._display_value(raw_value)
+
+    def _should_display_fact(self, node_key: str, fact_key: str) -> bool:
+        """Keep only player-useful facts in an action knowledge report."""
+
+        if fact_key == "repair_profile":
+            return False
+        if fact_key not in {"power_generation_capable", "generation_capable"}:
+            return True
+        node = self.definition.world.node(node_key)
+        fact = node.fact(fact_key) if node is not None else None
+        # The capability fact is present on every Facility for a shared
+        # gameplay contract.  Only a definition that advertises the
+        # capability as true is a genuine generation facility; ordinary
+        # facilities' false value is not player-facing information.
+        return fact is not None and fact.initial_value is True
 
     def _parse_resource_identity(self, key: str) -> _ResourceIdentity | None:
         parts = key.split("@")
@@ -216,10 +331,17 @@ class PlayerActionReportFormatter:
 def format_player_knowledge_changes(
     payload: object,
     definition: ScenarioDefinitionV2,
+    *,
+    action_key: str | None = None,
+    target_key: str | None = None,
 ) -> list[PublicKnowledgeChangeResponse]:
     """Format only the already-emitted action knowledge delta for players."""
 
-    return PlayerActionReportFormatter(definition).format_changes(payload)
+    return PlayerActionReportFormatter(definition).format_changes(
+        payload,
+        action_key=action_key,
+        target_key=target_key,
+    )
 
 
 __all__ = ["PlayerActionReportFormatter", "format_player_knowledge_changes"]

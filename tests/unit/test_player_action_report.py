@@ -106,14 +106,71 @@ def test_action_report_localizes_internal_resource_survey_fields_and_values() ->
                 "name": "Operational",
                 "value": False,
             },
+            {
+                "kind": "FACT_REVEALED",
+                "key": "central_telecom_hub.power_generation_capable",
+                "name": "Power generation capable",
+                "value": False,
+            },
+            {
+                "kind": "FACT_REVEALED",
+                "key": "central_telecom_hub.repair_profile",
+                "name": "Repair profile",
+                "value": "central_telecom_hub",
+            },
+            {
+                "kind": "FACT_REVEALED",
+                "key": "central_telecom_hub.power_supply",
+                "name": "Power supply",
+                "value": "AVAILABLE",
+            },
         ],
         definition,
     )
 
     rendered = [_render(change) for change in changes]
-    assert rendered == ["资源库存信息\uff1a已可见", "资源调查已完成", "运行状态\uff1a未运行"]
+    assert rendered == [
+        "资源库存信息\uff1a已可见",
+        "资源调查已完成",
+        "设备状态\uff1a待修复",
+        "供电状态\uff1a已供电",
+    ]
     assert all(token not in " ".join(rendered) for token in ("VISIBLE", "True", "False"))
     assert "heavy_equipment_yard" not in " ".join(rendered)
+
+
+def test_action_report_keeps_generation_capability_for_genuine_generator() -> None:
+    definition = _definition()
+    changes = format_player_knowledge_changes(
+        [
+            {
+                "kind": "FACT_REVEALED",
+                "key": "southeast_emergency_power_station.power_generation_capable",
+                "name": "Power generation capable",
+                "value": True,
+            },
+        ],
+        definition,
+    )
+
+    assert [_render(change) for change in changes] == ["发电能力\uff1a具备"]
+
+
+def test_action_report_uses_normalized_operational_labels() -> None:
+    definition = _definition()
+    changes = format_player_knowledge_changes(
+        [
+            {
+                "kind": "FACT_REVEALED",
+                "key": "southeast_emergency_power_station.operational",
+                "name": "Operational",
+                "value": True,
+            },
+        ],
+        definition,
+    )
+
+    assert [_render(change) for change in changes] == ["设备状态\uff1a正常"]
 
 
 def test_action_report_does_not_leak_hidden_enum_and_works_for_other_scenario() -> None:

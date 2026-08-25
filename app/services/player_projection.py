@@ -1486,7 +1486,12 @@ def _knowledge_changes(
 ) -> list[PublicKnowledgeChangeResponse]:
     if not isinstance(operation.outcome, dict):
         return []
-    return format_player_knowledge_changes(operation.outcome.get("knowledge_changes"), definition)
+    return format_player_knowledge_changes(
+        operation.outcome.get("knowledge_changes"),
+        definition,
+        action_key=operation.action_key,
+        target_key=operation.target_key,
+    )
 
 
 def _plan_invalidation_for(task: AgentTask, plan_version: int) -> dict[str, object] | None:
