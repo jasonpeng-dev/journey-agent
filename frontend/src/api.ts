@@ -77,6 +77,10 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ expected_runtime_revision: expectedRuntimeRevision }),
   }),
+  checkpointGame: (id: string, expectedRuntimeRevision: number, creationKey: string) => request<GameSummary>(`/api/v1/games/${id}/checkpoint`, {
+    method: "POST",
+    body: JSON.stringify({ expected_runtime_revision: expectedRuntimeRevision, creation_key: creationKey }),
+  }),
   forkGame: (id: string, creationKey: string) => request<GameSummary>(`/api/v1/games/${id}/fork`, {
     method: "POST",
     body: JSON.stringify({ creation_key: creationKey }),
