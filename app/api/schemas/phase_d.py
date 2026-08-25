@@ -288,6 +288,11 @@ class ForkGameRequest(ApiModel):
     creation_key: str = Field(min_length=1, max_length=160)
 
 
+class CheckpointGameRequest(ApiModel):
+    expected_runtime_revision: int = Field(ge=0)
+    creation_key: str = Field(min_length=1, max_length=160)
+
+
 class GameSummaryResponse(ApiModel):
     id: UUID
     scenario_id: UUID
@@ -297,6 +302,10 @@ class GameSummaryResponse(ApiModel):
     status: PublicGameStatus
     runtime_revision: int = Field(ge=0)
     active_task_id: UUID | None = None
+    is_checkpoint: bool = False
+    checkpointed_from_game_instance_id: UUID | None = None
+    checkpoint_source_runtime_revision: int | None = Field(default=None, ge=0)
+    inherited_task_count: int = Field(default=0, ge=0)
     created_at: datetime
     updated_at: datetime
 
@@ -606,6 +615,7 @@ class PlayerPacingRequest(ApiModel):
 
 __all__ = [
     "ApprovalDecisionRequest",
+    "CheckpointGameRequest",
     "DeveloperGameSnapshotResponse",
     "DraftDeleteObjectRequest",
     "DraftPublishRequest",
