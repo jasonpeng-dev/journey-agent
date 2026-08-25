@@ -90,6 +90,11 @@ def build_linjiang_v1_definition(base_definition: ScenarioDefinitionV2) -> Scena
 
 def _build_nodes(document: dict[str, Any]) -> None:
     nodes = {node["key"]: node for node in document["world"]["nodes"]}
+    nodes["central_hospital"]["facts"] = [
+        fact
+        for fact in nodes["central_hospital"].get("facts", [])
+        if fact["key"] != "emergency_power_operational"
+    ]
     facilities = {
         "north_communication_relay": (
             "\u5317\u90e8\u901a\u4fe1\u4e2d\u7ee7\u7ad9",
@@ -942,7 +947,6 @@ def _build_rules(document: dict[str, Any]) -> None:
             {
                 "central_hospital": [
                     _set_fact("operational", True),
-                    _set_fact("emergency_power_operational", True),
                     _emit("ELECTRICAL_REPAIRED"),
                 ],
                 "north_power_substation": [

@@ -202,18 +202,11 @@ world:
     - power_targetable
     - repairable
     facts:
-    - key: emergency_power_operational
-      name: 应急供电
-      description: 中央医院的应急供电是否恢复。
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      allowed_values: []
     - key: operational
       name: 运行状态
       description: 运行状态
       value_type: BOOLEAN
-      initial_value: false
+      initial_value: true
       initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
@@ -284,7 +277,7 @@ world:
       name: 供电状态
       description: 供电状态
       value_type: ENUM
-      initial_value: UNAVAILABLE
+      initial_value: AVAILABLE
       initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
@@ -630,7 +623,7 @@ world:
       name: 供电状态
       description: 供电状态
       value_type: ENUM
-      initial_value: UNAVAILABLE
+      initial_value: AVAILABLE
       initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
@@ -695,7 +688,7 @@ world:
       name: 供电状态
       description: 供电状态
       value_type: ENUM
-      initial_value: UNAVAILABLE
+      initial_value: AVAILABLE
       initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
@@ -771,7 +764,7 @@ world:
       name: 供电状态
       description: 供电状态
       value_type: ENUM
-      initial_value: UNAVAILABLE
+      initial_value: AVAILABLE
       initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
@@ -1230,7 +1223,7 @@ world:
       name: 供电状态
       description: 供电状态
       value_type: ENUM
-      initial_value: UNAVAILABLE
+      initial_value: AVAILABLE
       initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
@@ -4236,29 +4229,6 @@ rules:
       direction: null
       required_fact_key: null
     fact_key: operational
-    value:
-      source: LITERAL
-      literal: true
-      parameter_key: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-  - kind: SET_FACT
-    node:
-      kind: CURRENT_TARGET
-      node_key: null
-      anchor_node_key: null
-      relation_type_key: null
-      direction: null
-      required_fact_key: null
-    fact_key: emergency_power_operational
     value:
       source: LITERAL
       literal: true
