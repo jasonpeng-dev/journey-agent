@@ -27,6 +27,8 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceMemoryEvent,
     GameInstanceNodeState,
+    GameInstanceRegionResourceKnowledge,
+    GameInstanceRelationKnowledge,
     GameInstanceResourceState,
     Player,
     PlayerExecutionCheckpoint,
@@ -189,6 +191,8 @@ class GameLifecycleService:
             GameInstanceMemoryEvent,
             GameInstanceActor,
             GameInstanceResourceState,
+            GameInstanceRegionResourceKnowledge,
+            GameInstanceRelationKnowledge,
             GameInstanceFactState,
             GameInstanceNodeState,
         ):

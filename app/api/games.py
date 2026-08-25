@@ -355,7 +355,7 @@ def game_history(
     tasks = db.scalars(
         select(AgentTask)
         .where(AgentTask.game_instance_id == game.id)
-        .order_by(AgentTask.created_at)
+        .order_by(AgentTask.created_at, AgentTask.id)
     )
     operations = db.scalars(
         select(WorldOperation)

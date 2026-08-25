@@ -142,7 +142,7 @@ class PlayerProjectionService:
         task_query = (
             select(AgentTask)
             .where(AgentTask.game_instance_id == game.id)
-            .order_by(AgentTask.created_at)
+            .order_by(AgentTask.created_at, AgentTask.id)
         )
         task_rows = tuple(self.db.scalars(task_query))
         objective_names_by_key = {item.key: item.name for item in definition.objectives}

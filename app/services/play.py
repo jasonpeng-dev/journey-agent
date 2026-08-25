@@ -804,7 +804,7 @@ class PlayOrchestrator:
                 AgentTask.game_instance_id == self.scope.game_instance_id,
                 AgentTask.status.in_(_ACTIVE_STATUSES),
             )
-            .order_by(AgentTask.created_at.desc())
+            .order_by(AgentTask.created_at.desc(), AgentTask.id.desc())
         )
 
 
