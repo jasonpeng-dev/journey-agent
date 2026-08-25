@@ -115,6 +115,32 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .knowledge-entry-copy strong { font-size: 11px; font-weight: 700; }
 .knowledge-entry-copy small { margin-top: 2px; color: var(--console-soft); font-size: 9px; }
 .knowledge-entry > .knowledge-status-pill { max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-location-list { display: grid; gap: 8px; }
+.knowledge-facility-card, .knowledge-node-card { overflow: hidden; border: 1px solid #e4ddcf; border-radius: 11px; background: rgb(255 255 255 / 58%); }
+.knowledge-transport-card { padding: 8px 9px; border: 1px solid #e4ddcf; border-radius: 11px; background: rgb(255 255 255 / 58%); }
+.knowledge-facility-card summary, .knowledge-node-card summary { display: flex; align-items: center; justify-content: space-between; gap: 5px; padding: 8px 9px; cursor: pointer; list-style: none; }
+.knowledge-facility-card summary::-webkit-details-marker, .knowledge-node-card summary::-webkit-details-marker { display: none; }
+.knowledge-facility-card summary::after, .knowledge-node-card summary::after { flex: 0 0 auto; color: var(--console-jade); content: "+"; font-weight: 800; }
+.knowledge-facility-card[open] summary::after, .knowledge-node-card[open] summary::after { content: "−"; }
+.knowledge-facility-heading, .knowledge-node-card summary > span { display: block; min-width: 0; }
+.knowledge-facility-heading { flex: 1 1 auto; }
+.knowledge-facility-heading strong, .knowledge-facility-heading small, .knowledge-node-card summary strong, .knowledge-node-card summary small { display: block; }
+.knowledge-facility-heading strong, .knowledge-node-card summary strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.knowledge-facility-heading small, .knowledge-node-card summary small { margin-top: 3px; color: var(--console-soft); font-size: 9px; }
+.knowledge-transport-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.knowledge-transport-heading > span:first-child { min-width: 0; }
+.knowledge-transport-heading strong, .knowledge-transport-heading small { display: block; }
+.knowledge-transport-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.knowledge-transport-heading small { margin-top: 3px; color: var(--console-soft); font-size: 9px; }
+.knowledge-facility-statuses { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 3px; margin-left: auto; }
+.knowledge-facility-status { display: inline-flex; align-items: center; padding: 3px 5px; border-radius: 999px; color: #286f63; background: #e0f1eb; font-size: 9px; line-height: 1; white-space: nowrap; }
+.knowledge-facility-status.neutral { color: #6e5b35; background: #f2ead8; }
+.knowledge-facility-details, .knowledge-node-details { display: grid; gap: 3px; padding: 6px 10px 8px; border-top: 1px solid #eee8dd; }
+.knowledge-facility-attribute { display: flex; align-items: baseline; gap: 4px; min-width: 0; padding: 2px 0; color: var(--console-soft); font-size: 10px; line-height: 1.35; }
+.knowledge-facility-attribute-label { flex: 0 0 auto; font-weight: 700; }
+.knowledge-facility-attribute-value { min-width: 0; color: var(--console-soft); }
+.knowledge-region-facts { display: grid; margin-bottom: 8px; }
+.knowledge-node-details .knowledge-entry { min-height: 32px; padding-left: 0; padding-right: 0; }
 .knowledge-fact-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-fact-value { flex: 0 0 auto; max-width: 42%; white-space: normal; }
 .actor-status-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: flex-end; }

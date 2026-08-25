@@ -107,6 +107,33 @@ def action_planner_constraints(
                 "unknown": "MAY_ATTEMPT",
             }
         )
+    if action.behavior == ActionBehavior.INSPECT:
+        knowledge.append(
+            {
+                "type": "FACILITY_OR_ROUTE_KNOWLEDGE",
+                "target": "INSPECT_TARGET",
+                "reveals": "NON_RESOURCE_STATE",
+                "resources": "UNCHANGED",
+            }
+        )
+    if action.behavior == ActionBehavior.REPAIR_COMMUNICATIONS:
+        knowledge.append(
+            {
+                "type": "REGION_FACILITY_KNOWLEDGE",
+                "target": "TARGET_REGION_FACILITIES",
+                "reveals": "NON_RESOURCE_STATE",
+                "resources": "UNCHANGED",
+                "relations": "UNCHANGED",
+            }
+        )
+    if action.behavior == ActionBehavior.CLEAR_TRANSPORT:
+        knowledge.append(
+            {
+                "type": "KNOWN_BLOCKED_ROUTE",
+                "required": "KNOWN_BLOCKED",
+                "unknown": "CANNOT_CLEAR",
+            }
+        )
     if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
         contract["semantics"] = {
             "actor_location": "UNCHANGED",
@@ -234,6 +261,10 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
                     "subject": "transport_passability",
                     "failure_code": "TRAVEL_BLOCKED",
                 },
+                {
+                    "type": "KNOWLEDGE_REVEAL_ON_SUCCESS",
+                    "subject": "transport_passability",
+                },
             ]
         )
     elif behavior == ActionBehavior.RELAY_MESSAGE:
@@ -287,6 +318,10 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
                     "subject": "transport_passability",
                     "failure_code": "TRANSPORT_BLOCKED",
                 },
+                {
+                    "type": "KNOWLEDGE_REVEAL_ON_SUCCESS",
+                    "subject": "transport_passability",
+                },
             ]
         )
     elif behavior == ActionBehavior.INSPECT:
@@ -295,6 +330,25 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
                 {"type": "KNOWLEDGE_REVEAL", "target": "inspect_target"},
                 {"type": "NO_TRUTH_MUTATION", "subject": "inspected_target"},
             ]
+        )
+    elif behavior == ActionBehavior.REPAIR_COMMUNICATIONS:
+        effects.extend(
+            [
+                {
+                    "type": "KNOWLEDGE_REVEAL",
+                    "target": "TARGET_REGION_FACILITIES",
+                    "scope": "NON_RESOURCE_FACILITY_INFORMATION",
+                },
+                {"type": "NO_RESOURCE_KNOWLEDGE_REVEAL", "scope": "TARGET_REGION"},
+                {"type": "NO_RELATION_KNOWLEDGE_REVEAL", "scope": "TARGET_REGION"},
+            ]
+        )
+    elif behavior == ActionBehavior.CLEAR_TRANSPORT:
+        effects.append(
+            {
+                "type": "KNOWLEDGE_REVEAL_ON_SUCCESS",
+                "subject": "transport_passability",
+            }
         )
     elif behavior == ActionBehavior.SUPPLY_POWER:
         effects.extend(

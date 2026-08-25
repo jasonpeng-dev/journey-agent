@@ -61,9 +61,10 @@ export type GameHistory = {
 export type ActionLocation = { kind: string; summary: string; detail: string | null };
 export type PublicRelation = { relation_key?: string | null; source_node_key: string; relation_type_key: string; target_node_key: string; source_node_name?: string | null; target_node_name?: string | null };
 export type PublicActionRequirement = { action_key: string; action_name: string; required_actor_role_key?: string | null; required_actor_role_name?: string | null; source_relation_type_key?: string | null; known_preconditions: Array<{ node_key: string; fact_key: string; selector: string; current_value: string | number | boolean; failure_condition?: Record<string, unknown> }>; cost?: Record<string, number>; resource_costs?: Record<string, number> };
-export type PublicPlanStep = { id: string; sequence: number; description: string; assigned_actor_name: string; status: "PENDING" | "CURRENT" | "COMPLETED" | "FAILED" | "BLOCKED"; result_summary: string | null; location?: ActionLocation | null };
+export type PublicTargetActionContract = { target_key: string; action_key: string; action_name: string; required_actor_role_key?: string | null; required_actor_role_name?: string | null; source_relation_type_key?: string | null; cost?: Record<string, number>; special_requirements?: Array<Record<string, unknown>>; effects?: Array<Record<string, unknown>> };
+export type PublicPlanStep = { id: string; sequence: number; description: string; assigned_actor_name: string; subtitle?: string | null; status: "PENDING" | "CURRENT" | "COMPLETED" | "FAILED" | "BLOCKED"; result_summary: string | null; location?: ActionLocation | null };
 export type PublicPlan = { strategy_summary: string; updated: boolean; steps: PublicPlanStep[] };
-export type PublicPlanHistoryStep = { id: string; sequence: number; action_name: string; assigned_actor_name: string; status: "PLANNED" | "CURRENT" | "COMPLETED" | "FAILED" | "CANCELLED"; result_summary: string | null; location?: ActionLocation | null };
+export type PublicPlanHistoryStep = { id: string; sequence: number; action_name: string; assigned_actor_name: string; subtitle?: string | null; status: "PLANNED" | "CURRENT" | "COMPLETED" | "FAILED" | "CANCELLED"; result_summary: string | null; location?: ActionLocation | null };
 export type PlanInterruption = { kind: "FAILURE" | "KNOWLEDGE_CONFLICT"; step_id: string; sequence: number; step_name: string };
 export type PublicPlanHistory = { id: string; ordinal: number; status: "EXECUTING" | "ADJUSTED" | "COMPLETED" | "BLOCKED"; completed_steps: number; total_steps: number; failed_step_name: string | null; interruption?: PlanInterruption | null; steps: PublicPlanHistoryStep[] };
 export type MissionRoadmapStage = { key: string; name: string; description: string; status: "COMPLETED" | "CURRENT" | "PENDING"; objective_key: string | null };
@@ -84,7 +85,7 @@ export type ResourceIntelligence = {
     resource_survey_completed: boolean;
     resources: Record<string, {
       resource_name: string;
-      known_total: number;
+      known_total: number | null;
       known_available: number;
       pools: Array<{
         pool_key: string;
@@ -99,7 +100,7 @@ export type ResourceIntelligence = {
   }>;
   global_resources: Record<string, {
     resource_name: string;
-    known_total: number;
+    known_total: number | null;
     known_available: number;
     pools: Array<{
         pool_key: string;
@@ -112,7 +113,7 @@ export type ResourceIntelligence = {
     }>;
   }>;
 };
-export type PlayerGameState = { game: GameSummary; visible_nodes: Array<{ key: string; name: string; accessible: boolean; node_type_key?: string | null; region_key?: string | null; region_name?: string | null; endpoint_region_keys?: string[]; endpoint_region_names?: string[]; associated_known_resources?: Array<Record<string, unknown>> }>; known_facts: Array<{ node_key: string; fact_key: string; name: string; value: string | number | boolean; node_name?: string | null; node_type_key?: string | null; region_key?: string | null; region_name?: string | null; endpoint_region_keys?: string[]; endpoint_region_names?: string[] }>; known_relations?: PublicRelation[]; known_action_requirements?: PublicActionRequirement[]; resources: Array<{ key: string; name: string; value: number; reserved_value: number; pool_key?: string; facility_key?: string | null; availability?: "AVAILABLE" | "UNAVAILABLE"; scope_node_key?: string | null; scope_node_name?: string | null; scope_region_key?: string | null; scope_region_name?: string | null }>; resource_intelligence?: ResourceIntelligence; actors: Array<{ key: string; name: string; role_name: string; current_node_name: string; command_reachability: "ONLINE" | "DISCONNECTED" }>; current_task: PublicTask | null; task_history: PublicTaskSummary[]; pending_approval_id: string | null };
+export type PlayerGameState = { game: GameSummary; visible_nodes: Array<{ key: string; name: string; accessible: boolean; node_type_key?: string | null; region_key?: string | null; region_name?: string | null; endpoint_region_keys?: string[]; endpoint_region_names?: string[]; associated_known_resources?: Array<Record<string, unknown>> }>; known_facts: Array<{ node_key: string; fact_key: string; name: string; value: string | number | boolean; node_name?: string | null; node_type_key?: string | null; region_key?: string | null; region_name?: string | null; endpoint_region_keys?: string[]; endpoint_region_names?: string[] }>; known_relations?: PublicRelation[]; known_action_requirements?: PublicActionRequirement[]; known_target_action_contracts?: PublicTargetActionContract[]; resources: Array<{ key: string; name: string; value: number; reserved_value: number; pool_key?: string; facility_key?: string | null; availability?: "AVAILABLE" | "UNAVAILABLE"; scope_node_key?: string | null; scope_node_name?: string | null; scope_region_key?: string | null; scope_region_name?: string | null }>; resource_intelligence?: ResourceIntelligence; actors: Array<{ key: string; name: string; role_name: string; current_node_name: string; command_reachability: "ONLINE" | "DISCONNECTED" }>; current_task: PublicTask | null; task_history: PublicTaskSummary[]; pending_approval_id: string | null };
 export type GoalSubmission = { status: "ACCEPTED" | "NEEDS_CLARIFICATION" | "UNSUPPORTED"; task: PublicTask | null; clarification_prompt: string | null; candidate_objective_names: string[]; explanation: string | null };
 export type DeveloperSnapshot = { game: GameSummary; truth: Record<string, unknown>; knowledge: Record<string, unknown>; actors: Array<Record<string, unknown>>; tasks: Array<Record<string, unknown>>; plans: Array<Record<string, unknown>>; operations: Array<Record<string, unknown>>; rule_outcomes: Array<Record<string, unknown>>; decisions: Array<Record<string, unknown>>; memory: Array<Record<string, unknown>>; history: Array<Record<string, unknown>> };
 export type DraftSandboxResult = { scenario_id: string; revision: number; sandbox_started: boolean; issues: ValidationResult["issues"]; goal_status: string | null; task: PublicTask | null; visible_nodes: PlayerGameState["visible_nodes"]; known_facts: PlayerGameState["known_facts"]; resources: PlayerGameState["resources"] };

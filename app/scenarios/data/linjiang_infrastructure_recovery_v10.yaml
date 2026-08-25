@@ -174,7 +174,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: central_hospital
     name: 中央医院
     description: 为中央城区提供综合医疗救治服务。
@@ -191,28 +207,28 @@ world:
       description: 中央医院的应急供电是否恢复。
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: operational
       name: 运行状态
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -221,7 +237,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: central_hospital
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: central_river_tunnel
     name: 中央河底隧道
@@ -255,21 +271,21 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -278,7 +294,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: central_communication_core
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: city_distribution_center
     name: 城市配送中心
@@ -288,7 +304,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: district_service_center
     name: 东南公共服务中心
     description: 提供东南高地区的综合公共服务与办事支持。
@@ -519,7 +551,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: emergency_supply_warehouse
     name: 应急物资仓库
     description: 集中储存城市应急物资与周转用品。
@@ -528,7 +576,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: heavy_equipment_yard
     name: 重型工程设备场
     description: 停放和调配重型工程作业设备。
@@ -544,7 +608,7 @@ world:
       description: 重型工程支援
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -553,21 +617,21 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -576,7 +640,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: heavy_equipment_yard
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: hill_reservoir
     name: 高地蓄水池
@@ -586,7 +650,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: north_communication_relay
     name: 北部通信中继站
     description: 北部工业区的通信中继设施。
@@ -602,21 +682,21 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -625,7 +705,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: north_communication_relay
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: north_fuel_depot
     name: 北部燃料储备库
@@ -635,7 +715,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: north_industrial_district
     name: 北部工业区
     description: 集中分布能源与市政工程设施的北部区域。
@@ -662,21 +758,21 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -685,7 +781,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: north_power_substation
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: north_service_corridor
     name: 北部联络通道
@@ -712,7 +808,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: river_port
     name: 临江港
     description: 承担沿江货物与应急运输的装卸作业。
@@ -721,7 +833,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: riverside_shelter
     name: 河滨应急避难所
     description: 为河滨居民提供集中避难与公共服务空间。
@@ -778,14 +906,14 @@ world:
       description: 重型工程支援就绪
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: passable
       name: 通行状态
       description: 通行状态
       value_type: BOOLEAN
       initial_value: true
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: south_communication_core
     name: 南部通信核心
@@ -802,21 +930,21 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -825,7 +953,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: south_communication_core
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: south_fuel_terminal
     name: 南部燃料码头
@@ -835,7 +963,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: south_pump_station
     name: 南部主泵站
     description: 负责南部滨水区的水务输送与泵送调度。
@@ -852,21 +996,21 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -875,7 +1019,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: south_pump_station
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: south_substation
     name: 南部变电站
@@ -893,21 +1037,21 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -916,7 +1060,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: south_substation
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: south_waterfront_district
     name: 南部滨水区
@@ -942,7 +1086,7 @@ world:
       description: 通行状态
       value_type: BOOLEAN
       initial_value: true
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: southeast_emergency_power_station
     name: 东南应急电源站
@@ -1002,7 +1146,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: southeast_telecom_relay
     name: 东南通信中继站
     description: 为东南高地区提供通信信号中继服务。
@@ -1057,21 +1217,21 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1080,7 +1240,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: utility_service_depot
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: vehicle_depot
     name: 应急车辆基地
@@ -1090,7 +1250,23 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
-    facts: []
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
   - key: water_treatment_plant
     name: 城市水处理厂
     description: 负责城市原水处理与供水系统衔接。
@@ -1108,28 +1284,28 @@ world:
       description: 重型工程支援就绪
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: operational
       name: 运行状态
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
       description: 供电能力
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
       value_type: ENUM
       initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1138,7 +1314,7 @@ world:
       description: 设施修复类型
       value_type: STRING
       initial_value: water_treatment_plant
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: waterfront_access_corridor
     name: 滨江通道
@@ -1154,7 +1330,7 @@ world:
       description: 通行状态
       value_type: BOOLEAN
       initial_value: true
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: west_communication_relay
     name: 西部通信中继站
@@ -1210,7 +1386,7 @@ world:
       description: 通行状态
       value_type: BOOLEAN
       initial_value: true
-      initial_visibility: KNOWN
+      initial_visibility: HIDDEN
       allowed_values: []
   - key: west_logistics_district
     name: 西部物流区
@@ -1660,7 +1836,7 @@ actions:
   locality: FACILITY_REGION
 - key: clear_transport
   name: 清理交通通道
-  description: 清理已知受阻通道。
+  description: 修复已确认受阻的 Transport，使其恢复可通行；不应对尚未确认受阻的未知通道执行。
   required_interaction_key: clearable
   execution_mode: IMMEDIATE
   parameters: []
@@ -1681,7 +1857,7 @@ actions:
     - CLEARED
     wait_success_outcome_codes: []
     hints: []
-  behavior: RULE
+  behavior: CLEAR_TRANSPORT
   locality: TRANSPORT_ENDPOINT
 - key: deploy_heavy_engineering_support
   name: 部署重型工程支援
@@ -1714,7 +1890,7 @@ actions:
   locality: LOCAL_TARGET
 - key: inspect
   name: 检查状态
-  description: 检查设施或通道的已知状态。
+  description: 主动调查一个已知但尚未检查的设施或通道，揭示设施状态、供电状态、维修需求和其他非资源情报；不调查资源库存。
   required_interaction_key: inspectable
   execution_mode: IMMEDIATE
   parameters: []
@@ -1764,7 +1940,7 @@ actions:
   target_kind: ACTOR
 - key: repair_communications
   name: 修复通信设施
-  description: 恢复通信中继与区域通信核心。
+  description: 修复通信设施后，获得该通信设施所属 Region 全部 Facility 的非资源设施情报；不揭示资源库存、隐藏资源或新的供电关系。
   required_interaction_key: repairable
   execution_mode: IMMEDIATE
   parameters: []
@@ -1791,7 +1967,7 @@ actions:
     - COMMUNICATIONS_REPAIRED
     wait_success_outcome_codes: []
     hints: []
-  behavior: RULE
+  behavior: REPAIR_COMMUNICATIONS
   locality: FACILITY_REGION
 - key: repair_electrical
   name: 修复电力设施
@@ -1936,7 +2112,7 @@ actions:
   locality: FACILITY_REGION
 - key: survey_resources
   name: 查探资源
-  description: 完成一次区域资源盘点，并可能发现设施库存。
+  description: 专门调查目标 Region 的资源库存，发现普通资源与可调查的设施关联资源及其来源；不调查一般 Facility 状态。
   required_interaction_key: surveyable
   execution_mode: IMMEDIATE
   parameters: []
@@ -1961,7 +2137,7 @@ actions:
   locality: REGION
 - key: transport_resource
   name: 运输资源
-  description: 将当前 Region 的已知资源运往目标 Region。
+  description: 将当前 Region 的已知可用资源运往目标 Region。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复；不会移动 Actor。
   required_interaction_key: transport_destination
   execution_mode: IMMEDIATE
   parameters:
@@ -2003,7 +2179,7 @@ actions:
   locality: NONE
 - key: travel
   name: 前往区域
-  description: 通过一个 Transport 连接移动到目标区域。
+  description: 尝试通过一个连接当前 Region 与目标 Region 的 Transport。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复。
   required_interaction_key: travel_destination
   execution_mode: IMMEDIATE
   parameters: []
@@ -3037,54 +3213,6 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-  - kind: SET_REGION_RESOURCE_VISIBILITY
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-    region_key: central_district
-    visibility: VISIBLE
-  - kind: SET_REGION_RESOURCE_VISIBILITY
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-    region_key: west_logistics_district
-    visibility: VISIBLE
-  - kind: SET_REGION_RESOURCE_VISIBILITY
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-    region_key: east_residential_district
-    visibility: VISIBLE
   - kind: SET_ACTOR_COMMAND_REACHABILITY
     node: null
     fact_key: null
@@ -3221,38 +3349,6 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-  - kind: SET_REGION_RESOURCE_VISIBILITY
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-    region_key: north_industrial_district
-    visibility: VISIBLE
-  - kind: SET_RESOURCE_POOL_VISIBILITY
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-    pool_key: north_service_depot_stock
-    visibility: VISIBLE
   - kind: SET_ACTOR_COMMAND_REACHABILITY
     node: null
     fact_key: null
@@ -3373,54 +3469,6 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-  - kind: SET_REGION_RESOURCE_VISIBILITY
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-    region_key: south_waterfront_district
-    visibility: VISIBLE
-  - kind: SET_REGION_RESOURCE_VISIBILITY
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-    region_key: southeast_heights_district
-    visibility: VISIBLE
-  - kind: SET_RESOURCE_POOL_VISIBILITY
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-    pool_key: southeast_district_service_stock
-    visibility: VISIBLE
   - kind: SET_ACTOR_COMMAND_REACHABILITY
     node: null
     fact_key: null

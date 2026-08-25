@@ -8,6 +8,7 @@ import { useForkGame } from "../hooks/useForkGame";
 import {
   factDisplayLabel,
   factDisplayValue,
+  facilityStatusDisplayValue,
   knownRelationDescription,
   meaningfulKnownRelations,
   relationDisplayKey,
@@ -17,6 +18,7 @@ import type {
   PublicPlanHistory,
   PublicPlanHistoryStep,
   PlayerGameState,
+  PublicTargetActionContract,
   ResourceIntelligence,
   PublicTask,
   PublicTimelineEvent,
@@ -281,6 +283,11 @@ export function PlanHistory({ task }: { task: PublicTask }) {
                       <b>{planStepMark[step.status]}</b>
                       <div>
                         <strong>{step.assigned_actor_name} · {step.action_name}</strong>
+                        {step.subtitle && (
+                          <div className="action-location-line plan-step-subtitle">
+                            <strong>{step.subtitle}</strong>
+                          </div>
+                        )}
                         <ActionLocationLine location={step.location} />
                         {meaningfulResult(step.result_summary) && (
                           <p>{resultLabel(meaningfulResult(step.result_summary))}</p>
@@ -385,6 +392,7 @@ type KnownWorldAccordionsProps = {
   actors: PlayerGameState["actors"];
   knownFacts: PlayerGameState["known_facts"];
   knownRelations?: NonNullable<PlayerGameState["known_relations"]>;
+  knownTargetActionContracts?: PublicTargetActionContract[];
   task?: PublicTask | null;
 };
 
@@ -395,6 +403,7 @@ export function KnownWorldAccordions({
   actors,
   knownFacts,
   knownRelations = [],
+  knownTargetActionContracts = [],
   task = null,
 }: KnownWorldAccordionsProps) {
   const [expanded, setExpanded] = useState<Record<KnowledgeAccordionKey, boolean>>({
@@ -409,12 +418,339 @@ export function KnownWorldAccordions({
   };
   const resourceGroups = groupResourcesByRegion(resources);
   const locationGroups = groupNodesByRegion(visibleNodes);
-  const factGroups = groupFactsByRegion(knownFacts);
   const actorGroups = groupActorsByTask(actors, task);
   const displayedRelations = meaningfulKnownRelations(knownRelations);
-  const statusTone = (value: string | number | boolean) =>
-    value === false || value === 0 || value === "false" ? "neutral" : "success";
+  const nodeByKey = new Map(visibleNodes.map((node) => [node.key, node]));
+  const factsByNode = new Map<string, PlayerGameState["known_facts"]>();
+  const relationsBySource = new Map<string, NonNullable<PlayerGameState["known_relations"]>>();
+  const regionFacts = new Map<string, PlayerGameState["known_facts"]>();
+  const regionRelations = new Map<string, NonNullable<PlayerGameState["known_relations"]>>();
+  const assignedFactKeys = new Set<string>();
+  const assignedRelationKeys = new Set<string>();
+  const factIdentity = (fact: PlayerGameState["known_facts"][number]) => `${fact.node_key}:${fact.fact_key}`;
+  const isRegionNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
+    node?.node_type_key === "region";
+  const isFacilityNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
+    node?.node_type_key === "facility";
+  const isTransportNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
+    node?.node_type_key === "transport";
 
+  knownFacts.forEach((fact) => {
+    const node = nodeByKey.get(fact.node_key);
+    const facts = factsByNode.get(fact.node_key) ?? [];
+    facts.push(fact);
+    factsByNode.set(fact.node_key, facts);
+    if (isFacilityNode(node) || fact.node_type_key === "facility" || isTransportNode(node)) {
+      assignedFactKeys.add(factIdentity(fact));
+      return;
+    }
+    if (isRegionNode(node) || fact.node_type_key === "region") {
+      const regionKey = node?.key ?? fact.region_key;
+      if (regionKey) {
+        const group = regionFacts.get(regionKey) ?? [];
+        group.push(fact);
+        regionFacts.set(regionKey, group);
+        assignedFactKeys.add(factIdentity(fact));
+      }
+    }
+  });
+
+  displayedRelations.forEach((relation) => {
+    const source = nodeByKey.get(relation.source_node_key);
+    const relations = relationsBySource.get(relation.source_node_key) ?? [];
+    relations.push(relation);
+    relationsBySource.set(relation.source_node_key, relations);
+    const relationKey = relationDisplayKey(relation);
+    if (isFacilityNode(source) || isTransportNode(source)) {
+      assignedRelationKeys.add(relationKey);
+    } else if (source && isRegionNode(source)) {
+      const group = regionRelations.get(source.key) ?? [];
+      group.push(relation);
+      regionRelations.set(source.key, group);
+      assignedRelationKeys.add(relationKey);
+    }
+  });
+
+  const fallbackFacts = knownFacts.filter((fact) => !assignedFactKeys.has(factIdentity(fact)));
+  const fallbackRelations = displayedRelations.filter(
+    (relation) => !assignedRelationKeys.has(relationDisplayKey(relation)),
+  );
+  const fallbackFactGroups = groupFactsByRegion(fallbackFacts);
+  const contractsByTarget = new Map<string, PublicTargetActionContract[]>();
+  knownTargetActionContracts.forEach((contract) => {
+    const contracts = contractsByTarget.get(contract.target_key) ?? [];
+    contracts.push(contract);
+    contractsByTarget.set(contract.target_key, contracts);
+  });
+  const resourceNames = new Map<string, string>(resources.map((resource) => [resource.key, resource.name]));
+  if (resourceIntelligence) {
+    Object.values(resourceIntelligence.regions).forEach((region) => {
+      Object.entries(region.resources).forEach(([key, resource]) => resourceNames.set(key, resource.resource_name));
+    });
+    Object.entries(resourceIntelligence.global_resources).forEach(([key, resource]) => resourceNames.set(key, resource.resource_name));
+  }
+  const resourceName = (key: string) => resourceNames.get(key) ?? key;
+  const statusTone = (value: string | number | boolean) =>
+    value === false || value === 0 || value === "false" || value === "UNKNOWN" || value === "UNAVAILABLE" || value === "BLOCKED"
+      ? "neutral"
+      : "success";
+  const facilityFactsFor = (nodeKey: string) => factsByNode.get(nodeKey) ?? [];
+  const targetContractsFor = (nodeKey: string) => contractsByTarget.get(nodeKey) ?? [];
+  const facilityMetadataFacts = new Set(["operational", "power_supply", "power_generation_capable", "generation_capable", "repair_profile"]);
+  const effectText = (contract: PublicTargetActionContract, effect: Record<string, unknown>) => {
+    if (effect.type === "FACT_MUTATION" && effect.fact_key === "operational" && effect.value === true) {
+      return "修复后设备正常";
+    }
+    if (effect.type === "FACT_MUTATION" && typeof effect.fact_key === "string") {
+      const fact = facilityFactsFor(contract.target_key).find((item) => item.fact_key === effect.fact_key);
+      return `${fact ? factDisplayLabel(fact) : effect.fact_key}：${String(effect.value)}`;
+    }
+    if (effect.type === "RESOURCE_POOL_AVAILABILITY" && effect.availability === "AVAILABLE") {
+      return `${resourceName(String(effect.pool_key ?? "关联资源"))}：维修后可用`;
+    }
+    return null;
+  };
+
+  const renderKnownLocations = () => (
+    <div className="console-region-groups">
+      {locationGroups.map((group) => {
+        const groupFacts = regionFacts.get(group.key) ?? [];
+        const groupRelations = regionRelations.get(group.key) ?? [];
+        return (
+          <details className="knowledge-region" key={group.key} open={group.key === "__all__"}>
+            <summary>
+              <span>
+                <strong>{group.name}</strong>
+                <small>{group.items.length} {"\u4e2a\u5df2\u77e5\u5730\u70b9"}</small>
+              </span>
+            </summary>
+            <div className="knowledge-region-content">
+              {(groupFacts.length > 0 || groupRelations.length > 0) && (
+                <div className="knowledge-region-facts">
+                  {groupFacts.map((fact) => (
+                    <div className="knowledge-entry" key={"region-fact:" + factIdentity(fact)}>
+                      <div className="knowledge-entry-copy">
+                        <strong>{factDisplayLabel(fact)}</strong>
+                      </div>
+                      <span className={"console-pill " + statusTone(fact.value) + " knowledge-status-pill"}>
+                        {factDisplayValue(fact)}
+                      </span>
+                    </div>
+                  ))}
+                  {groupRelations.map((relation) => (
+                    <div className="knowledge-relation" key={"region-relation:" + relationDisplayKey(relation)}>
+                      <div className="knowledge-relation-line">
+                        <strong>{relation.source_node_name ?? relation.source_node_key}</strong>
+                        <span className="knowledge-relation-arrow" aria-hidden="true">{"\u2192"}</span>
+                        <strong>{relation.target_node_name ?? relation.target_node_key}</strong>
+                      </div>
+                      <small>{knownRelationDescription(relation.relation_type_key)}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="knowledge-location-list">
+                {group.items.map((node) => {
+                  const nodeFacts = factsByNode.get(node.key) ?? [];
+                  const nodeRelations = relationsBySource.get(node.key) ?? [];
+                  const facility = isFacilityNode(node);
+                  const transport = isTransportNode(node);
+                  const powerFact = nodeFacts.find((fact) => fact.fact_key === "power_supply");
+                  const operationalFact = nodeFacts.find((fact) => fact.fact_key === "operational");
+                  const passabilityFact = nodeFacts.find((fact) => fact.fact_key === "passable");
+                  const generationFact = nodeFacts.find(
+                    (fact) => fact.fact_key === "power_generation_capable" || fact.fact_key === "generation_capable",
+                  );
+                  const isPowerProvider = nodeRelations.some(
+                    (relation) =>
+                      relation.source_node_key === node.key
+                      && relation.relation_type_key === "supplies_power_to",
+                  ) || generationFact?.value === true;
+                  const targetContracts = targetContractsFor(node.key);
+                  const additionalFacts = nodeFacts.filter((fact) => !facilityMetadataFacts.has(fact.fact_key));
+                  const associatedResources = node.associated_known_resources ?? [];
+                  const hasFacilityDetails = targetContracts.length > 0
+                    || associatedResources.length > 0
+                    || (isPowerProvider && generationFact !== undefined)
+                    || additionalFacts.length > 0
+                    || nodeRelations.length > 0;
+                  const repairRequirementRows = targetContracts.map((contract) => {
+                    const parts = [
+                      ...Object.entries(contract.cost ?? {}).map(
+                        ([resourceKey, amount]) => `${resourceName(resourceKey)} \u00d7${String(amount)}`,
+                      ),
+                      ...(contract.required_actor_role_name
+                        ? [`\u6267\u884c\u961f\u4f4d\uff1a${contract.required_actor_role_name}`]
+                        : []),
+                      ...(contract.special_requirements ?? []).map(
+                        (requirement) =>
+                          `\u524d\u7f6e\u6761\u4ef6\uff1a${String(requirement.fact_key ?? "\u5df2\u77e5\u72b6\u6001")}`,
+                      ),
+                    ];
+                    return {
+                      key: node.key + ":requirement:" + contract.action_key,
+                      value: parts.length > 0 ? parts.join("\uff0c") : contract.action_name,
+                    };
+                  });
+                  const repairEffectRows = targetContracts.flatMap((contract) =>
+                    (contract.effects ?? [])
+                      .map((effect) => effectText(contract, effect))
+                      .filter((line): line is string => line !== null)
+                      .map((value, index) => ({
+                        key: node.key + ":effect:" + contract.action_key + ":" + index,
+                        value,
+                      })),
+                  );
+                  const associatedResourceText = associatedResources
+                    .map((resource) => {
+                      const name = String(resource.resource_name ?? resource.resource_key ?? "\u5df2\u77e5\u8d44\u6e90");
+                      const quantity = resource.quantity !== null && resource.quantity !== undefined
+                        ? ` \u00d7${String(resource.quantity)}`
+                        : "";
+                      const availability = resource.availability === "UNAVAILABLE"
+                        ? "\u6682\u4e0d\u53ef\u7528"
+                        : resource.availability === "AVAILABLE"
+                          ? "\u53ef\u7528"
+                          : "";
+                      const requirement = resource.availability_requirement
+                        ? "\u4fee\u590d\u540e\u53ef\u7528"
+                        : resource.availability_requirement_status === "UNKNOWN"
+                          ? "\u89e3\u9501\u6761\u4ef6\u672a\u77e5"
+                          : "";
+                      return [name + quantity, availability, requirement].filter(Boolean).join("\uff0c");
+                    })
+                    .join("\uff0c");
+                  const relationLabels = new Map<string, string[]>();
+                  nodeRelations.forEach((relation) => {
+                    const label = relation.relation_type_key === "supplies_power_to"
+                      ? "\u53ef\u4f9b\u7535"
+                      : knownRelationDescription(relation.relation_type_key);
+                    const targets = relationLabels.get(label) ?? [];
+                    targets.push(relation.target_node_name ?? relation.target_node_key);
+                    relationLabels.set(label, targets);
+                  });
+                  const facilityRelationRows = Array.from(relationLabels.entries()).map(([label, targets], index) => ({
+                    key: node.key + ":relation:" + index,
+                    label,
+                    value: targets.join("\u3001"),
+                  }));
+
+                  if (transport) {
+                    return (
+                      <div className="knowledge-transport-card" data-testid={"transport-card-" + node.key} key={node.key}>
+                        <div className="knowledge-transport-heading">
+                          <span>
+                            <strong>{node.name}</strong>
+                            <small>{node.endpoint_region_names?.join(" ↔ ") ?? group.name}</small>
+                          </span>
+                          <span className={"knowledge-facility-status " + statusTone(passabilityFact?.value ?? "UNKNOWN")}>
+                            {passabilityFact ? factDisplayValue(passabilityFact) : "待探索"}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (facility) {
+                    return (
+                      <details className="knowledge-facility-card" data-testid={"facility-card-" + node.key} key={node.key}>
+                        <summary>
+                          <span className="knowledge-facility-heading">
+                            <strong>{node.name}</strong>
+                          </span>
+                          <span className="knowledge-facility-statuses">
+                            <span className={"knowledge-facility-status " + statusTone(powerFact?.value ?? "UNKNOWN")}>
+                              {powerFact ? factDisplayValue(powerFact) : "供电未知"}
+                            </span>
+                            <span className={"knowledge-facility-status " + statusTone(operationalFact?.value ?? "UNKNOWN")}>
+                              {operationalFact ? facilityStatusDisplayValue(operationalFact) : "状态未知"}
+                            </span>
+                          </span>
+                        </summary>
+                        <div className="knowledge-facility-details">
+                          {repairRequirementRows.map((row) => (
+                            <div className="knowledge-facility-attribute" key={row.key}>
+                              <span className="knowledge-facility-attribute-label">{"\u4fee\u590d\u9700\u6c42\uff1a"}</span>
+                              <span className="knowledge-facility-attribute-value">{row.value}</span>
+                            </div>
+                          ))}
+                          {repairEffectRows.map((row) => (
+                            <div className="knowledge-facility-attribute" key={row.key}>
+                              <span className="knowledge-facility-attribute-label">{"\u4fee\u590d\u6548\u679c\uff1a"}</span>
+                              <span className="knowledge-facility-attribute-value">{row.value}</span>
+                            </div>
+                          ))}
+                          {associatedResources.length > 0 && (
+                            <div className="knowledge-facility-attribute">
+                              <span className="knowledge-facility-attribute-label">{"\u5173\u8054\u8d44\u6e90\uff1a"}</span>
+                              <span className="knowledge-facility-attribute-value">{associatedResourceText}</span>
+                            </div>
+                          )}
+                          {isPowerProvider && generationFact && (
+                            <div className="knowledge-facility-attribute">
+                              <span className="knowledge-facility-attribute-label">{"\u53d1\u7535\u80fd\u529b\uff1a"}</span>
+                              <span className="knowledge-facility-attribute-value">{factDisplayValue(generationFact)}</span>
+                            </div>
+                          )}
+                          {additionalFacts.map((fact) => (
+                            <div className="knowledge-facility-attribute" key={"facility-fact:" + factIdentity(fact)}>
+                              <span className="knowledge-facility-attribute-label">{factDisplayLabel(fact) + "\uff1a"}</span>
+                              <span className="knowledge-facility-attribute-value">{factDisplayValue(fact)}</span>
+                            </div>
+                          ))}
+                          {facilityRelationRows.map((row) => (
+                            <div className="knowledge-facility-attribute" key={row.key}>
+                              <span className="knowledge-facility-attribute-label">{row.label + "\uff1a"}</span>
+                              <span className="knowledge-facility-attribute-value">{row.value}</span>
+                            </div>
+                          ))}
+                          {!hasFacilityDetails && <div className="knowledge-empty-state">{"\u6682\u65e0\u66f4\u591a\u5df2\u77e5\u4fe1\u606f"}</div>}
+                        </div>
+                      </details>
+                    );
+                  }
+
+                  return (
+                    <details className="knowledge-node-card" key={node.key}>
+                      <summary>
+                        <span>
+                          <strong>{node.name}</strong>
+                          <small>{node.endpoint_region_names?.join(" \u2194 ") ?? node.region_name ?? group.name}</small>
+                        </span>
+                      </summary>
+                      <div className="knowledge-node-details">
+                        {nodeFacts.map((fact) => (
+                          <div className="knowledge-entry" key={"node-fact:" + factIdentity(fact)}>
+                            <span>{factDisplayLabel(fact)}</span>
+                            <span className={"console-pill " + statusTone(fact.value) + " knowledge-status-pill"}>
+                              {factDisplayValue(fact)}
+                            </span>
+                          </div>
+                        ))}
+                        {nodeRelations.map((relation) => (
+                          <div className="knowledge-relation" key={relationDisplayKey(relation)}>
+                            <div className="knowledge-relation-line">
+                              <strong>{relation.source_node_name ?? relation.source_node_key}</strong>
+                              <span className="knowledge-relation-arrow" aria-hidden="true">{"\u2192"}</span>
+                              <strong>{relation.target_node_name ?? relation.target_node_key}</strong>
+                            </div>
+                            <small>{knownRelationDescription(relation.relation_type_key)}</small>
+                          </div>
+                        ))}
+                        {nodeFacts.length === 0 && nodeRelations.length === 0 && (
+                          <div className="knowledge-empty-state">{"\u6682\u65e0\u66f4\u591a\u5df2\u77e5\u4fe1\u606f"}</div>
+                        )}
+                      </div>
+                    </details>
+                  );
+                })}
+              </div>
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
   return (
     <div className="knowledge-accordions">
       <KnowledgeAccordion
@@ -470,7 +806,9 @@ export function KnownWorldAccordions({
                                 ))}
                             </div>
                             <span className="console-pill success knowledge-status-pill">
-                              {resource.known_available} / {resource.known_total}
+                              {resource.known_total == null || resource.known_total === resource.known_available
+                                ? resource.known_available
+                                : resource.known_available + " / " + resource.known_total}
                             </span>
                           </div>
                         ))
@@ -488,7 +826,9 @@ export function KnownWorldAccordions({
                       <div className="knowledge-entry" key={"global:" + resourceKey}>
                         <div className="knowledge-entry-copy"><strong>{resource.resource_name}</strong></div>
                         <span className="console-pill success knowledge-status-pill">
-                          {resource.known_available} / {resource.known_total}
+                          {resource.known_total == null || resource.known_total === resource.known_available
+                            ? resource.known_available
+                            : resource.known_available + " / " + resource.known_total}
                         </span>
                       </div>
                     ))}
@@ -529,48 +869,11 @@ export function KnownWorldAccordions({
         id="locations"
         title="已知地点"
         count={visibleNodes.length}
-        summary="可见性与访问状态"
+        summary={"\u8bbe\u65bd\u72b6\u6001\u3001\u5df2\u77e5\u8d44\u6e90\u4e0e\u901a\u9053\u4fe1\u606f"}
         open={expanded.locations}
         onToggle={() => toggle("locations")}
       >
-        <div className="console-region-groups">
-          {locationGroups.map((group) => (
-            <details className="knowledge-region" key={group.key} open={group.key === "__all__"}>
-              <summary>
-                <span>
-                  <strong>{group.name}</strong>
-                  <small>{group.items.length} 个地点</small>
-                </span>
-              </summary>
-              <div className="knowledge-region-content">
-                <div className="knowledge-entry-list">
-                {group.items.map((node) => (
-                  <div className="knowledge-entry" key={node.key}>
-                    <div className="knowledge-entry-copy">
-                      <strong>{node.name}</strong>
-                      <small>{node.key}</small>
-                      {node.associated_known_resources?.map((resource, index) => (
-                        <small key={index}>
-                          关联资源：{String(resource.resource_name ?? resource.resource_key ?? "")} ×{String(resource.quantity ?? "")}
-                          {resource.availability === "UNAVAILABLE" ? " · 暂不可用" : ""}
-                          {resource.availability_requirement
-                            ? " · 修复后可调用"
-                            : resource.availability_requirement_status === "UNKNOWN"
-                              ? " · 解锁条件未知"
-                              : ""}
-                        </small>
-                      ))}
-                    </div>
-                    <span className={`console-pill ${node.accessible ? "success" : "neutral"} knowledge-status-pill`}>
-                      {node.accessible ? "可访问" : "已锁定"}
-                    </span>
-                  </div>
-                ))}
-                </div>
-              </div>
-            </details>
-          ))}
-        </div>
+        {renderKnownLocations()}
       </KnowledgeAccordion>
       <KnowledgeAccordion
         id="actors"
@@ -614,16 +917,19 @@ export function KnownWorldAccordions({
           ))}
         </div>
       </KnowledgeAccordion>
+      {(fallbackFacts.length > 0 || fallbackRelations.length > 0) && (
+      <>
+      {fallbackFacts.length > 0 && (
       <KnowledgeAccordion
         id="facts"
         title="已知事实"
-        count={knownFacts.length}
+        count={fallbackFacts.length}
         summary="当前已知世界状态"
         open={expanded.facts}
         onToggle={() => toggle("facts")}
       >
         <div className="console-region-groups">
-          {factGroups.map((group) => (
+          {fallbackFactGroups.map((group) => (
             <details className="knowledge-region" key={group.key} open={group.key === "__all__"}>
               <summary>
                 <span>
@@ -650,19 +956,20 @@ export function KnownWorldAccordions({
           ))}
         </div>
       </KnowledgeAccordion>
+      )}
       <KnowledgeAccordion
         id="relations"
         title="已知关系"
-        count={displayedRelations.length}
+        count={fallbackRelations.length}
         summary="当前已掌握的关键系统关系"
         open={expanded.relations}
         onToggle={() => toggle("relations")}
       >
-        {displayedRelations.length === 0 ? (
+        {fallbackRelations.length === 0 ? (
           <div className="knowledge-empty-state">暂无已知关键关系</div>
         ) : (
           <div className="knowledge-relation-list">
-            {displayedRelations.map((relation) => (
+            {fallbackRelations.map((relation) => (
               <div className="knowledge-relation" key={relationDisplayKey(relation)}>
                 <div className="knowledge-relation-line">
                   <strong>{relation.source_node_name ?? relation.source_node_key}</strong>
@@ -675,6 +982,8 @@ export function KnownWorldAccordions({
           </div>
         )}
       </KnowledgeAccordion>
+      </>
+      )}
     </div>
   );
 }
@@ -1045,10 +1354,12 @@ export function GamePage() {
           <header className="command-panel-heading"><div><p>01 · 世界</p><h1>已知世界</h1></div><span className="console-pill success">玩家可见</span></header>
           <KnownWorldAccordions
             resources={play.data.resources}
+            resourceIntelligence={play.data.resource_intelligence}
             visibleNodes={play.data.visible_nodes}
             actors={play.data.actors}
             knownFacts={play.data.known_facts}
             knownRelations={play.data.known_relations}
+            knownTargetActionContracts={play.data.known_target_action_contracts}
             task={task}
           />
         </aside>

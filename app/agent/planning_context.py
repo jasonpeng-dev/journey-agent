@@ -882,6 +882,61 @@ class PlanningContextBuilder:
                         ),
                     ]
                 )
+            elif action.behavior == ActionBehavior.INSPECT:
+                hints.extend(
+                    [
+                        (
+                            "Use to actively investigate one known but not yet inspected "
+                            "Facility or Transport."
+                        ),
+                        (
+                            "Facility inspection reveals non-resource facility information "
+                            "and repair requirements."
+                        ),
+                        "Transport inspection reveals the true passability state.",
+                        "Inspection does not reveal resource inventory or hidden resource pools.",
+                    ]
+                )
+            elif action.behavior == ActionBehavior.REPAIR_COMMUNICATIONS:
+                hints.extend(
+                    [
+                        (
+                            "After successful communication restoration, Facility information "
+                            "in the target Region becomes known."
+                        ),
+                        (
+                            "This reveal covers non-resource Facility state and repair "
+                            "requirements only."
+                        ),
+                        (
+                            "It does not survey resources, reveal hidden resource pools, "
+                            "or create new power relations."
+                        ),
+                    ]
+                )
+            elif action.behavior == ActionBehavior.CLEAR_TRANSPORT:
+                hints.extend(
+                    [
+                        (
+                            "Use only for a Transport whose passability is already known "
+                            "to be blocked."
+                        ),
+                        "A successful clear makes that Transport known passable.",
+                    ]
+                )
+            elif action.behavior in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}:
+                hints.extend(
+                    [
+                        (
+                            "UNKNOWN Transport passability may be attempted and is not "
+                            "the same as blocked."
+                        ),
+                        (
+                            "A successful attempt confirms the Transport is passable; a "
+                            "blocked failure confirms it needs repair."
+                        ),
+                    ]
+                )
             if hints:
                 action_context["soft_signals"] = {"hints": hints}
             result.append(action_context)

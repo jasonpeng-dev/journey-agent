@@ -28,7 +28,7 @@ from app.domain.enums import (
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.domain.world import Visibility
-from app.engine.rules import ResourceMutation
+from app.engine.rules import GenericRuleOutcome, ResourceMutation
 from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
@@ -36,13 +36,19 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     Player,
 )
-from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1
+from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V1, load_builtin_scenario
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
+from app.services.game_lifecycle import GameLifecycleService
 from app.services.generic_game import GenericGameError, GenericGameService
 from app.services.knowledge_projection import SharedKnowledgeProjection
+from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+
+LINJIANG_INFRASTRUCTURE_RECOVERY_V10 = load_builtin_scenario(
+    "linjiang_infrastructure_recovery_v10.yaml"
+)
 
 
 def _pool_definition() -> ScenarioDefinitionV2:
@@ -132,16 +138,42 @@ def _pool_definition() -> ScenarioDefinitionV2:
     return ScenarioDefinitionV2.model_validate(document)
 
 
+def _canonical_general_parts_definition(
+    key: str,
+    *,
+    west_quantity: int = 10,
+) -> ScenarioDefinitionV2:
+    document: dict[str, Any] = deepcopy(
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V10.model_dump(mode="json")
+    )
+    document["metadata"]["key"] = key
+    document["metadata"]["name"] = key
+    document["world"]["key"] = key
+    document["world"]["name"] = key
+    document["initialization"]["resource_initial_states"] = []
+    for pool in document["initialization"]["resource_pools"]:
+        if pool["pool_key"] == "central_general_stock":
+            pool["quantity"] = 0
+        elif pool["pool_key"] == "west_general_stock":
+            pool["quantity"] = west_quantity
+    return ScenarioDefinitionV2.model_validate(document)
+
+
 def _runtime(
     session: Session,
     definition: ScenarioDefinitionV2,
     key: str,
+    *,
+    use_platform_player: bool = False,
 ) -> tuple[object, object]:
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
-    player = Player(name=key)
-    session.add(player)
-    session.flush()
+    if use_platform_player:
+        player = GameLifecycleService(session).platform_player()
+    else:
+        player = Player(name=key)
+        session.add(player)
+        session.flush()
     runtime = RuntimeInitializationService(session).create(
         player_id=player.id,
         scenario_version_id=version.id,
@@ -615,6 +647,233 @@ def test_transport_aggregates_multiple_visible_available_pools_and_creates_desti
     assert west_summary["known_total"] == 15
     assert west_summary["known_available"] == 15
     assert any(pool["quantity"] == 0 for pool in west_summary["pools"])
+
+
+def _prepare_general_parts_transport(session: Session, runtime: object) -> None:
+    actor = session.get(GameInstanceActor, (runtime.instance.id, "logistics_team_alpha"))
+    passability = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "west_freight_corridor", "passable"),
+    )
+    assert actor is not None and passability is not None
+    actor.current_node_key = "west_logistics_district"
+    passability.truth_value = True
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "west_logistics_district"),
+    )
+    assert knowledge is not None
+    knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    knowledge.resource_survey_completed = True
+    session.flush()
+
+
+def _add_legacy_central_general_parts_row(session: Session, runtime: object) -> None:
+    session.add(
+        GameInstanceResourceState(
+            game_instance_id=runtime.instance.id,
+            resource_identity="general_engineering_parts@central_district",
+            resource_key="general_engineering_parts",
+            scope_node_key="central_district",
+            pool_key="default",
+            value=0,
+            reserved_value=0,
+            visibility=ResourcePoolVisibility.VISIBLE,
+            availability=ResourcePoolAvailability.AVAILABLE,
+            survey_discoverable=False,
+        )
+    )
+    session.flush()
+
+
+def _central_general_parts_player_rows(session: Session, runtime: object):
+    state = PlayerProjectionService(session).game_state(GameInstanceId(runtime.instance.id))
+    return [
+        item
+        for item in state.resources
+        if item.key == "general_engineering_parts" and item.scope_region_key == "central_district"
+    ]
+
+
+def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(
+        session,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V10,
+        "resource-pool-player-facility-separation",
+        use_platform_player=True,
+    )
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "north_industrial_district"),
+    )
+    assert knowledge is not None
+    knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    knowledge.resource_survey_completed = True
+    for pool_key in (
+        "north_emergency_engineering_stock",
+        "north_heavy_equipment_stock",
+        "north_service_depot_stock",
+    ):
+        pool = session.get(
+            GameInstanceResourceState,
+            (
+                runtime.instance.id,
+                f"general_engineering_parts@north_industrial_district@{pool_key}",
+            ),
+        )
+        assert pool is not None
+        pool.visibility = ResourcePoolVisibility.VISIBLE
+    session.flush()
+
+    shared = SharedKnowledgeProjection(session, scope, LINJIANG_INFRASTRUCTURE_RECOVERY_V10)
+    shared_summary = shared.resource_intelligence()["regions"]["north_industrial_district"][
+        "resources"
+    ]["general_engineering_parts"]
+    assert shared_summary["known_total"] == 105
+    assert shared_summary["known_available"] == 5
+
+    state = PlayerProjectionService(session).game_state(GameInstanceId(runtime.instance.id))
+    north_rows = [
+        item
+        for item in state.resources
+        if item.key == "general_engineering_parts"
+        and item.scope_region_key == "north_industrial_district"
+    ]
+    assert len(north_rows) == 1
+    assert north_rows[0].value == 5
+    assert north_rows[0].facility_key is None
+    assert north_rows[0].availability == ResourcePoolAvailability.AVAILABLE.value
+
+    player_summary = state.resource_intelligence["regions"]["north_industrial_district"][
+        "resources"
+    ]["general_engineering_parts"]
+    assert player_summary["known_total"] == 105
+    assert player_summary["known_available"] == 5
+    assert {pool["pool_key"] for pool in player_summary["pools"]} == {
+        "north_emergency_engineering_stock",
+        "north_heavy_equipment_stock",
+        "north_service_depot_stock",
+    }
+
+    nodes_by_key = {node.key: node for node in state.visible_nodes}
+    for facility_key, facility_name in {
+        "heavy_equipment_yard": "重型工程设备场",
+        "utility_service_depot": "市政工程维修基地",
+    }.items():
+        associated = nodes_by_key[facility_key].associated_known_resources
+        assert len(associated) == 1
+        assert associated[0]["resource_key"] == "general_engineering_parts"
+        assert associated[0]["resource_name"] == "通用工程部件"
+        assert associated[0]["facility_name"] == facility_name
+        assert associated[0]["quantity"] == 50
+        assert associated[0]["availability"] == "UNAVAILABLE"
+        assert associated[0]["availability_requirement_status"] == "UNKNOWN"
+
+
+def test_transport_reuses_canonical_destination_and_player_aggregates_legacy_duplicate(
+    session: Session,
+) -> None:
+    definition = _canonical_general_parts_definition(
+        "resource_pool_canonical_destination",
+        west_quantity=10,
+    )
+    runtime, scope = _runtime(
+        session,
+        definition,
+        "resource-pool-canonical-destination",
+        use_platform_player=True,
+    )
+    _add_legacy_central_general_parts_row(session, runtime)
+    _prepare_general_parts_transport(session, runtime)
+
+    result = GenericGameService(session, scope).execute(
+        actor_key="logistics_team_alpha",
+        action_key="transport_resource",
+        target_node_key="central_district",
+        parameters={"resource_key": "general_engineering_parts", "amount": 5},
+    )
+    assert result.outcome.failure is None
+    central_rows = [
+        row
+        for row in session.scalars(
+            select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == runtime.instance.id,
+                GameInstanceResourceState.scope_node_key == "central_district",
+                GameInstanceResourceState.resource_key == "general_engineering_parts",
+            )
+        )
+    ]
+    assert {(row.pool_key, row.value) for row in central_rows} == {
+        ("default", 0),
+        ("central_general_stock", 5),
+    }
+    player_rows = _central_general_parts_player_rows(session, runtime)
+    assert len(player_rows) == 1
+    assert player_rows[0].value == 5
+    assert player_rows[0].reserved_value == 0
+
+    GenericGameService(session, scope)._apply(
+        definition,
+        "logistics_team_alpha",
+        GenericRuleOutcome(
+            selected_rule_key="test:consume_general_parts",
+            resource_mutations=(
+                ResourceMutation(
+                    "general_engineering_parts",
+                    -5,
+                    "central_district",
+                    "default",
+                ),
+            ),
+        ),
+    )
+    session.flush()
+    player_rows = _central_general_parts_player_rows(session, runtime)
+    assert len(player_rows) == 1
+    assert player_rows[0].value == 0
+
+
+def test_repeated_transport_accumulates_in_one_canonical_destination_balance(
+    session: Session,
+) -> None:
+    definition = _canonical_general_parts_definition(
+        "resource_pool_repeated_canonical_transport",
+        west_quantity=10,
+    )
+    runtime, scope = _runtime(
+        session,
+        definition,
+        "resource-pool-repeated-canonical-transport",
+        use_platform_player=True,
+    )
+    _prepare_general_parts_transport(session, runtime)
+    game = GenericGameService(session, scope)
+
+    for amount in (5, 3):
+        result = game.execute(
+            actor_key="logistics_team_alpha",
+            action_key="transport_resource",
+            target_node_key="central_district",
+            parameters={"resource_key": "general_engineering_parts", "amount": amount},
+        )
+        assert result.outcome.failure is None
+
+    central_rows = [
+        row
+        for row in session.scalars(
+            select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == runtime.instance.id,
+                GameInstanceResourceState.scope_node_key == "central_district",
+                GameInstanceResourceState.resource_key == "general_engineering_parts",
+            )
+        )
+    ]
+    assert [(row.pool_key, row.value) for row in central_rows] == [("central_general_stock", 8)]
+    player_rows = _central_general_parts_player_rows(session, runtime)
+    assert len(player_rows) == 1
+    assert player_rows[0].value == 8
 
 
 def test_transport_excludes_reserved_source_inventory(

@@ -82,7 +82,7 @@ export function factDisplayValue(
     if (fact.fact_key === "operational") return value ? "运行中" : "未运行";
     if (fact.fact_key === "power_supply") return value ? "已供电" : "未供电";
     if (fact.fact_key === "emergency_power") return value ? "已恢复" : "未恢复";
-    if (fact.fact_key === "passable") return value ? "可通行" : "已阻断";
+    if (fact.fact_key === "passable") return value ? "可通行" : "待修复";
     if (fact.fact_key === "heavy_engineering_support_ready") return value ? "已部署" : "未部署";
     if (fact.fact_key === "heavy_engineering_support") return value ? "可用" : "不可用";
     if (fact.fact_key === "generation_capable" || fact.fact_key === "power_generation_capable") {
@@ -106,6 +106,15 @@ export function factDisplayValue(
   if (value === "UNAVAILABLE") return "不可用";
   if (MACHINE_VALUE_LABELS[value]) return MACHINE_VALUE_LABELS[value];
   return /^[a-z0-9_]+$/i.test(value) ? "当前状态已知" : uiLabel(value);
+}
+
+export function facilityStatusDisplayValue(
+  fact: PlayerGameState["known_facts"][number],
+): string {
+  if (fact.fact_key === "operational" && typeof fact.value === "boolean") {
+    return fact.value ? "设备正常" : "待修复";
+  }
+  return factDisplayValue(fact);
 }
 
 function factLookupKey(nodeKey: string, factKey: string): string {

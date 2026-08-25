@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -34,6 +36,7 @@ from app.api.schemas.phase_d import (
     PublicRelationResponse,
     PublicResourceResponse,
     PublicStepStatus,
+    PublicTargetActionContractResponse,
     PublicTaskResponse,
     PublicTaskStatus,
     PublicTaskSummaryResponse,
@@ -45,6 +48,7 @@ from app.domain.enums import (
     AgentStepStatus,
     AgentTaskStatus,
     DecisionStatus,
+    ResourcePoolAvailability,
     StepExecutionType,
     WorldOperationStatus,
 )
@@ -58,6 +62,7 @@ from app.infrastructure.db.models import (
     GameInstance,
     GameInstanceActor,
     GameInstanceResourceState,
+    PlanningCycle,
     PlayerExecutionCheckpoint,
     ScenarioVersion,
     WorldOperation,
@@ -67,8 +72,21 @@ from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.mission_roadmap import MissionRoadmap, MissionRoadmapProjector
+from app.services.player_action_report import format_player_knowledge_changes
 from app.services.player_pacing import PlayerExecutionPhase
 from app.services.spatial_projection import SpatialDisplayProjector, SpatialNodeProjection
+
+
+@dataclass(frozen=True, slots=True)
+class _PlayerResourceRow:
+    resource_key: str
+    value: int
+    reserved_value: int
+    pool_key: str
+    facility_key: str | None
+    availability: str
+    availability_requirement: dict[str, Any] | None
+    scope_node_key: str | None
 
 
 class PlayerProjectionService:
@@ -99,6 +117,7 @@ class PlayerProjectionService:
         known_facts = knowledge_projection.known_fact_rows()
         known_relations = knowledge_projection.known_relations()
         known_action_requirements = knowledge_projection.known_action_requirements()
+        known_target_action_contracts = knowledge_projection.known_target_action_contracts()
         node_projections: dict[str, SpatialNodeProjection] = {}
         for item in visible_nodes:
             projection = spatial.node(item.node_key)
@@ -116,7 +135,9 @@ class PlayerProjectionService:
             for item in resources
             if (item.resource_key, item.scope_node_key, item.pool_key)
             in visible_resource_identities
+            and self._is_player_usable_regional_pool(item)
         )
+        public_resources = self._aggregate_resource_rows(resources, spatial=spatial)
         actors = knowledge_projection.actor_rows()
         task_query = (
             select(AgentTask)
@@ -256,6 +277,9 @@ class PlayerProjectionService:
             known_action_requirements=[
                 PublicActionRequirementResponse(**item) for item in known_action_requirements
             ],
+            known_target_action_contracts=[
+                PublicTargetActionContractResponse(**item) for item in known_target_action_contracts
+            ],
             resources=[
                 PublicResourceResponse(
                     key=item.resource_key,
@@ -280,7 +304,7 @@ class PlayerProjectionService:
                     scope_region_key=spatial.resource_scope(item.scope_node_key).scope_region_key,
                     scope_region_name=spatial.resource_scope(item.scope_node_key).scope_region_name,
                 )
-                for item in resources
+                for item in public_resources
             ],
             resource_intelligence=knowledge_projection.resource_intelligence(),
             actors=[
@@ -317,6 +341,74 @@ class PlayerProjectionService:
             ],
             pending_approval_id=pending,
         )
+
+    @staticmethod
+    def _is_player_usable_regional_pool(item: GameInstanceResourceState) -> bool:
+        """Keep only movable, currently usable regional balances in the Player list."""
+
+        availability = (
+            item.availability.value
+            if hasattr(item.availability, "value")
+            else str(item.availability)
+        )
+        return (
+            item.facility_key is None and availability == ResourcePoolAvailability.AVAILABLE.value
+        )
+
+    @staticmethod
+    def _aggregate_resource_rows(
+        resources: tuple[GameInstanceResourceState, ...],
+        *,
+        spatial: SpatialDisplayProjector,
+    ) -> tuple[_PlayerResourceRow, ...]:
+        grouped: dict[tuple[str | None, str], list[GameInstanceResourceState]] = {}
+        for item in resources:
+            scope = spatial.resource_scope(item.scope_node_key)
+            group_key = (scope.scope_region_key or item.scope_node_key, item.resource_key)
+            grouped.setdefault(group_key, []).append(item)
+
+        result: list[_PlayerResourceRow] = []
+        for _group_key, items in sorted(
+            grouped.items(),
+            key=lambda entry: (
+                entry[0][0] is None,
+                entry[0][0] or "",
+                entry[0][1],
+            ),
+        ):
+            ordered = sorted(
+                items,
+                key=lambda item: (item.scope_node_key or "", item.pool_key),
+            )
+            representative = ordered[0]
+            availability_values = {
+                item.availability.value
+                if hasattr(item.availability, "value")
+                else str(item.availability)
+                for item in ordered
+            }
+            availability = (
+                next(iter(availability_values))
+                if len(availability_values) == 1
+                else ("AVAILABLE" if "AVAILABLE" in availability_values else "UNAVAILABLE")
+            )
+            requirements = [item.availability_requirement for item in ordered]
+            requirement = (
+                requirements[0] if all(item == requirements[0] for item in requirements) else None
+            )
+            result.append(
+                _PlayerResourceRow(
+                    resource_key=representative.resource_key,
+                    value=sum(item.value for item in ordered),
+                    reserved_value=sum(item.reserved_value for item in ordered),
+                    pool_key=representative.pool_key if len(ordered) == 1 else "aggregate",
+                    facility_key=representative.facility_key if len(ordered) == 1 else None,
+                    availability=availability,
+                    availability_requirement=requirement,
+                    scope_node_key=representative.scope_node_key,
+                )
+            )
+        return tuple(result)
 
     def _task_summary(
         self,
@@ -392,12 +484,19 @@ class PlayerProjectionService:
             for plan in plans
         }
         spatial = SpatialDisplayProjector(definition)
+        actor_positions_by_step = self._actor_positions_by_step(
+            task,
+            definition,
+            plans,
+            steps_by_plan,
+        )
         detailed_location_by_step = self._locations_by_step(
             task,
             definition,
             spatial,
             plans,
             steps_by_plan,
+            actor_positions_by_step=actor_positions_by_step,
         )
         compact_location_by_step = self._locations_by_step(
             task,
@@ -406,6 +505,14 @@ class PlayerProjectionService:
             plans,
             steps_by_plan,
             compact=True,
+            actor_positions_by_step=actor_positions_by_step,
+        )
+        relay_subtitle_by_step = self._relay_subtitles_by_step(
+            definition,
+            spatial,
+            steps_by_plan,
+            actor_positions_by_step,
+            actors,
         )
         latest = plans[-1] if plans else None
         checkpoint = self.db.get(PlayerExecutionCheckpoint, task.id)
@@ -422,6 +529,7 @@ class PlayerProjectionService:
                         assigned_actor_name=actors.get(
                             step.assigned_actor_key, step.assigned_actor_key
                         ),
+                        subtitle=relay_subtitle_by_step.get(step.id),
                         status=_step_status(step.status),
                         result_summary=_result_summary(step),
                         location=compact_location_by_step.get(step.id),
@@ -477,6 +585,7 @@ class PlayerProjectionService:
                     definition,
                     actors,
                     location_by_step=detailed_location_by_step,
+                    subtitle_by_step=relay_subtitle_by_step,
                     task_status=task.status,
                     is_latest=plan == latest,
                     current_step_id=(
@@ -550,8 +659,15 @@ class PlayerProjectionService:
         plans: tuple[AgentPlan, ...],
         steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
         compact: bool = False,
+        actor_positions_by_step: dict[UUID, dict[str, str]] | None = None,
     ) -> dict[UUID, PublicActionLocationResponse | None]:
-        source_nodes = self._source_nodes_by_step(task, definition, plans, steps_by_plan)
+        source_nodes = self._source_nodes_by_step(
+            task,
+            definition,
+            plans,
+            steps_by_plan,
+            actor_positions_by_step=actor_positions_by_step,
+        )
         locations: dict[UUID, PublicActionLocationResponse | None] = {}
         for plan in plans:
             for step in steps_by_plan[plan.id]:
@@ -582,19 +698,21 @@ class PlayerProjectionService:
                 )
         return locations
 
-    def _source_nodes_by_step(
+    def _actor_positions_by_step(
         self,
         task: AgentTask,
         definition: ScenarioDefinitionV2,
         plans: tuple[AgentPlan, ...],
         steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
-    ) -> dict[UUID, str | None]:
-        """Replay persisted actor movement for display-only source locations.
+    ) -> dict[UUID, dict[str, str]]:
+        """Replay display-only Actor positions at each planned tool step.
 
-        The replay consumes only Scenario initial positions and persisted
-        WorldOperation outcomes.  Pending actions in the current Plan are
-        advanced virtually so a Player can read the planned route; that
-        virtual position is never written back to runtime state.
+        New Plans start from the frozen PlannerInput Actor positions captured
+        by their PlanningCycle.  Legacy Plans without such a snapshot fall
+        back to Scenario initial positions plus persisted WorldOperation
+        outcomes.  Pending actions in the current Plan are advanced virtually
+        so a Player can read the planned route; that virtual position is never
+        written back to runtime state.
         """
 
         initial_positions = {
@@ -607,7 +725,7 @@ class PlayerProjectionService:
                 .order_by(WorldOperation.created_at, WorldOperation.id)
             )
         )
-        source_nodes: dict[UUID, str | None] = {}
+        positions_by_step: dict[UUID, dict[str, str]] = {}
 
         def apply_operation(positions: dict[str, str], operation: WorldOperation) -> None:
             if not _operation_succeeded(operation):
@@ -628,19 +746,21 @@ class PlayerProjectionService:
             positions[operation.actor_key] = destination
 
         for plan in plans:
-            # Every Plan gets an independent projected replay.  The starting
-            # position is the real runtime position at Plan creation, while
-            # the Plan's own travel sequence remains a display-only intent
-            # even when one of its steps later failed or was skipped.
-            positions = dict(initial_positions)
-            for operation in operations:
-                if operation.created_at <= plan.created_at:
-                    apply_operation(positions, operation)
+            # A frozen PlannerInput already includes all runtime operations
+            # observed before this Plan was created.  Replaying them again
+            # would move a REPLAN baseline twice and make old Plan summaries
+            # drift when the live runtime advances.
+            positions = self._plan_time_positions(task, plan)
+            if positions is None:
+                positions = dict(initial_positions)
+                for operation in operations:
+                    if operation.created_at <= plan.created_at:
+                        apply_operation(positions, operation)
             plan_steps = steps_by_plan[plan.id]
             for step in plan_steps:
                 if step.execution_type != StepExecutionType.TOOL:
                     continue
-                source_nodes[step.id] = positions.get(step.assigned_actor_key)
+                positions_by_step[step.id] = dict(positions)
                 action = _action_definition(definition, step)
                 target_key = step.tool_arguments.get("target_key")
                 if (
@@ -653,7 +773,96 @@ class PlayerProjectionService:
                     # so a failed Travel does not rewrite the following
                     # transport's historical source into the runtime location.
                     positions[step.assigned_actor_key] = target_key
-        return source_nodes
+        return positions_by_step
+
+    def _source_nodes_by_step(
+        self,
+        task: AgentTask,
+        definition: ScenarioDefinitionV2,
+        plans: tuple[AgentPlan, ...],
+        steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
+        *,
+        actor_positions_by_step: dict[UUID, dict[str, str]] | None = None,
+    ) -> dict[UUID, str | None]:
+        positions_by_step = (
+            actor_positions_by_step
+            if actor_positions_by_step is not None
+            else self._actor_positions_by_step(task, definition, plans, steps_by_plan)
+        )
+        return {
+            step.id: positions_by_step.get(step.id, {}).get(step.assigned_actor_key)
+            for plan in plans
+            for step in steps_by_plan[plan.id]
+            if step.execution_type == StepExecutionType.TOOL
+        }
+
+    def _relay_subtitles_by_step(
+        self,
+        definition: ScenarioDefinitionV2,
+        spatial: SpatialDisplayProjector,
+        steps_by_plan: dict[UUID, tuple[AgentStep, ...]],
+        actor_positions_by_step: dict[UUID, dict[str, str]],
+        actors: dict[str, str],
+    ) -> dict[UUID, str]:
+        subtitles: dict[UUID, str] = {}
+        for plan_steps in steps_by_plan.values():
+            for step in plan_steps:
+                if step.execution_type != StepExecutionType.TOOL:
+                    continue
+                action = _action_definition(definition, step)
+                if action is None or action.key != "relay_message":
+                    continue
+                target_key = step.tool_arguments.get("target_key")
+                if not isinstance(target_key, str):
+                    continue
+                target_position = actor_positions_by_step.get(step.id, {}).get(target_key)
+                target_region = (
+                    spatial.node(target_position) if target_position is not None else None
+                )
+                target_actor_name = actors.get(target_key)
+                if target_region is None or target_region.region_name is None:
+                    continue
+                if target_actor_name is None:
+                    continue
+                subtitles[step.id] = f"{target_region.region_name} · {target_actor_name}"
+        return subtitles
+
+    def _plan_time_positions(
+        self,
+        task: AgentTask,
+        plan: AgentPlan,
+    ) -> dict[str, str] | None:
+        """Return the Actor positions frozen for one Plan planning cycle.
+
+        AgentPlan currently stores only an audit run identifier and has no
+        foreign key to PlanningCycle. The durable association available in
+        the current schema is the same Task plus the cycle created before the
+        Plan. A missing or legacy snapshot returns None so callers can use
+        the explicit compatibility replay path.
+        """
+
+        cycle = self.db.scalar(
+            select(PlanningCycle)
+            .where(
+                PlanningCycle.task_id == task.id,
+                PlanningCycle.created_at <= plan.created_at,
+            )
+            .order_by(PlanningCycle.created_at.desc(), PlanningCycle.id.desc())
+        )
+        if cycle is None or not isinstance(cycle.planner_input, dict):
+            return None
+        raw_actors = cycle.planner_input.get("actors")
+        if not isinstance(raw_actors, list):
+            return None
+        positions: dict[str, str] = {}
+        for raw_actor in raw_actors:
+            if not isinstance(raw_actor, dict):
+                continue
+            actor_key = raw_actor.get("actor_key")
+            current_region = raw_actor.get("current_region")
+            if isinstance(actor_key, str) and isinstance(current_region, str):
+                positions[actor_key] = current_region
+        return positions
 
     def _timeline(
         self,
@@ -772,7 +981,7 @@ class PlayerProjectionService:
                             result_summary=debrief.result_summary,
                             success=debrief.success,
                             knowledge_changes=(
-                                _knowledge_changes(action_operation)
+                                _knowledge_changes(action_operation, definition)
                                 if action_operation is not None
                                 else []
                             ),
@@ -886,7 +1095,9 @@ class PlayerProjectionService:
             action_name=action.name if action is not None else step.description,
             success=not failed,
             result_summary=result_summary,
-            knowledge_changes=_knowledge_changes(operation) if operation is not None else [],
+            knowledge_changes=(
+                _knowledge_changes(operation, definition) if operation is not None else []
+            ),
             plan_adjusted=bool(newer_plans),
             plan_adjustment_summary=(
                 _next_action_name(definition, steps_by_plan[newer_plans[-1].id])
@@ -979,6 +1190,7 @@ def _plan_history_entry(
     is_latest: bool,
     current_step_id: UUID | None,
     location_by_step: dict[UUID, PublicActionLocationResponse | None],
+    subtitle_by_step: dict[UUID, str],
 ) -> PublicPlanHistoryResponse:
     tool_steps = tuple(step for step in steps if step.execution_type == StepExecutionType.TOOL)
     public_steps = [
@@ -991,6 +1203,7 @@ def _plan_history_entry(
                 else step.description
             ),
             assigned_actor_name=actors.get(step.assigned_actor_key, step.assigned_actor_key),
+            subtitle=subtitle_by_step.get(step.id),
             status=_plan_history_step_status(
                 step,
                 plan,
@@ -1267,21 +1480,13 @@ def _public_result_summary(
     return "行动已完成"
 
 
-def _knowledge_changes(operation: WorldOperation) -> list[PublicKnowledgeChangeResponse]:
+def _knowledge_changes(
+    operation: WorldOperation,
+    definition: ScenarioDefinitionV2,
+) -> list[PublicKnowledgeChangeResponse]:
     if not isinstance(operation.outcome, dict):
         return []
-    payload = operation.outcome.get("knowledge_changes")
-    if not isinstance(payload, list):
-        return []
-    changes: list[PublicKnowledgeChangeResponse] = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        try:
-            changes.append(PublicKnowledgeChangeResponse.model_validate(item))
-        except ValueError:
-            continue
-    return changes
+    return format_player_knowledge_changes(operation.outcome.get("knowledge_changes"), definition)
 
 
 def _plan_invalidation_for(task: AgentTask, plan_version: int) -> dict[str, object] | None:

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.agent.planner_contract import planner_target_contracts
 from app.domain.enums import (
     RelationVisibility,
     ResourceInventoryVisibility,
@@ -324,6 +325,71 @@ class SharedKnowledgeProjection:
                 )
         return tuple(result)
 
+    def known_target_action_contracts(self) -> tuple[dict[str, Any], ...]:
+        """Expose known target contracts for player-facing facility details.
+
+        This is a read-only projection of the same Knowledge-safe target
+        requirements/effects consumed by the Planner.  A target is included
+        only when its selector and the required target Facts are known; no
+        Scenario Truth is used to fill in a missing contract.
+        """
+
+        known_nodes = {row.node_key for row in self.known_node_rows()}
+        known_facts = {
+            (row.node_key, row.fact_key): row.truth_value for row in self.known_fact_rows()
+        }
+        known_relation_keys = {
+            str(item["relation_key"])
+            for item in self.known_relations()
+            if item.get("relation_key") is not None
+        }
+        known_pool_keys = {item.pool_key for item in self.visible_resource_pools()}
+        role_names = {role.key: role.name for role in self.definition.actors.roles}
+        actions = {action.key: action for action in self.definition.actions}
+        requirements_by_target = self.planner_action_requirements()
+        effects_by_action = {
+            action.key: planner_target_contracts(
+                self.definition,
+                action,
+                known_node_keys=known_nodes,
+                known_facts=known_facts,
+                known_relation_keys=known_relation_keys,
+                known_pool_keys=known_pool_keys,
+            )
+            for action in self.definition.actions
+        }
+
+        result: list[dict[str, Any]] = []
+        for target in requirements_by_target:
+            target_key = str(target["target_key"])
+            for raw_requirement in target["requirements"]:
+                action_key = str(raw_requirement["action_key"])
+                action = actions.get(action_key)
+                if action is None:
+                    continue
+                entry: dict[str, Any] = {
+                    "target_key": target_key,
+                    "action_key": action_key,
+                    "action_name": action.name,
+                }
+                if action.required_actor_role_key is not None:
+                    entry["required_actor_role_key"] = action.required_actor_role_key
+                    entry["required_actor_role_name"] = role_names.get(
+                        action.required_actor_role_key,
+                        action.required_actor_role_key,
+                    )
+                if action.source_relation_type_key is not None:
+                    entry["source_relation_type_key"] = action.source_relation_type_key
+                for key in ("cost", "special_requirements"):
+                    value = raw_requirement.get(key)
+                    if value:
+                        entry[key] = value
+                effects = effects_by_action.get(action_key, {}).get(target_key, {}).get("effects")
+                if effects:
+                    entry["effects"] = effects
+                result.append(entry)
+        return tuple(result)
+
     @staticmethod
     def _condition_leaves(condition: ConditionV2 | None) -> tuple[ConditionV2, ...]:
         if condition is None:
@@ -565,11 +631,11 @@ class SharedKnowledgeProjection:
         for region_key, state in self.region_states().items():
             region_node = self.definition.world.node(region_key)
             resources: dict[str, Any] = {}
-            for (pool_region, resource_key), pools in grouped.items():
+            for (pool_region, resource_key), pool_rows in grouped.items():
                 if pool_region != region_key:
                     continue
                 resources[resource_key] = self._resource_summary(
-                    pools,
+                    pool_rows,
                     resource_names[resource_key],
                 )
             regions[region_key] = {
@@ -579,10 +645,10 @@ class SharedKnowledgeProjection:
                 "resources": resources,
             }
         global_resources: dict[str, Any] = {}
-        for (global_region_key, resource_key), pools in grouped.items():
+        for (global_region_key, resource_key), pool_rows in grouped.items():
             if global_region_key is None:
                 global_resources[resource_key] = self._resource_summary(
-                    pools, resource_names[resource_key]
+                    pool_rows, resource_names[resource_key]
                 )
         return {
             "total_regions": len(self.region_keys),

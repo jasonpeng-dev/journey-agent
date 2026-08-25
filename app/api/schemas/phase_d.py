@@ -319,6 +319,7 @@ class PublicPlanStepResponse(ApiModel):
     sequence: int = Field(ge=1)
     description: str
     assigned_actor_name: str
+    subtitle: str | None = None
     status: PublicStepStatus
     result_summary: str | None = None
     location: PublicActionLocationResponse | None = None
@@ -335,6 +336,7 @@ class PublicPlanHistoryStepResponse(ApiModel):
     sequence: int = Field(ge=1)
     action_name: str
     assigned_actor_name: str
+    subtitle: str | None = None
     status: PublicPlanHistoryStepStatus
     result_summary: str | None = None
     location: PublicActionLocationResponse | None = None
@@ -512,6 +514,18 @@ class PublicActionRequirementResponse(ApiModel):
     known_preconditions: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class PublicTargetActionContractResponse(ApiModel):
+    target_key: str
+    action_key: str
+    action_name: str
+    required_actor_role_key: str | None = None
+    required_actor_role_name: str | None = None
+    source_relation_type_key: str | None = None
+    cost: dict[str, int] = Field(default_factory=dict)
+    special_requirements: list[dict[str, Any]] = Field(default_factory=list)
+    effects: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class PublicResourceResponse(ApiModel):
     key: str
     name: str
@@ -542,6 +556,9 @@ class PlayerGameStateResponse(ApiModel):
     known_facts: list[PublicFactResponse]
     known_relations: list[PublicRelationResponse] = Field(default_factory=list)
     known_action_requirements: list[PublicActionRequirementResponse] = Field(default_factory=list)
+    known_target_action_contracts: list[PublicTargetActionContractResponse] = Field(
+        default_factory=list
+    )
     resources: list[PublicResourceResponse]
     resource_intelligence: dict[str, Any] = Field(default_factory=dict)
     actors: list[PublicActorResponse] = Field(default_factory=list)

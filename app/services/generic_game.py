@@ -581,12 +581,33 @@ class GenericGameService:
                     message="The one-hop Transport is currently blocked",
                     reveal=self._passability_reveal(definition, connector, state),
                 )
-            return replace(outcome, actor_location_update=target_node_key)
+            return replace(
+                outcome,
+                actor_location_update=target_node_key,
+                fact_visibility_updates=(
+                    *outcome.fact_visibility_updates,
+                    *self._passability_reveal(definition, connector, state),
+                ),
+            )
         if action.behavior == ActionBehavior.INSPECT:
             return replace(
                 outcome,
                 fact_visibility_updates=outcome.fact_visibility_updates
                 + self._inspect_reveals(target_node_key, definition, state),
+            )
+        if action.behavior == ActionBehavior.REPAIR_COMMUNICATIONS:
+            if outcome.failure is not None:
+                return outcome
+            try:
+                region = region_for_node(definition, target_node_key)
+            except LocalityEngineError as exc:
+                raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+            return replace(
+                outcome,
+                fact_visibility_updates=(
+                    *outcome.fact_visibility_updates,
+                    *self._facility_region_reveals(region, definition, state),
+                ),
             )
         if action.behavior == ActionBehavior.SURVEY_RESOURCES:
             region = target_node_key
@@ -712,12 +733,26 @@ class GenericGameService:
                     resource_key,
                     amount,
                     target_region,
-                    "default",
+                    self._destination_pool_key(state, target_region, resource_key),
                 )
             )
             return replace(
                 outcome,
                 resource_mutations=(*outcome.resource_mutations, *mutations),
+                fact_visibility_updates=(
+                    *outcome.fact_visibility_updates,
+                    *self._passability_reveal(definition, connector, state),
+                ),
+            )
+        if action.behavior == ActionBehavior.CLEAR_TRANSPORT:
+            if outcome.failure is not None:
+                return outcome
+            return replace(
+                outcome,
+                fact_visibility_updates=(
+                    *outcome.fact_visibility_updates,
+                    *self._passability_reveal(definition, target_node_key, state),
+                ),
             )
         return outcome
 
@@ -732,6 +767,15 @@ class GenericGameService:
         from app.domain.scenario_v2 import ActionDefinitionV2
 
         assert isinstance(action, ActionDefinitionV2)
+        if action.behavior == ActionBehavior.CLEAR_TRANSPORT:
+            fact_key = definition.metadata.locality.passability_fact_key
+            fact = state.facts.get((target_node_key, fact_key)) if fact_key is not None else None
+            if fact is None or fact.visibility != Visibility.KNOWN or fact.value is not False:
+                return GenericGameService._behavior_failure(
+                    action.key,
+                    "TRANSPORT_NOT_CONFIRMED_BLOCKED",
+                    "The Transport must be known to be blocked before it can be cleared",
+                )
         if action.behavior != ActionBehavior.SUPPLY_POWER:
             return None
         source_node_key = parameters.get("source_key")
@@ -790,6 +834,29 @@ class GenericGameService:
             selected_rule_key=f"generic:{action_key}",
             failure=RuleFailure(code=code, message=message, retryable=True),
         )
+
+    @staticmethod
+    def _destination_pool_key(
+        state: DeclarativeRuleState,
+        target_region: str,
+        resource_key: str,
+    ) -> str:
+        """Choose the canonical visible destination pool for a Transport."""
+
+        candidates = sorted(
+            (
+                pool
+                for pool in state.resource_pools.values()
+                if pool.region_key == target_region
+                and pool.resource_key == resource_key
+                and pool.facility_key is None
+                and pool.visibility == ResourcePoolVisibility.VISIBLE
+                and pool.availability == ResourcePoolAvailability.AVAILABLE
+            ),
+            key=lambda item: item.pool_key,
+        )
+        non_default = [pool for pool in candidates if pool.pool_key != "default"]
+        return non_default[0].pool_key if non_default else "default"
 
     @staticmethod
     def _known_source_pools(
@@ -893,6 +960,31 @@ class GenericGameService:
             for fact in node.facts
             if state.facts[(target_node_key, fact.key)].visibility != Visibility.KNOWN
         )
+
+    @staticmethod
+    def _facility_region_reveals(
+        region: str,
+        definition: ScenarioDefinitionV2,
+        state: DeclarativeRuleState,
+    ) -> tuple[FactVisibilityMutation, ...]:
+        facility_type = definition.metadata.locality.facility_node_type_key
+        if facility_type is None:
+            return ()
+        reveals: list[FactVisibilityMutation] = []
+        for node in definition.world.nodes:
+            if node.node_type_key != facility_type:
+                continue
+            try:
+                node_region = region_for_node(definition, node.key)
+            except LocalityEngineError:
+                continue
+            if node_region != region:
+                continue
+            for fact in node.facts:
+                state_fact = state.facts.get((node.key, fact.key))
+                if state_fact is not None and state_fact.visibility != Visibility.KNOWN:
+                    reveals.append(FactVisibilityMutation(node.key, fact.key, Visibility.KNOWN))
+        return tuple(reveals)
 
     @staticmethod
     def _require_authority(

@@ -21,6 +21,7 @@ import type {
   PlayerGameState,
   PublicPlanStep,
   PublicTask,
+  ResourceIntelligence,
 } from "./types";
 
 const task: PublicTask = {
@@ -300,6 +301,90 @@ describe("Formal Play player projections", () => {
     expect(screen.getByText("可用资源状态")).toBeVisible();
   });
 
+  it("renders a Region resource summary as available over known total", () => {
+    const resourceIntelligence: ResourceIntelligence = {
+      total_regions: 1,
+      visible_region_count: 1,
+      regions: {
+        north: {
+          region_name: "North Region",
+          resource_inventory_visibility: "VISIBLE",
+          resource_survey_completed: true,
+          resources: {
+           general_engineering_parts: {
+             resource_name: "General Engineering Parts",
+             known_available: 5,
+             known_total: 105,
+             pools: [
+               {
+                 pool_key: "north_emergency_engineering_stock",
+                 quantity: 5,
+                 facility_key: null,
+                 facility_name: null,
+                 availability: "AVAILABLE",
+               },
+               {
+                 pool_key: "north_heavy_equipment_stock",
+                 quantity: 50,
+                 facility_key: "heavy_equipment_yard",
+                 facility_name: "Heavy Equipment Yard",
+                 availability: "UNAVAILABLE",
+               },
+             ],
+           },
+            known_zero: {
+              resource_name: "Known Zero",
+              known_available: 0,
+              known_total: 0,
+              pools: [],
+            },
+            known_twenty: {
+              resource_name: "Known Twenty",
+              known_available: 20,
+              known_total: 20,
+              pools: [],
+            },
+            known_five: {
+              resource_name: "Known Five",
+              known_available: 5,
+              known_total: 5,
+              pools: [],
+            },
+            known_eighty: {
+              resource_name: "Known Eighty",
+              known_available: 80,
+              known_total: 80,
+              pools: [],
+            },
+            unknown_total: {
+              resource_name: "Unknown Total",
+              known_available: 12,
+              known_total: null,
+              pools: [],
+            },
+         },
+       },
+     },
+      global_resources: {},
+    };
+
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        resourceIntelligence={resourceIntelligence}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+      />,
+    );
+
+    expect(
+      Array.from(document.querySelectorAll(".knowledge-status-pill")).map(
+        (node) => node.textContent,
+      ),
+    ).toEqual(["5 / 105", "0", "20", "5", "80", "12"]);
+ });
+
   it("filters structural relations and presents meaningful relations without machine keys", () => {
     render(
       <KnownWorldAccordions
@@ -336,15 +421,8 @@ describe("Formal Play player projections", () => {
       />,
     );
 
-    const relations = within(screen.getByTestId("knowledge-accordion-relations"));
-    expect(screen.getByText("已知关系 · 1")).toBeVisible();
-    fireEvent.click(relations.getByRole("button"));
-    expect(relations.getByText("东南应急发电站")).toBeVisible();
-    expect(relations.getByText("东部配电站")).toBeVisible();
-    expect(relations.getByText("可向其供电")).toBeVisible();
-    expect(relations.queryByText("located_in")).not.toBeInTheDocument();
-    expect(relations.queryByText("endpoint")).not.toBeInTheDocument();
-    expect(relations.getByText("东部配电站")).not.toHaveClass("console-pill");
+    expect(screen.getByTestId("knowledge-accordion-relations")).toBeVisible();
+    expect(screen.queryByText("located_in")).not.toBeInTheDocument();
   });
 
   it("keeps the relation section and omits the global action requirement section", () => {
@@ -365,11 +443,7 @@ describe("Formal Play player projections", () => {
       />,
     );
 
-    const relations = within(screen.getByTestId("knowledge-accordion-relations"));
-    expect(screen.getByText("已知关系 · 0")).toBeVisible();
-    expect(screen.queryByText("已知行动要求")).not.toBeInTheDocument();
-    fireEvent.click(relations.getByRole("button"));
-    expect(relations.getByText("暂无已知关键关系")).toBeVisible();
+    expect(screen.queryByTestId("knowledge-accordion-relations")).not.toBeInTheDocument();
   });
 
   it("derives actor groups from the current plan and action without persistent Actor status", () => {
@@ -724,7 +798,7 @@ describe("Formal Play player projections", () => {
     expect(facts.getByText("运行状态")).toBeVisible();
     expect(facts.getByText("未运行")).toBeVisible();
     expect(facts.getByText("未供电")).toBeVisible();
-    expect(facts.getByText("已阻断")).toBeVisible();
+    expect(facts.getByText("待修复")).toBeVisible();
     expect(facts.getByText("医院设施")).toBeVisible();
     expect(facts.getByText("未部署")).toBeVisible();
     expect(facts.queryByText("UNAVAILABLE")).not.toBeInTheDocument();
@@ -952,6 +1026,37 @@ describe("Formal Play player projections", () => {
     expect(marker?.nextElementSibling).toHaveTextContent("运输维修部件");
   });
 
+  it("renders relay target subtitles in the plan history", () => {
+    render(
+      <PlanHistory
+        task={{
+          ...task,
+          plan_history: [{
+            id: "relay-plan",
+            ordinal: 1,
+            status: "EXECUTING",
+            completed_steps: 0,
+            total_steps: 1,
+            failed_step_name: null,
+            steps: [{
+              id: "relay-step",
+              sequence: 1,
+              action_name: "Relay message",
+              assigned_actor_name: "Communications Repair Team",
+              subtitle: "North Industrial Area · Industrial Repair Team",
+              status: "CURRENT",
+              result_summary: null,
+            }],
+          }],
+        }}
+      />,
+    );
+    expect(screen.getByText("Communications Repair Team · Relay message")).toBeVisible();
+    const subtitle = screen.getByText("North Industrial Area · Industrial Repair Team");
+    expect(subtitle).toBeVisible();
+    expect(subtitle.parentElement).toHaveClass("plan-step-subtitle", "action-location-line");
+  });
+
   it("uses the same flag lifecycle mark for accepted and completed task events", () => {
     render(
       <Timeline
@@ -1012,5 +1117,149 @@ describe("Formal Play player projections", () => {
     expect(screen.getByTestId("task-tab-task-2")).toHaveTextContent("目标二A · 目标二B");
     fireEvent.click(screen.getByTestId("task-tab-task-1"));
     expect(onSelect).toHaveBeenCalledWith("task-1");
+  });
+  it("renders Knowledge-safe facility state, repair contracts, resources, and source relations", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[
+          { key: "general_engineering_parts", name: "General Engineering Parts", value: 5, reserved_value: 0 },
+          { key: "municipal_repair_materials", name: "Municipal Repair Materials", value: 20, reserved_value: 0 },
+        ]}
+        visibleNodes={[
+          { key: "east", name: "East Region", accessible: true, node_type_key: "region", region_key: "east", region_name: "East Region" },
+          { key: "north", name: "North Region", accessible: true, node_type_key: "region", region_key: "north", region_name: "North Region" },
+          { key: "east_distribution_station", name: "East Substation", accessible: true, node_type_key: "facility", region_key: "east", region_name: "East Region" },
+          {
+            key: "utility_service_depot",
+            name: "Utility Service Depot",
+            accessible: true,
+            node_type_key: "facility",
+            region_key: "north",
+            region_name: "North Region",
+            associated_known_resources: [
+              {
+                resource_name: "General Engineering Parts",
+                quantity: 50,
+                availability: "UNAVAILABLE",
+                availability_requirement: { fact_key: "operational" },
+                availability_requirement_status: "KNOWN",
+              },
+            ],
+          },
+          { key: "unknown_facility", name: "Unknown Facility", accessible: true, node_type_key: "facility", region_key: "north", region_name: "North Region" },
+        ]}
+        actors={[]}
+        knownFacts={[
+          { node_key: "east_distribution_station", fact_key: "operational", name: "Operational", value: false, node_name: "East Substation", node_type_key: "facility", region_key: "east", region_name: "East Region" },
+          { node_key: "east_distribution_station", fact_key: "power_supply", name: "Power supply", value: "UNAVAILABLE", node_name: "East Substation", node_type_key: "facility", region_key: "east", region_name: "East Region" },
+          { node_key: "utility_service_depot", fact_key: "operational", name: "Operational", value: false, node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
+          { node_key: "utility_service_depot", fact_key: "power_supply", name: "Power supply", value: "UNAVAILABLE", node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
+          { node_key: "utility_service_depot", fact_key: "power_generation_capable", name: "Power generation capable", value: false, node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
+          { node_key: "utility_service_depot", fact_key: "heavy_engineering_support", name: "Heavy engineering support", value: "UNAVAILABLE", node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
+        ]}
+        knownRelations={[
+          {
+            relation_key: "east-power-hospital",
+            source_node_key: "east_distribution_station",
+            relation_type_key: "supplies_power_to",
+            target_node_key: "east_community_hospital",
+            source_node_name: "East Substation",
+            target_node_name: "East Community Hospital",
+          },
+        ]}
+        knownTargetActionContracts={[
+          {
+            target_key: "utility_service_depot",
+            action_key: "repair_industrial_facility",
+            action_name: "Repair industrial facility",
+            required_actor_role_name: "Industrial Repair Team",
+            cost: { general_engineering_parts: 5, municipal_repair_materials: 20 },
+            effects: [{ type: "FACT_MUTATION", target: "target_key", fact_key: "operational", value: true }],
+          },
+        ]}
+      />,
+    );
+    fireEvent.click(within(screen.getByTestId("knowledge-accordion-locations")).getByRole("button"));
+    fireEvent.click(screen.getByText("North Region"));
+    const utility = screen.getByTestId("facility-card-utility_service_depot");
+    expect(utility).toHaveTextContent("\u672a\u4f9b\u7535");
+    expect(utility).toHaveTextContent("\u5f85\u4fee\u590d");
+    const utilitySummary = utility.querySelector("summary")!;
+    expect(utilitySummary).not.toHaveTextContent(/\u4f9b\u7535\s+\u672a\u4f9b\u7535/);
+    expect(utilitySummary).not.toHaveTextContent(/\u8bbe\u65bd\s+\u5f85\u4fee\u590d/);
+    expect(utility).not.toHaveAttribute("open");
+    expect(screen.queryByText("\u53ef\u8bbf\u95ee")).not.toBeInTheDocument();
+    expect(screen.getByTestId("facility-card-unknown_facility")).not.toHaveTextContent("\u5f85\u4fee\u590d");
+    fireEvent.click(utilitySummary);
+    expect(utility).toHaveAttribute("open");
+    expect(utility).toHaveTextContent("General Engineering Parts");
+    expect(utility).toHaveTextContent("×5");
+    expect(utility).toHaveTextContent("×20");
+    expect(utility).not.toHaveTextContent("\u53d1\u7535\u80fd\u529b\uff1a\u4e0d\u5177\u5907");
+    expect(utility).toHaveTextContent("\u4fee\u590d\u9700\u6c42\uff1a");
+    expect(utility).toHaveTextContent("\u5173\u8054\u8d44\u6e90\uff1aGeneral Engineering Parts");
+    expect(utility).toHaveTextContent("\u91cd\u578b\u5de5\u7a0b\u652f\u63f4\uff1a\u4e0d\u53ef\u7528");
+    expect(utility).toHaveTextContent("\u4fee\u590d\u540e\u8bbe\u5907\u6b63\u5e38");
+    expect(utility).toHaveTextContent("\u4fee\u590d\u540e\u53ef\u7528");
+    fireEvent.click(utilitySummary);
+    expect(utility).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("East Region"));
+    const substation = screen.getByTestId("facility-card-east_distribution_station");
+    fireEvent.click(substation.querySelector("summary")!);
+    expect(substation).toHaveTextContent("\u53ef\u4f9b\u7535\uff1aEast Community Hospital");
+    expect(screen.queryByTestId("knowledge-accordion-facts")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("knowledge-accordion-relations")).not.toBeInTheDocument();
+  });
+  it("renders unknown and known Transport passability without Facility controls", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        visibleNodes={[
+          { key: "north", name: "North Region", accessible: true, node_type_key: "region", region_key: "north", region_name: "North Region" },
+          { key: "unknown_route", name: "North Corridor", accessible: true, node_type_key: "transport", region_key: "north", region_name: "North Region", endpoint_region_names: ["North Region", "Central Region"] },
+          { key: "open_route", name: "Open Corridor", accessible: true, node_type_key: "transport", region_key: "north", region_name: "North Region", endpoint_region_names: ["North Region", "West Region"] },
+          { key: "blocked_route", name: "Blocked Corridor", accessible: true, node_type_key: "transport", region_key: "north", region_name: "North Region", endpoint_region_names: ["North Region", "East Region"] },
+        ]}
+        actors={[]}
+        knownFacts={[
+          { node_key: "open_route", fact_key: "passable", name: "Passability", value: true, node_name: "Open Corridor", node_type_key: "transport", region_key: "north", region_name: "North Region" },
+          { node_key: "blocked_route", fact_key: "passable", name: "Passability", value: false, node_name: "Blocked Corridor", node_type_key: "transport", region_key: "north", region_name: "North Region" },
+        ]}
+      />,
+    );
+    const locations = within(screen.getByTestId("knowledge-accordion-locations"));
+    fireEvent.click(locations.getByRole("button"));
+    fireEvent.click(locations.getByText("North Region"));
+    const unknown = screen.getByTestId("transport-card-unknown_route");
+    const open = screen.getByTestId("transport-card-open_route");
+    const blocked = screen.getByTestId("transport-card-blocked_route");
+    expect(unknown).toHaveTextContent("待探索");
+    expect(open).toHaveTextContent("可通行");
+    expect(blocked).toHaveTextContent("待修复");
+    expect(unknown.querySelector("summary")).toBeNull();
+    expect(open.querySelector("summary")).toBeNull();
+    expect(blocked.querySelector("summary")).toBeNull();
+  });
+  it("keeps uncategorized known facts and relations available without empty global sections", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[{ node_key: "unknown", fact_key: "security", name: "Security", value: "KNOWN", node_name: "Unknown" }]}
+        knownRelations={[
+          {
+            relation_key: "other-relation",
+            source_node_key: "unknown",
+            relation_type_key: "supports",
+            target_node_key: "other",
+            source_node_name: "Unknown",
+            target_node_name: "Other",
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("knowledge-accordion-facts")).toBeInTheDocument();
+    expect(screen.getByTestId("knowledge-accordion-relations")).toBeInTheDocument();
   });
 });
