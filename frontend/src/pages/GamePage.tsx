@@ -1020,17 +1020,20 @@ export function TaskTabs({
   tasks,
   selectedTaskId,
   onSelect,
+  inheritedTaskCount = 0,
 }: {
   tasks: PlayerGameState["task_history"];
   selectedTaskId: string | null;
   onSelect: (id: string) => void;
+  inheritedTaskCount?: number;
 }) {
   if (!tasks.length) return null;
   return (
     <nav className="task-tabs" aria-label="任务历史">
-      {tasks.map((item) => (
-        <button
-          key={item.id}
+      {tasks.map((item, index) => (
+        <Fragment key={item.id}>
+          {inheritedTaskCount > 0 && index === inheritedTaskCount && index < tasks.length && <div className="history-boundary" data-testid="history-boundary" role="separator">— 该存档初始状态 —</div>}
+          <button
           type="button"
           data-testid={`task-tab-${item.id}`}
           data-task-id={item.id}
@@ -1041,7 +1044,8 @@ export function TaskTabs({
           <span>任务 {item.sequence}</span>
           <strong>{item.objective_names.join(" · ")}</strong>
           <em className={taskTone[item.status] ?? "neutral"}>{uiLabel(item.status)}</em>
-        </button>
+          </button>
+        </Fragment>
       ))}
     </nav>
   );
@@ -1175,6 +1179,7 @@ export function GamePage() {
   const [activeOperation, setActiveOperation] = useState<ActivePlayOperation | null>(null);
   const [developerOpen, setDeveloperOpen] = useState(false);
   const [developerToken, setDeveloperToken] = useState("");
+  const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const play = useQuery({
     queryKey: ["play", gameId, selectedTaskId],
     queryFn: () => api.playState(gameId, selectedTaskId),
@@ -1257,6 +1262,14 @@ export function GamePage() {
     mutationFn: (revision: number) => api.archiveGame(gameId, revision),
     onSuccess: () => void refresh(),
   });
+  const checkpoint = useMutation({
+    mutationFn: (revision: number) => api.checkpointGame(gameId, revision, crypto.randomUUID()),
+    onSuccess: (target) => {
+      setCheckpointNotice("已创建存档 " + target.id.slice(0, 8));
+      void queryClient.invalidateQueries({ queryKey: ["games"] });
+      void refresh();
+    },
+  });
   const decision = useMutation({
     mutationFn: ({
       approve,
@@ -1331,12 +1344,13 @@ export function GamePage() {
     startPlanning.isPending ||
     abandon.isPending ||
     archive.isPending ||
+    checkpoint.isPending ||
     fork.isPending ||
     decision.isPending ||
     pacing.isPending ||
     replan.isPending;
   const mutationError =
-    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? fork.error ?? decision.error ?? pacing.error ?? replan.error;
+    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? checkpoint.error ?? fork.error ?? decision.error ?? pacing.error ?? replan.error;
   const resolutionMessage =
     submit.data && submit.data.status !== "ACCEPTED"
       ? submit.data.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。"
@@ -1399,6 +1413,7 @@ export function GamePage() {
             </header>
             <TaskTabs
               tasks={play.data.task_history}
+              inheritedTaskCount={play.data.game.inherited_task_count}
               selectedTaskId={selectedTaskId ?? task?.id ?? null}
               onSelect={setSelectedTaskId}
             />
@@ -1525,7 +1540,7 @@ export function GamePage() {
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>
-      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span>{game.status === "ACTIVE" && gameHasActiveTask && <small className="lifecycle-help">当前有活动任务，完成或放弃后才能归档。</small>}</div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <button className="danger-button" disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate(liveGame.runtime_revision)}>结束并归档游戏</button>}{game.status === "ARCHIVED" && <button disabled={busy} onClick={() => fork.fork(gameId)}>以此归档状态新开一局</button>}</div></section>
+      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span>{checkpointNotice && <small className="checkpoint-notice" role="status">{checkpointNotice}</small>}{game.status === "ACTIVE" && gameHasActiveTask && <small className="lifecycle-help">当前有活动任务，完成或放弃后才能归档。</small>}</div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <><button disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能存档" : undefined} onClick={() => checkpoint.mutate(liveGame.runtime_revision)}>存档</button><button className="danger-button" disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate(liveGame.runtime_revision)}>结束并归档游戏</button></>}{game.status === "ARCHIVED" && <button disabled={busy} onClick={() => fork.fork(gameId)}>以此归档状态新开一局</button>}</div></section>
       {developerOpen && <section className="developer-panel-v2"><label>开发者凭证<input type="password" value={developerToken} onChange={(event) => setDeveloperToken(event.target.value)} /></label>{developer.error && <p className="developer-error">开发者访问被拒绝。</p>}{developer.data && <><h2>内部运行时快照</h2><pre>{JSON.stringify(developer.data, null, 2)}</pre></>}</section>}
     </main>
   );

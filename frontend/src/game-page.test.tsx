@@ -1118,6 +1118,17 @@ describe("Formal Play player projections", () => {
     fireEvent.click(screen.getByTestId("task-tab-task-1"));
     expect(onSelect).toHaveBeenCalledWith("task-1");
   });
+  it("shows a single history boundary only before new tasks", () => {
+    const tasks: PlayerGameState["task_history"] = [
+      { id: "task-1", sequence: 1, goal: "inherited", objective_names: ["Inherited"], status: "COMPLETED", execution_phase: "COMPLETED", created_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T00:01:00Z" },
+      { id: "task-2", sequence: 2, goal: "new", objective_names: ["New"], status: "ACTIVE", execution_phase: "AWAITING_ACTION_ACK", created_at: "2026-01-01T00:02:00Z", completed_at: null },
+    ];
+    const onSelect = vi.fn();
+    const view = render(<TaskTabs tasks={tasks} inheritedTaskCount={0} selectedTaskId="task-2" onSelect={onSelect} />);
+    expect(screen.queryByTestId("history-boundary")).not.toBeInTheDocument();
+    view.rerender(<TaskTabs tasks={tasks} inheritedTaskCount={1} selectedTaskId="task-2" onSelect={onSelect} />);
+    expect(screen.getByTestId("history-boundary")).toHaveTextContent("该存档初始状态");
+  });
   it("renders Knowledge-safe facility state, repair contracts, resources, and source relations", () => {
     render(
       <KnownWorldAccordions

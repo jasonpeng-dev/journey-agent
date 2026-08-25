@@ -141,6 +141,28 @@ class GameInstance(UUIDPrimaryKey, TimestampMixin, Base):
             sqlite_where=text("creation_key IS NOT NULL"),
             postgresql_where=text("creation_key IS NOT NULL"),
         ),
+        CheckConstraint(
+            "checkpoint_source_runtime_revision IS NULL OR checkpoint_source_runtime_revision >= 0",
+            name="ck_game_instance_checkpoint_source_revision",
+        ),
+        CheckConstraint(
+            "inherited_task_count >= 0",
+            name="ck_game_instance_inherited_task_count",
+        ),
+        Index(
+            "uq_game_instances_checkpoint_source_revision",
+            "checkpointed_from_game_instance_id",
+            "checkpoint_source_runtime_revision",
+            unique=True,
+            sqlite_where=text(
+                "checkpointed_from_game_instance_id IS NOT NULL "
+                "AND checkpoint_source_runtime_revision IS NOT NULL"
+            ),
+            postgresql_where=text(
+                "checkpointed_from_game_instance_id IS NOT NULL "
+                "AND checkpoint_source_runtime_revision IS NOT NULL"
+            ),
+        ),
     )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
@@ -155,6 +177,19 @@ class GameInstance(UUIDPrimaryKey, TimestampMixin, Base):
         ),
         nullable=True,
         index=True,
+    )
+    checkpointed_from_game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "game_instances.id",
+            name="fk_game_instances_checkpointed_from_game_instance",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    checkpoint_source_runtime_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inherited_task_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
     )
     status: Mapped[GameInstanceStatus] = mapped_column(
         Enum(GameInstanceStatus, native_enum=False, length=30),

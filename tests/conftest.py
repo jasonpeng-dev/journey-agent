@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings, get_settings
 from app.infrastructure.db.base import Base
-from app.infrastructure.db.session import get_db
+from app.infrastructure.db.session import configure_sqlite_foreign_keys, get_db
 from app.main import app
 from app.scenarios.builtin import require_builtin_v2_version
 from tests.scenario_fixtures import STARFIRE_TEST
@@ -22,6 +22,7 @@ def session() -> Generator[Session, None, None]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    configure_sqlite_foreign_keys(engine)
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as db:

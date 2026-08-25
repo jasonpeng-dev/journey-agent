@@ -27,7 +27,11 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceMemoryEvent,
     GameInstanceNodeState,
+    GameInstanceRegionResourceKnowledge,
+    GameInstanceRelationKnowledge,
     GameInstanceResourceState,
+    PlanningAttempt,
+    PlanningCycle,
     Player,
     PlayerExecutionCheckpoint,
     Scenario,
@@ -104,26 +108,7 @@ class GameLifecycleService:
                 "GAME_INSTANCE_CONFLICT",
                 "The GameInstance changed before the lifecycle transition",
             )
-        if self._has_non_terminal_task(instance.id):
-            raise GameLifecycleError(
-                "GAME_INSTANCE_ARCHIVE_TASK_ACTIVE",
-                "The Game has an active Task and cannot archive",
-            )
-        if self._has_pending_operation(instance.id):
-            raise GameLifecycleError(
-                "GAME_INSTANCE_ARCHIVE_OPERATION_PENDING",
-                "The Game has a pending WorldOperation and cannot archive",
-            )
-        if self._has_pending_decision(instance.id):
-            raise GameLifecycleError(
-                "GAME_INSTANCE_ARCHIVE_DECISION_PENDING",
-                "The Game has a pending ActionDecisionRequest and cannot archive",
-            )
-        if self._has_reservation(instance.id):
-            raise GameLifecycleError(
-                "GAME_INSTANCE_ARCHIVE_RESERVATION_ACTIVE",
-                "The Game has reserved resources and cannot archive",
-            )
+        self.assert_stable_point(instance)
         instance.status = GameInstanceStatus.ARCHIVED
         instance.runtime_revision += 1
         self.db.flush()
@@ -189,6 +174,8 @@ class GameLifecycleService:
             GameInstanceMemoryEvent,
             GameInstanceActor,
             GameInstanceResourceState,
+            GameInstanceRegionResourceKnowledge,
+            GameInstanceRelationKnowledge,
             GameInstanceFactState,
             GameInstanceNodeState,
         ):
@@ -283,6 +270,63 @@ class GameLifecycleService:
             )
             or 0
         ) > 0
+
+    def _has_running_planning_cycle(self, game_instance_id: UUID) -> bool:
+        return (
+            self.db.scalar(
+                select(func.count())
+                .select_from(PlanningCycle)
+                .where(
+                    PlanningCycle.game_instance_id == game_instance_id,
+                    PlanningCycle.status == "RUNNING",
+                )
+            )
+            or 0
+        ) > 0
+
+    def _has_running_planning_attempt(self, game_instance_id: UUID) -> bool:
+        return (
+            self.db.scalar(
+                select(func.count())
+                .select_from(PlanningAttempt)
+                .where(
+                    PlanningAttempt.task_id.in_(
+                        select(AgentTask.id).where(AgentTask.game_instance_id == game_instance_id)
+                    ),
+                    PlanningAttempt.status == "RUNNING",
+                )
+            )
+            or 0
+        ) > 0
+
+    def assert_stable_point(self, instance: GameInstance) -> None:
+        if self._has_non_terminal_task(instance.id):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_TASK_ACTIVE",
+                "The Game has an active Task and cannot archive",
+            )
+        if self._has_pending_operation(instance.id):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_OPERATION_PENDING",
+                "The Game has a pending WorldOperation and cannot archive",
+            )
+        if self._has_pending_decision(instance.id):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_DECISION_PENDING",
+                "The Game has a pending ActionDecisionRequest and cannot archive",
+            )
+        if self._has_reservation(instance.id):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_RESERVATION_ACTIVE",
+                "The Game has reserved resources and cannot archive",
+            )
+        if self._has_running_planning_cycle(instance.id) or self._has_running_planning_attempt(
+            instance.id
+        ):
+            raise GameLifecycleError(
+                "GAME_INSTANCE_ARCHIVE_PLANNING_IN_FLIGHT",
+                "The Game has an in-flight planning cycle and cannot materialize",
+            )
 
     def _cancel_pending(
         self,

@@ -14,6 +14,7 @@ from app.agent.provider import GenericProviderError
 from app.api.schemas.phase_d import (
     ApprovalDecisionRequest,
     ArchiveGameRequest,
+    CheckpointGameRequest,
     ForkGameRequest,
     GameSummaryResponse,
     GoalSubmissionRequest,
@@ -37,6 +38,7 @@ from app.infrastructure.db.models import (
 )
 from app.infrastructure.db.session import get_db
 from app.services.composition import configured_play_orchestrator
+from app.services.game_checkpoint import GameCheckpointError, GameCheckpointService
 from app.services.game_fork import GameForkError, GameForkService
 from app.services.game_instances import GameInstanceError
 from app.services.game_lifecycle import GameLifecycleError, GameLifecycleService
@@ -320,6 +322,31 @@ def fork_game(
         _raise_http(exc)
 
 
+@router.post(
+    "/{game_instance_id}/checkpoint",
+    response_model=GameSummaryResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def checkpoint_game(
+    game_instance_id: UUID,
+    request: CheckpointGameRequest,
+    db: Session = Depends(get_db),
+) -> GameSummaryResponse:
+    try:
+        player = GameLifecycleService(db).platform_player()
+        runtime = GameCheckpointService(db).materialize(
+            source_game_instance_id=game_instance_id,
+            player_id=player.id,
+            expected_runtime_revision=request.expected_runtime_revision,
+            creation_key=request.creation_key,
+        )
+        db.commit()
+        return game_summary(db, runtime.instance)
+    except (GameCheckpointError, GameLifecycleError) as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
 @router.delete("/{game_instance_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_game(game_instance_id: UUID, db: Session = Depends(get_db)) -> Response:
     try:
@@ -355,7 +382,7 @@ def game_history(
     tasks = db.scalars(
         select(AgentTask)
         .where(AgentTask.game_instance_id == game.id)
-        .order_by(AgentTask.created_at)
+        .order_by(AgentTask.created_at, AgentTask.id)
     )
     operations = db.scalars(
         select(WorldOperation)
@@ -406,6 +433,10 @@ def game_summary(db: Session, game: GameInstance) -> GameSummaryResponse:
         status=PublicGameStatus(game.status.value),
         runtime_revision=game.runtime_revision,
         active_task_id=active_task,
+        is_checkpoint=game.checkpoint_source_runtime_revision is not None,
+        checkpointed_from_game_instance_id=game.checkpointed_from_game_instance_id,
+        checkpoint_source_runtime_revision=game.checkpoint_source_runtime_revision,
+        inherited_task_count=game.inherited_task_count,
         created_at=game.created_at,
         updated_at=game.updated_at,
     )
