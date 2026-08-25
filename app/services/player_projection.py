@@ -449,6 +449,10 @@ class PlayerProjectionService:
             status=PublicGameStatus(game.status.value),
             runtime_revision=game.runtime_revision,
             active_task_id=active_task_id,
+            is_checkpoint=game.checkpoint_source_runtime_revision is not None,
+            checkpointed_from_game_instance_id=game.checkpointed_from_game_instance_id,
+            checkpoint_source_runtime_revision=game.checkpoint_source_runtime_revision,
+            inherited_task_count=game.inherited_task_count,
             created_at=game.created_at,
             updated_at=game.updated_at,
         )
