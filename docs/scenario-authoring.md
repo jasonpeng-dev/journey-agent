@@ -91,7 +91,8 @@ It creates a new immutable Version; publishing an unchanged semantic document is
 Version History supports reading a snapshot, restoring its content into the Current Draft, and
 starting a new Game from that exact Version. Restore changes only the Draft. The New Game flow
 accepts a `scenario_version_id`, never a Draft or a mutable Scenario pointer. Built-in examples
-are the generic Starfire and Medical V2 definitions seeded by `python -m app.seed`.
+are exposed by `GET /api/v1/scenario-examples` and currently include the Linjiang Infrastructure
+Recovery v2.0 definition seeded by `python -m app.seed`.
 
 ## Authoring API map
 

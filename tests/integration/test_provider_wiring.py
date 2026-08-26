@@ -117,7 +117,7 @@ def _start_initial_plan(orchestrator, task):  # type: ignore[no-untyped-def]
     return orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
 
 
-def _medical_plan() -> tuple[PlanStepProposal, ...]:
+def _generic_plan() -> tuple[PlanStepProposal, ...]:
     return (
         _step("diagnose_patient", "patient_one", "doctor_lee"),
         _step("treat_patient", "patient_one", "doctor_lee", {"dosage": 2}),
@@ -156,7 +156,7 @@ def test_mock_composition_never_sends_model_http(
 def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = RecordingProvider(proposals=[_medical_plan()])
+    provider = RecordingProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -246,7 +246,7 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     provider = RecordingProvider(
         proposals=[
             (PlanStepProposal(candidate_id="candidate_invented"),),
-            _medical_plan(),
+            _generic_plan(),
         ]
     )
     monkeypatch.setattr(
@@ -290,7 +290,7 @@ def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
     runtime, _scope = _runtime(session)
     provider = RecordingProvider(
         selected=("stabilize_patient",),
-        proposals=[_medical_plan()],
+        proposals=[_generic_plan()],
     )
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
@@ -336,17 +336,17 @@ def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
 
     runtime, scope = _runtime(session, GENERIC_TEST)
     repeated = RecordingProvider(
-        proposals=[_medical_plan(), _medical_plan(), _medical_plan(), _medical_plan()]
+        proposals=[_generic_plan(), _generic_plan(), _generic_plan(), _generic_plan()]
     )
     agent = GenericAgentService(session, scope, provider=repeated)
     task = agent.create_task(runtime.session, "stabilize the patient")
-    first = _medical_plan()[0]
+    first = _generic_plan()[0]
     diagnose = next(
         item
         for item in repeated.plan_requests[0].planning_action_catalog
         if item.candidate_id == first.candidate_id
     )
-    treatment_step = _medical_plan()[1]
+    treatment_step = _generic_plan()[1]
     treatment = next(
         item
         for item in repeated.plan_requests[0].planning_action_catalog
@@ -377,7 +377,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
 ) -> None:
     unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
     invalid_parameters = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
-    provider = RecordingProvider(proposals=[unknown, invalid_parameters, _medical_plan()])
+    provider = RecordingProvider(proposals=[unknown, invalid_parameters, _generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -528,7 +528,7 @@ def test_provider_repair_attempt_limit_comes_from_settings(
 ) -> None:
     assert Settings(_env_file=None).model_max_repair_attempts_per_cycle == 2
     unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
-    provider = RecordingProvider(proposals=[unknown, unknown, unknown, unknown, _medical_plan()])
+    provider = RecordingProvider(proposals=[unknown, unknown, unknown, unknown, _generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -557,8 +557,8 @@ def test_provider_repair_attempt_limit_comes_from_settings(
 def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    reversed_plan = tuple(reversed(_medical_plan()))
-    provider = RecordingProvider(proposals=[reversed_plan, _medical_plan()])
+    reversed_plan = tuple(reversed(_generic_plan()))
+    provider = RecordingProvider(proposals=[reversed_plan, _generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -617,7 +617,7 @@ def test_generic_composition_uses_the_same_provider_wiring(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime, _scope = _runtime(session, GENERIC_TEST)
-    provider = RecordingProvider(proposals=[_medical_plan()])
+    provider = RecordingProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -633,7 +633,7 @@ def test_generic_composition_uses_the_same_provider_wiring(
 def test_draft_sandbox_uses_same_provider_composition_without_formal_game_row(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = RecordingProvider(proposals=[_medical_plan()])
+    provider = RecordingProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -948,7 +948,7 @@ def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
 def test_replan_provider_failure_persists_failure_and_action_history(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = FailOnReplanProvider(proposals=[_medical_plan()])
+    provider = FailOnReplanProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -1018,7 +1018,7 @@ def test_replan_provider_failure_persists_failure_and_action_history(
 def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = RecordingProvider(proposals=[_medical_plan()])
+    provider = RecordingProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
@@ -1089,7 +1089,7 @@ def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
 def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    initial = _medical_plan()
+    initial = _generic_plan()
     invalid = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
     provider = RecordingProvider(proposals=[initial, invalid, initial, initial, initial, initial])
     monkeypatch.setattr(

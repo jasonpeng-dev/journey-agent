@@ -141,8 +141,8 @@ Backend:
 
     uv run pytest --cov=app --cov-report=term-missing
     uv run ruff check .
-    uv run ruff format --check app evals tests
-    uv run mypy app evals
+    uv run ruff format --check app tests frontend/e2e/prepare_history_fixture.py
+    uv run mypy app
     uv run alembic upgrade head
 
 Frontend, from frontend:

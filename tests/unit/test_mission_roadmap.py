@@ -17,7 +17,7 @@ def _initial_knowledge(
     }
 
 
-def test_medical_uses_the_same_generic_roadmap_projection() -> None:
+def test_generic_scenario_uses_the_same_generic_roadmap_projection() -> None:
     roadmap = MissionRoadmapProjector().project(
         GENERIC_TEST,
         ("stabilize_patient",),

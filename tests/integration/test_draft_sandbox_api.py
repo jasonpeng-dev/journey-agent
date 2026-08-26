@@ -43,13 +43,13 @@ def test_incomplete_draft_returns_diagnostics_without_starting_runtime(
     assert session.scalar(select(func.count()).select_from(GameInstance)) == games_before
 
 
-def test_medical_uses_same_disposable_sandbox_and_formal_game_rejects_draft_identity(
+def test_generic_scenario_uses_same_disposable_sandbox_and_formal_game_rejects_draft_identity(
     client: TestClient, session: Session
 ) -> None:
     created = create_test_scenario(
         session,
         GENERIC_TEST,
-        key=f"sandbox_medical_{uuid4().hex[:8]}",
+        key=f"sandbox_generic_{uuid4().hex[:8]}",
         name="Sandbox Generic Contract",
     )
     scenario_id = str(created.id)
