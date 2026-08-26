@@ -2,127 +2,201 @@
 
 [English](README.md) · [中文](README.zh.md)
 
-Journey Agent 是一个通用、数据驱动的 LLM Agent runtime。它把 Planner、Validator、Runtime 和 Knowledge projection 分开：模型只根据公开的 canonical PlannerInput 选择行动，后端验证并执行，运行结果再形成下一轮可见知识。
+Journey Agent 是一个通用、数据驱动的 Scenario runtime，包含 LLM
+Planner、确定性 Validator、明确的 Truth/Knowledge 分离，以及可审计的
+Formal PLAY 执行。运行时由发布后的 ScenarioVersion 驱动：不可变的
+Version 提供世界内容和声明式语义，可复用的源代码负责 Goal resolution、
+planning、validation、Action execution、persistence 和浏览器产品。
 
-## 当前能力
+## 包含内容
 
-- Generic Planner / Validator / Runtime 分层，不为单一场景写规划逻辑。
-- PlannerInput V2 以 dependency closure 为边界，保持 sparse、bounded，并由 canonical action、actor、target 和 Known World 数据统一表达。
-- Truth 与 Knowledge 分离；Planner 和 Validator 不读取 Hidden Truth，UNKNOWN 不等于 false、zero 或 unavailable。
-- Planner 可自主选择 Action、Actor、Target、参数和顺序；Validator 只判断已提交方案是否违反已知确定约束。
-- PlanSegment 支持 sequential self-validation、bounded REPAIR、INFORMATION_BOUNDARY 和 REPLAN。
-- Travel 只改变 Actor 位置；transport_resource 才负责跨 Region 搬运资源。
-- Formal PLAY 使用一次请求完成一个 planning cycle，内部可执行 INITIAL/REPLAN 与 bounded REPAIR；只有 Validator 通过后才创建正式 AgentPlan 并进入 Runtime。
+* ScenarioDefinitionV2 Draft、validation、publication、不可变 Version，以及
+  精确绑定 Version 的 GameInstance。
+* Scenario Library 和结构化 Editor，覆盖 world、Actors、Actions、Rules、
+  Objectives、planning metadata、initialization、references 和 Version history。
+* Generic Goal Resolver、冻结的 ObjectiveScope、canonical PlannerInput V2、
+  deterministic Validator、bounded 内部 REPAIR，以及 Knowledge-aware REPLAN。
+* Declarative Action/Rule execution、Truth mutation、public Knowledge projection、
+  Player-safe Formal PLAY、审批、不可变 archived runtime source、Fork 和 plan
+  history。
+* Generic built-in Scenario 通过同一套 runtime 和浏览器产品运行；engine 不包含
+  scenario-specific gameplay 分支。
 
 ## 架构概览
 
-```text
-Scenario / Published Version
-            │
-            ▼
-ObjectiveScope + Dependency Closure
-            │
-            ▼
-Canonical PlannerInput V2
-            │
-            ▼
-Planner Provider ──► PlanSegment
-            │
-            ▼
-Sequential Validator
-       │              │
-       │ reject       │ accept
-       ▼              ▼
- bounded REPAIR    AgentPlan / AgentStep
-                          │
-                          ▼
-                    Runtime execution
-                          │
-                          ▼
-               public Knowledge update / REPLAN
-```
+~~~text
+ScenarioVersion
+  -> GameInstance
+       -> Goal -> frozen ObjectiveScope
+            -> Dependency Closure
+                 -> PlannerInput V2 -> Provider PlanSegment
+                      -> Validator -> formal AgentPlan
+                           -> Runtime -> Truth / Knowledge
+                                -> REPLAN or Complete
+~~~
 
-PlannerInput V2 是 Provider-facing 的唯一权威语义。旧的 PlanningContext、candidate catalog 和兼容字段只用于迁移或内部适配，不能产生第二套 Action/Actor/Target 资格。
+Formal PLAY 用一次 planning HTTP request 完成一个 planning cycle。Backend
+在内部执行 bounded REPAIR，并返回最终状态。被拒绝的 proposal 只保存在
+PlanningAttempt audit rows 中，不会成为 Player 可见的 plan，也不会创建
+runtime operation。
 
-## 文档入口
+详见 [docs/architecture.md](docs/architecture.md) 了解 high-level runtime
+boundaries，[docs/agent-planning-v2.md](docs/agent-planning-v2.md) 了解详细
+planning contract，[docs/scenario-authoring.md](docs/scenario-authoring.md)
+了解 Scenario publishing，以及 [docs/game-lifecycle.md](docs/game-lifecycle.md)
+了解详细的 GameInstance lifecycle。
 
-按以下顺序阅读：
-
-1. [文档索引](docs/README.md)
-2. [架构总览](docs/architecture.md)
-3. [Agent Planning V2](docs/agent-planning-v2.md)
-4. [场景作者指南](docs/scenario-authoring.md)
-
-旧版 PlanningContext V1 设计已归档，仅用于迁移考古：[archive/planning-context-v1.md](docs/archive/planning-context-v1.md)。
+ACTIVE GameInstance 只有在没有 non-terminal Task、pending WorldOperation、
+pending ActionDecisionRequest 或 reserved resource value 时才能 Archive。
+ARCHIVED instance 是不可变的只读 runtime source。Checkpoint 在 source 保持
+不变的情况下创建独立的 ARCHIVED snapshot；Fork 从 ARCHIVED source 创建新的
+独立 ACTIVE instance，保留相同的 exact ScenarioVersion、runtime state 和
+inherited formal history。详见 [GameInstance lifecycle](docs/game-lifecycle.md)。
 
 ## Provider 配置
 
-Provider 通过环境变量配置。常用设置包括：
+Mock mode 是安全默认值，不会发起网络请求。只在本地环境配置
+OpenAI-compatible Provider；不要提交 secret key。
 
-```text
-MODEL_PROVIDER=deepseek
-MODEL_NAME=deepseek-v4-flash
+~~~text
+MODEL_PROVIDER=mock
+MODEL_BASE_URL=https://api.openai.com/v1
+MODEL_NAME=gpt-4.1-mini
+MODEL_API_KEY=
 MODEL_THINKING_MODE=disabled
 MODEL_REASONING_EFFORT=low
-MODEL_MAX_OUTPUT_TOKENS=null
-MODEL_TIMEOUT_SECONDS=null
-MODEL_TOTAL_TIMEOUT_SECONDS=null
-```
+MODEL_TIMEOUT_SECONDS=20
+MODEL_TOTAL_TIMEOUT_SECONDS=60
+MODEL_MAX_OUTPUT_TOKENS=8192
+~~~
 
-请按当前部署环境填写 API key、endpoint 和其他凭据；不要把凭据提交到仓库。thinking、reasoning effort、可选输出上限和 deadline 都由 Settings 传入正式 Provider 路径。
+如果使用 DeepSeek 等 compatible endpoint，请配置 endpoint、可用 model、
+本地 key、thinking/reasoning 设置和 timeout/output limits。ScenarioVersion
+与 Provider 无关。
 
-## 快速启动
+## Docker 快速启动
 
-### Docker Compose
+从干净 checkout 开始：
 
-```text
-docker compose up --build
-```
+~~~text
+git clone https://github.com/jasonpeng-dev/journey-agent.git
+cd journey-agent
+Copy-Item .env.example .env
+docker compose up --build -d
+~~~
 
-默认服务端口和健康检查请以 `docker-compose.yml` 及部署文档为准。
+macOS/Linux 使用 cp .env.example .env。打开
+http://localhost:8000。Mock mode 不需要 API key。
 
-### 本地后端
+常用 lifecycle 命令：
 
-```text
-cd app
-uvicorn main:app --reload
-```
+~~~text
+docker compose logs -f
+docker compose stop
+docker compose start
+docker compose down
+docker compose down -v
+~~~
 
-### 本地前端
+命名的 Compose volume 会在普通 stop/start 和 down/up 之间保留本地
+Journey Agent 数据；down -v 只删除本 Compose project 的数据。
 
-```text
+## 本地开发
+
+支持的工具链是 Python 3.12、Node 22 和 uv。
+
+Backend 命令从 repository root 执行：
+
+~~~text
+uv sync --python 3.12 --extra dev
+Copy-Item .env.example .env
+uv run alembic upgrade head
+uv run python -m app.seed
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+~~~
+
+本地开发使用 ./journey_dev.db 中的 SQLite。请在 .env 中让 backend、
+Editor 和 Player UI 使用同一个数据库目标，不要把本地命令指向历史数据库。
+
+Frontend 在第二个 terminal 中运行：
+
+~~~text
 cd frontend
-npm install
-npm run dev
-```
+npm ci
+npm run dev -- --host 127.0.0.1 --port 4173
+~~~
+
+打开 http://127.0.0.1:4173。Vite 会把 API request proxy 到 backend。
+
+浏览器 lifecycle surface 保持精简：active game 可以从 detail 或 list card
+Archive，archived game 可以从任一位置 Fork。Fork request 使用一个
+creation key 提供 retry-safe idempotency，成功后导航到新的 target。
+
+## 主要 HTTP surfaces
+
+| Area | Routes |
+| --- | --- |
+| Health | /health, /ready |
+| Scenario Library | /scenarios and /api/v1/scenarios |
+| Editor | /scenarios/:id/edit/:section |
+| Games | /games and /api/v1/games |
+| Developer | /api/v1/developer/games/:id/snapshot and history |
 
 ## 验证
 
-后端测试和静态检查：
+Backend：
 
-```text
-pytest
-ruff check app tests
-mypy app
-```
+~~~text
+uv run pytest --cov=app --cov-report=term-missing
+uv run ruff check .
+uv run ruff format --check app tests frontend/e2e/prepare_history_fixture.py
+uv run mypy app
+uv run alembic upgrade head
+~~~
 
-前端检查：
+Frontend，从 frontend 目录运行：
 
-```text
-cd frontend
-npm run typecheck
-npm run test
+~~~text
 npm run lint
-```
+npm run typecheck
+npm test
+npm run build
+npm run e2e
+~~~
+
+Real Provider calls 不属于 CI。Provider tests 使用 deterministic fakes 或
+mocked HTTP responses；real-model runs 只作为有边界的手动 evaluation。
+Browser E2E 包含三个 deterministic smoke：Basic Product、PLAY Presentation
+和 Checkpoint/Fork；这些测试使用 mock Provider，不调用真实 Provider。
 
 ## 仓库结构
 
-- `app/agent/`：Planner、Provider contract、PlanningContext 和 planning lifecycle。
-- `app/services/`：Generic game、Knowledge projection、Formal PLAY 和 persistence orchestration。
-- `app/engine/`：Runtime rule engine、locality 和 action execution。
-- `app/domain/`：Scenario 与公开领域模型。
-- `frontend/`：Player UI 和 PLAY query/mutation flows。
-- `tests/`：后端 unit/integration/regression tests。
-- `docs/`：当前架构、PlannerInput V2、场景编写和历史归档。
+| Path | Responsibility |
+| --- | --- |
+| app/domain | ScenarioDefinitionV2、ObjectiveScope、world/runtime values |
+| app/agent | Goal resolver、PlannerInput、provider、Validator、Agent loop |
+| app/services | Scenario/Game lifecycle、Formal PLAY、actions、projections |
+| app/scenarios | V2 parsing、validation、persistence、built-in definitions |
+| app/api | FastAPI adapters 和 Player/Developer DTOs |
+| frontend/src | React/Vite browser product 和 Editor |
+| tests | Unit、contract、integration、lifecycle、provider 和 E2E support |
+| migrations | Alembic schema history |
+| docs | 当前 architecture、planning、authoring、lifecycle 和 archive |
 
-Journey Agent 的目标是让新的场景通过公开数据和 contract 驱动运行时，而不是在 runtime 中增加 scenario-specific 分支。
+## 文档
+
+Current authority：
+
+* [docs/architecture.md](docs/architecture.md)：high-level system architecture。
+* [docs/agent-planning-v2.md](docs/agent-planning-v2.md)：Agent Harness 和
+  planning contract。
+* [docs/scenario-authoring.md](docs/scenario-authoring.md)：Scenario authoring
+  和 publishing contract。
+* [docs/game-lifecycle.md](docs/game-lifecycle.md)：GameInstance Archive、
+  Checkpoint 和 Fork lifecycle。
+
+[docs/archive](docs/archive/) 仅保存 historical material，不是 current
+implementation authority。
+
+Setup 和 run instructions 保持在本 README；architecture、planning、authoring
+和 GameInstance lifecycle 的详细语义分别由上述 current docs 负责。

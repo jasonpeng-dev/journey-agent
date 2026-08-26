@@ -92,7 +92,7 @@ Version History supports reading a snapshot, restoring its content into the Curr
 starting a new Game from that exact Version. Restore changes only the Draft. The New Game flow
 accepts a `scenario_version_id`, never a Draft or a mutable Scenario pointer. Built-in examples
 are exposed by `GET /api/v1/scenario-examples` and currently include the Linjiang Infrastructure
-Recovery v2.0 definition seeded by `python -m app.seed`.
+Recovery v2.0 definition seeded by `uv run python -m app.seed`.
 
 ## Authoring API map
 
