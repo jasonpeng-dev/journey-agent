@@ -21,12 +21,13 @@ from app.agent.provider import (
     GoalSelection,
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
+    PlannerInput,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
 )
 from app.core.config import Settings
-from app.domain.enums import WorldOperationStatus
+from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import (
     AgentPlan,
@@ -43,7 +44,7 @@ from app.scenarios.builtin import require_builtin_v2_version
 from app.services.composition import configured_play_orchestrator
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
-from tests.scenario_fixtures import MEDICAL_TEST, STARFIRE_TEST, create_test_scenario
+from tests.scenario_fixtures import GENERIC_TEST, create_test_scenario
 
 
 class RecordingProvider:
@@ -98,7 +99,7 @@ def _settings(provider: Literal["mock", "openai_compatible"] = "mock") -> Settin
     )
 
 
-def _runtime(session: Session, definition=STARFIRE_TEST):  # type: ignore[no-untyped-def]
+def _runtime(session: Session, definition=GENERIC_TEST):  # type: ignore[no-untyped-def]
     version = require_builtin_v2_version(session, definition)
     player = Player(name=f"provider-{definition.metadata.key}-{uuid4().hex[:8]}")
     session.add(player)
@@ -117,7 +118,7 @@ def _start_initial_plan(orchestrator, task):  # type: ignore[no-untyped-def]
     return orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
 
 
-def _medical_plan() -> tuple[PlanStepProposal, ...]:
+def _generic_plan() -> tuple[PlanStepProposal, ...]:
     return (
         _step("diagnose_patient", "patient_one", "doctor_lee"),
         _step("treat_patient", "patient_one", "doctor_lee", {"dosage": 2}),
@@ -143,7 +144,7 @@ def test_mock_composition_never_sends_model_http(
         raise AssertionError("mock mode must not issue model HTTP")
 
     monkeypatch.setattr(httpx, "post", fail_http)
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     submission = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("mock")
     ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
@@ -156,11 +157,11 @@ def test_mock_composition_never_sends_model_http(
 def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = RecordingProvider(proposals=[_medical_plan()])
+    provider = RecordingProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -213,7 +214,7 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -246,13 +247,13 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     provider = RecordingProvider(
         proposals=[
             (PlanStepProposal(candidate_id="candidate_invented"),),
-            _medical_plan(),
+            _generic_plan(),
         ]
     )
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -289,17 +290,8 @@ def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
 ) -> None:
     runtime, _scope = _runtime(session)
     provider = RecordingProvider(
-        selected=("gather_valley_intelligence",),
-        proposals=[
-            (
-                _step(
-                    "recon_valley",
-                    "northern_valley",
-                    "han_lie",
-                    {"troop_count": 20, "approach": "CAUTIOUS"},
-                ),
-            )
-        ],
+        selected=("stabilize_patient",),
+        proposals=[_generic_plan()],
     )
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
@@ -308,14 +300,14 @@ def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
     accepted = orchestrator.submit_goal(
-        "find out what is happening beyond the northern pass",
+        "make the patient better",
         idempotency_key=str(uuid4()),
     )
 
     assert accepted.task is not None
-    assert accepted.resolution.objective_keys == ("gather_valley_intelligence",)
+    assert accepted.resolution.objective_keys == ("stabilize_patient",)
     assert {item["key"] for item in provider.goal_requests[0].objective_candidates} == {
-        objective.key for objective in STARFIRE_TEST.objectives
+        objective.key for objective in GENERIC_TEST.objectives
     }
 
     accepted.task.status = "SUCCEEDED"
@@ -333,7 +325,7 @@ def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
 def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
     session: Session,
 ) -> None:
-    runtime, scope = _runtime(session, MEDICAL_TEST)
+    runtime, scope = _runtime(session, GENERIC_TEST)
     invalid_step = (_step("treat_patient", "patient_one", "invented_actor", {"dosage": 2}),)
     invalid = RecordingProvider(proposals=[invalid_step, invalid_step, invalid_step])
     with pytest.raises(GenericAgentError) as caught:
@@ -343,19 +335,19 @@ def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
     assert caught.value.code == "MODEL_PLAN_REJECTED"
     session.rollback()
 
-    runtime, scope = _runtime(session, MEDICAL_TEST)
+    runtime, scope = _runtime(session, GENERIC_TEST)
     repeated = RecordingProvider(
-        proposals=[_medical_plan(), _medical_plan(), _medical_plan(), _medical_plan()]
+        proposals=[_generic_plan(), _generic_plan(), _generic_plan(), _generic_plan()]
     )
     agent = GenericAgentService(session, scope, provider=repeated)
     task = agent.create_task(runtime.session, "stabilize the patient")
-    first = _medical_plan()[0]
+    first = _generic_plan()[0]
     diagnose = next(
         item
         for item in repeated.plan_requests[0].planning_action_catalog
         if item.candidate_id == first.candidate_id
     )
-    treatment_step = _medical_plan()[1]
+    treatment_step = _generic_plan()[1]
     treatment = next(
         item
         for item in repeated.plan_requests[0].planning_action_catalog
@@ -381,275 +373,16 @@ def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
     assert len(repeated.plan_requests) == 4
 
 
-def test_failure_knowledge_replan_uses_same_provider(
-    session: Session, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    initial = (
-        _step(
-            "clear_valley",
-            "northern_valley",
-            "han_lie",
-            {"troop_count": 80, "strategy": "STANDARD"},
-        ),
-    )
-    recovery = (
-        _step(
-            "disrupt_supply",
-            "enemy_north_supply_route",
-            "han_lie",
-            {"troop_count": 30, "strategy": "CAUTIOUS"},
-        ),
-        *initial,
-    )
-    provider = RecordingProvider(proposals=[initial, recovery])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
-    runtime, _scope = _runtime(session)
-    orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    )
-    task = orchestrator.submit_goal("secure the northern valley", idempotency_key=str(uuid4())).task
-    assert task is not None
-    _start_initial_plan(orchestrator, task)
-    checkpoint = orchestrator._ensure_checkpoint(task)
-    orchestrator.acknowledge_action(expected_pacing_version=checkpoint.version)
-    assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN"]
-    orchestrator.replan(expected_pacing_version=checkpoint.version)
-
-    assert len(provider.plan_requests) == 2
-    assert provider.plan_requests[1].replan_reason == "ENCOUNTER_DEFEAT"
-    assert (
-        provider.plan_requests[1].known_world["facts"]["enemy_north_supply_route.supply_status"]
-        == "ACTIVE"
-    )
-    continuity = provider.plan_requests[1].planning_continuity
-    assert continuity is not None
-    operation = session.scalar(
-        select(WorldOperation)
-        .where(WorldOperation.task_id == task.id)
-        .order_by(WorldOperation.created_at.desc())
-    )
-    assert operation is not None
-    expected_changes = tuple(
-        change
-        for change in operation.outcome.get("knowledge_changes", [])
-        if isinstance(change, dict)
-    )
-    assert continuity.latest_new_knowledge == expected_changes
-
-
-def test_starfire_catalog_evolves_from_failure_to_unlock_and_completion(
-    session: Session, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    provider = RecordingProvider(
-        selected=("open_northern_trade_route",),
-        proposals=[
-            (
-                _step(
-                    "clear_valley",
-                    "northern_valley",
-                    "han_lie",
-                    {"troop_count": 80, "strategy": "STANDARD"},
-                ),
-                _step(
-                    "negotiate_support",
-                    "north_village",
-                    "lu_ning",
-                    {"food_offer": 20, "requested_support": "GUIDE"},
-                ),
-                _step(
-                    "repair_outpost",
-                    "starfire_outpost",
-                    "lu_ning",
-                    {"repair_level": "FULL", "food_commitment": 30, "gold_commitment": 40},
-                ),
-                _step("test_trade_route", "northern_trade_route", "lu_ning"),
-            ),
-            (
-                _step(
-                    "disrupt_supply",
-                    "enemy_north_supply_route",
-                    "han_lie",
-                    {"troop_count": 30, "strategy": "CAUTIOUS"},
-                ),
-                _step(
-                    "clear_valley",
-                    "northern_valley",
-                    "han_lie",
-                    {"troop_count": 80, "strategy": "STANDARD"},
-                ),
-                _step(
-                    "negotiate_support",
-                    "north_village",
-                    "lu_ning",
-                    {"food_offer": 20, "requested_support": "GUIDE"},
-                ),
-                _step(
-                    "repair_outpost",
-                    "starfire_outpost",
-                    "lu_ning",
-                    {"repair_level": "FULL", "food_commitment": 30, "gold_commitment": 40},
-                ),
-                _step("test_trade_route", "northern_trade_route", "lu_ning"),
-            ),
-        ],
-    )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
-    runtime, _scope = _runtime(session)
-    orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    )
-    submission = orchestrator.submit_goal(
-        "让北方恢复贸易并重新稳定下来", idempotency_key=str(uuid4())
-    )
-    task = submission.task
-    assert task is not None
-
-    for _ in range(20):
-        checkpoint = orchestrator._ensure_checkpoint(task)
-        if checkpoint.phase == "COMPLETED":
-            break
-        if checkpoint.phase == "AWAITING_PLAN_START":
-            orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
-        elif checkpoint.phase == "AWAITING_ACTION_ACK":
-            orchestrator.acknowledge_action(expected_pacing_version=checkpoint.version)
-        elif checkpoint.phase == "AWAITING_REPLAN_ACK":
-            orchestrator.replan(expected_pacing_version=checkpoint.version)
-        elif checkpoint.phase == "AWAITING_DEBRIEF_ACK":
-            orchestrator.acknowledge_debrief(expected_pacing_version=checkpoint.version)
-        else:
-            raise AssertionError(f"Unexpected pacing phase {checkpoint.phase}")
-    assert task.status.value == "SUCCEEDED"
-    assert tuple(task.objective_scope_keys or ()) == ("open_northern_trade_route",)
-
-    catalogs = [
-        {(item.action_key, item.target_key) for item in request.planning_action_catalog}
-        for request in provider.plan_requests
-    ]
-    assert ("repair_outpost", "starfire_outpost") in catalogs[0]
-    assert ("test_trade_route", "northern_trade_route") in catalogs[0]
-    assert ("disrupt_supply", "enemy_north_supply_route") not in catalogs[0]
-    assert "enemy_north_supply_route" not in {
-        item["key"] for item in provider.plan_requests[0].known_world["nodes"]
-    }
-    initial_provider_payload = json.dumps(
-        provider.plan_requests[0].model_dump(mode="json"), ensure_ascii=False
-    )
-    assert "ambush_status" not in initial_provider_payload
-    assert "enemy_north_supply_route" not in initial_provider_payload
-    assert ("disrupt_supply", "enemy_north_supply_route") in catalogs[1]
-    initial_by_action = {
-        item.action_key: item for item in provider.plan_requests[0].planning_action_catalog
-    }
-    assert initial_by_action["clear_valley"].currently_executable is True
-    assert initial_by_action["negotiate_support"].currently_executable is True
-    assert initial_by_action["repair_outpost"].currently_executable is False
-    assert initial_by_action["repair_outpost"].known_blockers[0]["code"] == (
-        "TARGET_CURRENTLY_LOCKED"
-    )
-    assert initial_by_action["test_trade_route"].currently_executable is False
-    assert [item.call_type for item in provider.plan_requests] == [
-        "INITIAL_PLAN",
-        "REPLAN",
-    ]
-    plans = tuple(
-        session.scalars(
-            select(AgentPlan).where(AgentPlan.task_id == task.id).order_by(AgentPlan.version)
-        )
-    )
-    assert [
-        [
-            step.tool_arguments["action_key"]
-            for step in session.scalars(
-                select(AgentStep)
-                .where(
-                    AgentStep.plan_id == plan.id, AgentStep.selected_tool_name == "execute_action"
-                )
-                .order_by(AgentStep.sequence)
-            )
-        ]
-        for plan in plans
-    ] == [
-        ["clear_valley", "negotiate_support", "repair_outpost", "test_trade_route"],
-        [
-            "disrupt_supply",
-            "clear_valley",
-            "negotiate_support",
-            "repair_outpost",
-            "test_trade_route",
-        ],
-    ]
-
-
-def test_future_step_is_plan_valid_but_execution_guard_replans_if_still_locked(
-    session: Session, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repair = _step(
-        "repair_outpost",
-        "starfire_outpost",
-        "lu_ning",
-        {"repair_level": "FULL", "food_commitment": 30, "gold_commitment": 40},
-    )
-    clear = _step(
-        "clear_valley",
-        "northern_valley",
-        "han_lie",
-        {"troop_count": 80, "strategy": "STANDARD"},
-    )
-    support = _step(
-        "negotiate_support",
-        "north_village",
-        "lu_ning",
-        {"food_offer": 20, "requested_support": "GUIDE"},
-    )
-    trade = _step("test_trade_route", "northern_trade_route", "lu_ning")
-    provider = RecordingProvider(
-        selected=("open_northern_trade_route",),
-        proposals=[(repair, clear, support, trade), (clear, support, repair, trade)],
-    )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
-    runtime, _scope = _runtime(session)
-    orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    )
-    task = orchestrator.submit_goal(
-        "让北方恢复贸易并重新稳定下来", idempotency_key=str(uuid4())
-    ).task
-    assert task is not None
-
-    _start_initial_plan(orchestrator, task)
-    checkpoint = orchestrator._ensure_checkpoint(task)
-    orchestrator.acknowledge_action(expected_pacing_version=checkpoint.version)
-    orchestrator.replan(expected_pacing_version=checkpoint.version)
-
-    assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN", "REPLAN"]
-    assert provider.plan_requests[1].replan_reason == "ACTION_TARGET_UNAVAILABLE"
-    assert (
-        session.scalar(
-            select(func.count())
-            .select_from(WorldOperation)
-            .where(WorldOperation.task_id == task.id)
-        )
-        == 0
-    )
-    assert task.status.value == "ACTIVE"
-
-
 def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
     invalid_parameters = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
-    provider = RecordingProvider(proposals=[unknown, invalid_parameters, _medical_plan()])
+    provider = RecordingProvider(proposals=[unknown, invalid_parameters, _generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -796,11 +529,11 @@ def test_provider_repair_attempt_limit_comes_from_settings(
 ) -> None:
     assert Settings(_env_file=None).model_max_repair_attempts_per_cycle == 2
     unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
-    provider = RecordingProvider(proposals=[unknown, unknown, unknown, unknown, _medical_plan()])
+    provider = RecordingProvider(proposals=[unknown, unknown, unknown, unknown, _generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     settings = _settings("openai_compatible").model_copy(
         update={"model_max_repair_attempts_per_cycle": 4}
     )
@@ -825,12 +558,12 @@ def test_provider_repair_attempt_limit_comes_from_settings(
 def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    reversed_plan = tuple(reversed(_medical_plan()))
-    provider = RecordingProvider(proposals=[reversed_plan, _medical_plan()])
+    reversed_plan = tuple(reversed(_generic_plan()))
+    provider = RecordingProvider(proposals=[reversed_plan, _generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
 
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
@@ -855,7 +588,7 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     patient = session.get(
         GameInstanceNodeState,
         (runtime.instance.id, "patient_one"),
@@ -880,40 +613,19 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
     assert provider.plan_requests == []
 
 
-@pytest.mark.parametrize(
-    ("definition", "goal", "proposal"),
-    [
-        (
-            STARFIRE_TEST,
-            "gather valley intelligence",
-            (
-                _step(
-                    "recon_valley",
-                    "northern_valley",
-                    "han_lie",
-                    {"troop_count": 20, "approach": "CAUTIOUS"},
-                ),
-            ),
-        ),
-        (MEDICAL_TEST, "stabilize the patient", _medical_plan()),
-    ],
-)
-def test_starfire_and_medical_share_composition_wiring(
+def test_generic_composition_uses_the_same_provider_wiring(
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
-    definition,
-    goal: str,
-    proposal: tuple[PlanStepProposal, ...],  # type: ignore[no-untyped-def]
 ) -> None:
-    runtime, _scope = _runtime(session, definition)
-    provider = RecordingProvider(proposals=[proposal])
+    runtime, _scope = _runtime(session, GENERIC_TEST)
+    provider = RecordingProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal(goal, idempotency_key=str(uuid4()))
+    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
     assert submission.task is not None
     _start_initial_plan(orchestrator, submission.task)
     assert len(provider.plan_requests) == 1
@@ -922,13 +634,13 @@ def test_starfire_and_medical_share_composition_wiring(
 def test_draft_sandbox_uses_same_provider_composition_without_formal_game_row(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = RecordingProvider(proposals=[_medical_plan()])
+    provider = RecordingProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
     created = create_test_scenario(
         session,
-        MEDICAL_TEST,
+        GENERIC_TEST,
         key=f"provider_sandbox_{uuid4().hex[:8]}",
         name="Provider Sandbox",
     )
@@ -1108,9 +820,9 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
         )
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
-    context = provider_module.PlanningContext(
-        goal={"objective_keys": ["known_objective"]},
-        current_knowledge={"facts": {}},
+    planner_input = PlannerInput(
+        objective={"objective_keys": ["known_objective"]},
+        known_world={"facts": {}},
     )
     for call_type in ("INITIAL_PLAN", "REPLAN"):
         provider.propose_plan(
@@ -1118,7 +830,7 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
                 call_type=call_type,
                 goal="known goal",
                 objective_keys=("known_objective",),
-                planning_context=context,
+                planner_input=planner_input,
             )
         )
 
@@ -1138,7 +850,7 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    version = require_builtin_v2_version(session, MEDICAL_TEST)
+    version = require_builtin_v2_version(session, GENERIC_TEST)
     session.commit()
     response = client.post(
         "/api/v1/games",
@@ -1199,7 +911,7 @@ def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    version = require_builtin_v2_version(session, MEDICAL_TEST)
+    version = require_builtin_v2_version(session, GENERIC_TEST)
     session.commit()
     game = client.post(
         "/api/v1/games",
@@ -1237,34 +949,22 @@ def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
 def test_replan_provider_failure_persists_failure_and_action_history(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = FailOnReplanProvider(
-        proposals=[
-            (
-                _step(
-                    "clear_valley",
-                    "northern_valley",
-                    "han_lie",
-                    {"troop_count": 80, "strategy": "STANDARD"},
-                ),
-            )
-        ]
-    )
+    provider = FailOnReplanProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    scenario = next(
-        item for item in client.get("/api/v1/scenarios").json() if item["key"] == "starfire_command"
-    )
+    version = require_builtin_v2_version(session, GENERIC_TEST)
+    session.commit()
     game = client.post(
         "/api/v1/games",
         json={
-            "scenario_version_id": scenario["current_published_version_id"],
+            "scenario_version_id": str(version.id),
             "idempotency_key": str(uuid4()),
         },
     ).json()
     goal = client.post(
         f"/api/v1/games/{game['id']}/goals",
-        json={"goal": "secure the northern valley", "idempotency_key": str(uuid4())},
+        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
     )
     assert goal.status_code == 200, goal.text
     task = goal.json()["task"]
@@ -1274,6 +974,10 @@ def test_replan_provider_failure_persists_failure_and_action_history(
     )
     assert start.status_code == 200, start.text
     task = start.json()["current_task"]
+    patient = session.get(GameInstanceNodeState, (UUID(game["id"]), "patient_one"))
+    assert patient is not None
+    patient.status = NodeStatus.LOCKED
+    session.flush()
     before_operations = session.scalar(select(func.count()).select_from(WorldOperation))
 
     failed = client.post(
@@ -1292,7 +996,7 @@ def test_replan_provider_failure_persists_failure_and_action_history(
     assert state["current_task"]["status"] == "MODEL_PROVIDER_TIMEOUT"
     assert state["current_task"]["execution_phase"] == "BLOCKED"
     assert state["current_task"]["explanation"] == "模型调用超时"
-    assert session.scalar(select(func.count()).select_from(WorldOperation)) == before_operations + 1
+    assert session.scalar(select(func.count()).select_from(WorldOperation)) == before_operations
     terminal = next(
         event for event in state["current_task"]["timeline"] if event["kind"] == "TASK_BLOCKED"
     )
@@ -1315,11 +1019,11 @@ def test_replan_provider_failure_persists_failure_and_action_history(
 def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = RecordingProvider(proposals=[_medical_plan()])
+    provider = RecordingProvider(proposals=[_generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, scope = _runtime(session, MEDICAL_TEST)
+    runtime, scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -1386,13 +1090,13 @@ def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
 def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    initial = _medical_plan()
+    initial = _generic_plan()
     invalid = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
     provider = RecordingProvider(proposals=[initial, invalid, initial, initial, initial, initial])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )

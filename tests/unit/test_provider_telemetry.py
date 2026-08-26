@@ -14,7 +14,7 @@ from app.agent.provider import (
     GenericProviderError,
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
-    PlanningContext,
+    PlannerInput,
     PlanRequest,
 )
 from app.core.config import Settings
@@ -153,7 +153,7 @@ def test_enabled_uncapped_provider_uses_nullable_production_settings(
         PlanRequest(
             call_type=call_type,
             goal="known goal",
-            planning_context=PlanningContext(goal={"objective_keys": ["known"]}),
+            planner_input=PlannerInput(objective={"objective_keys": ["known"]}),
         )
     )
 
@@ -292,9 +292,9 @@ def test_phase_telemetry_does_not_change_plan_parsing() -> None:
         PlanRequest(
             call_type="INITIAL_PLAN",
             goal="known goal",
-            planning_context=PlanningContext(
-                goal={"objective_keys": ["known"]},
-                current_knowledge={"facts": {}},
+            planner_input=PlannerInput(
+                objective={"objective_keys": ["known"]},
+                known_world={"facts": {}},
             ),
         )
     )

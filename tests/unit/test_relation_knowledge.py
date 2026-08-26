@@ -3,17 +3,15 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-import pytest
 from sqlalchemy.orm import Session
 
-from app.agent.generic import GenericAgentError, GenericAgentService
+from app.agent.generic import GenericAgentService
 from app.agent.planning_context import PlanningContextBuilder
 from app.domain.enums import RelationVisibility
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import (
     GameInstanceNodeState,
-    GameInstanceRelationKnowledge,
 )
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.scenarios.serialization import scenario_content_hash
@@ -24,12 +22,11 @@ from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.unit.test_generic_gameplay_capabilities import _runtime as capability_runtime
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
-def _hidden_medical_document(*, reveal_on_treatment: bool = False) -> dict[str, Any]:
-    document = deepcopy(_medical_scenario_document())
+def _hidden_relation_document(*, reveal_on_treatment: bool = False) -> dict[str, Any]:
+    document = deepcopy(_contract_scenario_document())
     relation = document["world"]["relations"][0]
     relation["key"] = "triage_contains_patient"
     relation["initial_visibility"] = "HIDDEN"
@@ -64,7 +61,7 @@ def _publish_runtime(
 
 
 def test_legacy_relation_defaults_visible_without_hash_or_serialization_change() -> None:
-    source = _medical_scenario_document()
+    source = _contract_scenario_document()
     definition = ScenarioDefinitionV2.model_validate(source)
 
     assert definition.world.relations[0].initial_visibility == RelationVisibility.VISIBLE
@@ -83,7 +80,7 @@ def test_hidden_relation_is_absent_from_player_and_planning_context_until_reveal
 ) -> None:
     definition, runtime, scope = _publish_runtime(
         session,
-        _hidden_medical_document(reveal_on_treatment=True),
+        _hidden_relation_document(reveal_on_treatment=True),
         "hidden-relation-projection",
     )
     projection = SharedKnowledgeProjection(session, scope, definition)
@@ -129,73 +126,3 @@ def test_hidden_relation_is_absent_from_player_and_planning_context_until_reveal
     patient_state.visibility = "HIDDEN"
     session.flush()
     assert projection.known_relations() == ()
-
-
-def test_hidden_power_relation_is_not_known_to_validator_or_runtime(
-    session: Session,
-) -> None:
-    agent, runtime, definition = capability_runtime(session, "hidden-power-relation")
-    relation = next(
-        item
-        for item in definition.world.relations
-        if item.source_node_key == "central_hospital"
-        and item.target_node_key == "central_telecom_hub"
-        and item.relation_type_key == "supplies_power_to"
-    )
-    row = session.get(
-        GameInstanceRelationKnowledge,
-        (
-            runtime.instance.id,
-            f"{relation.source_node_key}__{relation.relation_type_key}__{relation.target_node_key}",
-        ),
-    )
-    assert row is not None
-    row.visibility = RelationVisibility.HIDDEN
-    session.flush()
-
-    projection = SharedKnowledgeProjection(session, agent.scope, definition)
-    assert not any(
-        item["source_node_key"] == "central_hospital"
-        and item["target_node_key"] == "central_telecom_hub"
-        for item in projection.known_relations()
-    )
-    action = next(item for item in definition.actions if item.key == "supply_power")
-    with pytest.raises(GenericAgentError) as error:
-        agent._validate_projected_supply_power(
-            definition,
-            action,
-            "central_telecom_hub",
-            {"source_key": "central_hospital"},
-            agent._known_fact_projection(),
-            agent._known_node_keys(),
-            agent._known_relation_keys(definition),
-        )
-    assert error.value.code == "SUPPLY_POWER_RELATION_UNKNOWN"
-
-    result = GenericGameService(session, agent.scope).execute(
-        actor_key="electrical_team_beta",
-        action_key="supply_power",
-        target_node_key="central_telecom_hub",
-        parameters={"source_key": "central_hospital"},
-    )
-    assert result.outcome.failure is not None
-    assert result.outcome.failure.code == "SUPPLY_POWER_RELATION_UNKNOWN"
-
-    row.visibility = RelationVisibility.VISIBLE
-    session.flush()
-    agent._validate_projected_supply_power(
-        definition,
-        action,
-        "central_telecom_hub",
-        {"source_key": "central_hospital"},
-        agent._known_fact_projection(),
-        agent._known_node_keys(),
-        agent._known_relation_keys(definition),
-    )
-    result = GenericGameService(session, agent.scope).execute(
-        actor_key="electrical_team_beta",
-        action_key="supply_power",
-        target_node_key="central_telecom_hub",
-        parameters={"source_key": "central_hospital"},
-    )
-    assert result.outcome.failure is None

@@ -14,13 +14,13 @@ from app.scenarios.versions import ScenarioVersionRepository
 from app.services.scenarios import ScenarioService
 
 
-def _medical_scenario_document() -> dict[str, Any]:
+def _contract_scenario_document() -> dict[str, Any]:
     return {
         "schema_version": 2,
         "metadata": {
-            "key": "medical_emergency",
-            "name": "Medical Emergency",
-            "description": "Stabilize a patient in a small clinic.",
+            "key": "generic_contract",
+            "name": "Generic Contract",
+            "description": "Exercise a small deterministic action contract.",
         },
         "engine_contract": {
             "key": "declarative-rule-engine",
@@ -31,8 +31,8 @@ def _medical_scenario_document() -> dict[str, Any]:
             "primary_actor_key": "doctor_lee",
         },
         "world": {
-            "key": "medical_emergency",
-            "name": "Medical Emergency",
+            "key": "generic_contract",
+            "name": "Generic Contract",
             "node_types": [
                 {"key": "patient", "name": "Patient"},
                 {"key": "room", "name": "Room"},
@@ -177,7 +177,7 @@ def _medical_scenario_document() -> dict[str, Any]:
 
 
 def test_v2_document_is_frozen_strict_and_canonical() -> None:
-    source = _medical_scenario_document()
+    source = _contract_scenario_document()
     parsed = parse_scenario_document(source)
 
     assert isinstance(parsed, ScenarioDefinitionV2)
@@ -217,7 +217,7 @@ def test_v2_validation_fails_closed_for_references_and_engine_contract(
     mutate: Any,
     code: str,
 ) -> None:
-    document = _medical_scenario_document()
+    document = _contract_scenario_document()
     mutate(document)
 
     result = ScenarioDefinitionValidator().validate(document)
@@ -228,23 +228,23 @@ def test_v2_validation_fails_closed_for_references_and_engine_contract(
 
 def test_v2_draft_publishes_and_loads_exact_snapshot(session: Session) -> None:
     repository = ScenarioDefinitionRepository(session)
-    medical_definition = ScenarioDefinitionV2.model_validate(_medical_scenario_document())
-    medical = repository.persist_initial_draft(medical_definition)
-    medical_version = (
+    contract_definition = ScenarioDefinitionV2.model_validate(_contract_scenario_document())
+    contract = repository.persist_initial_draft(contract_definition)
+    contract_version = (
         ScenarioService(session)
         .publish_draft(
-            medical.id,
+            contract.id,
             expected_revision=1,
         )
         .version
     )
-    loaded_v2 = ScenarioVersionRepository(session).load(medical_version.id)
+    loaded_v2 = ScenarioVersionRepository(session).load(contract_version.id)
 
-    assert medical_version.schema_version == 2
+    assert contract_version.schema_version == 2
     assert isinstance(loaded_v2.definition, ScenarioDefinitionV2)
-    assert loaded_v2.definition.metadata.key == "medical_emergency"
-    assert medical_version.engine_contract_key == "declarative-rule-engine"
-    assert medical_version.engine_contract_version == "1"
+    assert loaded_v2.definition.metadata.key == "generic_contract"
+    assert contract_version.engine_contract_key == "declarative-rule-engine"
+    assert contract_version.engine_contract_version == "1"
 
 
 def test_v1_documents_fail_closed() -> None:

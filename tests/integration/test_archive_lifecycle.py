@@ -18,15 +18,13 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     WorldOperation,
 )
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _version_id(session: Session) -> str:
-    from app.infrastructure.db.models import Scenario
-
-    scenario = session.scalar(select(Scenario).where(Scenario.key == "starfire_command"))
-    assert scenario is not None and scenario.current_published_version_id is not None
-    return str(scenario.current_published_version_id)
+    return str(require_builtin_v2_version(session, GENERIC_TEST).id)
 
 
 def _new_game(client: TestClient, session: Session) -> dict[str, object]:
@@ -52,7 +50,7 @@ def test_stable_active_archive_preserves_world_state_and_becomes_read_only(
     game = _new_game(client, session)
     game_id = UUID(str(game["id"]))
     before = (
-        session.get(GameInstanceNodeState, (game_id, "northern_valley")),
+        session.get(GameInstanceNodeState, (game_id, "patient_one")),
         session.scalar(
             select(GameInstanceFactState).where(GameInstanceFactState.game_instance_id == game_id)
         ),
@@ -71,7 +69,7 @@ def test_stable_active_archive_preserves_world_state_and_becomes_read_only(
     assert response.json()["runtime_revision"] == int(game["runtime_revision"]) + 1
     session.expire_all()
     after = (
-        session.get(GameInstanceNodeState, (game_id, "northern_valley")),
+        session.get(GameInstanceNodeState, (game_id, "patient_one")),
         session.scalar(
             select(GameInstanceFactState).where(GameInstanceFactState.game_instance_id == game_id)
         ),
@@ -101,7 +99,7 @@ def test_stable_active_archive_preserves_world_state_and_becomes_read_only(
 
     readonly = client.post(
         f"/api/v1/games/{game_id}/goals",
-        json={"goal": "gather valley intelligence", "idempotency_key": str(uuid4())},
+        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
     )
     assert readonly.status_code == 409
     assert readonly.json()["error"]["code"] == "GAME_INSTANCE_READ_ONLY"
@@ -125,9 +123,7 @@ def test_archive_rejects_active_task_without_cleanup(client: TestClient, session
         select(ConversationSession).where(ConversationSession.game_instance_id == game_id)
     )
     assert conversation is not None
-    task = GenericAgentService(session, scope).create_task(
-        conversation, "gather valley intelligence"
-    )
+    task = GenericAgentService(session, scope).create_task(conversation, "stabilize the patient")
     session.flush()
     task_id = task.id
     session.commit()
@@ -150,14 +146,15 @@ def test_archive_rejects_pending_operation_without_cleanup(
     )
     assert conversation is not None
     agent = GenericAgentService(session, scope)
-    task = agent.create_task(conversation, "gather valley intelligence")
+    task = agent.create_task(conversation, "stabilize the patient")
     agent.execute_next(task)
     operation = session.scalar(select(WorldOperation).where(WorldOperation.task_id == task.id))
-    assert operation is not None and operation.status.value == "PENDING"
+    assert operation is not None
+    operation.status = WorldOperationStatus.PENDING
     task.status = AgentTaskStatus.SUCCEEDED
     operation_id = operation.id
     session.commit()
-    response = _archive(client, game)
+    response = _archive(client, client.get(f"/api/v1/games/{game_id}").json())
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "GAME_INSTANCE_ARCHIVE_OPERATION_PENDING"
     operation = session.get(WorldOperation, operation_id)
@@ -177,7 +174,7 @@ def test_archive_rejects_pending_decision_without_cleanup(
     )
     assert conversation is not None
     agent = GenericAgentService(session, scope)
-    task = agent.create_task(conversation, "gather valley intelligence")
+    task = agent.create_task(conversation, "stabilize the patient")
     step = agent.execute_next(task)
     assert step is not None
     decision = ActionDecisionRequest(
@@ -202,7 +199,7 @@ def test_archive_rejects_pending_decision_without_cleanup(
     operation.status = WorldOperationStatus.RESOLVED
     decision_id = decision.id
     session.commit()
-    response = _archive(client, game)
+    response = _archive(client, client.get(f"/api/v1/games/{game_id}").json())
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "GAME_INSTANCE_ARCHIVE_DECISION_PENDING"
     decision = session.get(ActionDecisionRequest, decision_id)

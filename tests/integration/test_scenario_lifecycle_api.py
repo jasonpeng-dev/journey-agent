@@ -282,7 +282,7 @@ def test_definition_schema_exposes_closed_condition_and_effect_vocabulary(
     assert "execute_action" not in encoded
 
 
-def test_examples_expose_the_two_complete_templates_and_world_v0(client: TestClient) -> None:
+def test_examples_expose_the_current_complete_template(client: TestClient) -> None:
     examples = client.get("/api/v1/scenario-examples")
     assert examples.status_code == 200
     maturity = {item["key"]: item["maturity"] for item in examples.json()}

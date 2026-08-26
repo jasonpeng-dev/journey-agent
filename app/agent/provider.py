@@ -313,8 +313,8 @@ class PlanRequest(ProviderModel):
 
         ``planning_action_catalog`` and the other legacy projections stay on
         the in-process request object for compatibility. They are deliberately
-        omitted whenever ``planner_input`` is available, so V1 and V2 semantic
-        projections are never sent together.
+        omitted whenever ``planner_input`` is available, so only the canonical
+        V2 semantic projection is sent to the provider.
         """
 
         if self.planner_input is not None:
@@ -334,23 +334,6 @@ class PlanRequest(ProviderModel):
                 payload["anti_regression_memory"] = self._anti_regression_payloads()
             if self.repair_diagnostics:
                 payload["validator_violations"] = self._violation_payloads()
-            return payload
-        if self.planning_context is not None:
-            payload = {
-                "call_type": self.call_type,
-                "goal": self.goal,
-                "planning_context": self.planning_context.compact_dump(),
-            }
-            if self.planning_continuity is not None:
-                payload["planning_continuity"] = self.planning_continuity.model_dump(mode="json")
-            if self.replan_reason:
-                payload["replan_reason"] = self.replan_reason
-            if self.call_type == "REPAIR" or self.repair_attempt != 0:
-                payload["repair_attempt"] = self.repair_attempt
-            if self.call_type == "REPAIR":
-                payload["anti_regression_memory"] = self._anti_regression_payloads()
-            if self.repair_diagnostics:
-                payload["repair_diagnostics"] = self._violation_payloads()
             return payload
         return self.model_dump(mode="json")
 
@@ -1191,9 +1174,6 @@ def _safe_text(value: object, *, limit: int) -> str:
     return text[:limit]
 
 
-PlanningContextV1 = PlanningContext
-
-
 __all__ = [
     "AntiRegressionMemoryItem",
     "GenericModelProvider",
@@ -1213,7 +1193,6 @@ __all__ = [
     "PlannerTargetBinding",
     "PlanningActionCandidate",
     "PlanningContext",
-    "PlanningContextV1",
     "ProviderCallMetadata",
     "ProviderTotalTimeout",
     "build_generic_provider",

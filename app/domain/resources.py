@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from app.domain.enums import ResourcePoolAvailability, ResourcePoolVisibility
 from app.domain.scenario_v2 import (
-    ResourceInitialStateV2,
     ResourcePoolDefinitionV2,
     ScenarioDefinitionV2,
 )
@@ -84,20 +83,6 @@ def resource_pool_initial_states(
     return tuple(converted)
 
 
-def resource_initial_states(
-    definition: ScenarioDefinitionV2,
-) -> tuple[ResourceInitialStateV2, ...]:
-    """Expand legacy global Resource definitions into explicit initial rows."""
-
-    configured = definition.initialization.resource_initial_states
-    if configured:
-        return configured
-    return tuple(
-        ResourceInitialStateV2(resource_key=item.key, value=item.initial_value)
-        for item in definition.world.resources
-    )
-
-
 def valid_resource_state_identity(
     definition: ScenarioDefinitionV2,
     resource_key: str,
@@ -128,7 +113,6 @@ def valid_resource_state_identity(
 
 __all__ = [
     "resource_identity",
-    "resource_initial_states",
     "resource_pool_initial_states",
     "resource_state_key",
     "valid_resource_state_identity",

@@ -9,11 +9,11 @@ from sqlalchemy.orm import Session
 from app.infrastructure.db.models import ActionDecisionRequest, AgentTask
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.scenarios import ScenarioService
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def _approval_version(session: Session) -> str:
-    document = deepcopy(_medical_scenario_document())
+    document = deepcopy(_contract_scenario_document())
     parameter = document["actions"][0]["parameters"][0]
     parameter["required"] = False
     parameter["default"] = 2

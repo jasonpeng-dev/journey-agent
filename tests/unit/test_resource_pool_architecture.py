@@ -36,7 +36,6 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     Player,
 )
-from app.scenarios.builtin import load_builtin_scenario
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
@@ -45,15 +44,13 @@ from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import LINJIANG_V1_TEST
+from tests.scenario_fixtures import LINJIANG_V2_TEST
 
-LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0 = load_builtin_scenario(
-    "linjiang_infrastructure_recovery_v2_0.yaml"
-)
+LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0 = LINJIANG_V2_TEST
 
 
 def _pool_definition() -> ScenarioDefinitionV2:
-    document: dict[str, Any] = deepcopy(LINJIANG_V1_TEST.model_dump(mode="json"))
+    document: dict[str, Any] = deepcopy(LINJIANG_V2_TEST.model_dump(mode="json"))
     document["metadata"]["key"] = "resource_pool_architecture_test"
     document["metadata"]["name"] = "Resource Pool Architecture Test"
     document["world"]["key"] = "resource_pool_architecture_test"
@@ -91,6 +88,51 @@ def _pool_definition() -> ScenarioDefinitionV2:
                 "value": True,
             },
         },
+        {
+            "pool_key": "southeast_district_service_stock",
+            "resource_key": "electrical_repair_parts",
+            "region_key": "southeast_heights_district",
+            "facility_key": "district_service_center",
+            "quantity": 0,
+            "visibility": "HIDDEN",
+            "availability": "UNAVAILABLE",
+            "survey_discoverable": True,
+            "availability_requirement": {
+                "node_key": "district_service_center",
+                "fact_key": "operational",
+                "value": True,
+            },
+        },
+        {
+            "pool_key": "north_service_depot_stock",
+            "resource_key": "general_engineering_parts",
+            "region_key": "north_industrial_district",
+            "facility_key": "utility_service_depot",
+            "quantity": 0,
+            "visibility": "HIDDEN",
+            "availability": "UNAVAILABLE",
+            "survey_discoverable": True,
+            "availability_requirement": {
+                "node_key": "utility_service_depot",
+                "fact_key": "operational",
+                "value": True,
+            },
+        },
+        {
+            "pool_key": "north_heavy_equipment_stock",
+            "resource_key": "general_engineering_parts",
+            "region_key": "north_industrial_district",
+            "facility_key": "heavy_equipment_yard",
+            "quantity": 0,
+            "visibility": "HIDDEN",
+            "availability": "UNAVAILABLE",
+            "survey_discoverable": True,
+            "availability_requirement": {
+                "node_key": "heavy_equipment_yard",
+                "fact_key": "operational",
+                "value": True,
+            },
+        },
     ]
     document["initialization"]["region_resource_knowledge"] = [
         {
@@ -112,30 +154,49 @@ def _pool_definition() -> ScenarioDefinitionV2:
                 }
             ]
     for actor in document["actors"]["actor_profiles"]:
-        if actor["key"] == "logistics_team_alpha":
-            actor["allowed_action_keys"].append("survey_resources")
-    document["actions"].append(
+        if actor["key"] == "electrical_repair_team_alpha":
+            actor["initial_node_key"] = "east_residential_district"
+            actor["command_reachability"] = "ONLINE"
+    return ScenarioDefinitionV2.model_validate(document)
+
+
+def _legacy_balance_definition() -> ScenarioDefinitionV2:
+    document: dict[str, Any] = deepcopy(LINJIANG_V2_TEST.model_dump(mode="json"))
+    document["metadata"]["key"] = "resource_pool_legacy_balance_test"
+    document["metadata"]["name"] = "Resource Pool Legacy Balance Test"
+    document["world"]["key"] = "resource_pool_legacy_balance_test"
+    document["world"]["name"] = "Resource Pool Legacy Balance Test"
+    document["initialization"]["region_resource_knowledge"] = []
+    document["initialization"]["resource_pools"] = []
+    document["initialization"]["resource_initial_states"] = [
         {
-            "key": "survey_resources",
-            "name": "Survey Resources",
-            "description": "Survey ordinary inventory and discover eligible hidden stock.",
-            "required_interaction_key": "transport_destination",
-            "execution_mode": "IMMEDIATE",
-            "allowed_actor_capabilities": ["EXECUTE_ACTION"],
-            "expected_outcomes": [
-                {"code": "SURVEYED", "name": "Resources surveyed", "success": True}
-            ],
-            "planning": {
-                "success_outcome_codes": ["SURVEYED"],
-                "hints": [
-                    "Use when ordinary inventory is unknown or a full survey is incomplete.",
-                    "A survey may discover hidden Facility-bound stock.",
-                ],
-            },
-            "behavior": "SURVEY_RESOURCES",
-            "locality": "REGION",
+            "resource_key": resource_key,
+            "scope_node_key": (
+                "west_logistics_district"
+                if resource_key == "electrical_repair_parts"
+                else "central_district"
+            ),
+            "value": 10 if resource_key == "electrical_repair_parts" else 0,
+            "reserved_value": 0,
         }
-    )
+        for resource_key in (
+            "communication_equipment",
+            "electrical_repair_parts",
+            "general_engineering_parts",
+            "municipal_repair_materials",
+            "water_system_parts",
+        )
+    ]
+    pool_keys = {
+        "north_service_depot_stock",
+        "north_heavy_equipment_stock",
+        "southeast_district_service_stock",
+    }
+    document["rules"] = [
+        rule
+        for rule in document["rules"]
+        if not any(pool_key in str(rule) for pool_key in pool_keys)
+    ]
     return ScenarioDefinitionV2.model_validate(document)
 
 
@@ -189,7 +250,7 @@ def test_legacy_balance_becomes_default_visible_available_pool_and_region_defaul
 ) -> None:
     runtime, _scope = _runtime(
         session,
-        LINJIANG_V1_TEST,
+        _legacy_balance_definition(),
         "resource-pool-legacy-defaults",
     )
     row = session.get(
@@ -226,7 +287,7 @@ def test_hidden_pool_is_absent_from_shared_planner_and_player_safe_projection(
     projection = SharedKnowledgeProjection(session, scope, definition)
 
     visible = projection.visible_resource_pools()
-    assert {item.pool_key for item in visible} == {"west_pool_a", "west_pool_b"}
+    assert {item.pool_key for item in visible} == {"default", "west_pool_a", "west_pool_b"}
     intelligence = projection.resource_intelligence()
     assert intelligence["regions"]["north_industrial_district"]["resources"] == {}
     player_intelligence = (
@@ -252,7 +313,7 @@ def test_hidden_pool_is_absent_from_shared_planner_and_player_safe_projection(
     )
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
-        "restore central hospital emergency power",
+        "restore central communications",
         initialize_plan=False,
     )
     objective = definition.objectives[0]
@@ -352,7 +413,7 @@ def test_hidden_truth_pool_presence_cannot_change_public_resource_knowledge(
         projection = SharedKnowledgeProjection(session, scope, definition)
         task = GenericAgentService(session, scope).create_task(
             runtime.session,
-            "restore central hospital emergency power",
+            "restore central communications",
             initialize_plan=False,
         )
         closure = PlanningContextBuilder(session, scope).build_v2_closure(
@@ -981,18 +1042,26 @@ def test_repair_adjust_resource_aggregates_multiple_visible_available_pools(
     document["initialization"]["resource_pools"].extend(
         [
             {
-                "pool_key": "central_pool_a",
+                "pool_key": "east_pool_a",
                 "resource_key": "electrical_repair_parts",
-                "region_key": "central_district",
+                "region_key": "east_residential_district",
                 "quantity": 4,
                 "visibility": "VISIBLE",
                 "availability": "AVAILABLE",
             },
             {
-                "pool_key": "central_pool_b",
+                "pool_key": "east_pool_b",
                 "resource_key": "electrical_repair_parts",
-                "region_key": "central_district",
+                "region_key": "east_residential_district",
                 "quantity": 8,
+                "visibility": "VISIBLE",
+                "availability": "AVAILABLE",
+            },
+            {
+                "pool_key": "east_general_pool",
+                "resource_key": "general_engineering_parts",
+                "region_key": "east_residential_district",
+                "quantity": 5,
                 "visibility": "VISIBLE",
                 "availability": "AVAILABLE",
             },
@@ -1002,9 +1071,9 @@ def test_repair_adjust_resource_aggregates_multiple_visible_available_pools(
     runtime, scope = _runtime(session, definition, "resource-pool-aggregate-repair")
 
     result = GenericGameService(session, scope).execute(
-        actor_key="electrical_team_beta",
+        actor_key="electrical_repair_team_alpha",
         action_key="repair_electrical",
-        target_node_key="central_hospital",
+        target_node_key="east_distribution_station",
         parameters={},
     )
     assert result.outcome.failure is None
@@ -1016,11 +1085,11 @@ def test_repair_adjust_resource_aggregates_multiple_visible_available_pools(
             )
         )
     }
-    assert rows[("central_district", "central_pool_a")] == 0
-    assert rows[("central_district", "central_pool_b")] == 2
+    assert rows[("east_residential_district", "east_pool_a")] == 0
+    assert rows[("east_residential_district", "east_pool_b")] == 2
     fact = session.get(
         GameInstanceFactState,
-        (runtime.instance.id, "central_hospital", "emergency_power_operational"),
+        (runtime.instance.id, "east_distribution_station", "operational"),
     )
     assert fact is not None and fact.truth_value is True
 
@@ -1097,7 +1166,7 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
     assert "known_value" not in player_pool["availability_requirement"]
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
-        "restore central hospital emergency power",
+        "restore central communications",
         initialize_plan=False,
     )
     context = PlanningContextBuilder(session, scope).build(
@@ -1134,9 +1203,12 @@ def test_region_visibility_effect_does_not_complete_survey_or_reveal_hidden_pool
             "survey_discoverable": True,
         }
     )
-    document["actors"]["actor_profiles"][1]["allowed_action_keys"].append(
-        "restore_inventory_visibility"
+    logistics_actor = next(
+        actor
+        for actor in document["actors"]["actor_profiles"]
+        if actor["key"] == "logistics_team_alpha"
     )
+    logistics_actor["allowed_action_keys"].append("restore_inventory_visibility")
     document["actions"].append(
         {
             "key": "restore_inventory_visibility",
@@ -1197,7 +1269,7 @@ def test_region_visibility_effect_does_not_complete_survey_or_reveal_hidden_pool
 def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
     session: Session,
 ) -> None:
-    document: dict[str, Any] = deepcopy(LINJIANG_V1_TEST.model_dump(mode="json"))
+    document: dict[str, Any] = deepcopy(LINJIANG_V2_TEST.model_dump(mode="json"))
     document["metadata"]["key"] = "resource_pool_planning_guidance_test"
     document["metadata"]["name"] = "Resource Pool Planning Guidance Test"
     document["world"]["key"] = "resource_pool_planning_guidance_test"
@@ -1210,7 +1282,7 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
     service = GenericAgentService(session, scope)
     task = service.create_task(
         runtime.session,
-        "restore central hospital emergency power",
+        "restore central communications",
         initialize_plan=False,
     )
     objective = definition.objectives[0]
@@ -1228,6 +1300,12 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
             task=task,
             replan_reason=reason,
         )
+        planner_input = builder.build_v2(
+            definition,
+            (objective,),
+            task=task,
+            replan_reason=reason,
+        )
         request = PlanRequest(
             call_type=call_type,
             goal=task.goal_description,
@@ -1235,7 +1313,7 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
                 (objective,),
                 known_fact_refs=known_refs,
             ),
-            planning_context=context,
+            planner_input=planner_input,
         )
         assert context.goal["objectives"][0]["planning_guidance"] == (
             "Prefer known reachable Regions and preserve enough parts for repair."
@@ -1244,7 +1322,7 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
             "Prefer known reachable Regions and preserve enough parts for repair."
         )
         assert (
-            request.provider_payload()["planning_context"]["goal"]["objectives"][0][
+            request.provider_payload()["planner_input"]["objective"]["objectives"][0][
                 "planning_guidance"
             ]
             == "Prefer known reachable Regions and preserve enough parts for repair."

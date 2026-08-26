@@ -43,7 +43,11 @@ from app.domain.enums import (
 )
 from app.domain.resources import resource_state_key
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ObjectiveDefinitionV2, ObjectiveRequirementV2
+from app.domain.scenario_v2 import (
+    ObjectiveDefinitionV2,
+    ObjectiveRequirementV2,
+    ScenarioDefinitionV2,
+)
 from app.domain.world import AccessState, Visibility
 from app.engine.locality import transport_between
 from app.engine.rules import (
@@ -65,15 +69,13 @@ from app.scenarios.builtin import (
     LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
     require_builtin_v2_version,
 )
-from app.scenarios.linjiang_v1_draft import build_linjiang_v1_definition
 from app.scenarios.persistence import ScenarioDefinitionRepository
-from app.scenarios.validation import ScenarioDefinitionValidator
 from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import LINJIANG_V1_TEST
+from tests.scenario_fixtures import LINJIANG_V2_TEST
 
 
 def _rule_state(
@@ -120,7 +122,21 @@ def test_dependency_closure_uses_known_available_not_total_at_scope() -> None:
 
 
 def _v2_0_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
-    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
+    document = LINJIANG_V2_TEST.model_dump(mode="json")
+    central_telecom = next(
+        node for node in document["world"]["nodes"] if node["key"] == "central_telecom_hub"
+    )
+    for fact in central_telecom["facts"]:
+        fact["initial_visibility"] = "KNOWN"
+    water_treatment = next(
+        node for node in document["world"]["nodes"] if node["key"] == "water_treatment_plant"
+    )
+    for fact in water_treatment["facts"]:
+        fact["initial_visibility"] = "KNOWN"
+    for relation in document["world"]["relations"]:
+        if relation["relation_type_key"] == "supplies_power_to":
+            relation["initial_visibility"] = "VISIBLE"
+    definition = ScenarioDefinitionV2.model_validate(document)
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
     player = Player(name=key)
@@ -196,63 +212,6 @@ class _InspectBoundaryProvider:
                 ),
             ),
         )
-
-
-def test_linjiang_v1_draft_is_complete_and_does_not_mutate_v9() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
-
-    assert LINJIANG_V1_TEST.metadata.key == "linjiang_infrastructure_recovery"
-    assert definition.metadata.key == "linjiang_infrastructure_recovery_v2_0"
-    assert len([node for node in definition.world.nodes if node.node_type_key == "region"]) == 6
-    assert len([node for node in definition.world.nodes if node.node_type_key == "facility"]) == 30
-    assert len([node for node in definition.world.nodes if node.node_type_key == "transport"]) == 6
-    assert len(definition.actors.actor_profiles) == 6
-    assert len(definition.objectives) == 4
-    assert {item.key for item in definition.world.resources} == {
-        "communication_equipment",
-        "general_engineering_parts",
-        "municipal_repair_materials",
-        "electrical_repair_parts",
-        "water_system_parts",
-    }
-
-    relations = {
-        (item.source_node_key, item.relation_type_key, item.target_node_key): item
-        for item in definition.world.relations
-    }
-    for relation in (
-        ("southeast_emergency_power_station", "supplies_power_to", "east_distribution_station"),
-        ("east_distribution_station", "supplies_power_to", "east_community_hospital"),
-        ("east_distribution_station", "supplies_power_to", "riverside_shelter"),
-    ):
-        assert relations[relation].initial_visibility.value == "VISIBLE"
-
-    nodes = {node.key: node for node in definition.world.nodes}
-    assert nodes["central_river_tunnel"].fact("passable").initial_visibility.value == "HIDDEN"
-    assert nodes["north_service_corridor"].fact("passable").initial_visibility.value == "HIDDEN"
-    assert nodes["west_freight_corridor"].fact("passable").initial_value is True
-    assert (
-        nodes["southeast_emergency_power_station"].fact("power_generation_capable").initial_value
-        is True
-    )
-    assert nodes["south_communication_core"].fact("operational").initial_visibility.value == "KNOWN"
-
-    pools = {pool.pool_key: pool for pool in definition.initialization.resource_pools}
-    assert pools["southeast_electrical_stock"].visibility.value == "VISIBLE"
-    assert pools["southeast_electrical_stock"].availability.value == "AVAILABLE"
-    assert pools["southeast_district_service_stock"].visibility.value == "HIDDEN"
-    assert pools["north_heavy_equipment_stock"].survey_discoverable is True
-    assert pools["north_service_depot_stock"].availability_requirement is not None
-
-
-def test_linjiang_v1_draft_passes_scenario_readiness_validation() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
-
-    result = ScenarioDefinitionValidator().validate(definition.model_dump(mode="json"))
-
-    assert result.passed
-    assert result.issues == ()
-    assert all(objective.planning_guidance for objective in definition.objectives)
 
 
 def test_linjiang_v2_0_planning_context_uses_sparse_target_requirements(
@@ -408,9 +367,8 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     }
     clear = actions["clear_transport"]
     assert any(
-        effect["type"] == "FACT_MUTATION"
-        and effect["fact_key"] == "passable"
-        and effect["value"] is True
+        effect.get("type") == "KNOWLEDGE_REVEAL_ON_SUCCESS"
+        and effect.get("subject") == "transport_passability"
         for effect in clear["planner_effects"]
     )
 
@@ -763,11 +721,11 @@ def test_dependency_closure_expands_each_new_binding_after_action_selection() ->
         description="Exercise independent target binding expansion.",
         completion_requirements=(
             ObjectiveRequirementV2(
-                key="hospital",
-                node_key="central_hospital",
+                key="power_station",
+                node_key="east_distribution_station",
                 fact_key="operational",
                 accepted_values=(True,),
-                description="Hospital is operational.",
+                description="Power station is operational.",
             ),
             ObjectiveRequirementV2(
                 key="telecom",
@@ -811,8 +769,8 @@ def test_dependency_closure_expands_each_new_binding_after_action_selection() ->
             target_bindings=(
                 PlannerTargetBinding(
                     action_key="repair_test",
-                    target_key="central_hospital",
-                    requirements=({"cost": {"hospital_parts": 2}},),
+                    target_key="east_distribution_station",
+                    requirements=({"cost": {"electrical_parts": 2}},),
                     deterministic_effects=(
                         {
                             "type": "FACT_MUTATION",
@@ -839,7 +797,7 @@ def test_dependency_closure_expands_each_new_binding_after_action_selection() ->
             known_world=PlannerKnownWorldSlice(
                 nodes=(
                     {
-                        "key": "central_hospital",
+                        "key": "east_distribution_station",
                         "access": "AVAILABLE",
                         "interactions": [],
                     },
@@ -850,7 +808,7 @@ def test_dependency_closure_expands_each_new_binding_after_action_selection() ->
                     },
                 ),
                 resources={
-                    "hospital_parts": {"known_available": 2, "known_total": 2},
+                    "electrical_parts": {"known_available": 2, "known_total": 2},
                     "telecom_parts": {"known_available": 3, "known_total": 3},
                 },
             ),
@@ -860,10 +818,12 @@ def test_dependency_closure_expands_each_new_binding_after_action_selection() ->
     assert {
         (item.action_key, item.target_key) for item in result.planner_input.target_bindings
     } == {
-        ("repair_test", "central_hospital"),
+        ("repair_test", "east_distribution_station"),
         ("repair_test", "central_telecom_hub"),
     }
-    assert {"hospital_parts", "telecom_parts"}.issubset(result.planner_input.known_world.resources)
+    assert {"electrical_parts", "telecom_parts"}.issubset(
+        result.planner_input.known_world.resources
+    )
 
 
 def _v4_blocked_route_planner_base(
@@ -1320,7 +1280,7 @@ def test_locality_dependency_closure_keeps_relocation_capability_for_local_actio
 def test_historical_travel_success_requires_current_location_redundancy_proof(
     session: Session,
 ) -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
+    definition = LINJIANG_V2_TEST
     travel = next(item for item in definition.actions if item.key == "travel")
     actor = GameInstanceActor(
         game_instance_id=uuid4(),
@@ -1844,7 +1804,7 @@ def test_projected_ambiguous_rules_apply_only_common_effects_once(
 
 
 def test_linjiang_v2_0_all_regions_have_the_generic_travel_target_contract() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
+    definition = LINJIANG_V2_TEST
     regions = {node.key: node for node in definition.world.nodes if node.node_type_key == "region"}
 
     assert set(regions) == {
@@ -2211,7 +2171,7 @@ def test_projected_canonical_actor_location_effect_updates_following_step(
 
 
 def test_linjiang_v2_0_known_route_remains_one_hop_after_hidden_route_failure() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
+    definition = LINJIANG_V2_TEST
     travel = next(item for item in definition.actions if item.key == "travel")
     projected_locations = {"logistics_team_alpha": "central_district"}
     route = (
@@ -2238,8 +2198,8 @@ def test_linjiang_v2_0_known_route_remains_one_hop_after_hidden_route_failure() 
         projected_locations["logistics_team_alpha"] = target_region
 
 
-def test_linjiang_v1_task_three_repairs_and_task_four_support_gate() -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
+def test_linjiang_v2_power_and_support_rules() -> None:
+    definition = LINJIANG_V2_TEST
     action = next(item for item in definition.actions if item.key == "repair_industrial_facility")
     assert action.required_actor_role_key == "industrial_repair_team"
     assert {item.node_key for item in action.planning.terminal_effects} >= {
@@ -2405,20 +2365,8 @@ def test_linjiang_v1_task_three_repairs_and_task_four_support_gate() -> None:
     assert activation.outcome_code == "WATER_TRANSFER_ACTIVE"
 
 
-def test_linjiang_v1_runtime_initializes_knowledge_and_reachability(session: Session) -> None:
-    definition = build_linjiang_v1_definition(LINJIANG_V1_TEST)
-    scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
-    version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
-    player = Player(name="linjiang-v1-draft-runtime")
-    session.add(player)
-    session.flush()
-
-    runtime = RuntimeInitializationService(session).create(
-        player_id=player.id,
-        scenario_version_id=version.id,
-        creation_key="linjiang-v1-draft-runtime",
-    )
-    scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
+def test_linjiang_v2_runtime_initializes_knowledge_and_reachability(session: Session) -> None:
+    runtime, scope = _linjiang_v4_runtime(session, "linjiang-v2-runtime")
 
     actors = {
         actor.actor_key: actor

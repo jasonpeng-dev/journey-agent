@@ -13,11 +13,11 @@ from app.engine.rules import (
     RuleFactState,
     RuleNodeState,
 )
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def _document() -> dict[str, Any]:
-    document = _medical_scenario_document()
+    document = _contract_scenario_document()
     document["rules"] = [
         {
             "key": "insufficient_medicine",

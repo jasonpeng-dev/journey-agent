@@ -187,12 +187,25 @@ Resource Knowledge is public Knowledge. A visible, surveyed inventory with
 no pool row is an explicit known zero. An incomplete or hidden inventory with
 no row remains UNKNOWN. Reserved quantity is not available quantity.
 
-The legacy PlanningContext and Candidate Catalog remain compatibility
-projections for in-process callers and old fake-provider tests. They are not
-co-authorities. When PlannerInput V2 exists, provider_payload emits PlannerInput
-and omits the legacy catalog/context payload. The candidate view must be
-derived from canonical semantics and cannot contradict actor action scope or
-ActionContract availability.
+Resource Knowledge contract:
+
+* survey_resources can expose the identity, quantity, availability, and static
+  unlock requirement of a discovered Resource Pool;
+* survey_resources does not directly expose hidden Facility Truth referenced by
+  an unlock requirement;
+* inspect reveals the corresponding Target or Facility facts, but does not
+  also discover an undiscovered Resource Pool;
+* survey and inspect order must not change the final legal Knowledge state;
+* Agent and Player use the same Knowledge permission boundary;
+* the Agent reads relevant Known Knowledge through canonical structured
+  PlannerInput; hidden Truth is never included in PlannerInput.
+
+PlanningContext and PlanningActionCatalogBuilder remain current in-process and
+binding projections used by the runtime. PlanningContextV1 has been removed.
+The planning-context-only provider_payload branch has also been removed.
+PlannerInput V2 is the canonical provider payload authority. candidate_id
+remains supported as a compatibility response field and is resolved against
+the current catalog and binding; it is not a second planning authority.
 
 For REPLAN, planning_continuity is an additional historical sibling field.
 It is not part of the canonical PlannerInput and never overrides it.
@@ -517,25 +530,7 @@ configuration, request/payload sizes, timestamps, latency, usage,
 finish_reason, parsed proposal, and Validator diagnostics. Raw credentials and
 hidden reasoning are excluded.
 
-## 19. Verified Formal PLAY baseline
-
-A read-only evidence export for the current successful baseline recorded:
-
-* GameInstance prefix: 99c5d772
-* Scenario: linjiang_infrastructure_recovery_v2_0
-* Objective: restore_central_communication_capability
-* Result: completed
-* four PlanningCycles;
-* five Provider attempts;
-* four accepted formal AgentPlans;
-* Runtime Knowledge changes, REPLAN continuity, Resource transfer, transport
-  clearing, and final objective verification.
-
-This is a development baseline, not a claim that every scenario or every
-provider run has been proven. Evidence files are kept outside the formal
-documentation authority and are not linked from current docs.
-
-## 20. Known future work
+## 19. Known future work
 
 Only the following directions are recorded as not-yet-implemented design
 work:
@@ -550,7 +545,7 @@ The current runtime uses implicit backward prerequisite reasoning. Working
 goals, milestones, and a persistent goal dependency graph are not current
 implementation features.
 
-## 21. Source map
+## 20. Source map
 
 | Area | Current implementation |
 | --- | --- |

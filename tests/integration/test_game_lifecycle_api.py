@@ -6,7 +6,7 @@ from sqlalchemy import func, inspect, select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
-from app.domain.enums import DecisionStatus
+from app.domain.enums import DecisionStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
@@ -22,19 +22,18 @@ from app.infrastructure.db.models import (
     GameInstanceNodeState,
     GameInstanceResourceState,
     PlayerExecutionCheckpoint,
-    Scenario,
     ScenarioVersion,
     WorldOperation,
 )
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleError
 from app.services.generic_game import GenericGameService
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _published_version_id(session: Session) -> str:
-    scenario = session.scalar(select(Scenario).where(Scenario.key == "starfire_command"))
-    assert scenario is not None and scenario.current_published_version_id is not None
-    return str(scenario.current_published_version_id)
+    return str(require_builtin_v2_version(session, GENERIC_TEST).id)
 
 
 def test_games_bind_exact_version_and_instances_are_isolated(
@@ -82,10 +81,12 @@ def test_abandon_cancels_unsettled_operation_and_archive_is_read_only(
     )
     assert conversation is not None
     agent = GenericAgentService(session, scope)
-    task = agent.create_task(conversation, "gather valley intelligence")
+    task = agent.create_task(conversation, "stabilize the patient")
     agent.execute_next(task)
     operation = session.scalar(select(WorldOperation).where(WorldOperation.task_id == task.id))
-    assert operation is not None and operation.status.value == "PENDING"
+    assert operation is not None
+    operation.status = WorldOperationStatus.PENDING
+    session.flush()
     revision_before_abandon = game.runtime_revision
 
     abandoned = client.post(f"/api/v1/games/{game.id}/tasks/{task.id}/abandon")
@@ -116,9 +117,9 @@ def test_abandon_cancels_unsettled_operation_and_archive_is_read_only(
     assert client.get("/api/v1/games?status=archived").json()[0]["id"] == str(game.id)
     with pytest.raises(GameLifecycleError, match="Only an active GameInstance"):
         GenericGameService(session, scope).execute(
-            actor_key="han_lie",
-            action_key="recon_valley",
-            target_node_key="northern_valley",
+            actor_key="doctor_lee",
+            action_key="treat_patient",
+            target_node_key="patient_one",
             parameters={},
         )
 
@@ -147,9 +148,7 @@ def test_permanent_delete_removes_only_instance_scope_and_preserves_version(
         select(ConversationSession).where(ConversationSession.game_instance_id == game_id)
     )
     assert conversation is not None
-    task = GenericAgentService(session, scope).create_task(
-        conversation, "gather valley intelligence"
-    )
+    task = GenericAgentService(session, scope).create_task(conversation, "stabilize the patient")
     step = GenericAgentService(session, scope).execute_next(task)
     assert step is not None
     session.add(

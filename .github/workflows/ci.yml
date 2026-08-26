@@ -108,8 +108,7 @@ jobs:
           python-version: "3.12"
       - run: uv sync --frozen --extra dev
       - run: uv run ruff check .
-      - run: uv run ruff format --check app evals tests frontend/e2e/prepare_history_fixture.py
-      - run: uv run mypy app evals
+      - run: uv run ruff format --check app tests frontend/e2e/prepare_history_fixture.py
+      - run: uv run mypy app
       - run: uv run alembic upgrade head
       - run: uv run pytest --cov=app --cov-report=term-missing
-      - run: node --input-type=module --check < app/web/render.js

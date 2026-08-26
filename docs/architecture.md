@@ -6,6 +6,7 @@ Journey Agent runtime. Detailed planning and validation semantics live in
 in [Scenario authoring](scenario-authoring.md). Historical design and
 migration notes live under [docs/archive](archive/) and are not current
 implementation authority.
+GameInstance lifecycle details live in [GameInstance lifecycle](game-lifecycle.md).
 
 ## 1. Product and system goal
 
@@ -153,37 +154,23 @@ The main lifecycle entities are:
 | WorldOperation | Runtime operation and public outcome |
 | PlayerExecutionCheckpoint | Player pacing state, not gameplay authority |
 
-### GameInstance archive and Fork
+### GameInstance lifecycle
 
-The lifecycle is deliberately narrower than a save-slot or branch-tree
-system:
+GameInstance lifecycle has a stable archive boundary:
 
-    ACTIVE --stable archive gate--> ARCHIVED --Fork--> ACTIVE target
+    ACTIVE A --Archive--> ARCHIVED A
+          |
+          +-- Checkpoint --> ARCHIVED B --Fork--> ACTIVE C
 
-Archiving locks the owned root GameInstance, verifies the expected
-runtime_revision, and rejects any non-terminal AgentTask, pending
-WorldOperation, pending ActionDecisionRequest, or non-zero resource
-reservation. A successful archive increments the revision and retains all
-runtime Truth/Knowledge rows in read-only form. It does not clean up or
-serialize a second snapshot.
+Ordinary Archive finalizes the same GameInstance as an immutable ARCHIVED
+runtime source. Checkpoint creates an independent archived snapshot while its
+ACTIVE source remains unchanged. Fork starts a new independent ACTIVE
+GameInstance from an ARCHIVED source with the same exact ScenarioVersion,
+materialized runtime state, and inherited formal history.
 
-Fork is a dedicated materializer. It reads only an ARCHIVED source and the
-same exact ScenarioVersion, then performs one transaction:
-
-* COPY node visibility/status, Fact truth/visibility, Resource value and
-  visibility/availability, region/relation knowledge, and Actor dynamic state;
-* RESET target identity, ACTIVE status, revision 1, creation key,
-  reservations, conversation session, and provenance;
-* RECOMPUTE static resource/actor metadata and the root current Node from the
-  primary Actor, with exact-version validation;
-* DROP Tasks, objective scopes, plans, cycles, attempts, operations,
-  decisions, pacing history, memory, and messages.
-
-The target stores forked_from_game_instance_id as provenance. A
-(player_id, creation_key) is idempotent for the same source and exact
-ScenarioVersion; a retry returns the existing target, while reuse against a
-different source is rejected. Deleting a source detaches that provenance link
-so targets survive.
+The complete contract for stable gates, runtime materialization, provenance,
+idempotency, locking, and inherited-history presentation is in
+[GameInstance lifecycle](game-lifecycle.md).
 
 Provider audit metadata is secret-safe and may include model settings,
 timestamps, latency, token usage, request size, finish reason, parsed
@@ -191,17 +178,9 @@ proposal, and Validator diagnostics. Raw chain-of-thought and API keys are
 not persisted.
 
 All runtime rows are scoped by GameInstance and exact ScenarioVersion
-ownership. Goal/action idempotency and Fork creation keys support recovery
-without rebinding an instance to a different Version.
-
-Transaction and lock ordering is root-first. Lifecycle archive, delete,
-abandon, and writable-scope checks lock the owned GameInstance before
-dependent rows. Action mutation paths also establish the root lock before
-mutating instance-scoped runtime state; read-only projection paths do not
-lock. Fork locks the archived source root, then creates and populates the
-target inside one transaction. No path takes a dependent runtime lock and
-then attempts to acquire the root lock, preventing a reverse-order cycle
-with existing Action mutation.
+ownership. The detailed lifecycle implementation contract, including
+idempotency and transaction boundaries, belongs to
+[GameInstance lifecycle](game-lifecycle.md).
 
 ## 9. API and repository boundaries
 
@@ -232,4 +211,6 @@ Repository map:
   Runtime, Knowledge, REPAIR, REPLAN, and continuity contract.
 * [Scenario authoring](scenario-authoring.md): Draft, Editor, validation,
   sandbox, publication, and Version lifecycle.
+* [GameInstance lifecycle](game-lifecycle.md): Archive, Checkpoint, Fork,
+  runtime materialization, and formal history inheritance.
 * [Archive](archive/): historical design and migration notes only.

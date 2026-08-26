@@ -27,12 +27,11 @@ from app.services.game_instances import GameInstanceService
 from app.services.play import PlayError, PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import STARFIRE_TEST
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def _definition(*, preflight: bool = False) -> ScenarioDefinitionV2:
-    document = deepcopy(_medical_scenario_document())
+    document = deepcopy(_contract_scenario_document())
     parameter = document["actions"][0]["parameters"][0]
     parameter["required"] = False
     parameter["default"] = 2
@@ -60,6 +59,23 @@ def _definition(*, preflight: bool = False) -> ScenarioDefinitionV2:
                 ],
             },
         )
+    return ScenarioDefinitionV2.model_validate(document)
+
+
+def _subsumption_definition() -> ScenarioDefinitionV2:
+    document = deepcopy(_contract_scenario_document())
+    base_objective = document["objectives"][0]
+    document["objectives"].append(
+        {
+            **base_objective,
+            "key": "complete_contract",
+            "name": "Complete Contract",
+            "description": "Complete the generic contract.",
+            "subsumes": ["stabilize_patient"],
+            "goal_aliases": [],
+            "goal_examples": [],
+        }
+    )
     return ScenarioDefinitionV2.model_validate(document)
 
 
@@ -96,10 +112,11 @@ def test_goal_resolver_uses_only_exact_version_candidates() -> None:
 
 
 def test_objective_subsumption_is_normalized_before_scope_freeze() -> None:
+    definition = _subsumption_definition()
     assert normalize_objective_keys(
-        STARFIRE_TEST,
-        ("full_northern_recovery", "open_northern_trade_route"),
-    ) == ("full_northern_recovery",)
+        definition,
+        ("complete_contract", "stabilize_patient"),
+    ) == ("complete_contract",)
 
 
 def test_generic_agent_completes_goal_plan_action_and_backend_objective(

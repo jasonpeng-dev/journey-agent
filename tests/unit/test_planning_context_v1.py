@@ -34,7 +34,7 @@ from app.infrastructure.db.models import AgentPlan, Player
 from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
-from tests.scenario_fixtures import STARFIRE_TEST
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 class DirectBindingProvider:
@@ -49,50 +49,30 @@ class DirectBindingProvider:
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.requests.append(request)
         return PlanProposal(
-            plan_summary="Secure the valley, restore the outpost, and reopen trade.",
+            plan_summary="Diagnose and stabilize the patient.",
             steps=(
                 PlanStepProposal(
-                    purpose="Make the northern valley safe",
-                    action_key="clear_valley",
-                    actor_key="han_lie",
-                    target_key="northern_valley",
-                    parameters={"troop_count": 80, "strategy": "STANDARD"},
-                    short_actor_reason="frontline commander",
-                ),
-                PlanStepProposal(
-                    purpose="Secure village support",
-                    action_key="negotiate_support",
-                    actor_key="lu_ning",
-                    target_key="north_village",
-                    parameters={"food_offer": 20, "requested_support": "GUIDE"},
-                    short_actor_reason="steward handles supplies",
-                ),
-                PlanStepProposal(
-                    purpose="Restore the outpost",
-                    action_key="repair_outpost",
-                    actor_key="lu_ning",
-                    target_key="starfire_outpost",
-                    parameters={
-                        "repair_level": "FULL",
-                        "food_commitment": 30,
-                        "gold_commitment": 40,
-                    },
-                    short_actor_reason="steward manages repairs",
-                ),
-                PlanStepProposal(
-                    purpose="Open the trade route",
-                    action_key="test_trade_route",
-                    actor_key="lu_ning",
-                    target_key="northern_trade_route",
+                    purpose="Diagnose the patient",
+                    action_key="diagnose_patient",
+                    actor_key="doctor_lee",
+                    target_key="patient_one",
                     parameters={},
-                    short_actor_reason="steward operates trade",
+                    short_actor_reason="physician performs diagnosis",
+                ),
+                PlanStepProposal(
+                    purpose="Stabilize the patient",
+                    action_key="treat_patient",
+                    actor_key="doctor_lee",
+                    target_key="patient_one",
+                    parameters={"dosage": 2},
+                    short_actor_reason="physician performs treatment",
                 ),
             ),
         )
 
 
 def _runtime(session: Session):  # type: ignore[no-untyped-def]
-    version = require_builtin_v2_version(session, STARFIRE_TEST)
+    version = require_builtin_v2_version(session, GENERIC_TEST)
     player = Player(name=f"planning-context-{uuid4().hex[:8]}")
     session.add(player)
     session.flush()
@@ -140,42 +120,36 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     runtime, scope = _runtime(session)
     provider = DirectBindingProvider()
     task = GenericAgentService(session, scope, provider=provider).create_task(
-        runtime.session, "open the northern trade route"
+        runtime.session, "stabilize the patient"
     )
 
     request = provider.requests[0]
     context = request.planning_context
     assert context is not None
     assert {item["action_key"] for item in context.relevant_actions} == {
-        "clear_valley",
-        "negotiate_support",
-        "recon_valley",
-        "repair_outpost",
-        "test_trade_route",
+        "diagnose_patient",
+        "treat_patient",
     }
     assert len({item["action_key"] for item in context.relevant_actions}) == len(
         context.relevant_actions
     )
     assert {item["actor_key"] for item in context.relevant_actors} >= {
-        "shen_ce",
-        "han_lie",
-        "lu_ning",
+        "doctor_lee",
+        "nurse_ana",
     }
     assert len({item["actor_key"] for item in context.relevant_actors}) == len(
         context.relevant_actors
     )
-    assert "enemy_north_supply_route" not in json.dumps(
-        context.model_dump(mode="json"), ensure_ascii=False
+    assert "legacy" not in json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
+    patient_target = next(
+        item for item in context.relevant_targets if item["target_key"] == "patient_one"
     )
-    locked_target = next(
-        item for item in context.relevant_targets if item["target_key"] == "starfire_outpost"
-    )
-    assert set(locked_target) == {"target_key"}
+    assert patient_target["target_key"] == "patient_one"
     known_node_keys = {item["key"] for item in context.current_knowledge["nodes"]}
-    locked_node = next(
-        item for item in context.current_knowledge["nodes"] if item["key"] == "starfire_outpost"
+    patient_node = next(
+        item for item in context.current_knowledge["nodes"] if item["key"] == "patient_one"
     )
-    assert locked_node["type"] == "facility"
+    assert patient_node["type"] == "patient"
     assert set(context.current_knowledge) >= {
         "nodes",
         "facts",
@@ -218,7 +192,7 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     assert "repair_attempt" not in initial_payload
     assert "repair_diagnostics" not in initial_payload
     assert initial_payload["planner_input"]["schema_version"] == 2
-    assert "enemy_north_supply_route" not in json.dumps(initial_payload, ensure_ascii=False)
+    assert "legacy" not in json.dumps(initial_payload, ensure_ascii=False)
     assert "planning_context" not in initial_payload
     assert task.current_plan_version == 1
 
@@ -227,7 +201,7 @@ def test_legacy_catalog_is_not_in_canonical_provider_payload(session: Session) -
     runtime, scope = _runtime(session)
     provider = DirectBindingProvider()
     GenericAgentService(session, scope, provider=provider).create_task(
-        runtime.session, "open the northern trade route"
+        runtime.session, "stabilize the patient"
     )
     request = provider.requests[0]
     payload = json.dumps(request.provider_payload(), ensure_ascii=False)
@@ -308,13 +282,13 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
     assert repair_payload["planner_input"]["actors"][0] == canonical_actor
 
 
-def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrelated(
+def test_validator_relevance_accepts_direct_progress_and_rejects_unrelated(
     session: Session,
 ) -> None:
     runtime, scope = _runtime(session)
     provider = DirectBindingProvider()
     service = GenericAgentService(session, scope, provider=provider)
-    task = service.create_task(runtime.session, "open the northern trade route")
+    task = service.create_task(runtime.session, "stabilize the patient")
     request = provider.requests[0]
     proposal = provider.propose_plan(request)
     context = request.planning_context
@@ -328,8 +302,6 @@ def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrel
         replan_reason=None,
     )
 
-    # The normal direct proposal contains objective-progressing Actions and is
-    # accepted without requiring a backend-generated prerequisite graph.
     _direct_steps, direct_diagnostics = service._validate_provider_proposal_v1(
         task,
         definition,
@@ -342,31 +314,13 @@ def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrel
     )
     assert not direct_diagnostics
 
-    # Reconnaissance is epistemic: it adds public Knowledge before the direct
-    # objective Actions.  Its goal-directed relation is enough for acceptance.
-    recon = PlanStepProposal(
-        purpose="Inspect the northern valley",
-        action_key="recon_valley",
-        actor_key="han_lie",
-        target_key="northern_valley",
-        parameters={"troop_count": 20, "approach": "CAUTIOUS"},
+    unrelated_step = PlanStepProposal(
+        purpose="Diagnose the patient",
+        action_key="diagnose_patient",
+        actor_key="doctor_lee",
+        target_key="patient_one",
+        parameters={},
     )
-    _epistemic_steps, epistemic_diagnostics = service._validate_provider_proposal_v1(
-        task,
-        definition,
-        objectives,
-        None,
-        3,
-        catalog,
-        (recon, *proposal.steps),
-        context,
-    )
-    assert not epistemic_diagnostics
-
-    # If the same Action is presented without any objective or Knowledge
-    # progression, the validator rejects it as unrelated.  This is a semantic
-    # relevance check, not a requirement that every step be in a prerequisite
-    # or effect graph.
     unrelated_context = context.model_copy(
         update={
             "relevant_actions": tuple(
@@ -376,7 +330,7 @@ def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrel
                     "declared_world_effects": [],
                     "declared_knowledge_effects": [],
                 }
-                if entry.get("action_key") == "recon_valley"
+                if entry.get("action_key") == "diagnose_patient"
                 else entry
                 for entry in context.relevant_actions
             )
@@ -387,9 +341,9 @@ def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrel
         definition,
         objectives,
         None,
-        4,
+        3,
         catalog,
-        (recon, *proposal.steps),
+        (unrelated_step,),
         unrelated_context,
     )
     unrelated = next(
@@ -398,10 +352,10 @@ def test_validator_relevance_allows_direct_and_epistemic_steps_but_rejects_unrel
     assert unrelated == {
         "code": "OBJECTIVE_IRRELEVANT",
         "failure_code": "OBJECTIVE_IRRELEVANT",
-        "step_id": recon.step_id,
-        "action_key": "recon_valley",
-        "actor_key": "han_lie",
-        "target_key": "northern_valley",
+        "step_id": unrelated_step.step_id,
+        "action_key": "diagnose_patient",
+        "actor_key": "doctor_lee",
+        "target_key": "patient_one",
         "dimension": "OBJECTIVE_RELEVANCE",
         "required": "ADVANCES_FROZEN_OBJECTIVE_SCOPE",
         "actual": "NO_DECLARED_RELEVANT_EFFECT",
@@ -414,10 +368,18 @@ def test_validator_reports_target_interaction_mismatch_to_provider(
     runtime, scope = _runtime(session)
     provider = DirectBindingProvider()
     service = GenericAgentService(session, scope, provider=provider)
-    task = service.create_task(runtime.session, "open the northern trade route")
+    task = service.create_task(runtime.session, "stabilize the patient")
     request = provider.requests[0]
     context = request.planning_context
     assert context is not None
+    context = context.model_copy(
+        update={
+            "relevant_targets": (
+                *context.relevant_targets,
+                {"target_key": "medicine_cabinet"},
+            )
+        }
+    )
     definition = service._definition()
     objectives = service._objectives(task, definition)
     catalog = PlanningActionCatalogBuilder(session, scope).build(
@@ -427,15 +389,12 @@ def test_validator_reports_target_interaction_mismatch_to_provider(
         replan_reason=None,
     )
 
-    # ``clear_valley`` requires ``clear_threat`` while the outpost only
-    # declares ``repair``.  The target is known, so this is a static contract
-    # mismatch rather than an objective-relevance failure.
     invalid_step = PlanStepProposal(
-        purpose="Clear the outpost",
-        action_key="clear_valley",
-        actor_key="han_lie",
-        target_key="starfire_outpost",
-        parameters={"troop_count": 80, "strategy": "STANDARD"},
+        purpose="Diagnose the medicine cabinet",
+        action_key="diagnose_patient",
+        actor_key="doctor_lee",
+        target_key="medicine_cabinet",
+        parameters={},
     )
     _steps, diagnostics = service._validate_provider_proposal_v1(
         task,
@@ -452,14 +411,14 @@ def test_validator_reports_target_interaction_mismatch_to_provider(
         "code": "TARGET_INTERACTION_INVALID",
         "failure_code": "TARGET_INTERACTION_INVALID",
         "step_id": invalid_step.step_id,
-        "action_key": "clear_valley",
-        "actor_key": "han_lie",
-        "target_key": "starfire_outpost",
+        "action_key": "diagnose_patient",
+        "actor_key": "doctor_lee",
+        "target_key": "medicine_cabinet",
         "dimension": "TARGET_INTERACTION",
-        "required": "clear_threat",
-        "actual": ["repair"],
-        "required_interaction_key": "clear_threat",
-        "actual_interactions": ("repair",),
+        "required": "diagnosable",
+        "actual": ["restockable"],
+        "required_interaction_key": "diagnosable",
+        "actual_interactions": ("restockable",),
     }
     assert all(item.get("code") != "OBJECTIVE_IRRELEVANT" for item in diagnostics)
 
@@ -1078,7 +1037,7 @@ def test_information_boundary_exhaustion_generates_replan_from_latest_state(
     agent = GenericAgentService(session, scope, provider=provider)
     task = agent.create_task(
         runtime.session,
-        "open the northern trade route",
+        "stabilize the patient",
         initialize_plan=False,
     )
     exhausted = AgentPlan(

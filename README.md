@@ -1,5 +1,7 @@
 # Journey Agent
 
+[English](README.md) · [中文](README.zh.md)
+
 Journey Agent is a generic, data-driven scenario runtime with an LLM Planner,
 deterministic validation, explicit Truth/Knowledge separation, and auditable
 Formal PLAY execution.
@@ -41,17 +43,20 @@ REPAIR attempts internally and returns one final state. Rejected proposals
 remain internal PlanningAttempt audit rows; they are not player-visible plans
 and do not create runtime operations.
 
-See [docs/README.md](docs/README.md) for the documentation authority map,
-[docs/architecture.md](docs/architecture.md) for high-level runtime
-boundaries, and [docs/agent-planning-v2.md](docs/agent-planning-v2.md) for
-the detailed planning contract.
+See [docs/architecture.md](docs/architecture.md) for high-level runtime
+boundaries, [docs/agent-planning-v2.md](docs/agent-planning-v2.md) for the
+detailed planning contract, [docs/scenario-authoring.md](docs/scenario-authoring.md)
+for Scenario publishing, and [docs/game-lifecycle.md](docs/game-lifecycle.md)
+for the detailed GameInstance lifecycle.
 
 An ACTIVE GameInstance can be archived only when it has no non-terminal Task,
 pending WorldOperation, pending ActionDecisionRequest, or reserved resource
-value. ARCHIVED instances are immutable, read-only runtime sources. Fork
-materializes a new independent ACTIVE instance from that source with the same
-exact ScenarioVersion, fresh runtime identity, empty execution history, and
-an auditable source link.
+value. ARCHIVED instances are immutable, read-only runtime sources. A
+Checkpoint creates an independent ARCHIVED snapshot while its ACTIVE source
+remains unchanged. Fork materializes a new independent ACTIVE instance from an
+ARCHIVED source with the same exact ScenarioVersion, runtime state, inherited
+formal history, and an auditable source link. See
+[GameInstance lifecycle](docs/game-lifecycle.md) for the complete contract.
 
 ## Provider configuration
 
@@ -141,8 +146,8 @@ Backend:
 
     uv run pytest --cov=app --cov-report=term-missing
     uv run ruff check .
-    uv run ruff format --check app evals tests
-    uv run mypy app evals
+    uv run ruff format --check app tests frontend/e2e/prepare_history_fixture.py
+    uv run mypy app
     uv run alembic upgrade head
 
 Frontend, from frontend:
@@ -156,6 +161,10 @@ Frontend, from frontend:
 Real provider calls are not part of CI. Provider tests use deterministic fakes
 or mocked HTTP responses. Real-model runs are bounded manual evaluations.
 
+The browser E2E suite contains three deterministic smokes: Basic Product,
+PLAY Presentation, and Checkpoint/Fork. These browser tests use the mock
+provider and do not call a real Provider.
+
 ## Repository map
 
 | Path | Responsibility |
@@ -168,16 +177,16 @@ or mocked HTTP responses. Real-model runs are bounded manual evaluations.
 | frontend/src | React/Vite browser product and Editor |
 | tests | Unit, contract, integration, lifecycle, provider, and E2E support |
 | migrations | Alembic schema history |
-| docs | Current architecture, planning, authoring, and archive |
+| docs | Current architecture, planning, authoring, lifecycle, and archive |
 
 ## Documentation
 
 Current authority:
 
-* [docs/README.md](docs/README.md)
 * [docs/architecture.md](docs/architecture.md)
 * [docs/agent-planning-v2.md](docs/agent-planning-v2.md)
 * [docs/scenario-authoring.md](docs/scenario-authoring.md)
+* [docs/game-lifecycle.md](docs/game-lifecycle.md)
 
 Historical notes:
 

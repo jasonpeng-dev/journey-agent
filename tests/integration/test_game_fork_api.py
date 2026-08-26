@@ -16,15 +16,14 @@ from app.infrastructure.db.models import (
     GameInstanceRegionResourceKnowledge,
     GameInstanceRelationKnowledge,
     GameInstanceResourceState,
-    Scenario,
     WorldOperation,
 )
+from app.scenarios.builtin import require_builtin_v2_version
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _version_id(session: Session) -> str:
-    scenario = session.scalar(select(Scenario).where(Scenario.key == "starfire_command"))
-    assert scenario is not None and scenario.current_published_version_id is not None
-    return str(scenario.current_published_version_id)
+    return str(require_builtin_v2_version(session, GENERIC_TEST).id)
 
 
 def _new_game(client: TestClient, session: Session, *, key: str | None = None) -> dict[str, object]:
@@ -66,11 +65,14 @@ def _prepare_archived_game(client: TestClient, session: Session) -> dict[str, ob
         select(GameInstanceActor).where(GameInstanceActor.game_instance_id == game_id)
     )
     assert node is not None and fact is not None and resource is not None and actor is not None
-    fact.truth_value = {"observed": "after-fork"}
+    fact.truth_value = "after-fork"
     resource.value += 7
     resource.visibility = ResourcePoolVisibility.HIDDEN
     resource.availability = ResourcePoolAvailability.UNAVAILABLE
     actor.current_node_key = node.node_key
+    game_row = session.get(GameInstance, game_id)
+    assert game_row is not None
+    game_row.current_node_key = node.node_key
     actor.command_reachability = "DISCONNECTED"
     actor.status = "DEGRADED"
     region = session.scalar(
@@ -203,7 +205,7 @@ def test_archived_source_forks_exact_state_without_history(
 
     goal = client.post(
         f"/api/v1/games/{target_id}/goals",
-        json={"goal": "gather valley intelligence", "idempotency_key": str(uuid4())},
+        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
     )
     assert goal.status_code == 200
     assert goal.json()["status"] == "ACCEPTED"
