@@ -1,22 +1,18 @@
-import pytest
-
 from app.domain.scenario_v2 import ActionBehavior
 from app.services.spatial_projection import SpatialDisplayProjector
-from tests.scenario_fixtures import LINJIANG_V1_TEST
-
-pytestmark = pytest.mark.legacy_scenario
+from tests.scenario_fixtures import LINJIANG_V2_TEST
 
 
 def test_linjiang_nodes_resources_and_transport_use_generic_spatial_projection() -> None:
-    definition = LINJIANG_V1_TEST
+    definition = LINJIANG_V2_TEST
     projector = SpatialDisplayProjector(definition)
 
-    hospital = projector.node("central_hospital")
-    assert hospital is not None
-    central = projector.node("central_district")
-    assert central is not None
-    assert hospital.region_key == "central_district"
-    assert hospital.region_name == central.name
+    distribution = projector.node("east_distribution_station")
+    assert distribution is not None
+    east = projector.node("east_residential_district")
+    assert east is not None
+    assert distribution.region_key == "east_residential_district"
+    assert distribution.region_name == east.name
 
     corridor = projector.node("west_freight_corridor")
     assert corridor is not None
@@ -34,7 +30,7 @@ def test_linjiang_nodes_resources_and_transport_use_generic_spatial_projection()
 
 
 def test_action_location_formats_route_transport_facility_and_connector() -> None:
-    definition = LINJIANG_V1_TEST
+    definition = LINJIANG_V2_TEST
     projector = SpatialDisplayProjector(definition)
     actions = {action.key: action for action in definition.actions}
 
@@ -63,7 +59,7 @@ def test_action_location_formats_route_transport_facility_and_connector() -> Non
 
     repair = projector.action_location(
         actions["repair_electrical"],
-        target_node_key="central_hospital",
+        target_node_key="east_distribution_station",
     )
     assert repair is not None
     assert repair.kind == "FACILITY"

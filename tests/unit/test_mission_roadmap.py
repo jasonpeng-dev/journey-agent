@@ -1,13 +1,9 @@
-import pytest
-
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.services.mission_roadmap import (
     MissionRoadmapProjector,
     MissionRoadmapStageStatus,
 )
-from tests.scenario_fixtures import GENERIC_TEST, STARFIRE_TEST
-
-pytestmark = pytest.mark.legacy_scenario
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _initial_knowledge(
@@ -19,48 +15,6 @@ def _initial_knowledge(
         for fact in node.facts
         if fact.initial_visibility.value == "KNOWN"
     }
-
-
-def test_starfire_high_level_objective_has_future_non_executable_stages() -> None:
-    scope = ("open_northern_trade_route",)
-    roadmap = MissionRoadmapProjector().project(
-        STARFIRE_TEST,
-        scope,
-        _initial_knowledge(STARFIRE_TEST),
-    )
-
-    assert scope == ("open_northern_trade_route",)
-    assert [stage.objective_key for stage in roadmap.stages] == [
-        "secure_northern_valley",
-        "restore_starfire_outpost",
-        None,
-        "open_northern_trade_route",
-    ]
-    assert roadmap.stages[0].status == MissionRoadmapStageStatus.CURRENT
-    assert all(stage.status != MissionRoadmapStageStatus.COMPLETED for stage in roadmap.stages)
-    assert "ambush" not in " ".join(stage.name.lower() for stage in roadmap.stages)
-
-
-def test_roadmap_updates_from_knowledge_without_changing_objective_scope() -> None:
-    scope = ("open_northern_trade_route",)
-    knowledge = _initial_knowledge(STARFIRE_TEST)
-    knowledge.update(
-        {
-            ("northern_valley", "valley_security"): "SAFE",
-            ("starfire_outpost", "outpost_status"): "RESTORED",
-            ("north_village", "village_support"): "GUIDE",
-        }
-    )
-
-    roadmap = MissionRoadmapProjector().project(STARFIRE_TEST, scope, knowledge)
-
-    assert scope == ("open_northern_trade_route",)
-    assert [stage.status for stage in roadmap.stages] == [
-        MissionRoadmapStageStatus.COMPLETED,
-        MissionRoadmapStageStatus.COMPLETED,
-        MissionRoadmapStageStatus.COMPLETED,
-        MissionRoadmapStageStatus.CURRENT,
-    ]
 
 
 def test_medical_uses_the_same_generic_roadmap_projection() -> None:

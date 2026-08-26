@@ -18,13 +18,9 @@ def load_test_scenario(path: Path) -> ScenarioDefinitionV2:
     return ScenarioDefinitionV2.model_validate(payload)
 
 
-STARFIRE_TEST = load_test_scenario(_ROOT / "migrations" / "fixtures" / "c800_legacy_starfire.yaml")
 GENERIC_TEST = load_test_scenario(Path(__file__).with_name("fixtures") / "generic_contract.yaml")
 LINJIANG_V2_TEST = load_test_scenario(
     _ROOT / "app" / "scenarios" / "data" / "linjiang_infrastructure_recovery_v2_0.yaml"
-)
-LINJIANG_V1_TEST = load_test_scenario(
-    Path(__file__).with_name("fixtures") / "generic_linjiang_v1.yaml"
 )
 
 
@@ -48,9 +44,7 @@ def create_test_scenario(
 
 __all__ = [
     "GENERIC_TEST",
-    "LINJIANG_V1_TEST",
     "LINJIANG_V2_TEST",
-    "STARFIRE_TEST",
     "create_test_scenario",
     "load_test_scenario",
 ]

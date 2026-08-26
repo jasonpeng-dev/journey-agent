@@ -54,5 +54,4 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
   "integration: tests requiring the application database",
-  "legacy_scenario: test still asserting a retired Scenario-specific contract; migrate in C2",
 ]

@@ -1,7 +1,6 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -13,17 +12,14 @@ from app.infrastructure.db.models import (
     AgentTask,
     ConversationSession,
     GameInstance,
-    Scenario,
 )
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
-
-pytestmark = pytest.mark.legacy_scenario
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _version_id(session: Session) -> str:
-    scenario = session.scalar(select(Scenario).where(Scenario.key == "starfire_command"))
-    assert scenario is not None and scenario.current_published_version_id is not None
-    return str(scenario.current_published_version_id)
+    return str(require_builtin_v2_version(session, GENERIC_TEST).id)
 
 
 def _new_game(client: TestClient, session: Session, key: str | None = None) -> dict[str, object]:
@@ -45,7 +41,7 @@ def _completed_task(session: Session, game_id: UUID, goal: str) -> AgentTask:
     assert conversation is not None
     task = GenericAgentService(
         session, GameInstanceService(session).load(GameInstanceId(game_id))
-    ).create_task(conversation, "gather valley intelligence")
+    ).create_task(conversation, "stabilize the patient")
     task.status = AgentTaskStatus.SUCCEEDED
     task.completed_at = datetime.now(UTC)
     session.flush()
@@ -124,7 +120,7 @@ def test_nested_checkpoint_fork_lifecycle_preserves_history_and_delete_independe
     assert final_fork["inherited_task_count"] == 4
     new_task = client.post(
         f"/api/v1/games/{final_fork_id}/goals",
-        json={"goal": "gather valley intelligence", "idempotency_key": "nested-task-five"},
+        json={"goal": "stabilize the patient", "idempotency_key": "nested-task-five"},
     )
     assert new_task.status_code == 200, new_task.text
     history = client.get(f"/api/v1/games/{final_fork_id}/play")

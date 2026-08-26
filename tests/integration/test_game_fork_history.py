@@ -1,7 +1,6 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -9,16 +8,14 @@ from sqlalchemy.orm import Session
 from app.agent.generic import GenericAgentService
 from app.domain.enums import AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
-from app.infrastructure.db.models import AgentTask, ConversationSession, GameInstance, Scenario
+from app.infrastructure.db.models import AgentTask, ConversationSession, GameInstance
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
-
-pytestmark = pytest.mark.legacy_scenario
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _version_id(session: Session) -> str:
-    scenario = session.scalar(select(Scenario).where(Scenario.key == "starfire_command"))
-    assert scenario is not None and scenario.current_published_version_id is not None
-    return str(scenario.current_published_version_id)
+    return str(require_builtin_v2_version(session, GENERIC_TEST).id)
 
 
 def _new_game(client: TestClient, session: Session) -> dict[str, object]:
@@ -58,7 +55,7 @@ def test_ordinary_archive_fork_inherits_history_and_new_task_boundary(
 ) -> None:
     source = _new_game(client, session)
     source_id = UUID(str(source["id"]))
-    first_task = _completed_task(session, source_id, "gather valley intelligence")
+    first_task = _completed_task(session, source_id, "stabilize the patient")
     session.commit()
     archived = _archive(client, source)
 
@@ -78,7 +75,7 @@ def test_ordinary_archive_fork_inherits_history_and_new_task_boundary(
 
     new_task_response = client.post(
         f"/api/v1/games/{target_id}/goals",
-        json={"goal": "gather valley intelligence", "idempotency_key": "new-target-task"},
+        json={"goal": "stabilize the patient", "idempotency_key": "new-target-task"},
     )
     assert new_task_response.status_code == 200, new_task_response.text
     assert (
@@ -113,7 +110,7 @@ def test_checkpoint_fork_inherits_history_but_not_checkpoint_provenance(
 ) -> None:
     source = _new_game(client, session)
     source_id = UUID(str(source["id"]))
-    _completed_task(session, source_id, "gather valley intelligence")
+    _completed_task(session, source_id, "stabilize the patient")
     session.commit()
 
     checkpoint_response = client.post(

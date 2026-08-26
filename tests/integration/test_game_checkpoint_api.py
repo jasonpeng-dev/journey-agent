@@ -1,7 +1,6 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -15,17 +14,14 @@ from app.infrastructure.db.models import (
     GameInstance,
     GameInstanceFactState,
     GameInstanceResourceState,
-    Scenario,
 )
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
-
-pytestmark = pytest.mark.legacy_scenario
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _version_id(session: Session) -> str:
-    scenario = session.scalar(select(Scenario).where(Scenario.key == "starfire_command"))
-    assert scenario is not None and scenario.current_published_version_id is not None
-    return str(scenario.current_published_version_id)
+    return str(require_builtin_v2_version(session, GENERIC_TEST).id)
 
 
 def _new_game(client: TestClient, session: Session) -> dict[str, object]:
@@ -44,7 +40,7 @@ def _completed_task(session: Session, game_id: UUID) -> AgentTask:
     assert conversation is not None
     task = GenericAgentService(
         session, GameInstanceService(session).load(GameInstanceId(game_id))
-    ).create_task(conversation, "gather valley intelligence")
+    ).create_task(conversation, "stabilize the patient")
     task.status = AgentTaskStatus.SUCCEEDED
     task.completed_at = datetime.now(UTC)
     session.flush()
