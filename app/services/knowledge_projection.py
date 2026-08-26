@@ -17,6 +17,7 @@ from app.domain.enums import (
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
+from app.domain.resources import resource_pool_initial_states
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
@@ -85,6 +86,13 @@ class SharedKnowledgeProjection:
         self.definition = definition
         self._region_states: dict[str, RegionResourceKnowledgeView] | None = None
         self._visible_pools: tuple[KnownResourcePoolView, ...] | None = None
+        self._static_pool_requirements: dict[tuple[str, str | None, str], dict[str, Any]] = {}
+        for pool in resource_pool_initial_states(definition):
+            requirement = pool.availability_requirement
+            if requirement is not None:
+                self._static_pool_requirements[
+                    (pool.resource_key, pool.region_key, pool.pool_key)
+                ] = requirement.model_dump(mode="json")
 
     @property
     def region_keys(self) -> tuple[str, ...]:
@@ -594,6 +602,7 @@ class SharedKnowledgeProjection:
                     and row.facility_key is None
                 ):
                     continue
+            availability_requirement = self.availability_requirement_for_pool(row)
             visible.append(
                 KnownResourcePoolView(
                     pool_key=row.pool_key,
@@ -607,9 +616,9 @@ class SharedKnowledgeProjection:
                         "availability",
                         ResourcePoolAvailability.AVAILABLE,
                     ),
-                    availability_requirement=self.known_requirement(row.availability_requirement),
+                    availability_requirement=availability_requirement,
                     availability_requirement_status=self.requirement_status(
-                        row.availability_requirement
+                        availability_requirement
                     ),
                 )
             )
@@ -767,6 +776,7 @@ class SharedKnowledgeProjection:
             }
             for pool in self.visible_resource_pools()
             if pool.facility_key == facility_key
+            and pool.availability != ResourcePoolAvailability.AVAILABLE
         ]
 
     def _resource_summary(
@@ -811,6 +821,15 @@ class SharedKnowledgeProjection:
         facility = self.definition.world.node(facility_key)
         return facility.name if facility is not None else None
 
+    def availability_requirement_for_pool(
+        self, row: GameInstanceResourceState
+    ) -> dict[str, Any] | None:
+        raw = self._static_pool_requirements.get(
+            (row.resource_key, row.scope_node_key, row.pool_key),
+            row.availability_requirement,
+        )
+        return self.known_requirement(raw)
+
     def known_requirement(self, raw: dict[str, Any] | None) -> dict[str, Any] | None:
         if not raw:
             return None
@@ -826,7 +845,7 @@ class SharedKnowledgeProjection:
             )
         )
         if known != Visibility.KNOWN:
-            return None
+            return dict(raw)
         result = dict(raw)
         fact_value = self.db.scalar(
             select(GameInstanceFactState.truth_value).where(

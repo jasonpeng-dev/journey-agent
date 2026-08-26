@@ -24,6 +24,7 @@ from app.scenarios.builtin import load_builtin_scenario
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.generic_game import GenericGameService
+from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
 
@@ -174,6 +175,116 @@ def test_inspect_reveals_non_resource_facility_facts_only(session: Session) -> N
         ),
     )
     assert pool is not None and pool.visibility == ResourcePoolVisibility.HIDDEN
+
+
+def test_resource_pool_and_facility_knowledge_is_order_independent(session: Session) -> None:
+    survey_definition = _definition_with_pool(
+        "linjiang_v2_0_survey_then_inspect_definition",
+        pool_key="order_test_survey_pool",
+        resource_key="general_engineering_parts",
+        region_key="north_industrial_district",
+        quantity=1,
+    )
+    inspect_definition = _definition_with_pool(
+        "linjiang_v2_0_inspect_then_survey_definition",
+        pool_key="order_test_inspect_pool",
+        resource_key="general_engineering_parts",
+        region_key="north_industrial_district",
+        quantity=1,
+    )
+
+    def discovered_pool(scope, definition):
+        pool = next(
+            (
+                item
+                for item in SharedKnowledgeProjection(
+                    session, scope, definition
+                ).visible_resource_pools()
+                if item.pool_key == "north_heavy_equipment_stock"
+            ),
+            None,
+        )
+        return pool
+
+    survey_first_runtime, survey_first_scope = _runtime(
+        session,
+        survey_definition,
+        "linjiang-v2_0-survey-then-inspect",
+    )
+    _set_actor(
+        session,
+        survey_first_runtime.instance.id,
+        "logistics_team_alpha",
+        "north_industrial_district",
+    )
+    survey_first_game = GenericGameService(session, survey_first_scope)
+    surveyed = survey_first_game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="survey_resources",
+        target_node_key="north_industrial_district",
+        parameters={},
+    )
+    assert surveyed.outcome.failure is None
+    before_inspect = discovered_pool(survey_first_scope, survey_definition)
+    assert before_inspect is not None
+    assert before_inspect.availability_requirement == {
+        "node_key": "heavy_equipment_yard",
+        "fact_key": "operational",
+        "value": True,
+    }
+    assert "known_value" not in before_inspect.availability_requirement
+    assert (
+        _fact(
+            session,
+            survey_first_runtime.instance.id,
+            "heavy_equipment_yard",
+            "operational",
+        ).visibility
+        == Visibility.HIDDEN
+    )
+    inspected = survey_first_game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="inspect",
+        target_node_key="heavy_equipment_yard",
+        parameters={},
+    )
+    assert inspected.outcome.failure is None
+    survey_then_inspect = discovered_pool(survey_first_scope, survey_definition)
+    assert survey_then_inspect is not None
+    assert survey_then_inspect.availability_requirement["known_value"] is False
+
+    inspect_first_runtime, inspect_first_scope = _runtime(
+        session,
+        inspect_definition,
+        "linjiang-v2_0-inspect-then-survey",
+    )
+    _set_actor(
+        session,
+        inspect_first_runtime.instance.id,
+        "logistics_team_alpha",
+        "north_industrial_district",
+    )
+    inspect_first_game = GenericGameService(session, inspect_first_scope)
+    inspected_first = inspect_first_game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="inspect",
+        target_node_key="heavy_equipment_yard",
+        parameters={},
+    )
+    assert inspected_first.outcome.failure is None
+    assert discovered_pool(inspect_first_scope, inspect_definition) is None
+    surveyed_second = inspect_first_game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="survey_resources",
+        target_node_key="north_industrial_district",
+        parameters={},
+    )
+    assert surveyed_second.outcome.failure is None
+    inspect_then_survey = discovered_pool(inspect_first_scope, inspect_definition)
+    assert inspect_then_survey is not None
+    assert (
+        inspect_then_survey.availability_requirement == survey_then_inspect.availability_requirement
+    )
 
 
 def test_repair_communications_reveals_target_region_facilities_not_resources(

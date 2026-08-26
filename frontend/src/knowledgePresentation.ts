@@ -39,6 +39,24 @@ const RELATION_REQUIREMENT_DESCRIPTIONS: Record<string, string> = {
   enables: "需要已知的行动支持关系",
 };
 
+export function resourceAvailabilityRequirementText(
+  requirement: Record<string, unknown>,
+  targetName?: string | null,
+): string | null {
+  const subject = targetName?.trim() || '相关设施';
+  const factKey = requirement.fact_key;
+  const value = requirement.value;
+  if (factKey === 'operational') {
+    if (value === true) return subject + '恢复运行';
+    if (value === false) return subject + '停止运行';
+  }
+  if (factKey === 'power_supply') {
+    if (value === 'AVAILABLE' || value === true) return subject + '恢复供电';
+    if (value === 'UNAVAILABLE' || value === false) return subject + '满足供电条件';
+  }
+  return subject + '满足解锁条件';
+}
+
 export type DisplayRequirementLine = {
   key: string;
   label: string;

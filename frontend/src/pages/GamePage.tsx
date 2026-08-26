@@ -11,6 +11,7 @@ import {
   facilityStatusDisplayValue,
   generationCapabilityDisplayValue,
   resourceDisplayName,
+  resourceAvailabilityRequirementText,
   knownRelationDescription,
   meaningfulKnownRelations,
   relationDisplayKey,
@@ -426,6 +427,14 @@ export function KnownWorldAccordions({
   const nodeByKey = new Map(visibleNodes.map((node) => [node.key, node]));
   const nodeDisplayName = (key: string, candidate?: string | null) =>
     candidate ?? nodeByKey.get(key)?.name ?? "已知地点";
+  const resourceRequirementText = (requirement: unknown) => {
+    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) return "";
+    const normalized = requirement as Record<string, unknown>;
+    const nodeKey = typeof normalized.node_key === "string" ? normalized.node_key : "";
+    const targetName = nodeKey ? nodeDisplayName(nodeKey) : null;
+    const text = resourceAvailabilityRequirementText(normalized, targetName);
+    return text ? "解锁条件：" + text : "";
+  };
   const factsByNode = new Map<string, PlayerGameState["known_facts"]>();
   const relationsBySource = new Map<string, NonNullable<PlayerGameState["known_relations"]>>();
   const regionFacts = new Map<string, PlayerGameState["known_facts"]>();
@@ -563,7 +572,8 @@ export function KnownWorldAccordions({
                   const hasGenerationSemantics = generationFact?.value === true;
                   const targetContracts = targetContractsFor(node.key);
                   const additionalFacts = nodeFacts.filter((fact) => !facilityMetadataFacts.has(fact.fact_key));
-                  const associatedResources = node.associated_known_resources ?? [];
+                  const associatedResources = (node.associated_known_resources ?? [])
+                    .filter((resource) => resource.availability !== "AVAILABLE");
                   const hasFacilityDetails = targetContracts.length > 0
                     || associatedResources.length > 0
                     || hasPowerOutputRelation
@@ -609,11 +619,7 @@ export function KnownWorldAccordions({
                         : resource.availability === "AVAILABLE"
                           ? "\u53ef\u7528"
                           : "";
-                      const requirement = resource.availability_requirement
-                        ? "\u4fee\u590d\u540e\u53ef\u7528"
-                        : resource.availability_requirement_status === "UNKNOWN"
-                          ? "\u89e3\u9501\u6761\u4ef6\u672a\u77e5"
-                          : "";
+                      const requirement = resourceRequirementText(resource.availability_requirement);
                       return [name + quantity, availability, requirement].filter(Boolean).join("\uff0c");
                     })
                     .join("\uff0c");
@@ -825,11 +831,9 @@ export function KnownWorldAccordions({
                                   <small key={index}>
                                     暂不可用 {pool.quantity}
                                     {pool.facility_name ? ` · ${pool.facility_name}` : ""}
-                                    {pool.availability_requirement
-                                      ? " · 修复后可调用"
-                                      : pool.availability_requirement_status === "UNKNOWN"
-                                        ? " · 解锁条件未知"
-                                        : ""}
+                                    {resourceRequirementText(pool.availability_requirement)
+                                      ? " · " + resourceRequirementText(pool.availability_requirement)
+                                      : ""}
                                   </small>
                                 ))}
                             </div>

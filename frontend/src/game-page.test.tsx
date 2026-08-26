@@ -1153,8 +1153,14 @@ describe("Formal Play player projections", () => {
                 resource_name: "General Engineering Parts",
                 quantity: 50,
                 availability: "UNAVAILABLE",
-                availability_requirement: { fact_key: "operational" },
+                availability_requirement: { node_key: "utility_service_depot", fact_key: "operational", value: true },
                 availability_requirement_status: "KNOWN",
+              },
+              {
+                resource_key: "general_engineering_parts",
+                resource_name: "General Engineering Parts",
+                quantity: 35,
+                availability: "AVAILABLE",
               },
             ],
           },
@@ -1209,6 +1215,7 @@ describe("Formal Play player projections", () => {
     expect(screen.getByTestId("facility-card-unknown_facility")).not.toHaveTextContent("\u5f85\u4fee\u590d");
     fireEvent.click(utilitySummary);
     expect(utility).toHaveAttribute("open");
+    expect(utility).not.toHaveTextContent("\u00d735");
     expect(utilitySummary).toHaveTextContent("-");
     expect(utilitySummary).not.toHaveTextContent("+");
     expect(window.location.href).toBe(locationBefore);
@@ -1218,7 +1225,7 @@ describe("Formal Play player projections", () => {
     expect(utility).toHaveTextContent("×20");
     expect(utility).toHaveTextContent("修复需求：通用工程部件 ×5、市政维修材料 ×20");
     expect(utility).toHaveTextContent("执行队伍：Industrial Repair Team");
-    expect(utility).toHaveTextContent("关联资源：通用工程部件 ×50，暂不可用，修复后可用");
+    expect(utility).toHaveTextContent("关联资源：通用工程部件 ×50，暂不可用，解锁条件：Utility Service Depot恢复运行");
     expect(utility).toHaveTextContent("重型工程支援：不可用");
     expect(utility).not.toHaveTextContent("修复效果：");
     expect(utility).not.toHaveTextContent("修复后设备正常");

@@ -217,13 +217,24 @@ def test_hidden_pool_is_absent_from_shared_planner_and_player_safe_projection(
     session: Session,
 ) -> None:
     definition = _pool_definition()
-    runtime, scope = _runtime(session, definition, "resource-pool-hidden-before-survey")
+    runtime, scope = _runtime(
+        session,
+        definition,
+        "resource-pool-hidden-before-survey",
+        use_platform_player=True,
+    )
     projection = SharedKnowledgeProjection(session, scope, definition)
 
     visible = projection.visible_resource_pools()
     assert {item.pool_key for item in visible} == {"west_pool_a", "west_pool_b"}
     intelligence = projection.resource_intelligence()
     assert intelligence["regions"]["north_industrial_district"]["resources"] == {}
+    player_intelligence = (
+        PlayerProjectionService(session)
+        .game_state(GameInstanceId(runtime.instance.id))
+        .resource_intelligence
+    )
+    assert player_intelligence["regions"]["north_industrial_district"]["resources"] == {}
     planner = projection.planner_resources()
     planner_json = str(planner)
     assert "north_hidden_pool" not in planner_json
@@ -726,6 +737,8 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
         )
         assert pool is not None
         pool.visibility = ResourcePoolVisibility.VISIBLE
+        if pool_key != "north_emergency_engineering_stock":
+            pool.availability_requirement = None
     session.flush()
 
     shared = SharedKnowledgeProjection(session, scope, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
@@ -770,7 +783,40 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
         assert associated[0]["facility_name"] == facility_name
         assert associated[0]["quantity"] == 50
         assert associated[0]["availability"] == "UNAVAILABLE"
-        assert associated[0]["availability_requirement_status"] == "UNKNOWN"
+        assert associated[0]["availability_requirement"] == {
+            "node_key": facility_key,
+            "fact_key": "operational",
+            "value": True,
+        }
+        assert associated[0]["availability_requirement_status"] == "KNOWN"
+        assert "known_value" not in associated[0]["availability_requirement"]
+
+    for pool_key in ("north_heavy_equipment_stock", "north_service_depot_stock"):
+        pool = session.get(
+            GameInstanceResourceState,
+            (
+                runtime.instance.id,
+                f"general_engineering_parts@north_industrial_district@{pool_key}",
+            ),
+        )
+        assert pool is not None
+        pool.availability = ResourcePoolAvailability.AVAILABLE
+    session.flush()
+    refreshed = PlayerProjectionService(session).game_state(GameInstanceId(runtime.instance.id))
+    refreshed_pools = refreshed.resource_intelligence["regions"]["north_industrial_district"][
+        "resources"
+    ]["general_engineering_parts"]["pools"]
+    assert {
+        pool["pool_key"]: pool["availability"]
+        for pool in refreshed_pools
+        if pool["pool_key"] in {"north_heavy_equipment_stock", "north_service_depot_stock"}
+    } == {
+        "north_heavy_equipment_stock": "AVAILABLE",
+        "north_service_depot_stock": "AVAILABLE",
+    }
+    refreshed_nodes = {node.key: node for node in refreshed.visible_nodes}
+    assert refreshed_nodes["heavy_equipment_yard"].associated_known_resources == []
+    assert refreshed_nodes["utility_service_depot"].associated_known_resources == []
 
 
 def test_transport_reuses_canonical_destination_and_player_aggregates_legacy_duplicate(
@@ -983,7 +1029,12 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
     session: Session,
 ) -> None:
     definition = _pool_definition()
-    runtime, scope = _runtime(session, definition, "resource-pool-unknown-requirement")
+    runtime, scope = _runtime(
+        session,
+        definition,
+        "resource-pool-unknown-requirement",
+        use_platform_player=True,
+    )
     pool = session.get(
         GameInstanceResourceState,
         (
@@ -1004,19 +1055,60 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
     known_pool = next(
         item for item in projection.visible_resource_pools() if item.pool_key == "north_hidden_pool"
     )
-    assert known_pool.availability_requirement is None
-    assert known_pool.availability_requirement_status == "UNKNOWN"
+    assert known_pool.availability_requirement == {
+        "node_key": "north_power_substation",
+        "fact_key": "operational",
+        "value": True,
+    }
+    assert known_pool.availability_requirement_status == "KNOWN"
+    assert "known_value" not in known_pool.availability_requirement
     summary = projection.resource_intelligence()["regions"]["north_industrial_district"][
         "resources"
     ]["electrical_repair_parts"]
     pool_summary = summary["pools"][0]
-    assert pool_summary["availability_requirement_status"] == "UNKNOWN"
-    assert "availability_requirement" not in pool_summary
+    assert pool_summary["availability_requirement"] == {
+        "node_key": "north_power_substation",
+        "fact_key": "operational",
+        "value": True,
+    }
+    assert pool_summary["availability_requirement_status"] == "KNOWN"
     planner_pool = projection.planner_resources()["resources"]["electrical_repair_parts"][
         "regions"
     ]["north_industrial_district"]["pools"][0]
-    assert planner_pool["availability_requirement_status"] == "UNKNOWN"
-    assert "availability_requirement" not in planner_pool
+    assert planner_pool["availability_requirement"] == {
+        "node_key": "north_power_substation",
+        "fact_key": "operational",
+        "value": True,
+    }
+    assert planner_pool["availability_requirement_status"] == "KNOWN"
+    player_pool = (
+        PlayerProjectionService(session)
+        .game_state(GameInstanceId(runtime.instance.id))
+        .resource_intelligence["regions"]["north_industrial_district"]["resources"][
+            "electrical_repair_parts"
+        ]["pools"][0]
+    )
+    assert player_pool["availability_requirement"] == {
+        "node_key": "north_power_substation",
+        "fact_key": "operational",
+        "value": True,
+    }
+    assert player_pool["availability_requirement_status"] == "KNOWN"
+    assert "known_value" not in player_pool["availability_requirement"]
+    task = GenericAgentService(session, scope).create_task(
+        runtime.session,
+        "restore central hospital emergency power",
+        initialize_plan=False,
+    )
+    context = PlanningContextBuilder(session, scope).build(
+        definition,
+        (definition.objectives[0],),
+        task=task,
+        replan_reason=None,
+    )
+    context_json = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
+    assert "north_power_substation" in context_json
+    assert "known_value" not in context_json
 
 
 def test_region_visibility_effect_does_not_complete_survey_or_reveal_hidden_pools(

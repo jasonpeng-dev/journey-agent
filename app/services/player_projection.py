@@ -137,7 +137,11 @@ class PlayerProjectionService:
             in visible_resource_identities
             and self._is_player_usable_regional_pool(item)
         )
-        public_resources = self._aggregate_resource_rows(resources, spatial=spatial)
+        public_resources = self._aggregate_resource_rows(
+            resources,
+            spatial=spatial,
+            knowledge_projection=knowledge_projection,
+        )
         actors = knowledge_projection.actor_rows()
         task_query = (
             select(AgentTask)
@@ -355,11 +359,12 @@ class PlayerProjectionService:
             item.facility_key is None and availability == ResourcePoolAvailability.AVAILABLE.value
         )
 
-    @staticmethod
     def _aggregate_resource_rows(
+        self,
         resources: tuple[GameInstanceResourceState, ...],
         *,
         spatial: SpatialDisplayProjector,
+        knowledge_projection: SharedKnowledgeProjection,
     ) -> tuple[_PlayerResourceRow, ...]:
         grouped: dict[tuple[str | None, str], list[GameInstanceResourceState]] = {}
         for item in resources:
@@ -392,7 +397,9 @@ class PlayerProjectionService:
                 if len(availability_values) == 1
                 else ("AVAILABLE" if "AVAILABLE" in availability_values else "UNAVAILABLE")
             )
-            requirements = [item.availability_requirement for item in ordered]
+            requirements = [
+                knowledge_projection.availability_requirement_for_pool(item) for item in ordered
+            ]
             requirement = (
                 requirements[0] if all(item == requirements[0] for item in requirements) else None
             )
