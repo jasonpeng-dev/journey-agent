@@ -3,7 +3,7 @@ from __future__ import annotations
 from app.domain.resources import resource_pool_initial_states, resource_state_key
 from app.scenarios.builtin import load_builtin_scenario
 from app.services.player_action_report import format_player_knowledge_changes
-from tests.scenario_fixtures import STARFIRE_TEST
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _definition(name: str = "linjiang_infrastructure_recovery_v2_0.yaml"):
@@ -174,7 +174,7 @@ def test_action_report_uses_normalized_operational_labels() -> None:
 
 
 def test_action_report_does_not_leak_hidden_enum_and_works_for_other_scenario() -> None:
-    definition = STARFIRE_TEST
+    definition = GENERIC_TEST
     resource = definition.world.resources[0]
     changes = format_player_knowledge_changes(
         [

@@ -32,6 +32,8 @@ from app.services.generic_actions import GenericActionError, GenericActionServic
 from app.services.runtime_initialization import InitializedRuntime, RuntimeInitializationService
 from tests.scenario_fixtures import LINJIANG_V1_TEST
 
+pytestmark = pytest.mark.legacy_scenario
+
 
 class LinjiangProvider:
     model_name = "linjiang-test-provider"

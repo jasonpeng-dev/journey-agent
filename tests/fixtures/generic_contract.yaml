@@ -1,6 +1,6 @@
 schema_version: 2
 metadata:
-  key: medical_emergency
+  key: generic_runtime
   name: 医疗急救
   description: 在小型诊所中诊断并稳定患者病情。
   locality:
@@ -20,7 +20,7 @@ initialization:
   primary_actor_key: doctor_lee
   resource_initial_states: []
 world:
-  key: medical_emergency
+  key: generic_runtime
   name: 医疗急救
   node_types:
   - key: cabinet

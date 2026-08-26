@@ -2,6 +2,7 @@ import json
 from uuid import uuid4
 
 import httpx
+import pytest
 from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
@@ -35,6 +36,8 @@ from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
 from tests.scenario_fixtures import STARFIRE_TEST
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 class DirectBindingProvider:

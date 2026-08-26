@@ -1,4 +1,8 @@
+import pytest
+
 from tests.scenario_fixtures import LINJIANG_V1_TEST
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 def test_linjiang_v1_preserves_topology_and_adds_gameplay() -> None:

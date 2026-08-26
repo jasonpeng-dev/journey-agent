@@ -1,9 +1,13 @@
+import pytest
+
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.services.mission_roadmap import (
     MissionRoadmapProjector,
     MissionRoadmapStageStatus,
 )
-from tests.scenario_fixtures import MEDICAL_TEST, STARFIRE_TEST
+from tests.scenario_fixtures import GENERIC_TEST, STARFIRE_TEST
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 def _initial_knowledge(
@@ -61,9 +65,9 @@ def test_roadmap_updates_from_knowledge_without_changing_objective_scope() -> No
 
 def test_medical_uses_the_same_generic_roadmap_projection() -> None:
     roadmap = MissionRoadmapProjector().project(
-        MEDICAL_TEST,
+        GENERIC_TEST,
         ("stabilize_patient",),
-        _initial_knowledge(MEDICAL_TEST),
+        _initial_knowledge(GENERIC_TEST),
     )
 
     assert [stage.objective_key for stage in roadmap.stages] == [

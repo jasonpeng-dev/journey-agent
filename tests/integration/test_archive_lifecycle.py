@@ -1,5 +1,6 @@
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,6 +20,8 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.services.game_instances import GameInstanceService
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 def _version_id(session: Session) -> str:

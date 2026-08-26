@@ -30,6 +30,8 @@ from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleError
 from app.services.generic_game import GenericGameService
 
+pytestmark = pytest.mark.legacy_scenario
+
 
 def _published_version_id(session: Session) -> str:
     scenario = session.scalar(select(Scenario).where(Scenario.key == "starfire_command"))

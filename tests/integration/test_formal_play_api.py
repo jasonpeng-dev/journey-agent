@@ -18,7 +18,9 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.scenarios.builtin import require_builtin_v2_version
-from tests.scenario_fixtures import LINJIANG_V1_TEST, MEDICAL_TEST
+from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V1_TEST
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 class FormalKnowledgeRevalidationProvider:
@@ -253,7 +255,7 @@ def test_goal_submission_stops_at_first_briefing_and_ack_runs_one_action_cycle(
 def test_medical_uses_same_stepwise_play_and_game_remains_active(
     client: TestClient, session: Session
 ) -> None:
-    version = require_builtin_v2_version(session, MEDICAL_TEST)
+    version = require_builtin_v2_version(session, GENERIC_TEST)
     session.commit()
     game_id = _new_game(client, str(version.id))
     first = client.post(

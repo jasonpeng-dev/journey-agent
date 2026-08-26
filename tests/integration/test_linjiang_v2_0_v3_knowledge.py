@@ -20,15 +20,15 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     Player,
 )
-from app.scenarios.builtin import load_builtin_scenario
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.generic_game import GenericGameService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import LINJIANG_V2_TEST
 
-V2_0 = load_builtin_scenario("linjiang_infrastructure_recovery_v2_0.yaml")
+V2_0 = LINJIANG_V2_TEST
 
 
 def _definition_with_pool(

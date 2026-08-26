@@ -1,6 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -21,7 +22,9 @@ from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
-from tests.scenario_fixtures import MEDICAL_TEST, STARFIRE_TEST
+from tests.scenario_fixtures import GENERIC_TEST, STARFIRE_TEST
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 def _drive(
@@ -55,7 +58,7 @@ def test_two_different_v2_games_run_isolated_and_recover_exact_versions(
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         starfire_version = require_builtin_v2_version(db, STARFIRE_TEST)
-        medical_version = require_builtin_v2_version(db, MEDICAL_TEST)
+        medical_version = require_builtin_v2_version(db, GENERIC_TEST)
         player = Player(name="dual-scenario-player")
         db.add(player)
         db.flush()

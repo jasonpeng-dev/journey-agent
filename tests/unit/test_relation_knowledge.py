@@ -25,11 +25,11 @@ from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
 from tests.unit.test_generic_gameplay_capabilities import _runtime as capability_runtime
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
-def _hidden_medical_document(*, reveal_on_treatment: bool = False) -> dict[str, Any]:
-    document = deepcopy(_medical_scenario_document())
+def _hidden_relation_document(*, reveal_on_treatment: bool = False) -> dict[str, Any]:
+    document = deepcopy(_contract_scenario_document())
     relation = document["world"]["relations"][0]
     relation["key"] = "triage_contains_patient"
     relation["initial_visibility"] = "HIDDEN"
@@ -64,7 +64,7 @@ def _publish_runtime(
 
 
 def test_legacy_relation_defaults_visible_without_hash_or_serialization_change() -> None:
-    source = _medical_scenario_document()
+    source = _contract_scenario_document()
     definition = ScenarioDefinitionV2.model_validate(source)
 
     assert definition.world.relations[0].initial_visibility == RelationVisibility.VISIBLE
@@ -83,7 +83,7 @@ def test_hidden_relation_is_absent_from_player_and_planning_context_until_reveal
 ) -> None:
     definition, runtime, scope = _publish_runtime(
         session,
-        _hidden_medical_document(reveal_on_treatment=True),
+        _hidden_relation_document(reveal_on_treatment=True),
         "hidden-relation-projection",
     )
     projection = SharedKnowledgeProjection(session, scope, definition)

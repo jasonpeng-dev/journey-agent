@@ -12,11 +12,11 @@ from app.infrastructure.db.base import Base
 from app.infrastructure.db.session import configure_sqlite_foreign_keys, get_db
 from app.main import app
 from app.scenarios.builtin import require_builtin_v2_version
-from tests.scenario_fixtures import STARFIRE_TEST
+from tests.scenario_fixtures import GENERIC_TEST, STARFIRE_TEST
 
 
 @pytest.fixture
-def session() -> Generator[Session, None, None]:
+def session(request: pytest.FixtureRequest) -> Generator[Session, None, None]:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -27,8 +27,12 @@ def session() -> Generator[Session, None, None]:
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as db:
         with db.begin():
-            # Generic runtime tests use this test-only fixture; production seed remains v2.0-only.
-            require_builtin_v2_version(db, STARFIRE_TEST)
+            # Generic runtime tests use a disposable, scenario-neutral contract fixture.
+            require_builtin_v2_version(db, GENERIC_TEST)
+            # These modules still assert the retired Starfire-specific route/recovery
+            # contract. They are explicitly marked for the C2 scenario-test migration.
+            if request.node.get_closest_marker("legacy_scenario") is not None:
+                require_builtin_v2_version(db, STARFIRE_TEST)
         yield db
 
 

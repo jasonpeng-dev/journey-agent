@@ -1,6 +1,10 @@
+import pytest
+
 from app.agent.generic import GenericGoalResolver
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from tests.scenario_fixtures import LINJIANG_V1_TEST
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 def test_current_builtin_preserves_stable_keys_and_player_names() -> None:

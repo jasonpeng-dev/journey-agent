@@ -43,7 +43,9 @@ from app.scenarios.builtin import require_builtin_v2_version
 from app.services.composition import configured_play_orchestrator
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
-from tests.scenario_fixtures import MEDICAL_TEST, STARFIRE_TEST, create_test_scenario
+from tests.scenario_fixtures import GENERIC_TEST, STARFIRE_TEST, create_test_scenario
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 class RecordingProvider:
@@ -143,7 +145,7 @@ def test_mock_composition_never_sends_model_http(
         raise AssertionError("mock mode must not issue model HTTP")
 
     monkeypatch.setattr(httpx, "post", fail_http)
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     submission = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("mock")
     ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
@@ -160,7 +162,7 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -213,7 +215,7 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -252,7 +254,7 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -333,7 +335,7 @@ def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
 def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
     session: Session,
 ) -> None:
-    runtime, scope = _runtime(session, MEDICAL_TEST)
+    runtime, scope = _runtime(session, GENERIC_TEST)
     invalid_step = (_step("treat_patient", "patient_one", "invented_actor", {"dosage": 2}),)
     invalid = RecordingProvider(proposals=[invalid_step, invalid_step, invalid_step])
     with pytest.raises(GenericAgentError) as caught:
@@ -343,7 +345,7 @@ def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
     assert caught.value.code == "MODEL_PLAN_REJECTED"
     session.rollback()
 
-    runtime, scope = _runtime(session, MEDICAL_TEST)
+    runtime, scope = _runtime(session, GENERIC_TEST)
     repeated = RecordingProvider(
         proposals=[_medical_plan(), _medical_plan(), _medical_plan(), _medical_plan()]
     )
@@ -649,7 +651,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -800,7 +802,7 @@ def test_provider_repair_attempt_limit_comes_from_settings(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     settings = _settings("openai_compatible").model_copy(
         update={"model_max_repair_attempts_per_cycle": 4}
     )
@@ -830,7 +832,7 @@ def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
 
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
@@ -855,7 +857,7 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     patient = session.get(
         GameInstanceNodeState,
         (runtime.instance.id, "patient_one"),
@@ -895,7 +897,7 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
                 ),
             ),
         ),
-        (MEDICAL_TEST, "stabilize the patient", _medical_plan()),
+        (GENERIC_TEST, "stabilize the patient", _medical_plan()),
     ],
 )
 def test_starfire_and_medical_share_composition_wiring(
@@ -928,7 +930,7 @@ def test_draft_sandbox_uses_same_provider_composition_without_formal_game_row(
     )
     created = create_test_scenario(
         session,
-        MEDICAL_TEST,
+        GENERIC_TEST,
         key=f"provider_sandbox_{uuid4().hex[:8]}",
         name="Provider Sandbox",
     )
@@ -1138,7 +1140,7 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    version = require_builtin_v2_version(session, MEDICAL_TEST)
+    version = require_builtin_v2_version(session, GENERIC_TEST)
     session.commit()
     response = client.post(
         "/api/v1/games",
@@ -1199,7 +1201,7 @@ def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    version = require_builtin_v2_version(session, MEDICAL_TEST)
+    version = require_builtin_v2_version(session, GENERIC_TEST)
     session.commit()
     game = client.post(
         "/api/v1/games",
@@ -1319,7 +1321,7 @@ def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, scope = _runtime(session, MEDICAL_TEST)
+    runtime, scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
@@ -1392,7 +1394,7 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, MEDICAL_TEST)
+    runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )

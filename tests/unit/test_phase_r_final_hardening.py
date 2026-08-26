@@ -33,7 +33,7 @@ from app.services.generic_actions import (
 )
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 class FakeProvider:
@@ -67,7 +67,7 @@ def _provider_step(
 
 
 def _runtime(session: Session, document: dict | None = None):  # type: ignore[type-arg,no-untyped-def]
-    payload = deepcopy(document or _medical_scenario_document())
+    payload = deepcopy(document or _contract_scenario_document())
     parameter = payload["actions"][0]["parameters"][0]
     parameter["required"] = False
     parameter["default"] = 2
@@ -89,7 +89,7 @@ def _runtime(session: Session, document: dict | None = None):  # type: ignore[ty
 def test_nonempty_multi_objective_scope_is_frozen_and_uses_and_completion(
     session: Session,
 ) -> None:
-    document = _medical_scenario_document()
+    document = _contract_scenario_document()
     document["world"]["nodes"][0]["facts"].append(
         {
             "key": "conscious",
@@ -150,7 +150,7 @@ def test_nonempty_multi_objective_scope_is_frozen_and_uses_and_completion(
 def test_planner_delegates_by_exact_actor_capability_and_execution_rechecks(
     session: Session,
 ) -> None:
-    document = _medical_scenario_document()
+    document = _contract_scenario_document()
     document["actors"]["actor_profiles"].append(
         {
             "key": "nurse_ana",
@@ -186,7 +186,7 @@ def test_planner_delegates_by_exact_actor_capability_and_execution_rechecks(
 
 
 def test_generic_approval_gate_pauses_and_consumes_exact_decision(session: Session) -> None:
-    document = deepcopy(_medical_scenario_document())
+    document = deepcopy(_contract_scenario_document())
     document["actions"][0]["authority_policy"] = {
         "autonomous_limits": [{"parameter_key": "dosage", "maximum": 1}]
     }
@@ -217,7 +217,7 @@ def test_generic_approval_gate_pauses_and_consumes_exact_decision(session: Sessi
 
 
 def test_agent_pauses_for_approval_and_resumes_without_replanning(session: Session) -> None:
-    document = deepcopy(_medical_scenario_document())
+    document = deepcopy(_contract_scenario_document())
     document["actions"][0]["authority_policy"] = {
         "autonomous_limits": [{"parameter_key": "dosage", "maximum": 1}]
     }

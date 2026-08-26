@@ -1,6 +1,10 @@
+import pytest
+
 from app.domain.scenario_v2 import ActionBehavior
 from app.services.spatial_projection import SpatialDisplayProjector
 from tests.scenario_fixtures import LINJIANG_V1_TEST
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 def test_linjiang_nodes_resources_and_transport_use_generic_spatial_projection() -> None:

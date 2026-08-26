@@ -25,6 +25,8 @@ from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
 from tests.scenario_fixtures import LINJIANG_V1_TEST
 
+pytestmark = pytest.mark.legacy_scenario
+
 
 def _relay_definition() -> ScenarioDefinitionV2:
     document: dict[str, Any] = deepcopy(LINJIANG_V1_TEST.model_dump(mode="json"))

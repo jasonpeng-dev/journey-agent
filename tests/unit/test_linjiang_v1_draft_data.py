@@ -75,6 +75,8 @@ from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
 from tests.scenario_fixtures import LINJIANG_V1_TEST
 
+pytestmark = pytest.mark.legacy_scenario
+
 
 def _rule_state(
     definition: Any,

@@ -1,9 +1,12 @@
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from tests.scenario_fixtures import LINJIANG_V1_TEST, create_test_scenario
+
+pytestmark = pytest.mark.legacy_scenario
 
 
 def test_linjiang_v1_draft_round_trip_preserves_topology_and_localization(
