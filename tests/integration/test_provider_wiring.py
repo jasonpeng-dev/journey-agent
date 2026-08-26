@@ -21,6 +21,7 @@ from app.agent.provider import (
     GoalSelection,
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
+    PlannerInput,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -819,9 +820,9 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
         )
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
-    context = provider_module.PlanningContext(
-        goal={"objective_keys": ["known_objective"]},
-        current_knowledge={"facts": {}},
+    planner_input = PlannerInput(
+        objective={"objective_keys": ["known_objective"]},
+        known_world={"facts": {}},
     )
     for call_type in ("INITIAL_PLAN", "REPLAN"):
         provider.propose_plan(
@@ -829,7 +830,7 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
                 call_type=call_type,
                 goal="known goal",
                 objective_keys=("known_objective",),
-                planning_context=context,
+                planner_input=planner_input,
             )
         )
 

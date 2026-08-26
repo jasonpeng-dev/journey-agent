@@ -54,8 +54,6 @@ from app.infrastructure.db.models import (
 )
 from app.services.knowledge_projection import SharedKnowledgeProjection
 
-PlanningContextV1 = PlanningContext
-
 
 def _canonical_resource_knowledge(raw: object) -> tuple[dict[str, object], ...]:
     """Normalize the V1 region-keyed view into sparse canonical V2 entries."""
@@ -1678,7 +1676,6 @@ __all__ = [
     "PlanningActionCatalogBuilder",
     "PlanningContext",
     "PlanningContextBuilder",
-    "PlanningContextV1",
     "PlanningContinuityBuilder",
     "legal_candidate_id",
     "objective_context",

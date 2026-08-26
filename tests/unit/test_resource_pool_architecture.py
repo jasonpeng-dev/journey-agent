@@ -1300,6 +1300,12 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
             task=task,
             replan_reason=reason,
         )
+        planner_input = builder.build_v2(
+            definition,
+            (objective,),
+            task=task,
+            replan_reason=reason,
+        )
         request = PlanRequest(
             call_type=call_type,
             goal=task.goal_description,
@@ -1307,7 +1313,7 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
                 (objective,),
                 known_fact_refs=known_refs,
             ),
-            planning_context=context,
+            planner_input=planner_input,
         )
         assert context.goal["objectives"][0]["planning_guidance"] == (
             "Prefer known reachable Regions and preserve enough parts for repair."
@@ -1316,7 +1322,7 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
             "Prefer known reachable Regions and preserve enough parts for repair."
         )
         assert (
-            request.provider_payload()["planning_context"]["goal"]["objectives"][0][
+            request.provider_payload()["planner_input"]["objective"]["objectives"][0][
                 "planning_guidance"
             ]
             == "Prefer known reachable Regions and preserve enough parts for repair."
