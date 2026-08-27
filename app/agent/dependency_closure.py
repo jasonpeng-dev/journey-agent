@@ -7,6 +7,8 @@ import hashlib
 import json
 from collections import deque
 from dataclasses import dataclass
+from itertools import product
+from typing import Any
 
 from app.agent.provider import (
     PlannerActionContract,
@@ -57,6 +59,298 @@ def _scope_actor_actions_to_contracts(
         )
         for actor in actors
     )
+
+
+def _relation_is_public(relation: dict[str, object]) -> bool:
+    for key in ("public", "is_public"):
+        if key in relation and relation[key] is not True:
+            return False
+    for key in ("visibility", "relation_visibility"):
+        if key not in relation:
+            continue
+        value = getattr(relation[key], "value", relation[key])
+        if not isinstance(value, str) or value.upper() != "VISIBLE":
+            return False
+    return True
+
+
+def _public_source_candidates(
+    contract: PlannerActionContract,
+    target_key: str,
+    planner_input: PlannerInput,
+) -> tuple[tuple[str, dict[str, object]], ...]:
+    relation_type = contract.source_relation_type_key
+    if not isinstance(relation_type, str):
+        return ()
+    known_nodes = {
+        str(item["key"])
+        for item in planner_input.known_world.nodes
+        if isinstance(item.get("key"), str)
+    }
+    candidates: list[tuple[str, dict[str, object]]] = []
+    for relation in planner_input.known_world.relations:
+        source_key = relation.get("source_node_key")
+        if (
+            not isinstance(source_key, str)
+            or relation.get("target_node_key") != target_key
+            or relation.get("relation_type_key") != relation_type
+            or source_key not in known_nodes
+            or target_key not in known_nodes
+            or not _relation_is_public(relation)
+        ):
+            continue
+        candidates.append((source_key, relation))
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda item: (item[0], str(item[1].get("relation_key", ""))),
+        )
+    )
+
+
+def _source_condition_status(
+    condition: dict[str, object],
+    source_key: str,
+    known_facts: dict[str, object],
+) -> bool | None:
+    kind = condition.get("kind")
+    if kind in {"ALL", "ANY"}:
+        raw_children = condition.get("conditions")
+        if not isinstance(raw_children, (list, tuple)):
+            return None
+        children = [item for item in raw_children if isinstance(item, dict)]
+        if len(children) != len(raw_children) or not children:
+            return None
+        statuses = [_source_condition_status(item, source_key, known_facts) for item in children]
+        if kind == "ALL":
+            if any(status is False for status in statuses):
+                return False
+            if all(status is True for status in statuses):
+                return True
+            return None
+        if any(status is True for status in statuses):
+            return True
+        if all(status is False for status in statuses):
+            return False
+        return None
+    if kind == "NOT":
+        child = condition.get("condition")
+        if not isinstance(child, dict):
+            return None
+        status = _source_condition_status(child, source_key, known_facts)
+        return None if status is None else not status
+    selector = condition.get("selector")
+    if selector not in {None, "ACTION_SOURCE"}:
+        return None
+    fact_key = condition.get("fact_key")
+    if not isinstance(fact_key, str):
+        return None
+    identity = f"{source_key}.{fact_key}"
+    if identity not in known_facts:
+        return None
+    current = known_facts[identity]
+    if kind == "FACT_EQUALS":
+        return current == condition.get("value")
+    if kind == "FACT_NOT_EQUALS":
+        return current != condition.get("value")
+    if kind == "FACT_IN":
+        values = condition.get("values")
+        return isinstance(values, (list, tuple)) and current in values
+    if kind == "FACT_COMPARE":
+        operator = condition.get("operator")
+        expected = condition.get("value")
+        left: Any = current
+        right: Any = expected
+        try:
+            if operator == "EQ":
+                return bool(left == right)
+            if operator == "NE":
+                return bool(left != right)
+            if operator == "LT":
+                return bool(left < right)
+            if operator == "LTE":
+                return bool(left <= right)
+            if operator == "GT":
+                return bool(left > right)
+            if operator == "GTE":
+                return bool(left >= right)
+        except TypeError:
+            return None
+    return None
+
+
+def _source_predicate(condition: dict[str, object]) -> dict[str, object] | None:
+    kind = condition.get("kind")
+    if kind not in {
+        "FACT_EQUALS",
+        "FACT_NOT_EQUALS",
+        "FACT_IN",
+        "FACT_COMPARE",
+    }:
+        return None
+    selector = condition.get("selector")
+    if selector not in {None, "ACTION_SOURCE"}:
+        return None
+    fact_key = condition.get("fact_key")
+    if not isinstance(fact_key, str):
+        return None
+    predicate: dict[str, object] = {"kind": kind, "fact_key": fact_key}
+    for key in ("value", "values", "operator"):
+        if key in condition:
+            predicate[key] = condition[key]
+    return predicate
+
+
+def _source_alternative_product(
+    groups: list[tuple[tuple[dict[str, object], ...], ...]],
+) -> tuple[tuple[dict[str, object], ...], ...]:
+    combined: tuple[tuple[dict[str, object], ...], ...] = ((),)
+    for alternatives in groups:
+        if not alternatives:
+            return ()
+        combined = tuple(prefix + suffix for prefix, suffix in product(combined, alternatives))
+    return combined
+
+
+def _source_condition_true_alternatives(
+    condition: dict[str, object],
+) -> tuple[tuple[dict[str, object], ...], ...]:
+    kind = condition.get("kind")
+    if kind in {
+        "FACT_EQUALS",
+        "FACT_NOT_EQUALS",
+        "FACT_IN",
+        "FACT_COMPARE",
+    }:
+        predicate = _source_predicate(condition)
+        return ((predicate,),) if predicate is not None else ()
+    if kind in {"ALL", "ANY"}:
+        raw_children = condition.get("conditions")
+        if not isinstance(raw_children, (list, tuple)):
+            return ()
+        groups = [
+            _source_condition_true_alternatives(item)
+            for item in raw_children
+            if isinstance(item, dict)
+        ]
+        if len(groups) != len(raw_children):
+            return ()
+        if kind == "ALL":
+            return _source_alternative_product(groups)
+        return tuple(alternative for group in groups for alternative in group)
+    if kind == "NOT":
+        child = condition.get("condition")
+        return _source_condition_false_alternatives(child) if isinstance(child, dict) else ()
+    return ()
+
+
+def _source_condition_false_alternatives(
+    condition: dict[str, object],
+) -> tuple[tuple[dict[str, object], ...], ...]:
+    kind = condition.get("kind")
+    if kind in {
+        "FACT_EQUALS",
+        "FACT_NOT_EQUALS",
+        "FACT_IN",
+        "FACT_COMPARE",
+    }:
+        predicate = _source_predicate(condition)
+        if predicate is None:
+            return ()
+        if kind == "FACT_NOT_EQUALS":
+            complement = dict(predicate)
+            complement["kind"] = "FACT_EQUALS"
+            return ((complement,),)
+        if kind == "FACT_COMPARE" and condition.get("operator") == "NE":
+            complement = dict(predicate)
+            complement["kind"] = "FACT_EQUALS"
+            complement.pop("operator", None)
+            return ((complement,),)
+        return ()
+    if kind in {"ALL", "ANY"}:
+        raw_children = condition.get("conditions")
+        if not isinstance(raw_children, (list, tuple)):
+            return ()
+        groups = [
+            _source_condition_false_alternatives(item)
+            for item in raw_children
+            if isinstance(item, dict)
+        ]
+        if len(groups) != len(raw_children):
+            return ()
+        if kind == "ALL":
+            return tuple(alternative for group in groups for alternative in group)
+        return _source_alternative_product(groups)
+    if kind == "NOT":
+        child = condition.get("condition")
+        return _source_condition_true_alternatives(child) if isinstance(child, dict) else ()
+    return ()
+
+
+def _source_fact_satisfies(
+    predicate: dict[str, object],
+    source_key: str,
+    known_facts: dict[str, object],
+) -> bool:
+    fact_key = predicate.get("fact_key")
+    if not isinstance(fact_key, str):
+        return False
+    identity = f"{source_key}.{fact_key}"
+    if identity not in known_facts:
+        return False
+    current = known_facts[identity]
+    if predicate.get("kind") == "FACT_EQUALS":
+        return current == predicate.get("value")
+    if predicate.get("kind") == "FACT_IN":
+        values = predicate.get("values")
+        return isinstance(values, (list, tuple)) and current in values
+    return False
+
+
+def _source_precondition_dependencies(
+    contract: PlannerActionContract,
+    source_key: str,
+    planner_input: PlannerInput,
+) -> tuple[TypedDependency, ...]:
+    known_facts = planner_input.known_world.facts
+    dependencies: list[TypedDependency] = []
+    seen: set[TypedDependency] = set()
+    for entry in contract.source_preconditions:
+        failure_condition = entry.get("failure_condition")
+        if not isinstance(failure_condition, dict):
+            continue
+        status = _source_condition_status(failure_condition, source_key, known_facts)
+        if status is False:
+            continue
+        for alternative in _source_condition_false_alternatives(failure_condition):
+            for predicate in alternative:
+                fact_key = predicate.get("fact_key")
+                kind = predicate.get("kind")
+                if not isinstance(fact_key, str) or kind not in {
+                    "FACT_EQUALS",
+                    "FACT_IN",
+                }:
+                    continue
+                if _source_fact_satisfies(predicate, source_key, known_facts):
+                    continue
+                values: tuple[object, ...]
+                if kind == "FACT_EQUALS":
+                    values = (predicate.get("value"),)
+                else:
+                    raw_values = predicate.get("values")
+                    if not isinstance(raw_values, (list, tuple)) or not raw_values:
+                        continue
+                    values = tuple(raw_values)
+                dependency = TypedDependency(
+                    "FACT",
+                    source_key,
+                    fact_key,
+                    repr(values),
+                )
+                if dependency not in seen:
+                    seen.add(dependency)
+                    dependencies.append(dependency)
+    return tuple(dependencies)
 
 
 def build_dependency_closure(
@@ -111,6 +405,7 @@ def build_dependency_closure(
     audit: dict[str, list[dict[str, object]]] = {}
     selected_actor_targets: set[str] = set()
     selected_diagnostic_actor_keys: set[str] = set()
+    expanded_source_targets: set[tuple[str, str]] = set()
     state_changed = False
 
     def select_action(action_key: str, path: tuple[str, ...], producer_for: str) -> bool:
@@ -276,6 +571,7 @@ def build_dependency_closure(
         )
         relevant_nodes.add(target_key)
         _queue_binding_resource_dependencies(binding, path, action_key)
+        expand_source_dependencies(contracts[action_key], target_key, path)
         return True
 
     def action_has_legal_executor(contract: PlannerActionContract) -> bool:
@@ -354,6 +650,45 @@ def build_dependency_closure(
                 action_key,
             )
 
+    def expand_source_dependencies(
+        contract: PlannerActionContract,
+        target_key: str,
+        path: tuple[str, ...],
+    ) -> None:
+        relation_type = contract.source_relation_type_key
+        if not isinstance(relation_type, str):
+            return
+        expansion_key = (contract.action_key, target_key)
+        if expansion_key in expanded_source_targets:
+            return
+        expanded_source_targets.add(expansion_key)
+        for source_key, relation in _public_source_candidates(
+            contract,
+            target_key,
+            planner_input,
+        ):
+            relation_path = (
+                *path,
+                f"action:{contract.action_key}",
+                f"source_relation:{relation_type}",
+                f"source:{source_key}",
+            )
+            relevant_nodes.add(source_key)
+            audit.setdefault(contract.action_key, []).append(
+                {
+                    "producer_for": f"{contract.action_key}:{target_key}",
+                    "dependency_path": list(relation_path),
+                    "source_candidate": source_key,
+                    "relation_key": relation.get("relation_key"),
+                }
+            )
+            for dependency in _source_precondition_dependencies(
+                contract,
+                source_key,
+                planner_input,
+            ):
+                queue.append((dependency, relation_path, contract.action_key))
+
     def process_dependency(
         dependency: TypedDependency,
         path: tuple[str, ...],
@@ -413,6 +748,12 @@ def build_dependency_closure(
                 ):
                     continue
                 select_action(action_key, path, repr(dependency))
+                if action_key in selected_actions:
+                    expand_source_dependencies(
+                        contract,
+                        dependency.subject,
+                        path,
+                    )
             for binding_key, binding in bindings.items():
                 for effect in binding.deterministic_effects:
                     if (

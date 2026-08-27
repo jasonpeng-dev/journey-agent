@@ -85,6 +85,11 @@ class PlannerActionContract(ProviderModel):
     action_key: str
     executor_requirements: dict[str, object] = Field(default_factory=dict)
     target_contract: dict[str, object] = Field(default_factory=dict)
+    source_relation_type_key: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    source_preconditions: tuple[dict[str, object], ...] = ()
     locality: dict[str, object] = Field(default_factory=dict)
     parameters: tuple[dict[str, object], ...] = ()
     known_preconditions: tuple[dict[str, object], ...] = ()

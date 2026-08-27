@@ -18,6 +18,7 @@ from app.agent.planner_contract import (
     actor_execution_state,
     declarative_action_effects,
     planner_known_preconditions,
+    planner_source_preconditions,
     planner_target_contracts,
 )
 from app.agent.provider import (
@@ -155,6 +156,14 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
         # legality proof able to interpret Region/Facility/Transport
         # relations without consulting Scenario Truth.
         contract_locality.update(locality_projection)
+        raw_source_relation_type_key = contract.get("source_relation_type_key")
+        if not isinstance(raw_source_relation_type_key, str):
+            raw_target_requirements = raw.get("target_requirements")
+            if isinstance(raw_target_requirements, dict):
+                raw_source_relation_type_key = raw_target_requirements.get(
+                    "source_relation_type_key"
+                )
+        raw_source_preconditions = contract.get("source_preconditions")
         action_contracts.append(
             PlannerActionContract(
                 action_key=action_key,
@@ -167,6 +176,16 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
                     dict(cast(dict[str, object], contract["target"]))
                     if isinstance(contract.get("target"), dict)
                     else {}
+                ),
+                source_relation_type_key=(
+                    raw_source_relation_type_key
+                    if isinstance(raw_source_relation_type_key, str)
+                    else None
+                ),
+                source_preconditions=(
+                    tuple(dict(item) for item in raw_source_preconditions if isinstance(item, dict))
+                    if isinstance(raw_source_preconditions, (list, tuple))
+                    else ()
                 ),
                 locality=contract_locality,
                 parameters=tuple(
@@ -811,6 +830,7 @@ class PlanningContextBuilder:
                 "planner_constraints": action_planner_constraints(
                     action,
                     known_preconditions=known_preconditions_by_action.get(action.key, ()),
+                    source_preconditions=planner_source_preconditions(definition, action),
                 ),
             }
             planner_effects = action_planner_effects(action)

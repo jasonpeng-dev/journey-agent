@@ -1,0 +1,7463 @@
+schema_version: 2
+metadata:
+  key: linjiang_infrastructure_recovery_v2_0_task3_baseline
+  name: 临江市灾后基础设施恢复 — Task3 测试基线
+  description: 临江灾后基础设施恢复：通信、交通、电力、水务与资源情报。
+  locality:
+    enabled: true
+    scoped_resources: true
+    region_node_type_key: region
+    facility_node_type_key: facility
+    transport_node_type_key: transport
+    located_in_relation_type_key: located_in
+    transport_endpoint_relation_type_key: endpoint
+    passability_fact_key: passable
+engine_contract:
+  key: declarative-rule-engine
+  version: '1'
+initialization:
+  start_node_key: central_district
+  primary_actor_key: logistics_team_alpha
+  resource_initial_states: []
+  resource_pools:
+  - pool_key: central_general_stock
+    resource_key: general_engineering_parts
+    region_key: central_district
+    facility_key: null
+    quantity: 0
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: AVAILABLE
+    survey_discoverable: false
+  - pool_key: west_general_stock
+    resource_key: general_engineering_parts
+    region_key: west_logistics_district
+    facility_key: null
+    quantity: 5
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: AVAILABLE
+    survey_discoverable: false
+  - pool_key: west_municipal_stock
+    resource_key: municipal_repair_materials
+    region_key: west_logistics_district
+    facility_key: null
+    quantity: 60
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: AVAILABLE
+    survey_discoverable: false
+  - pool_key: east_communication_stock
+    resource_key: communication_equipment
+    region_key: east_residential_district
+    facility_key: null
+    quantity: 10
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: AVAILABLE
+    survey_discoverable: false
+  - pool_key: southeast_electrical_stock
+    resource_key: electrical_repair_parts
+    region_key: southeast_heights_district
+    facility_key: null
+    quantity: 20
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: AVAILABLE
+    survey_discoverable: false
+  - pool_key: south_water_stock
+    resource_key: water_system_parts
+    region_key: south_waterfront_district
+    facility_key: null
+    quantity: 50
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: AVAILABLE
+    survey_discoverable: false
+  - pool_key: north_emergency_engineering_stock
+    resource_key: general_engineering_parts
+    region_key: north_industrial_district
+    facility_key: null
+    quantity: 0
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: AVAILABLE
+    survey_discoverable: false
+  - pool_key: north_service_depot_stock
+    resource_key: general_engineering_parts
+    region_key: north_industrial_district
+    facility_key: utility_service_depot
+    quantity: 35
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: AVAILABLE
+    survey_discoverable: true
+    availability_requirement:
+      node_key: utility_service_depot
+      fact_key: operational
+      value: true
+  - pool_key: north_heavy_equipment_stock
+    resource_key: general_engineering_parts
+    region_key: north_industrial_district
+    facility_key: heavy_equipment_yard
+    quantity: 50
+    reserved_value: 0
+    visibility: VISIBLE
+    availability: UNAVAILABLE
+    survey_discoverable: true
+    availability_requirement:
+      node_key: heavy_equipment_yard
+      fact_key: operational
+      value: true
+  - pool_key: southeast_district_service_stock
+    resource_key: electrical_repair_parts
+    region_key: southeast_heights_district
+    facility_key: district_service_center
+    quantity: 50
+    reserved_value: 0
+    visibility: HIDDEN
+    availability: UNAVAILABLE
+    survey_discoverable: true
+    availability_requirement:
+      node_key: district_service_center
+      fact_key: operational
+      value: true
+  region_resource_knowledge:
+  - region_key: central_district
+    resource_inventory_visibility: VISIBLE
+    resource_survey_completed: true
+  - region_key: north_industrial_district
+    resource_inventory_visibility: VISIBLE
+    resource_survey_completed: true
+  - region_key: west_logistics_district
+    resource_inventory_visibility: VISIBLE
+    resource_survey_completed: true
+  - region_key: east_residential_district
+    resource_inventory_visibility: VISIBLE
+    resource_survey_completed: true
+  - region_key: south_waterfront_district
+    resource_inventory_visibility: HIDDEN
+    resource_survey_completed: false
+  - region_key: southeast_heights_district
+    resource_inventory_visibility: HIDDEN
+    resource_survey_completed: false
+world:
+  key: linjiang_infrastructure_recovery_v2_0_task3_baseline
+  name: 临江市灾后基础设施恢复 — Task3 测试基线
+  node_types:
+  - key: facility
+    name: 设施
+    description: ''
+  - key: region
+    name: 区域
+    description: ''
+  - key: transport
+    name: 交通通道
+    description: ''
+  nodes:
+  - key: central_district
+    name: 中央城区
+    description: 临江市行政与综合应急资源集中的核心区域。
+    node_type_key: region
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - surveyable
+    - transport_destination
+    - travel_destination
+    facts: []
+  - key: central_fire_rescue_station
+    name: 中央消防救援站
+    description: 承担中央城区消防与应急救援响应。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: central_hospital
+    name: 中央医院
+    description: 为中央城区提供综合医疗救治服务。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - power_targetable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: central_hospital
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: central_river_tunnel
+    name: 中央河底隧道
+    description: 连接中央城区与东部居住区的河底通道。
+    node_type_key: transport
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - clearable
+    - inspectable
+    facts:
+    - key: passable
+      name: 通行状态
+      description: 该通道是否可通行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: central_telecom_hub
+    name: 中央通信枢纽
+    description: 汇聚并转接城市核心通信网络。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: central_communication_core
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: city_distribution_center
+    name: 城市配送中心
+    description: 负责城市物资的集中分拨与配送组织。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: district_service_center
+    name: 东南公共服务中心
+    description: 提供东南高地区的综合公共服务与办事支持。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: district_service_center
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: east_community_hospital
+    name: 东区社区医院
+    description: 为东部居住区提供社区医疗服务。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - power_targetable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: east_community_hospital
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: east_distribution_station
+    name: 东部配电站
+    description: 东部居住区的配电设施。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - power_targetable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: east_distribution_station
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: east_residential_district
+    name: 东部居住区
+    description: 人口居住、社区医疗与民生供水设施集中的东部区域。
+    node_type_key: region
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - surveyable
+    - travel_destination
+    - transport_destination
+    facts: []
+  - key: east_telecom_station
+    name: 东区通信站
+    description: 为东部居住区提供区域通信接入服务。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: east_telecom_station
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: east_water_pump_station
+    name: 东部供水泵站
+    description: 负责东部居住区的供水加压与输送。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - power_targetable
+    - repairable
+    facts:
+    - key: east_emergency_water_supply
+      name: 东部应急供水
+      description: 东部应急供水
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: east_water_pump_station
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: emergency_command_center
+    name: 市应急指挥中心
+    description: 负责统筹全市应急信息与资源调度。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: emergency_supply_warehouse
+    name: 应急物资仓库
+    description: 集中储存城市应急物资与周转用品。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: heavy_equipment_yard
+    name: 重型工程设备场
+    description: 停放和调配重型工程作业设备。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: heavy_engineering_support
+      name: 重型工程支援
+      description: 重型工程支援
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: heavy_equipment_yard
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: hill_reservoir
+    name: 高地蓄水池
+    description: 储存并调节东南高地区的供水资源。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: north_communication_relay
+    name: 北部通信中继站
+    description: 北部工业区的通信中继设施。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: north_communication_relay
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: north_fuel_depot
+    name: 北部燃料储备库
+    description: 储存并供应城市应急运行所需燃料。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: north_industrial_district
+    name: 北部工业区
+    description: 集中分布能源与市政工程设施的北部区域。
+    node_type_key: region
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - surveyable
+    - transport_destination
+    - travel_destination
+    facts: []
+  - key: north_power_substation
+    name: 北部主变电站
+    description: 为北部工业区及周边区域提供电力变配服务。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: north_power_substation
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: north_service_corridor
+    name: 北部联络通道
+    description: 连接北部工业区与中央城区的区域联络通道。
+    node_type_key: transport
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - clearable
+    - inspectable
+    facts:
+    - key: passable
+      name: 通行状态
+      description: 该通道是否可通行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: rail_freight_yard
+    name: 铁路货运场
+    description: 承担铁路货物到发与装卸组织。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: river_port
+    name: 临江港
+    description: 承担沿江货物与应急运输的装卸作业。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: riverside_shelter
+    name: 河滨应急避难所
+    description: 为河滨居民提供集中避难与公共服务空间。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - power_targetable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: riverside_shelter
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: south_bridge
+    name: 南港大桥
+    description: 连接西部物流区与南部滨水区的跨江通道。
+    node_type_key: transport
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - heavy_support_target
+    - inspectable
+    facts:
+    - key: heavy_engineering_support_ready
+      name: 重型工程支援就绪
+      description: 重型工程支援就绪
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: passable
+      name: 通行状态
+      description: 通行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+  - key: south_communication_core
+    name: 南部通信核心
+    description: 南部水滨区的区域通信核心。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: south_communication_core
+      initial_visibility: HIDDEN
+      allowed_values: []
+  - key: south_fuel_terminal
+    name: 南部燃料码头
+    description: 承担燃料水运接卸与转运组织。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: south_pump_station
+    name: 南部主泵站
+    description: 负责南部滨水区的水务输送与泵送调度。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - power_targetable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: south_pump_station
+      initial_visibility: HIDDEN
+      allowed_values: []
+  - key: south_substation
+    name: 南部变电站
+    description: 为南部水务系统供电的变电设施。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - power_targetable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: south_substation
+      initial_visibility: HIDDEN
+      allowed_values: []
+  - key: south_waterfront_district
+    name: 南部滨水区
+    description: 沿江分布水处理、港口与燃料设施的南部区域。
+    node_type_key: region
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - surveyable
+    - travel_destination
+    - transport_destination
+    facts: []
+  - key: southeast_access_corridor
+    name: 东南山麓通道
+    description: 连接南部滨水区与东南高地区的山麓通道。
+    node_type_key: transport
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: passable
+      name: 通行状态
+      description: 通行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+  - key: southeast_emergency_power_station
+    name: 东南应急电源站
+    description: 东南高地的应急发电设施。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: southeast_emergency_power_station
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: southeast_heights_district
+    name: 东南高地区
+    description: 承担避难、蓄水与公共服务的东南高地区域。
+    node_type_key: region
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - surveyable
+    - travel_destination
+    - transport_destination
+    facts: []
+  - key: southeast_shelter
+    name: 东南高地避难所
+    description: 为东南片区提供高地集中避难空间。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: southeast_telecom_relay
+    name: 东南通信中继站
+    description: 为东南高地区提供通信信号中继服务。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: southeast_telecom_relay
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: utility_service_depot
+    name: 市政工程维修基地
+    description: 集中存放并调度市政工程维修设备。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    - repairable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: utility_service_depot
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: vehicle_depot
+    name: 应急车辆基地
+    description: 集中停放并调度应急响应车辆。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 设施是否正常运行。
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 设施当前是否可用供电。
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+  - key: water_treatment_plant
+    name: 城市水处理厂
+    description: 负责城市原水处理与供水系统衔接。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - heavy_support_target
+    - inspectable
+    - power_targetable
+    - repairable
+    facts:
+    - key: heavy_engineering_support_ready
+      name: 重型工程支援就绪
+      description: 重型工程支援就绪
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: UNAVAILABLE
+      initial_visibility: HIDDEN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: water_treatment_plant
+      initial_visibility: HIDDEN
+      allowed_values: []
+  - key: waterfront_access_corridor
+    name: 滨江通道
+    description: 连接东部居住区与南部滨水区的滨江通道。
+    node_type_key: transport
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: passable
+      name: 通行状态
+      description: 通行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: HIDDEN
+      allowed_values: []
+  - key: west_communication_relay
+    name: 西部通信中继站
+    description: 西部物流区的通信中继设施。
+    node_type_key: facility
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - inspectable
+    facts:
+    - key: operational
+      name: 运行状态
+      description: 运行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_generation_capable
+      name: 供电能力
+      description: 供电能力
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+    - key: power_supply
+      name: 供电状态
+      description: 供电状态
+      value_type: ENUM
+      initial_value: AVAILABLE
+      initial_visibility: KNOWN
+      allowed_values:
+      - AVAILABLE
+      - UNAVAILABLE
+    - key: repair_profile
+      name: 设施修复类型
+      description: 设施修复类型
+      value_type: STRING
+      initial_value: west_communication_relay
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: west_freight_corridor
+    name: 西部货运走廊
+    description: 连接中央城区与西部物流区的货运通道。
+    node_type_key: transport
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - clearable
+    - inspectable
+    facts:
+    - key: passable
+      name: 通行状态
+      description: 通行状态
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: west_logistics_district
+    name: 西部物流区
+    description: 承担物资集散、车辆调度与铁路货运的西部区域。
+    node_type_key: region
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - surveyable
+    - transport_destination
+    - travel_destination
+    facts: []
+  relations:
+  - key: central_fire_rescue_station__located_in__central_district
+    source_node_key: central_fire_rescue_station
+    relation_type_key: located_in
+    target_node_key: central_district
+  - key: central_hospital__located_in__central_district
+    source_node_key: central_hospital
+    relation_type_key: located_in
+    target_node_key: central_district
+  - key: central_river_tunnel__endpoint__central_district
+    source_node_key: central_river_tunnel
+    relation_type_key: endpoint
+    target_node_key: central_district
+  - key: central_river_tunnel__endpoint__east_residential_district
+    source_node_key: central_river_tunnel
+    relation_type_key: endpoint
+    target_node_key: east_residential_district
+  - key: central_telecom_hub__located_in__central_district
+    source_node_key: central_telecom_hub
+    relation_type_key: located_in
+    target_node_key: central_district
+  - key: city_distribution_center__located_in__west_logistics_district
+    source_node_key: city_distribution_center
+    relation_type_key: located_in
+    target_node_key: west_logistics_district
+  - key: district_service_center__located_in__southeast_heights_district
+    source_node_key: district_service_center
+    relation_type_key: located_in
+    target_node_key: southeast_heights_district
+  - key: east_community_hospital__located_in__east_residential_district
+    source_node_key: east_community_hospital
+    relation_type_key: located_in
+    target_node_key: east_residential_district
+  - key: east_distribution_station__located_in__east_residential_district
+    source_node_key: east_distribution_station
+    relation_type_key: located_in
+    target_node_key: east_residential_district
+  - key: east_distribution_station__supplies_power_to__east_community_hospital
+    source_node_key: east_distribution_station
+    relation_type_key: supplies_power_to
+    target_node_key: east_community_hospital
+  - key: east_distribution_station__supplies_power_to__east_water_pump_station
+    source_node_key: east_distribution_station
+    relation_type_key: supplies_power_to
+    target_node_key: east_water_pump_station
+  - key: east_distribution_station__supplies_power_to__riverside_shelter
+    source_node_key: east_distribution_station
+    relation_type_key: supplies_power_to
+    target_node_key: riverside_shelter
+  - key: east_telecom_station__located_in__east_residential_district
+    source_node_key: east_telecom_station
+    relation_type_key: located_in
+    target_node_key: east_residential_district
+  - key: east_water_pump_station__located_in__east_residential_district
+    source_node_key: east_water_pump_station
+    relation_type_key: located_in
+    target_node_key: east_residential_district
+  - key: emergency_command_center__located_in__central_district
+    source_node_key: emergency_command_center
+    relation_type_key: located_in
+    target_node_key: central_district
+  - key: emergency_supply_warehouse__located_in__west_logistics_district
+    source_node_key: emergency_supply_warehouse
+    relation_type_key: located_in
+    target_node_key: west_logistics_district
+  - key: heavy_equipment_yard__located_in__north_industrial_district
+    source_node_key: heavy_equipment_yard
+    relation_type_key: located_in
+    target_node_key: north_industrial_district
+  - key: hill_reservoir__located_in__southeast_heights_district
+    source_node_key: hill_reservoir
+    relation_type_key: located_in
+    target_node_key: southeast_heights_district
+  - key: north_communication_relay__located_in__north_industrial_district
+    source_node_key: north_communication_relay
+    relation_type_key: located_in
+    target_node_key: north_industrial_district
+  - key: north_fuel_depot__located_in__north_industrial_district
+    source_node_key: north_fuel_depot
+    relation_type_key: located_in
+    target_node_key: north_industrial_district
+  - key: north_power_substation__located_in__north_industrial_district
+    source_node_key: north_power_substation
+    relation_type_key: located_in
+    target_node_key: north_industrial_district
+  - key: north_service_corridor__endpoint__central_district
+    source_node_key: north_service_corridor
+    relation_type_key: endpoint
+    target_node_key: central_district
+  - key: north_service_corridor__endpoint__north_industrial_district
+    source_node_key: north_service_corridor
+    relation_type_key: endpoint
+    target_node_key: north_industrial_district
+  - key: rail_freight_yard__located_in__west_logistics_district
+    source_node_key: rail_freight_yard
+    relation_type_key: located_in
+    target_node_key: west_logistics_district
+  - key: river_port__located_in__south_waterfront_district
+    source_node_key: river_port
+    relation_type_key: located_in
+    target_node_key: south_waterfront_district
+  - key: riverside_shelter__located_in__east_residential_district
+    source_node_key: riverside_shelter
+    relation_type_key: located_in
+    target_node_key: east_residential_district
+  - key: south_bridge__endpoint__south_waterfront_district
+    source_node_key: south_bridge
+    relation_type_key: endpoint
+    target_node_key: south_waterfront_district
+  - key: south_bridge__endpoint__west_logistics_district
+    source_node_key: south_bridge
+    relation_type_key: endpoint
+    target_node_key: west_logistics_district
+  - key: south_communication_core__located_in__south_waterfront_district
+    source_node_key: south_communication_core
+    relation_type_key: located_in
+    target_node_key: south_waterfront_district
+  - key: south_fuel_terminal__located_in__south_waterfront_district
+    source_node_key: south_fuel_terminal
+    relation_type_key: located_in
+    target_node_key: south_waterfront_district
+  - key: south_pump_station__located_in__south_waterfront_district
+    source_node_key: south_pump_station
+    relation_type_key: located_in
+    target_node_key: south_waterfront_district
+  - key: south_substation__located_in__south_waterfront_district
+    source_node_key: south_substation
+    relation_type_key: located_in
+    target_node_key: south_waterfront_district
+  - key: south_substation__supplies_power_to__south_pump_station
+    source_node_key: south_substation
+    relation_type_key: supplies_power_to
+    target_node_key: south_pump_station
+  - key: south_substation__supplies_power_to__water_treatment_plant
+    source_node_key: south_substation
+    relation_type_key: supplies_power_to
+    target_node_key: water_treatment_plant
+  - key: southeast_access_corridor__endpoint__south_waterfront_district
+    source_node_key: southeast_access_corridor
+    relation_type_key: endpoint
+    target_node_key: south_waterfront_district
+  - key: southeast_access_corridor__endpoint__southeast_heights_district
+    source_node_key: southeast_access_corridor
+    relation_type_key: endpoint
+    target_node_key: southeast_heights_district
+  - key: southeast_emergency_power_station__located_in__southeast_heights_district
+    source_node_key: southeast_emergency_power_station
+    relation_type_key: located_in
+    target_node_key: southeast_heights_district
+  - key: southeast_emergency_power_station__supplies_power_to__east_distribution_station
+    source_node_key: southeast_emergency_power_station
+    relation_type_key: supplies_power_to
+    target_node_key: east_distribution_station
+  - key: southeast_emergency_power_station__supplies_power_to__south_substation
+    source_node_key: southeast_emergency_power_station
+    relation_type_key: supplies_power_to
+    target_node_key: south_substation
+  - key: southeast_shelter__located_in__southeast_heights_district
+    source_node_key: southeast_shelter
+    relation_type_key: located_in
+    target_node_key: southeast_heights_district
+  - key: southeast_telecom_relay__located_in__southeast_heights_district
+    source_node_key: southeast_telecom_relay
+    relation_type_key: located_in
+    target_node_key: southeast_heights_district
+  - key: utility_service_depot__located_in__north_industrial_district
+    source_node_key: utility_service_depot
+    relation_type_key: located_in
+    target_node_key: north_industrial_district
+  - key: vehicle_depot__located_in__west_logistics_district
+    source_node_key: vehicle_depot
+    relation_type_key: located_in
+    target_node_key: west_logistics_district
+  - key: water_treatment_plant__located_in__south_waterfront_district
+    source_node_key: water_treatment_plant
+    relation_type_key: located_in
+    target_node_key: south_waterfront_district
+  - key: waterfront_access_corridor__endpoint__east_residential_district
+    source_node_key: waterfront_access_corridor
+    relation_type_key: endpoint
+    target_node_key: east_residential_district
+  - key: waterfront_access_corridor__endpoint__south_waterfront_district
+    source_node_key: waterfront_access_corridor
+    relation_type_key: endpoint
+    target_node_key: south_waterfront_district
+  - key: west_communication_relay__located_in__west_logistics_district
+    source_node_key: west_communication_relay
+    relation_type_key: located_in
+    target_node_key: west_logistics_district
+  - key: west_freight_corridor__endpoint__central_district
+    source_node_key: west_freight_corridor
+    relation_type_key: endpoint
+    target_node_key: central_district
+  - key: west_freight_corridor__endpoint__west_logistics_district
+    source_node_key: west_freight_corridor
+    relation_type_key: endpoint
+    target_node_key: west_logistics_district
+  resources:
+  - key: communication_equipment
+    name: 通信设备
+    description: 用于恢复通信节点的设备。
+    initial_value: 0
+    minimum: 0
+    maximum: null
+    reservation_supported: false
+  - key: electrical_repair_parts
+    name: 电力维修部件
+    description: 用于电力设施恢复。
+    initial_value: 0
+    minimum: 0
+    maximum: null
+    reservation_supported: false
+  - key: general_engineering_parts
+    name: 通用工程部件
+    description: 用于普通设施维修的通用工程部件。
+    initial_value: 0
+    minimum: 0
+    maximum: null
+    reservation_supported: false
+  - key: municipal_repair_materials
+    name: 市政维修材料
+    description: 用于清理和修复普通交通通道。
+    initial_value: 0
+    minimum: 0
+    maximum: null
+    reservation_supported: false
+  - key: water_system_parts
+    name: 水务系统部件
+    description: 用于水处理与供水设施恢复。
+    initial_value: 0
+    minimum: 0
+    maximum: null
+    reservation_supported: false
+actors:
+  roles:
+  - key: communications_repair_team
+    name: 通信抢修队
+    description: 负责通信中继与区域通信核心修复。
+    capabilities:
+    - EXECUTE_ACTION
+    - INSPECT_STATE
+    - PLAN
+  - key: electrical_response_team
+    name: 电力抢修队
+    description: 负责发电、变电与供电设施。
+    capabilities:
+    - EXECUTE_ACTION
+    - INSPECT_STATE
+    - PLAN
+  - key: emergency_logistics_team
+    name: 应急物流队
+    description: 负责跨区域资源调度。
+    capabilities:
+    - EXECUTE_ACTION
+    - INSPECT_STATE
+    - LOGISTICS
+    - PLAN
+  - key: industrial_repair_team
+    name: 工业抢修队
+    description: 负责工业设施与重型工程支援。
+    capabilities:
+    - EXECUTE_ACTION
+    - INSPECT_STATE
+    - PLAN
+  - key: municipal_repair_team
+    name: 市政抢修队
+    description: 负责交通通道清理与市政设施修复。
+    capabilities:
+    - EXECUTE_ACTION
+    - INSPECT_STATE
+    - PLAN
+  - key: water_repair_team
+    name: 水务抢修队
+    description: 负责水处理与供水设施修复。
+    capabilities:
+    - EXECUTE_ACTION
+    - INSPECT_STATE
+    - PLAN
+  actor_profiles:
+  - key: communications_repair_team_alpha
+    name: 通信抢修一队
+    role_key: communications_repair_team
+    persona: 通信抢修一队的应急恢复工作队。
+    doctrine: []
+    initial_node_key: north_industrial_district
+    allowed_action_keys:
+    - inspect
+    - relay_message
+    - repair_communications
+    - survey_resources
+    - travel
+    authority_policy:
+      autonomous_limits: []
+      approval_required_values: []
+    command_reachability: ONLINE
+  - key: electrical_repair_team_alpha
+    name: 电力抢修一队
+    role_key: electrical_response_team
+    persona: 电力抢修一队的应急恢复工作队。
+    doctrine: []
+    initial_node_key: southeast_heights_district
+    allowed_action_keys:
+    - inspect
+    - relay_message
+    - repair_electrical
+    - supply_power
+    - survey_resources
+    - travel
+    authority_policy:
+      autonomous_limits: []
+      approval_required_values: []
+    command_reachability: DISCONNECTED
+  - key: industrial_repair_team_alpha
+    name: 工业抢修一队
+    role_key: industrial_repair_team
+    persona: 工业抢修一队的应急恢复工作队。
+    doctrine: []
+    initial_node_key: north_industrial_district
+    allowed_action_keys:
+    - deploy_heavy_engineering_support
+    - inspect
+    - relay_message
+    - repair_industrial_facility
+    - survey_resources
+    - travel
+    authority_policy:
+      autonomous_limits: []
+      approval_required_values: []
+    command_reachability: ONLINE
+  - key: logistics_team_alpha
+    name: 应急物流一队
+    role_key: emergency_logistics_team
+    persona: 应急物流一队的应急恢复工作队。
+    doctrine: []
+    initial_node_key: central_district
+    allowed_action_keys:
+    - inspect
+    - relay_message
+    - survey_resources
+    - transport_resource
+    - travel
+    authority_policy:
+      autonomous_limits: []
+      approval_required_values: []
+    command_reachability: ONLINE
+  - key: municipal_transport_team
+    name: 市政运输一队
+    role_key: municipal_repair_team
+    persona: 市政运输一队的应急恢复工作队。
+    doctrine: []
+    initial_node_key: central_district
+    allowed_action_keys:
+    - clear_transport
+    - inspect
+    - relay_message
+    - travel
+    authority_policy:
+      autonomous_limits: []
+      approval_required_values: []
+    command_reachability: ONLINE
+  - key: water_repair_team_alpha
+    name: 水务抢修一队
+    role_key: water_repair_team
+    persona: 水务抢修一队的应急恢复工作队。
+    doctrine: []
+    initial_node_key: south_waterfront_district
+    allowed_action_keys:
+    - activate_emergency_water_transfer
+    - inspect
+    - relay_message
+    - repair_water_facility
+    - survey_resources
+    - travel
+    authority_policy:
+      autonomous_limits: []
+      approval_required_values: []
+    command_reachability: DISCONNECTED
+interactions:
+- key: clearable
+  name: 可清障
+  description: 可清理交通通道。
+- key: heavy_support_target
+  name: 重型支援目标
+  description: 可部署重型工程支援。
+- key: inspectable
+  name: 可检查
+  description: 可检查目标的公开状态。
+- key: power_targetable
+  name: 可接收供电
+  description: 可接受供电的设施。
+- key: relayable
+  name: 可传递信息
+  description: 可作为传递信息的 Actor 目标。
+- key: repairable
+  name: 可维修
+  description: 可执行设施维修。
+- key: surveyable
+  name: 可查探资源
+  description: 可执行区域资源查探。
+- key: transport_destination
+  name: 可运输到区域
+  description: 作为资源运输目标的区域。
+- key: travel_destination
+  name: 可前往区域
+  description: 作为 Travel 目标的区域。
+- key: water_transfer_target
+  name: 应急供水目标
+  description: 可启动应急供水。
+actions:
+- key: activate_emergency_water_transfer
+  name: 启动应急供水
+  description: 在水务、供电、重型工程与通信条件均已满足时启动东部应急供水。
+  required_interaction_key: water_transfer_target
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  required_actor_role_key: water_repair_team
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: WATER_TRANSFER_ACTIVE
+    name: 应急供水已启动
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: east_water_pump_station
+      fact_key: east_emergency_water_supply
+    supporting_effects: []
+    success_outcome_codes:
+    - WATER_TRANSFER_ACTIVE
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: RULE
+  locality: FACILITY_REGION
+- key: clear_transport
+  name: 清理交通通道
+  description: 修复已确认受阻的 Transport，使其恢复可通行；不应对尚未确认受阻的未知通道执行。
+  required_interaction_key: clearable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  required_actor_role_key: municipal_repair_team
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: CLEARED
+    name: 通道已清理
+    success: true
+  planning:
+    terminal_effects: []
+    supporting_effects: []
+    success_outcome_codes:
+    - CLEARED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: CLEAR_TRANSPORT
+  locality: TRANSPORT_ENDPOINT
+- key: deploy_heavy_engineering_support
+  name: 部署重型工程支援
+  description: 在设施或通道目标上部署已解锁的重型工程支援。
+  required_interaction_key: heavy_support_target
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  required_actor_role_key: industrial_repair_team
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: SUPPORT_DEPLOYED
+    name: 重型工程支援已就位
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: south_bridge
+      fact_key: heavy_engineering_support_ready
+    - node_key: water_treatment_plant
+      fact_key: heavy_engineering_support_ready
+    supporting_effects: []
+    success_outcome_codes:
+    - SUPPORT_DEPLOYED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: DEPLOY_HEAVY_ENGINEERING_SUPPORT
+  locality: LOCAL_TARGET
+- key: inspect
+  name: 检查状态
+  description: 主动调查一个已知但尚未检查的设施或通道，揭示设施状态、供电状态、维修需求和其他非资源情报；不调查资源库存。
+  required_interaction_key: inspectable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  - INSPECT_STATE
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: INSPECTED
+    name: 状态已检查
+    success: true
+  planning:
+    terminal_effects: []
+    supporting_effects: []
+    success_outcome_codes:
+    - INSPECTED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: INSPECT
+  locality: LOCAL_TARGET
+- key: relay_message
+  name: 传递信息
+  description: ONLINE Actor 在同一 Region 向失联 Actor 传递命令。
+  required_interaction_key: relayable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: RELAYED
+    name: 消息已传递
+    success: true
+  planning:
+    terminal_effects: []
+    supporting_effects: []
+    success_outcome_codes:
+    - RELAYED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: RELAY_MESSAGE
+  locality: ACTOR_REGION
+  target_kind: ACTOR
+- key: repair_communications
+  name: 修复通信设施
+  description: 修复通信设施后，获得该通信设施所属 Region 全部 Facility 的非资源设施情报；不揭示资源库存、隐藏资源或新的供电关系。
+  required_interaction_key: repairable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  required_actor_role_key: communications_repair_team
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: COMMUNICATIONS_REPAIRED
+    name: 通信已恢复
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: central_telecom_hub
+      fact_key: operational
+    - node_key: north_communication_relay
+      fact_key: operational
+    - node_key: south_communication_core
+      fact_key: operational
+    supporting_effects: []
+    success_outcome_codes:
+    - COMMUNICATIONS_REPAIRED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: REPAIR_COMMUNICATIONS
+  locality: FACILITY_REGION
+- key: repair_electrical
+  name: 修复电力设施
+  description: 修复发电、变电或配电设施。
+  required_interaction_key: repairable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  required_actor_role_key: electrical_response_team
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: ELECTRICAL_REPAIRED
+    name: 电力设施已修复
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: east_distribution_station
+      fact_key: operational
+    - node_key: south_substation
+      fact_key: operational
+    - node_key: southeast_emergency_power_station
+      fact_key: operational
+    supporting_effects: []
+    success_outcome_codes:
+    - ELECTRICAL_REPAIRED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: RULE
+  locality: FACILITY_REGION
+- key: repair_industrial_facility
+  name: 修复工业设施
+  description: 修复工业基地或服务中心。
+  required_interaction_key: repairable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  required_actor_role_key: industrial_repair_team
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: INDUSTRIAL_REPAIRED
+    name: 工业设施已修复
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: district_service_center
+      fact_key: operational
+    - node_key: east_community_hospital
+      fact_key: operational
+    - node_key: heavy_equipment_yard
+      fact_key: operational
+    - node_key: riverside_shelter
+      fact_key: operational
+    - node_key: utility_service_depot
+      fact_key: operational
+    supporting_effects: []
+    success_outcome_codes:
+    - INDUSTRIAL_REPAIRED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: RULE
+  locality: FACILITY_REGION
+- key: repair_water_facility
+  name: 修复水务设施
+  description: 修复水处理或供水设施。
+  required_interaction_key: repairable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  required_actor_role_key: water_repair_team
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: WATER_FACILITY_REPAIRED
+    name: 水务设施已修复
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: east_water_pump_station
+      fact_key: operational
+    - node_key: south_pump_station
+      fact_key: operational
+    - node_key: water_treatment_plant
+      fact_key: operational
+    supporting_effects: []
+    success_outcome_codes:
+    - WATER_FACILITY_REPAIRED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: RULE
+  locality: FACILITY_REGION
+- key: supply_power
+  name: 送电
+  description: 根据已知的直接供电关系为目标设施恢复供电。
+  required_interaction_key: power_targetable
+  execution_mode: IMMEDIATE
+  parameters:
+  - key: source_key
+    name: 供电来源
+    value_type: STRING
+    required: true
+    minimum: null
+    maximum: null
+    allowed_values: []
+    default: null
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  required_actor_role_key: electrical_response_team
+  source_relation_type_key: supplies_power_to
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: POWER_SUPPLIED
+    name: 已恢复供电
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: east_community_hospital
+      fact_key: power_supply
+    - node_key: east_water_pump_station
+      fact_key: power_supply
+    - node_key: riverside_shelter
+      fact_key: power_supply
+    - node_key: south_pump_station
+      fact_key: power_supply
+    - node_key: water_treatment_plant
+      fact_key: power_supply
+    - node_key: east_distribution_station
+      fact_key: power_supply
+    supporting_effects: []
+    success_outcome_codes:
+    - POWER_SUPPLIED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: SUPPLY_POWER
+  locality: FACILITY_REGION
+- key: survey_resources
+  name: 查探资源
+  description: 专门调查目标 Region 的资源库存，发现普通资源与可调查的设施关联资源及其来源；不调查一般 Facility 状态。
+  required_interaction_key: surveyable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  - INSPECT_STATE
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: SURVEYED
+    name: 资源已查探
+    success: true
+  planning:
+    terminal_effects: []
+    supporting_effects: []
+    success_outcome_codes:
+    - SURVEYED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: SURVEY_RESOURCES
+  locality: REGION
+- key: transport_resource
+  name: 运输资源
+  description: 将当前 Region 的已知可用资源运往目标 Region。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复；不会移动 Actor。
+  required_interaction_key: transport_destination
+  execution_mode: IMMEDIATE
+  parameters:
+  - key: amount
+    name: 数量
+    value_type: INTEGER
+    required: true
+    minimum: 1
+    maximum: null
+    allowed_values: []
+    default: null
+  - key: resource_key
+    name: 资源键
+    value_type: STRING
+    required: true
+    minimum: null
+    maximum: null
+    allowed_values: []
+    default: null
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  - LOGISTICS
+  required_actor_role_key: emergency_logistics_team
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: TRANSPORTED
+    name: 资源已运输
+    success: true
+  planning:
+    terminal_effects: []
+    supporting_effects: []
+    success_outcome_codes:
+    - TRANSPORTED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: TRANSPORT_RESOURCE
+  locality: NONE
+- key: travel
+  name: 前往区域
+  description: 尝试通过一个连接当前 Region 与目标 Region 的 Transport。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复。
+  required_interaction_key: travel_destination
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: TRAVELLED
+    name: 已到达目标区域
+    success: true
+  planning:
+    terminal_effects: []
+    supporting_effects: []
+    success_outcome_codes:
+    - TRAVELLED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: TRAVEL
+  locality: NONE
+rules:
+- key: activate_water_requirements
+  phase: PREFLIGHT
+  action_key: activate_emergency_water_transfer
+  priority: 100
+  condition:
+    kind: NOT
+    conditions: []
+    condition:
+      kind: ALL
+      conditions:
+      - kind: FACT_EQUALS
+        conditions: []
+        condition: null
+        node:
+          kind: EXPLICIT
+          node_key: water_treatment_plant
+          anchor_node_key: null
+          relation_type_key: null
+          direction: null
+          required_fact_key: null
+        fact_key: operational
+        resource_key: null
+        resource_scope: null
+        parameter_key: null
+        operator: null
+        value: true
+        values: []
+        visibility: null
+        access: null
+        relation_type_key: null
+        relation_direction: null
+      - kind: FACT_EQUALS
+        conditions: []
+        condition: null
+        node:
+          kind: EXPLICIT
+          node_key: water_treatment_plant
+          anchor_node_key: null
+          relation_type_key: null
+          direction: null
+          required_fact_key: null
+        fact_key: power_supply
+        resource_key: null
+        resource_scope: null
+        parameter_key: null
+        operator: null
+        value: AVAILABLE
+        values: []
+        visibility: null
+        access: null
+        relation_type_key: null
+        relation_direction: null
+      - kind: FACT_EQUALS
+        conditions: []
+        condition: null
+        node:
+          kind: EXPLICIT
+          node_key: south_pump_station
+          anchor_node_key: null
+          relation_type_key: null
+          direction: null
+          required_fact_key: null
+        fact_key: operational
+        resource_key: null
+        resource_scope: null
+        parameter_key: null
+        operator: null
+        value: true
+        values: []
+        visibility: null
+        access: null
+        relation_type_key: null
+        relation_direction: null
+      - kind: FACT_EQUALS
+        conditions: []
+        condition: null
+        node:
+          kind: EXPLICIT
+          node_key: south_pump_station
+          anchor_node_key: null
+          relation_type_key: null
+          direction: null
+          required_fact_key: null
+        fact_key: power_supply
+        resource_key: null
+        resource_scope: null
+        parameter_key: null
+        operator: null
+        value: AVAILABLE
+        values: []
+        visibility: null
+        access: null
+        relation_type_key: null
+        relation_direction: null
+      - kind: FACT_EQUALS
+        conditions: []
+        condition: null
+        node:
+          kind: EXPLICIT
+          node_key: east_water_pump_station
+          anchor_node_key: null
+          relation_type_key: null
+          direction: null
+          required_fact_key: null
+        fact_key: operational
+        resource_key: null
+        resource_scope: null
+        parameter_key: null
+        operator: null
+        value: true
+        values: []
+        visibility: null
+        access: null
+        relation_type_key: null
+        relation_direction: null
+      - kind: FACT_EQUALS
+        conditions: []
+        condition: null
+        node:
+          kind: EXPLICIT
+          node_key: east_water_pump_station
+          anchor_node_key: null
+          relation_type_key: null
+          direction: null
+          required_fact_key: null
+        fact_key: power_supply
+        resource_key: null
+        resource_scope: null
+        parameter_key: null
+        operator: null
+        value: AVAILABLE
+        values: []
+        visibility: null
+        access: null
+        relation_type_key: null
+        relation_direction: null
+      - kind: FACT_EQUALS
+        conditions: []
+        condition: null
+        node:
+          kind: EXPLICIT
+          node_key: south_communication_core
+          anchor_node_key: null
+          relation_type_key: null
+          direction: null
+          required_fact_key: null
+        fact_key: operational
+        resource_key: null
+        resource_scope: null
+        parameter_key: null
+        operator: null
+        value: true
+        values: []
+        visibility: null
+        access: null
+        relation_type_key: null
+        relation_direction: null
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: null
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: WATER_TRANSFER_REQUIREMENTS_UNMET
+    message: 应急供水的工程与通信条件尚未满足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: activate_water_resolution
+  phase: RESOLVE
+  action_key: activate_emergency_water_transfer
+  priority: 0
+  condition: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: east_emergency_water_supply
+    value:
+      source: LITERAL
+      literal: AVAILABLE
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: WATER_TRANSFER_ACTIVE
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: clear_transport_municipal_repair_materials_10_required
+  phase: PREFLIGHT
+  action_key: clear_transport
+  priority: 900
+  condition:
+    kind: RESOURCE_COMPARE
+    conditions: []
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: municipal_repair_materials
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    parameter_key: null
+    operator: LT
+    value: 10
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
+    message: 清理通道需要足够的市政维修材料。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: clear_transport_resolution
+  phase: RESOLVE
+  action_key: clear_transport
+  priority: 0
+  condition: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: passable
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: municipal_repair_materials
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: CLEARED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: heavy_support_unavailable
+  phase: PREFLIGHT
+  action_key: deploy_heavy_engineering_support
+  priority: 100
+  condition:
+    kind: FACT_NOT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: EXPLICIT
+      node_key: heavy_equipment_yard
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: heavy_engineering_support
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: AVAILABLE
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: HEAVY_SUPPORT_UNAVAILABLE
+    message: 重型工程支援尚未解锁。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: heavy_support_resolution
+  phase: RESOLVE
+  action_key: deploy_heavy_engineering_support
+  priority: 0
+  condition: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: heavy_engineering_support_ready
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: SUPPORT_DEPLOYED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: inspect_resolution
+  phase: RESOLVE
+  action_key: inspect
+  priority: 0
+  condition: null
+  effects:
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: INSPECTED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: relay_message_resolution
+  phase: RESOLVE
+  action_key: relay_message
+  priority: 0
+  condition: null
+  effects:
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: RELAYED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_communications_target_profile_required
+  phase: PREFLIGHT
+  action_key: repair_communications
+  priority: 1000
+  condition:
+    kind: NOT
+    conditions: []
+    condition:
+      kind: FACT_IN
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: null
+      values:
+      - central_communication_core
+      - north_communication_relay
+      - south_communication_core
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: REPAIR_TARGET_UNSUPPORTED
+    message: 该专业队不能修复该目标。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_communications_0_communication_equipment
+  phase: PREFLIGHT
+  action_key: repair_communications
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: central_communication_core
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: communication_equipment
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_COMMUNICATION_EQUIPMENT
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_communications_1_communication_equipment
+  phase: PREFLIGHT
+  action_key: repair_communications
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: north_communication_relay
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: communication_equipment
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_COMMUNICATION_EQUIPMENT
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_communications_2_communication_equipment
+  phase: PREFLIGHT
+  action_key: repair_communications
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: south_communication_core
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: communication_equipment
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_COMMUNICATION_EQUIPMENT
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_communications_0_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_communications
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: central_communication_core
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 15
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_communications_1_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_communications
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: north_communication_relay
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 15
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_communications_2_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_communications
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: south_communication_core
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 15
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: repair_communications_central_communication_core_resolution
+  phase: RESOLVE
+  action_key: repair_communications
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: central_communication_core
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_ACTOR_COMMAND_REACHABILITY
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+    actor_key: municipal_transport_team
+    command_reachability: ONLINE
+  - kind: SET_ACTOR_COMMAND_REACHABILITY
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+    actor_key: communications_repair_team_alpha
+    command_reachability: ONLINE
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: communication_equipment
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -15
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: COMMUNICATIONS_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_communications_north_communication_relay_resolution
+  phase: RESOLVE
+  action_key: repair_communications
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: north_communication_relay
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_ACTOR_COMMAND_REACHABILITY
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+    actor_key: industrial_repair_team_alpha
+    command_reachability: ONLINE
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: communication_equipment
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -15
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: COMMUNICATIONS_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_communications_south_communication_core_resolution
+  phase: RESOLVE
+  action_key: repair_communications
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: south_communication_core
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_ACTOR_COMMAND_REACHABILITY
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+    actor_key: water_repair_team_alpha
+    command_reachability: ONLINE
+  - kind: SET_ACTOR_COMMAND_REACHABILITY
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+    actor_key: electrical_repair_team_alpha
+    command_reachability: ONLINE
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: communication_equipment
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -15
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: COMMUNICATIONS_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_electrical_target_profile_required
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 1000
+  condition:
+    kind: NOT
+    conditions: []
+    condition:
+      kind: FACT_IN
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: null
+      values:
+      - central_hospital
+      - north_power_substation
+      - east_distribution_station
+      - southeast_emergency_power_station
+      - south_substation
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: REPAIR_TARGET_UNSUPPORTED
+    message: 该专业队不能修复该目标。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_electrical_0_electrical_repair_parts
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: central_hospital
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: electrical_repair_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_ELECTRICAL_REPAIR_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_electrical_1_electrical_repair_parts
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: north_power_substation
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: electrical_repair_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_ELECTRICAL_REPAIR_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_electrical_2_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: east_distribution_station
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_electrical_3_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: southeast_emergency_power_station
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_electrical_4_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: south_substation
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_electrical_2_electrical_repair_parts
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: east_distribution_station
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: electrical_repair_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_ELECTRICAL_REPAIR_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_electrical_3_electrical_repair_parts
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: southeast_emergency_power_station
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: electrical_repair_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 20
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_ELECTRICAL_REPAIR_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_electrical_4_electrical_repair_parts
+  phase: PREFLIGHT
+  action_key: repair_electrical
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: south_substation
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: electrical_repair_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 20
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_ELECTRICAL_REPAIR_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: repair_electrical_central_hospital_resolution
+  phase: RESOLVE
+  action_key: repair_electrical
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: central_hospital
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: electrical_repair_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: ELECTRICAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_electrical_east_distribution_station_resolution
+  phase: RESOLVE
+  action_key: repair_electrical
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: east_distribution_station
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: power_supply
+    value:
+      source: LITERAL
+      literal: UNAVAILABLE
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: electrical_repair_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: ELECTRICAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_electrical_north_power_substation_resolution
+  phase: RESOLVE
+  action_key: repair_electrical
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: north_power_substation
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: power_supply
+    value:
+      source: LITERAL
+      literal: AVAILABLE
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: electrical_repair_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: ELECTRICAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_electrical_south_substation_resolution
+  phase: RESOLVE
+  action_key: repair_electrical
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: south_substation
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: power_supply
+    value:
+      source: LITERAL
+      literal: UNAVAILABLE
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: electrical_repair_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -20
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: ELECTRICAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_electrical_southeast_emergency_power_station_resolution
+  phase: RESOLVE
+  action_key: repair_electrical
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: southeast_emergency_power_station
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: power_supply
+    value:
+      source: LITERAL
+      literal: AVAILABLE
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: electrical_repair_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -20
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: ELECTRICAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_industrial_facility_target_profile_required
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 1000
+  condition:
+    kind: NOT
+    conditions: []
+    condition:
+      kind: FACT_IN
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: null
+      values:
+      - utility_service_depot
+      - heavy_equipment_yard
+      - district_service_center
+      - east_community_hospital
+      - riverside_shelter
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: REPAIR_TARGET_UNSUPPORTED
+    message: 该专业队不能修复该目标。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_0_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: utility_service_depot
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_1_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: heavy_equipment_yard
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_2_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: district_service_center
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_3_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: east_community_hospital
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_4_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: riverside_shelter
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_0_municipal_repair_materials
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: utility_service_depot
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: municipal_repair_materials
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 20
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_1_municipal_repair_materials
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: heavy_equipment_yard
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: municipal_repair_materials
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_2_municipal_repair_materials
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: district_service_center
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: municipal_repair_materials
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_3_municipal_repair_materials
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: east_community_hospital
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: municipal_repair_materials
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_industrial_facility_4_municipal_repair_materials
+  phase: PREFLIGHT
+  action_key: repair_industrial_facility
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: riverside_shelter
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: municipal_repair_materials
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: repair_industrial_facility_district_service_center_resolution
+  phase: RESOLVE
+  action_key: repair_industrial_facility
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: district_service_center
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_RESOURCE_POOL_AVAILABILITY
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+    pool_key: southeast_district_service_stock
+    availability: AVAILABLE
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: municipal_repair_materials
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: INDUSTRIAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_industrial_facility_east_community_hospital_resolution
+  phase: RESOLVE
+  action_key: repair_industrial_facility
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: east_community_hospital
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: municipal_repair_materials
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: INDUSTRIAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_industrial_facility_heavy_equipment_yard_resolution
+  phase: RESOLVE
+  action_key: repair_industrial_facility
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: heavy_equipment_yard
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: heavy_engineering_support
+    value:
+      source: LITERAL
+      literal: AVAILABLE
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_RESOURCE_POOL_AVAILABILITY
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+    pool_key: north_heavy_equipment_stock
+    availability: AVAILABLE
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: municipal_repair_materials
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: INDUSTRIAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_industrial_facility_riverside_shelter_resolution
+  phase: RESOLVE
+  action_key: repair_industrial_facility
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: riverside_shelter
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: municipal_repair_materials
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: INDUSTRIAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_industrial_facility_utility_service_depot_resolution
+  phase: RESOLVE
+  action_key: repair_industrial_facility
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: utility_service_depot
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: SET_RESOURCE_POOL_AVAILABILITY
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+    pool_key: north_service_depot_stock
+    availability: AVAILABLE
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: municipal_repair_materials
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -20
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: INDUSTRIAL_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_water_facility_target_profile_required
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 1000
+  condition:
+    kind: NOT
+    conditions: []
+    condition:
+      kind: FACT_IN
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: null
+      values:
+      - water_treatment_plant
+      - south_pump_station
+      - east_water_pump_station
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: REPAIR_TARGET_UNSUPPORTED
+    message: 该专业队不能修复该目标。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: repair_water_facility_heavy_support_required
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 950
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: water_treatment_plant
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: FACT_NOT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: EXPLICIT
+        node_key: water_treatment_plant
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: heavy_engineering_support_ready
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: true
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: HEAVY_ENGINEERING_SUPPORT_REQUIRED
+    message: 维修南部水处理厂前必须先部署重型工程支援。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_water_facility_0_water_system_parts
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: water_treatment_plant
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: water_system_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 15
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_WATER_SYSTEM_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_water_facility_1_water_system_parts
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: south_pump_station
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: water_system_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_WATER_SYSTEM_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_water_facility_2_water_system_parts
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 900
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: east_water_pump_station
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: water_system_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_WATER_SYSTEM_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_water_facility_0_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: water_treatment_plant
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_water_facility_1_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: south_pump_station
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_water_facility_2_general_engineering_parts
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 899
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: east_water_pump_station
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: general_engineering_parts
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 5
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: cost_repair_water_facility_0_municipal_repair_materials
+  phase: PREFLIGHT
+  action_key: repair_water_facility
+  priority: 898
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: CURRENT_TARGET
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: repair_profile
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: water_treatment_plant
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: RESOURCE_COMPARE
+      conditions: []
+      condition: null
+      node: null
+      fact_key: null
+      resource_key: municipal_repair_materials
+      resource_scope:
+        kind: ACTOR_CURRENT_REGION
+        node_key: null
+      parameter_key: null
+      operator: LT
+      value: 10
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
+    message: 当前 Region 的已知可用资源不足。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: repair_water_facility_east_water_pump_station_resolution
+  phase: RESOLVE
+  action_key: repair_water_facility
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: east_water_pump_station
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: water_system_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: WATER_FACILITY_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_water_facility_south_pump_station_resolution
+  phase: RESOLVE
+  action_key: repair_water_facility
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: south_pump_station
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: water_system_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: WATER_FACILITY_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: repair_water_facility_water_treatment_plant_resolution
+  phase: RESOLVE
+  action_key: repair_water_facility
+  priority: 10
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: repair_profile
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: water_treatment_plant
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: water_system_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -15
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: general_engineering_parts
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -5
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: municipal_repair_materials
+    resource_scope:
+      kind: ACTOR_CURRENT_REGION
+      node_key: null
+    amount:
+      source: LITERAL
+      literal: -10
+      parameter_key: null
+      multiplier: 1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: WATER_FACILITY_REPAIRED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: supply_power_source_not_operational
+  phase: PREFLIGHT
+  action_key: supply_power
+  priority: 100
+  condition:
+    kind: FACT_NOT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: ACTION_SOURCE
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: operational
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: true
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: POWER_SOURCE_NOT_OPERATIONAL
+    message: 电源尚未运行。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: supply_power_source_unavailable
+  phase: PREFLIGHT
+  action_key: supply_power
+  priority: 90
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: ACTION_SOURCE
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: power_generation_capable
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: false
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    - kind: FACT_NOT_EQUALS
+      conditions: []
+      condition: null
+      node:
+        kind: ACTION_SOURCE
+        node_key: null
+        anchor_node_key: null
+        relation_type_key: null
+        direction: null
+        required_fact_key: null
+      fact_key: power_supply
+      resource_key: null
+      resource_scope: null
+      parameter_key: null
+      operator: null
+      value: AVAILABLE
+      values: []
+      visibility: null
+      access: null
+      relation_type_key: null
+      relation_direction: null
+    condition: null
+    node: null
+    fact_key: null
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: null
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: POWER_SOURCE_UNAVAILABLE
+    message: 电源不可用。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: supply_power_resolution
+  phase: RESOLVE
+  action_key: supply_power
+  priority: 0
+  condition: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: power_supply
+    value:
+      source: LITERAL
+      literal: AVAILABLE
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: POWER_SUPPLIED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: survey_resources_resolution
+  phase: RESOLVE
+  action_key: survey_resources
+  priority: 0
+  condition: null
+  effects:
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: SURVEYED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: transport_resource_resolution
+  phase: RESOLVE
+  action_key: transport_resource
+  priority: 0
+  condition: null
+  effects:
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: TRANSPORTED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: travel_resolution
+  phase: RESOLVE
+  action_key: travel
+  priority: 0
+  condition: null
+  effects:
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: TRAVELLED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+objectives:
+- key: restore_central_communication_capability
+  name: 恢复中央通信能力
+  description: 恢复中央通信核心并重新建立城市调度联络。
+  completion_requirements:
+  - key: central_telecom_operational
+    node_key: central_telecom_hub
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 中央通信核心已恢复运行。
+  prerequisites: []
+  subsumes: []
+  goal_aliases:
+  - Restore central communications
+  - 恢复中央通信核心
+  goal_examples: []
+  planning_guidance: 优先恢复中央通信核心；遵循已知的地点、通道和资源条件。
+- key: restore_east_emergency_power_network
+  name: 恢复东部应急供电网络
+  description: 恢复东部配电与东部应急设施的供电能力。
+  completion_requirements:
+  - key: east_hospital_operational
+    node_key: east_community_hospital
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 东区社区医院已恢复运行。
+  - key: east_hospital_power
+    node_key: east_community_hospital
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+    description: 东区社区医院已获得供电。
+  - key: riverside_shelter_operational
+    node_key: riverside_shelter
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 河滨避难所已恢复运行。
+  - key: riverside_shelter_power
+    node_key: riverside_shelter
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+    description: 河滨避难所已获得供电。
+  prerequisites: []
+  subsumes: []
+  goal_aliases:
+  - Restore east emergency power
+  - 恢复东部应急供电
+  goal_examples: []
+  planning_guidance: 依据已知的电力拓扑连续修复、供电并校验两个东部设施。
+- key: restore_east_emergency_water_supply
+  name: 恢复东部应急供水
+  description: 恢复东部应急供水调度能力。
+  completion_requirements:
+  - key: east_emergency_water_supply
+    node_key: east_water_pump_station
+    fact_key: east_emergency_water_supply
+    accepted_values:
+    - AVAILABLE
+    description: 东部应急供水已可用。
+  prerequisites: []
+  subsumes: []
+  goal_aliases:
+  - Restore east emergency water supply
+  - 恢复东部应急供水
+  goal_examples: []
+  planning_guidance: 满足水务设施、供电、重型工程与南部通信协调条件后启动调度。
+- key: restore_north_basic_engineering_support
+  name: 恢复北部基础工程支援
+  description: 恢复北部通信中继与市政工程服务能力。
+  completion_requirements:
+  - key: north_depot_operational
+    node_key: utility_service_depot
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 市政工程服务基地已恢复。
+  - key: north_relay_operational
+    node_key: north_communication_relay
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 北部通信中继已恢复。
+  prerequisites: []
+  subsumes: []
+  goal_aliases:
+  - Restore north engineering support
+  - 恢复北部基础工程支援
+  goal_examples: []
+  planning_guidance: 先确认北部通道与通信条件，再按专业队与已知资源编排修复。
+goal_resolution:
+  allow_llm_fallback: true
+  clarification_prompt: 请说明希望恢复的基础设施或公共服务。
+planning:
+  instructions:
+  - 只使用当前 Knowledge 中已知的地点、关系、资源与设施状态。
+  - 资源使用前确认 source Region 的已知可用数量；不要选择 pool_key。
+  - 依次检查 Actor 的在线状态、区域归属和已知工程条件。
+  recovery_hints:
+  - failure_code: RESOURCE_SURVEY_ALREADY_COMPLETED
+    hint: 已完成的资源 Survey 不要重复执行。
+  - failure_code: TRANSPORT_RESOURCE_INSUFFICIENT
+    hint: 资源数量不足时重新检查已知库存与解锁条件。
+  - failure_code: TRAVEL_BLOCKED
+    hint: 保留已完成步骤，读取新揭示的通行事实后重新评估剩余计划。

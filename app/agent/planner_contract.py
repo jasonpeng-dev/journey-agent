@@ -70,6 +70,7 @@ def action_planner_constraints(
     action: ActionDefinitionV2,
     *,
     known_preconditions: tuple[dict[str, object], ...] = (),
+    source_preconditions: tuple[dict[str, object], ...] = (),
 ) -> dict[str, object]:
     """Build the generic Action-level constraint contract.
 
@@ -185,6 +186,10 @@ def action_planner_constraints(
             "actor_location": "TARGET",
             "resource_transfer": "NONE",
         }
+    if action.source_relation_type_key is not None:
+        contract["source_relation_type_key"] = action.source_relation_type_key
+    if source_preconditions:
+        contract["source_preconditions"] = [dict(item) for item in source_preconditions]
     if known_preconditions:
         contract["known_preconditions"] = [dict(item) for item in known_preconditions]
     return contract
@@ -240,6 +245,23 @@ def planner_known_preconditions(
                 projection["current_value"] = known_facts[(node_key, condition.fact_key)]
             if projection not in result:
                 result.append(projection)
+    return tuple(result)
+
+
+def planner_source_preconditions(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+) -> tuple[dict[str, object], ...]:
+    result: list[dict[str, object]] = []
+    for rule in definition.rules:
+        if rule.action_key != action.key or rule.phase != RulePhase.PREFLIGHT:
+            continue
+        projected = _source_condition_projection(rule.condition)
+        if projected is None:
+            continue
+        entry: dict[str, object] = {"failure_condition": projected}
+        if entry not in result:
+            result.append(entry)
     return tuple(result)
 
 
@@ -626,6 +648,49 @@ def _condition_leaves(condition: Any) -> tuple[Any, ...]:
     if condition.kind == ConditionKind.NOT:
         return _condition_leaves(condition.condition)
     return (condition,)
+
+
+def _source_condition_projection(condition: Any) -> dict[str, object] | None:
+    if condition is None:
+        return None
+    if condition.kind in {ConditionKind.ALL, ConditionKind.ANY}:
+        children = tuple(_source_condition_projection(item) for item in condition.conditions)
+        if any(item is None for item in children):
+            return None
+        return {
+            "kind": condition.kind.value,
+            "conditions": [item for item in children if item is not None],
+        }
+    if condition.kind == ConditionKind.NOT:
+        child = _source_condition_projection(condition.condition)
+        if child is None:
+            return None
+        return {"kind": condition.kind.value, "condition": child}
+    if condition.kind not in {
+        ConditionKind.FACT_EQUALS,
+        ConditionKind.FACT_NOT_EQUALS,
+        ConditionKind.FACT_IN,
+        ConditionKind.FACT_COMPARE,
+    }:
+        return None
+    if (
+        condition.node is None
+        or condition.node.kind != NodeSelectorKind.ACTION_SOURCE
+        or condition.fact_key is None
+    ):
+        return None
+    projection: dict[str, object] = {
+        "kind": condition.kind.value,
+        "selector": NodeSelectorKind.ACTION_SOURCE.value,
+        "fact_key": condition.fact_key,
+    }
+    if condition.value is not None:
+        projection["value"] = condition.value
+    if condition.values:
+        projection["values"] = list(condition.values)
+    if condition.operator is not None:
+        projection["operator"] = condition.operator.value
+    return projection
 
 
 def _condition_projection(condition: Any) -> dict[str, object]:
