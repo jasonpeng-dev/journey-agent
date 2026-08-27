@@ -914,6 +914,7 @@ class GenericAgentService:
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
+        projected_known_resource_balance: dict[tuple[str | None, str], int] = {}
         actions = {action.key: action for action in definition.actions}
 
         for step in remaining_steps:
@@ -1031,6 +1032,7 @@ class GenericAgentService:
                     projected_actor_locations,
                     projected_resource_pools,
                     projected_region_resource_knowledge,
+                    projected_known_resource_balance,
                     projected_resolution_effects,
                 )
             except GenericAgentError as exc:
@@ -1586,6 +1588,7 @@ class GenericAgentService:
         projected_resource_pools, projected_region_resource_knowledge = (
             self._projected_resource_state(definition)
         )
+        projected_known_resource_balance: dict[tuple[str | None, str], int] = {}
 
         successful_signatures = self._successful_proposal_signatures(task)
         result: list[dict[str, object]] = []
@@ -1686,6 +1689,7 @@ class GenericAgentService:
                     projected_actor_locations,
                     projected_resource_pools,
                     projected_region_resource_knowledge,
+                    projected_known_resource_balance,
                     projected_resolution_effects,
                 )
             except GenericAgentError as exc:
@@ -3154,6 +3158,7 @@ class GenericAgentService:
         projected_actor_locations: dict[str, str],
         projected_pools: dict[str, _ProjectedResourcePool],
         projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+        projected_known_resource_balance: dict[tuple[str | None, str], int],
         projected_resolution_effects: Sequence[EffectV2],
     ) -> None:
         if action.behavior == ActionBehavior.SURVEY_RESOURCES:
@@ -3192,6 +3197,7 @@ class GenericAgentService:
                 projected_actor_locations,
                 projected_pools,
                 projected_region_knowledge,
+                projected_known_resource_balance,
                 projected_resolution_effects,
             )
             return
@@ -3218,13 +3224,14 @@ class GenericAgentService:
                 amount,
                 projected_pools,
                 projected_region_knowledge,
+                projected_known_resource_balance=projected_known_resource_balance,
             )
             if consumed:
                 self._add_projected_resource(
                     destination_region,
                     resource_key,
                     amount,
-                    projected_pools,
+                    projected_known_resource_balance,
                 )
 
         self._apply_projected_resource_effects(
@@ -3235,6 +3242,7 @@ class GenericAgentService:
             projected_actor_locations,
             projected_pools,
             projected_region_knowledge,
+            projected_known_resource_balance,
             projected_resolution_effects,
         )
 
@@ -3247,12 +3255,16 @@ class GenericAgentService:
         projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
         *,
         require_known: bool = True,
+        projected_known_resource_balance: dict[tuple[str | None, str], int] | None = None,
     ) -> bool:
         if amount < 0:
             raise GenericAgentError(
                 "RESOURCE_AMOUNT_INVALID",
                 "A Resource operation amount cannot be negative",
             )
+        if projected_known_resource_balance is None:
+            projected_known_resource_balance = {}
+
         candidates = [
             pool
             for pool in projected_pools.values()
@@ -3274,47 +3286,14 @@ class GenericAgentService:
         available = [
             pool for pool in candidates if pool.availability == ResourcePoolAvailability.AVAILABLE
         ]
-        if not candidates:
-            knowledge = (
-                projected_region_knowledge.get(region_key) if region_key is not None else None
-            )
-            knowledge_status = resource_knowledge_status(
-                inventory_visibility=(
-                    knowledge.visibility
-                    if knowledge is not None
-                    else ResourceInventoryVisibility.HIDDEN
-                ),
-                survey_completed=(knowledge.survey_completed if knowledge is not None else False),
-                has_visible_pool=False,
-            )
-            if knowledge_status == "KNOWN_ZERO":
-                raise GenericAgentError(
-                    "KNOWN_RESOURCE_INSUFFICIENT",
-                    "Known available Resource quantity is insufficient",
-                    details={
-                        "dimension": "RESOURCE_QUANTITY",
-                        "resource_key": resource_key,
-                        "scope_region": region_key,
-                        "required_amount": amount,
-                        "projected_known_available_amount": 0,
-                        "deficit": amount,
-                    },
-                )
-            raise GenericAgentError(
-                "RESOURCE_INVENTORY_UNKNOWN",
-                "The source Region Resource inventory is not known",
-                details={
-                    "dimension": "RESOURCE_KNOWLEDGE",
-                    "resource_key": resource_key,
-                    "scope_region": region_key,
-                    "required_amount": amount,
-                    "required": "KNOWN_VISIBLE_AVAILABLE",
-                    "actual": "UNKNOWN",
-                },
-            )
-        known_available = sum(pool.quantity for pool in available if pool.quantity is not None)
+        projected_balance_key = (region_key, resource_key)
+        projected_available = projected_known_resource_balance.get(projected_balance_key, 0)
+        known_available = projected_available + sum(
+            pool.quantity for pool in available if pool.quantity is not None
+        )
         has_unknown_available = any(pool.quantity is None for pool in available)
-        if known_available < amount and not has_unknown_available:
+
+        if known_available < amount:
             knowledge = (
                 projected_region_knowledge.get(region_key) if region_key is not None else None
             )
@@ -3323,7 +3302,7 @@ class GenericAgentService:
                 and knowledge.visibility == ResourceInventoryVisibility.VISIBLE
                 and knowledge.survey_completed
             )
-            if not inventory_complete:
+            if has_unknown_available or not inventory_complete:
                 raise GenericAgentError(
                     "RESOURCE_INVENTORY_UNKNOWN",
                     "The source Region Resource inventory is not known",
@@ -3348,19 +3327,7 @@ class GenericAgentService:
                     "deficit": amount - known_available,
                 },
             )
-        if known_available < amount:
-            raise GenericAgentError(
-                "RESOURCE_INVENTORY_UNKNOWN",
-                "The source Region Resource inventory is not known",
-                details={
-                    "dimension": "RESOURCE_KNOWLEDGE",
-                    "resource_key": resource_key,
-                    "scope_region": region_key,
-                    "required_amount": amount,
-                    "required": "KNOWN_VISIBLE_AVAILABLE",
-                    "actual": "UNKNOWN",
-                },
-            )
+
         remaining = amount
         for pool in sorted(available, key=lambda item: item.pool_key):
             if remaining <= 0:
@@ -3370,31 +3337,27 @@ class GenericAgentService:
             consumed = min(pool.quantity, remaining)
             pool.quantity -= consumed
             remaining -= consumed
-        return True
+
+        if remaining > 0:
+            consumed_from_projected = min(projected_available, remaining)
+            projected_known_resource_balance[projected_balance_key] = (
+                projected_available - consumed_from_projected
+            )
+            remaining -= consumed_from_projected
+
+        return remaining == 0
 
     @staticmethod
     def _add_projected_resource(
         region_key: str | None,
         resource_key: str,
         amount: int,
-        projected_pools: dict[str, _ProjectedResourcePool],
+        projected_known_resource_balance: dict[tuple[str | None, str], int],
     ) -> None:
-        identity = resource_state_key(resource_key, region_key, "default")
-        pool = projected_pools.get(identity)
-        if pool is None:
-            pool = _ProjectedResourcePool(
-                pool_key="default",
-                resource_key=resource_key,
-                region_key=region_key,
-                facility_key=None,
-                quantity=0,
-                visibility=ResourcePoolVisibility.VISIBLE,
-                availability=ResourcePoolAvailability.AVAILABLE,
-                survey_discoverable=False,
-            )
-            projected_pools[identity] = pool
-        if pool.quantity is not None:
-            pool.quantity += amount
+        identity = (region_key, resource_key)
+        projected_known_resource_balance[identity] = (
+            projected_known_resource_balance.get(identity, 0) + amount
+        )
 
     def _apply_projected_resource_effects(
         self,
@@ -3405,6 +3368,7 @@ class GenericAgentService:
         projected_actor_locations: dict[str, str],
         projected_pools: dict[str, _ProjectedResourcePool],
         projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+        projected_known_resource_balance: dict[tuple[str | None, str], int],
         projected_resolution_effects: Sequence[EffectV2],
     ) -> None:
         actor_node_key = projected_actor_locations.get(actor_key)
@@ -3445,13 +3409,14 @@ class GenericAgentService:
                         projected_pools,
                         projected_region_knowledge,
                         require_known=True,
+                        projected_known_resource_balance=projected_known_resource_balance,
                     )
                 elif amount > 0:
                     self._add_projected_resource(
                         scope,
                         effect.resource_key,
                         amount,
-                        projected_pools,
+                        projected_known_resource_balance,
                     )
 
     @staticmethod

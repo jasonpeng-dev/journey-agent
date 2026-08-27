@@ -12,7 +12,13 @@ from app.agent.dependency_closure import (
     _has_known_available_resource_at,
     build_dependency_closure,
 )
-from app.agent.generic import GenericAgentError, GenericAgentService, PlanningActionCatalogBuilder
+from app.agent.generic import (
+    GenericAgentError,
+    GenericAgentService,
+    PlanningActionCatalogBuilder,
+    _ProjectedRegionResourceKnowledge,
+    _ProjectedResourcePool,
+)
 from app.agent.planning_context import PlanningContextBuilder, objective_context
 from app.agent.provider import (
     PlannerActionContract,
@@ -26,7 +32,7 @@ from app.domain.enums import (
     ResourcePoolVisibility,
 )
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import ActionBehavior, ScenarioDefinitionV2
 from app.domain.world import Visibility
 from app.engine.rules import GenericRuleOutcome, ResourceMutation
 from app.infrastructure.db.models import (
@@ -1329,3 +1335,292 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
         )
 
     assert service.evaluate(task).completed is False
+
+
+def _projected_resource_validator() -> GenericAgentService:
+    return GenericAgentService.__new__(GenericAgentService)
+
+
+def _synthetic_region_definition() -> Any:
+    region_keys = ("source_region", "middle_region", "destination_region")
+    nodes = tuple(
+        type("SyntheticNode", (), {"key": key, "node_type_key": "region"})() for key in region_keys
+    )
+    node_by_key = {node.key: node for node in nodes}
+    locality = type(
+        "SyntheticLocality",
+        (),
+        {
+            "region_node_type_key": "region",
+            "facility_node_type_key": "facility",
+            "transport_node_type_key": "transport",
+            "located_in_relation_type_key": "located_in",
+            "transport_endpoint_relation_type_key": "endpoint",
+            "passability_fact_key": "passable",
+        },
+    )()
+    world = type(
+        "SyntheticWorld",
+        (),
+        {
+            "nodes": nodes,
+            "node": lambda self, key: node_by_key.get(key),
+        },
+    )()
+    return type(
+        "SyntheticDefinition",
+        (),
+        {
+            "metadata": type("SyntheticMetadata", (), {"locality": locality})(),
+            "world": world,
+        },
+    )()
+
+
+def _projected_pool(
+    region_key: str,
+    *,
+    quantity: int | None,
+    resource_key: str = "synthetic_resource",
+    pool_key: str = "base",
+    facility_key: str | None = None,
+    visibility: ResourcePoolVisibility = ResourcePoolVisibility.VISIBLE,
+    availability: ResourcePoolAvailability = ResourcePoolAvailability.AVAILABLE,
+) -> _ProjectedResourcePool:
+    return _ProjectedResourcePool(
+        pool_key=pool_key,
+        resource_key=resource_key,
+        region_key=region_key,
+        facility_key=facility_key,
+        quantity=quantity,
+        visibility=visibility,
+        availability=availability,
+        survey_discoverable=False,
+    )
+
+
+def _projected_knowledge(
+    region_key: str,
+    *,
+    visibility: ResourceInventoryVisibility,
+    survey_completed: bool,
+) -> dict[str, _ProjectedRegionResourceKnowledge]:
+    return {
+        region_key: _ProjectedRegionResourceKnowledge(
+            visibility=visibility,
+            survey_completed=survey_completed,
+        )
+    }
+
+
+def _add_inflow(
+    validator: GenericAgentService,
+    region_key: str,
+    amount: int,
+    balance: dict[tuple[str | None, str], int],
+) -> None:
+    validator._add_projected_resource(
+        region_key,
+        "synthetic_resource",
+        amount,
+        balance,
+    )
+
+
+def _consume(
+    validator: GenericAgentService,
+    region_key: str,
+    amount: int,
+    pools: dict[str, _ProjectedResourcePool],
+    knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+    balance: dict[tuple[str | None, str], int],
+) -> bool:
+    return validator._consume_projected_resource(
+        region_key,
+        "synthetic_resource",
+        amount,
+        pools,
+        knowledge,
+        projected_known_resource_balance=balance,
+    )
+
+
+def test_projected_transport_inflow_can_be_consumed_in_unknown_region() -> None:
+    validator = _projected_resource_validator()
+    definition = _synthetic_region_definition()
+    transport = type("SyntheticTransport", (), {"behavior": ActionBehavior.TRANSPORT_RESOURCE})()
+    pools = {
+        "source": _projected_pool("source_region", quantity=10),
+    }
+    knowledge = {
+        **_projected_knowledge(
+            "source_region",
+            visibility=ResourceInventoryVisibility.VISIBLE,
+            survey_completed=True,
+        ),
+        **_projected_knowledge(
+            "middle_region",
+            visibility=ResourceInventoryVisibility.HIDDEN,
+            survey_completed=False,
+        ),
+        **_projected_knowledge(
+            "destination_region",
+            visibility=ResourceInventoryVisibility.HIDDEN,
+            survey_completed=False,
+        ),
+    }
+    balance: dict[tuple[str | None, str], int] = {}
+    locations = {"carrier": "source_region"}
+
+    validator._validate_and_advance_projected_resources(
+        definition,
+        transport,
+        "carrier",
+        "middle_region",
+        {"resource_key": "synthetic_resource", "amount": 10},
+        locations,
+        pools,
+        knowledge,
+        balance,
+        (),
+    )
+    assert balance[("middle_region", "synthetic_resource")] == 10
+
+    locations["carrier"] = "middle_region"
+    validator._validate_and_advance_projected_resources(
+        definition,
+        transport,
+        "carrier",
+        "destination_region",
+        {"resource_key": "synthetic_resource", "amount": 10},
+        locations,
+        pools,
+        knowledge,
+        balance,
+        (),
+    )
+
+    assert pools["source"].quantity == 0
+    assert balance[("middle_region", "synthetic_resource")] == 0
+    assert balance[("destination_region", "synthetic_resource")] == 10
+    assert knowledge["middle_region"].visibility == ResourceInventoryVisibility.HIDDEN
+    assert knowledge["middle_region"].survey_completed is False
+
+
+def test_projected_inflow_shortfall_preserves_unknown_error() -> None:
+    validator = _projected_resource_validator()
+    knowledge = _projected_knowledge(
+        "middle_region",
+        visibility=ResourceInventoryVisibility.HIDDEN,
+        survey_completed=False,
+    )
+    balance: dict[tuple[str | None, str], int] = {}
+    _add_inflow(validator, "middle_region", 10, balance)
+
+    with pytest.raises(GenericAgentError) as error:
+        _consume(validator, "middle_region", 15, {}, knowledge, balance)
+
+    assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
+    assert balance[("middle_region", "synthetic_resource")] == 10
+
+
+def test_projected_inflow_supports_local_consumption() -> None:
+    validator = _projected_resource_validator()
+    knowledge = _projected_knowledge(
+        "middle_region",
+        visibility=ResourceInventoryVisibility.HIDDEN,
+        survey_completed=False,
+    )
+    balance: dict[tuple[str | None, str], int] = {}
+    _add_inflow(validator, "middle_region", 10, balance)
+
+    assert _consume(validator, "middle_region", 10, {}, knowledge, balance) is True
+    assert balance[("middle_region", "synthetic_resource")] == 0
+
+
+def test_known_zero_region_accepts_projected_inflow_transit() -> None:
+    validator = _projected_resource_validator()
+    knowledge = _projected_knowledge(
+        "middle_region",
+        visibility=ResourceInventoryVisibility.VISIBLE,
+        survey_completed=True,
+    )
+    balance: dict[tuple[str | None, str], int] = {}
+    _add_inflow(validator, "middle_region", 10, balance)
+
+    assert _consume(validator, "middle_region", 10, {}, knowledge, balance) is True
+    assert balance[("middle_region", "synthetic_resource")] == 0
+
+
+def test_unknown_region_without_projected_inflow_remains_unknown() -> None:
+    validator = _projected_resource_validator()
+    knowledge = _projected_knowledge(
+        "middle_region",
+        visibility=ResourceInventoryVisibility.HIDDEN,
+        survey_completed=False,
+    )
+
+    with pytest.raises(GenericAgentError) as error:
+        _consume(validator, "middle_region", 10, {}, knowledge, {})
+
+    assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
+
+
+def test_projected_inflow_does_not_reveal_unknown_inventory() -> None:
+    validator = _projected_resource_validator()
+    hidden_pool = _projected_pool(
+        "middle_region",
+        quantity=90,
+        pool_key="hidden_pool",
+        facility_key="hidden_facility",
+        visibility=ResourcePoolVisibility.HIDDEN,
+    )
+    pools = {"hidden": hidden_pool}
+    knowledge = _projected_knowledge(
+        "middle_region",
+        visibility=ResourceInventoryVisibility.HIDDEN,
+        survey_completed=False,
+    )
+    balance: dict[tuple[str | None, str], int] = {}
+    _add_inflow(validator, "middle_region", 10, balance)
+
+    assert _consume(validator, "middle_region", 10, pools, knowledge, balance) is True
+    assert hidden_pool.quantity == 90
+    assert hidden_pool.visibility == ResourcePoolVisibility.HIDDEN
+    assert knowledge["middle_region"].visibility == ResourceInventoryVisibility.HIDDEN
+    assert knowledge["middle_region"].survey_completed is False
+
+
+def test_base_and_projected_known_balances_are_combined() -> None:
+    validator = _projected_resource_validator()
+    pools = {
+        "base": _projected_pool("middle_region", quantity=5),
+    }
+    knowledge = _projected_knowledge(
+        "middle_region",
+        visibility=ResourceInventoryVisibility.VISIBLE,
+        survey_completed=True,
+    )
+    balance: dict[tuple[str | None, str], int] = {}
+    _add_inflow(validator, "middle_region", 10, balance)
+
+    assert _consume(validator, "middle_region", 12, pools, knowledge, balance) is True
+    assert pools["base"].quantity == 0
+    assert balance[("middle_region", "synthetic_resource")] == 3
+
+
+def test_unknown_base_inventory_with_projected_inflow_stays_unknown() -> None:
+    validator = _projected_resource_validator()
+    knowledge = _projected_knowledge(
+        "middle_region",
+        visibility=ResourceInventoryVisibility.HIDDEN,
+        survey_completed=False,
+    )
+    balance: dict[tuple[str | None, str], int] = {}
+    _add_inflow(validator, "middle_region", 10, balance)
+
+    with pytest.raises(GenericAgentError) as error:
+        _consume(validator, "middle_region", 12, {}, knowledge, balance)
+
+    assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
+    assert balance[("middle_region", "synthetic_resource")] == 10
