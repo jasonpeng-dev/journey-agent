@@ -412,11 +412,13 @@ class GenericAgentService:
         )
         self.db.add(task)
         self.db.flush()
+        if self.evaluate(task).completed:
+            self._complete_task(task)
         # Formal Play uses the same task/objective construction but lets the
         # player explicitly acknowledge the resolved Goal before initial
         # planning starts.  The default keeps the generic engine's existing
         # eager-planning behavior unchanged for all other callers.
-        if initialize_plan:
+        elif initialize_plan:
             self.plan(task)
         return task
 
@@ -1163,7 +1165,18 @@ class GenericAgentService:
             if not matched:
                 continue
             target_key = matched[0][0]
-            parameters = self._default_parameters(action)
+            try:
+                parameters = self._default_parameters(action)
+            except GenericAgentError as exc:
+                if exc.code != "GENERIC_PLAN_PARAMETER_REQUIRED" or not exc.message.startswith(
+                    "Action input is missing required parameter "
+                ):
+                    raise
+                # Required parameters without deterministic defaults belong to
+                # the Planner. The pre-provider frontier may not materialize
+                # or choose them, so leave this Action unresolved for the
+                # canonical PlannerInput/provider boundary.
+                continue
             actor = self._delegate_actor(definition, action, target_key, parameters)
             if actor is None:
                 continue
