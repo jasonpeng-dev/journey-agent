@@ -406,6 +406,8 @@ def build_dependency_closure(
     selected_actor_targets: set[str] = set()
     selected_diagnostic_actor_keys: set[str] = set()
     expanded_source_targets: set[tuple[str, str]] = set()
+    queued_resource_dependencies: set[TypedDependency] = set()
+    resource_demand: dict[str, int] = {}
     state_changed = False
 
     def select_action(action_key: str, path: tuple[str, ...], producer_for: str) -> bool:
@@ -591,14 +593,18 @@ def build_dependency_closure(
         action_key: str,
     ) -> None:
         relevant_resources.add(resource_key)
+        dependency = TypedDependency(
+            "RESOURCE_SOURCE",
+            resource_key,
+            key=target_key,
+            required=required_amount,
+        )
+        if dependency not in queued_resource_dependencies:
+            queued_resource_dependencies.add(dependency)
+            resource_demand[resource_key] = resource_demand.get(resource_key, 0) + required_amount
         queue.append(
             (
-                TypedDependency(
-                    "RESOURCE_SOURCE",
-                    resource_key,
-                    key=target_key,
-                    required=required_amount,
-                ),
+                dependency,
                 (*path, f"action:{action_key}", f"resource:{resource_key}"),
                 action_key,
             )
@@ -784,6 +790,28 @@ def build_dependency_closure(
             known_resource = planner_input.known_world.resources.get(dependency.subject)
             required_amount = int(dependency.required or 0)
             known_available_amount = _known_available_resource_amount(known_resource)
+            # A resource may be needed by several already relevant bindings.
+            # Accumulated demand is only a closure-relevance signal: it does
+            # not assign quantities to Pools or choose a source for Planner.
+            relevant_demand = max(
+                required_amount,
+                resource_demand.get(dependency.subject, required_amount),
+            )
+            if known_available_amount < relevant_demand:
+                for unlock_dependency in _known_linked_pool_unlock_dependencies(
+                    known_resource,
+                    planner_input,
+                ):
+                    queue.append(
+                        (
+                            unlock_dependency,
+                            (
+                                *path,
+                                f"resource_unlock:{dependency.subject}",
+                            ),
+                            consumer_action,
+                        )
+                    )
             destination_region = _known_region_for_node(
                 definition,
                 planner_input,
@@ -1269,6 +1297,81 @@ def _known_available_resource_amount(raw: object) -> int:
         if isinstance(value, dict)
         and isinstance(value.get("known_available"), int)
         and not isinstance(value.get("known_available"), bool)
+    )
+
+
+def _known_linked_pool_unlock_dependencies(
+    raw_resource: object,
+    planner_input: PlannerInput,
+) -> tuple[TypedDependency, ...]:
+    """Return public, unsatisfied unlock Facts for known unavailable Pools.
+
+    ``PlannerInput`` contains only the public Pool projection.  A requirement
+    is safe to expand only when its referenced Fact is also present in the
+    public Fact projection; a requirement definition alone must not reveal a
+    hidden Fact.  The helper deliberately returns Facts only.  Existing
+    producer/binding expansion remains the sole authority for deciding which
+    Action can satisfy them.
+    """
+
+    if not isinstance(raw_resource, dict):
+        return ()
+    scopes = raw_resource.get("scopes")
+    if not isinstance(scopes, dict):
+        return ()
+    known_facts = planner_input.known_world.facts
+    dependencies: set[TypedDependency] = set()
+    for scope in scopes.values():
+        if not isinstance(scope, dict):
+            continue
+        pools = scope.get("pools")
+        if not isinstance(pools, (list, tuple)):
+            continue
+        for pool in pools:
+            if not isinstance(pool, dict):
+                continue
+            visibility = pool.get("visibility")
+            if visibility is not None:
+                visibility_value = getattr(visibility, "value", visibility)
+                if visibility_value != "VISIBLE":
+                    continue
+            availability = getattr(pool.get("availability"), "value", pool.get("availability"))
+            if availability != "UNAVAILABLE":
+                continue
+            requirement_status = pool.get("availability_requirement_status")
+            if requirement_status is not None:
+                requirement_status = getattr(requirement_status, "value", requirement_status)
+                if requirement_status != "KNOWN":
+                    continue
+            requirement = pool.get("availability_requirement")
+            if not isinstance(requirement, dict):
+                continue
+            node_key = requirement.get("node_key")
+            fact_key = requirement.get("fact_key")
+            if not isinstance(node_key, str) or not isinstance(fact_key, str):
+                continue
+            operator = requirement.get("operator")
+            if operator not in {None, "EQ"}:
+                continue
+            identity = f"{node_key}.{fact_key}"
+            if identity not in known_facts:
+                continue
+            required_value = requirement.get("value")
+            if known_facts[identity] == required_value:
+                continue
+            dependencies.add(
+                TypedDependency(
+                    "FACT",
+                    node_key,
+                    fact_key,
+                    repr((required_value,)),
+                )
+            )
+    return tuple(
+        sorted(
+            dependencies,
+            key=lambda item: (item.subject, item.key, str(item.required)),
+        )
     )
 
 
