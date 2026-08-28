@@ -301,6 +301,104 @@ class PlayOrchestrator:
         self.db.flush()
         return task
 
+    def run_until_boundary(self, *, expected_pacing_version: int) -> AgentTask:
+        """Execute the current accepted Plan until its next player boundary.
+
+        This orchestration deliberately stays at the Formal Play boundary.  A
+        single Action still goes through ``GenericAgentService.execute_next``
+        and the existing operation settlement path; this method only repeats
+        the already-supported action acknowledgement/debrief transition while
+        the same accepted Plan remains active.  Every Action result is
+        committed before another Action is considered, so a later failure
+        cannot roll back earlier successful work.
+        """
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        task = self._current_task()
+        if task is None:
+            raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Game has no active Task")
+        checkpoint = self._checkpoint(task, expected_pacing_version=expected_pacing_version)
+        if checkpoint.phase != PlayerExecutionPhase.AWAITING_ACTION_ACK:
+            raise PlayError(
+                "PLAYER_PACING_PHASE_INVALID",
+                "The Task is not waiting for action acknowledgement",
+            )
+
+        first_step = self._next_action_step(task)
+        if first_step is None:
+            self._block_unreachable(task, checkpoint)
+            self.db.commit()
+            return task
+        accepted_plan = self.db.get(AgentPlan, first_step.plan_id)
+        if accepted_plan is None or accepted_plan.status != AgentPlanStatus.ACTIVE:
+            self._block_unreachable(task, checkpoint)
+            self.db.commit()
+            return task
+        accepted_plan_id = accepted_plan.id
+        accepted_plan_version = accepted_plan.version
+        task_id = task.id
+
+        for _transition in range(self.MAX_TRANSITIONS):
+            active_plan = self._active_plan_for_task(task)
+            if (
+                active_plan is None
+                or active_plan.id != accepted_plan_id
+                or active_plan.version != accepted_plan_version
+            ):
+                # A concurrent/newly accepted Plan is a hard boundary.  The
+                # continuous request must never start executing that Plan.
+                return task
+
+            action_step = self._next_action_step(task)
+            if action_step is None:
+                self._block_unreachable(task, checkpoint)
+                self.db.commit()
+                return task
+
+            self._execute_action_cycle(task, action_step)
+            checkpoint.last_action_step_id = action_step.id
+            checkpoint.phase = self._phase_after_cycle(task, action_step=action_step)
+            checkpoint.version += 1
+            self.db.flush()
+            # Keep each Action's state durable and independently visible.  A
+            # later exception therefore cannot roll back earlier Actions.
+            self.db.commit()
+
+            task = self.db.get(AgentTask, task_id)
+            next_checkpoint = self.db.get(PlayerExecutionCheckpoint, task_id)
+            if task is None or next_checkpoint is None:
+                raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Task disappeared during execution")
+            checkpoint = next_checkpoint
+            phase = PlayerExecutionPhase(checkpoint.phase)
+            if phase in _PRODUCT_TERMINAL or phase in (
+                PlayerExecutionPhase.APPROVAL_REQUIRED,
+                PlayerExecutionPhase.AWAITING_REPLAN_ACK,
+            ):
+                return task
+            if not self._plan_matches(
+                task,
+                plan_id=accepted_plan_id,
+                plan_version=accepted_plan_version,
+            ):
+                return task
+            if phase != PlayerExecutionPhase.AWAITING_DEBRIEF_ACK:
+                return task
+
+            # Reuse the existing player-facing Continue transition internally;
+            # it only advances the pacing checkpoint and never calls a
+            # Provider.  Persist the transition before the next Action.
+            self.acknowledge_debrief(expected_pacing_version=checkpoint.version)
+            self.db.commit()
+            task = self.db.get(AgentTask, task_id)
+            next_checkpoint = self.db.get(PlayerExecutionCheckpoint, task_id)
+            if task is None or next_checkpoint is None:
+                raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Task disappeared during execution")
+            checkpoint = next_checkpoint
+            if checkpoint.phase != PlayerExecutionPhase.AWAITING_ACTION_ACK:
+                return task
+
+        raise PlayError("PLAY_TRANSITION_LIMIT", "Formal Play reached its safety bound")
+
     def acknowledge_debrief(self, *, expected_pacing_version: int) -> AgentTask:
         require_scope_writable(self.db, self.scope.game_instance_id)
         task = self._current_task()
@@ -622,12 +720,7 @@ class PlayOrchestrator:
         self.agent.plan(task, reason="PLAN_EXHAUSTED")
 
     def _next_action_step(self, task: AgentTask) -> AgentStep | None:
-        plan = self.db.scalar(
-            select(AgentPlan).where(
-                AgentPlan.task_id == task.id,
-                AgentPlan.status == AgentPlanStatus.ACTIVE,
-            )
-        )
+        plan = self._active_plan_for_task(task)
         if plan is None:
             return None
         return self.db.scalar(
@@ -641,6 +734,24 @@ class PlayOrchestrator:
             )
             .order_by(AgentStep.sequence)
         )
+
+    def _active_plan_for_task(self, task: AgentTask) -> AgentPlan | None:
+        return self.db.scalar(
+            select(AgentPlan).where(
+                AgentPlan.task_id == task.id,
+                AgentPlan.status == AgentPlanStatus.ACTIVE,
+            )
+        )
+
+    def _plan_matches(
+        self,
+        task: AgentTask,
+        *,
+        plan_id: UUID,
+        plan_version: int,
+    ) -> bool:
+        plan = self._active_plan_for_task(task)
+        return bool(plan is not None and plan.id == plan_id and plan.version == plan_version)
 
     def _ensure_checkpoint(self, task: AgentTask) -> PlayerExecutionCheckpoint:
         checkpoint = self.db.get(PlayerExecutionCheckpoint, task.id)

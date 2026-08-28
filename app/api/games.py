@@ -198,6 +198,34 @@ def acknowledge_action(
 
 
 @router.post(
+    "/{game_instance_id}/play/run-until-boundary",
+    response_model=PlayerGameStateResponse,
+)
+def run_until_boundary(
+    game_instance_id: UUID,
+    request: PlayerPacingRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PlayerGameStateResponse:
+    try:
+        configured_play_orchestrator(
+            db, GameInstanceId(game_instance_id), settings
+        ).run_until_boundary(expected_pacing_version=request.expected_pacing_version)
+        db.commit()
+        return PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        GenericProviderError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
+@router.post(
     "/{game_instance_id}/play/acknowledge-debrief",
     response_model=PlayerGameStateResponse,
 )

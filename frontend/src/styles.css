@@ -259,6 +259,9 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .player-checkpoint ul { margin: 6px 0 12px; padding-left: 20px; }
 .player-checkpoint button { margin-top: 10px; padding: 11px 18px; border: 0; border-radius: 9px; color: white; background: var(--console-jade); cursor: pointer; }
 .player-checkpoint button:disabled { cursor: wait; opacity: .55; }
+.action-execution-controls { display: flex; flex-wrap: wrap; gap: 9px; }
+.action-execution-controls button { margin-top: 10px; }
+.continuous-execution-status { display: block; margin-top: 8px; color: var(--console-soft); font-size: 11px; }
 .player-checkpoint.failed { border-color: #d7a8a2; background: #fff4f1; }
 .goal-receiving-card { border-color: #d9d2c5; background: #faf8f3; }
 .goal-receiving-card p { margin-bottom: 0; }

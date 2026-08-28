@@ -504,6 +504,43 @@ export function WaitingStatus({
   );
 }
 
+export function ActionExecutionControls({
+  disabled,
+  starting,
+  continuousExecuting,
+  onStart,
+  onContinuous,
+}: {
+  disabled: boolean;
+  starting: boolean;
+  continuousExecuting: boolean;
+  onStart: () => void;
+  onContinuous: () => void;
+}) {
+  return (
+    <>
+      <div className="action-execution-controls">
+        <button type="button" disabled={disabled} onClick={onStart}>
+          {starting ? "正在执行……" : "知悉，开始执行"}
+        </button>
+        <button
+          type="button"
+          data-testid="continuous-execution-button"
+          disabled={disabled}
+          onClick={onContinuous}
+        >
+          连续执行
+        </button>
+      </div>
+      {continuousExecuting && (
+        <span className="continuous-execution-status" data-testid="continuous-execution-status" role="status">
+          执行中…
+        </span>
+      )}
+    </>
+  );
+}
+
 type KnowledgeAccordionKey = "resources" | "locations" | "actors" | "facts" | "relations";
 
 type KnowledgeAccordionProps = {
@@ -1385,6 +1422,7 @@ export function GamePage() {
   const [pendingGoal, setPendingGoal] = useState<string | null>(null);
   const [acceptedTask, setAcceptedTask] = useState<PublicTask | null>(null);
   const [activeOperation, setActiveOperation] = useState<ActivePlayOperation | null>(null);
+  const [continuousExecuting, setContinuousExecuting] = useState(false);
   const [developerOpen, setDeveloperOpen] = useState(false);
   const [developerToken, setDeveloperToken] = useState("");
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
@@ -1392,11 +1430,15 @@ export function GamePage() {
     queryKey: ["play", gameId, selectedTaskId],
     queryFn: () => api.playState(gameId, selectedTaskId),
     placeholderData: (previous) => previous,
+    refetchOnWindowFocus: !continuousExecuting,
+    refetchOnReconnect: !continuousExecuting,
   });
   const livePlay = useQuery({
     queryKey: ["play", gameId, "live"],
     queryFn: () => api.playState(gameId, null),
     placeholderData: (previous) => previous,
+    refetchOnWindowFocus: !continuousExecuting,
+    refetchOnReconnect: !continuousExecuting,
   });
   const scenario = useQuery({
     queryKey: ["scenario", play.data?.game.scenario_id],
@@ -1497,6 +1539,12 @@ export function GamePage() {
         : api.acknowledgeDebrief(gameId, version),
     onSuccess: syncLivePlay,
   });
+  const continuous = useMutation({
+    mutationFn: (version: number) => api.runUntilBoundary(gameId, version),
+    onMutate: () => setContinuousExecuting(true),
+    onSuccess: syncLivePlay,
+    onSettled: () => setContinuousExecuting(false),
+  });
   const replan = useMutation({
     mutationFn: ({ version }: { version: number; taskId: string }) =>
       api.replan(gameId, version),
@@ -1556,9 +1604,11 @@ export function GamePage() {
     fork.isPending ||
     decision.isPending ||
     pacing.isPending ||
+    continuous.isPending ||
+    continuousExecuting ||
     replan.isPending;
   const mutationError =
-    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? checkpoint.error ?? fork.error ?? decision.error ?? pacing.error ?? replan.error;
+    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? checkpoint.error ?? fork.error ?? decision.error ?? pacing.error ?? continuous.error ?? replan.error;
   const resolutionMessage =
     submit.data && submit.data.status !== "ACCEPTED"
       ? submit.data.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。"
@@ -1571,7 +1621,6 @@ export function GamePage() {
   const planningForTask = operationSelected && activeOperation?.kind === "planning";
   const replanningForTask = operationSelected && activeOperation?.kind === "replanning";
   const goalAccepted = task?.execution_phase === "AWAITING_PLAN_START";
-  const actionReady = task?.execution_phase === "AWAITING_ACTION_ACK";
   const successDebrief = task?.execution_phase === "AWAITING_DEBRIEF_ACK";
   const failureDebrief = task?.execution_phase === "AWAITING_REPLAN_ACK";
   const planInvalidatedDebrief = Boolean(
@@ -1667,16 +1716,22 @@ export function GamePage() {
                 </button>
               </section>
             )}
-            {task && actionReady && task.briefing && selectedTaskActive && !planningForTask && !replanningForTask && (
+            {task && task.execution_phase === "AWAITING_ACTION_ACK" && task.briefing && selectedTaskActive && !planningForTask && !replanningForTask && (
               <section className="player-checkpoint action-briefing">
                 <small>下一步行动</small>
                 <h2>{task.briefing.actor_name} 准备执行</h2>
                 <p><strong>{task.briefing.action_name}</strong> · 目标：{task.briefing.target_name}</p>
                 <ActionLocationLine location={task.briefing.location} />
                 <p>{task.briefing.purpose}</p>
-                <button disabled={busy} onClick={() => pacing.mutate({ phase: "action", version: task.pacing_version })}>
-                  {pacing.isPending ? "正在执行……" : "知悉，开始执行"}
-                </button>
+                <ActionExecutionControls
+                  disabled={busy}
+                  starting={pacing.isPending}
+                  continuousExecuting={continuousExecuting}
+                  onStart={() => pacing.mutate({ phase: "action", version: task.pacing_version })}
+                  onContinuous={() => {
+                    if (!continuousExecuting) continuous.mutate(task.pacing_version);
+                  }}
+                />
               </section>
             )}
             {task && (successDebrief || failureDebrief) && task.debrief && !planningForTask && !replanningForTask && (

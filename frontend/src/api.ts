@@ -89,6 +89,7 @@ export const api = {
   playState: (id: string, taskId?: string | null) => request<PlayerGameState>(`/api/v1/games/${id}/play${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
   submitGoal: (id: string, goal: string, idempotencyKey: string) => request<GoalSubmission>(`/api/v1/games/${id}/goals`, { method: "POST", body: JSON.stringify({ goal, idempotency_key: idempotencyKey }) }),
   acknowledgeAction: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/acknowledge-action`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
+  runUntilBoundary: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/run-until-boundary`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   startInitialPlanning: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/start-planning`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   acknowledgeDebrief: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/acknowledge-debrief`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   replan: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/replan`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),

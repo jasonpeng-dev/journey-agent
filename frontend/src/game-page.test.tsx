@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ActionExecutionControls,
   GoalComposer,
   KnownWorldAccordions,
   MissionLogPanel,
@@ -388,6 +389,38 @@ describe("Formal Play player projections", () => {
     fireEvent.click(resourceRegionSummary!);
     expect(screen.getByText("粮食")).toBeVisible();
     expect(screen.getByText("可用资源状态")).toBeVisible();
+  });
+
+  it("offers continuous execution beside the current action and freezes both controls while running", () => {
+    const onStart = vi.fn();
+    const onContinuous = vi.fn();
+    const { rerender } = render(
+      <ActionExecutionControls
+        disabled={false}
+        starting={false}
+        continuousExecuting={false}
+        onStart={onStart}
+        onContinuous={onContinuous}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "知悉，开始执行" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "连续执行" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "连续执行" }));
+    expect(onContinuous).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <ActionExecutionControls
+        disabled
+        starting={false}
+        continuousExecuting
+        onStart={onStart}
+        onContinuous={onContinuous}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "知悉，开始执行" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "连续执行" })).toBeDisabled();
+    expect(screen.getByTestId("continuous-execution-status")).toHaveTextContent("执行中…");
   });
 
   it("opens non-empty resource regions by default and preserves manual state across rerenders", () => {
