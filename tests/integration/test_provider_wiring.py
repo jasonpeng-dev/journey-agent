@@ -178,6 +178,15 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
         assert persisted is not None
         calls = (persisted.objective_resolution_metadata or {}).get("provider_calls", [])
         observed_started_calls.append(dict(calls[-1]))
+        cycle = session.scalar(select(PlanningCycle).where(PlanningCycle.task_id == persisted.id))
+        assert cycle is not None and cycle.status == "RUNNING"
+        assert cycle.started_at is not None
+        attempt = session.scalar(
+            select(PlanningAttempt).where(PlanningAttempt.cycle_id == cycle.id)
+        )
+        assert attempt is not None and attempt.status == "RUNNING"
+        assert attempt.started_at is not None
+        assert cycle.current_attempt == attempt.attempt_index
         return original_propose_plan(request)
 
     monkeypatch.setattr(provider, "propose_plan", inspect_persistence_boundary)
@@ -269,6 +278,8 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     ]
     cycle = session.scalar(select(PlanningCycle).where(PlanningCycle.task_id == task.id))
     assert cycle is not None and cycle.status == "ACCEPTED"
+    assert cycle.started_at is not None
+    assert cycle.finished_at is not None
     attempts = tuple(
         session.scalars(
             select(PlanningAttempt)
@@ -277,6 +288,8 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
         )
     )
     assert [attempt.status for attempt in attempts] == ["REJECTED", "ACCEPTED"]
+    plan = session.scalar(select(AgentPlan).where(AgentPlan.task_id == task.id))
+    assert plan is not None and plan.planning_cycle_id == cycle.id
     assert (
         session.scalar(
             select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == task.id)
@@ -901,6 +914,11 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
         .order_by(PlanningCycle.created_at.desc())
     )
     assert cycle is not None and cycle.status == "ERROR"
+    assert cycle.started_at is not None
+    assert cycle.finished_at is not None
+    attempt = session.scalar(select(PlanningAttempt).where(PlanningAttempt.cycle_id == cycle.id))
+    assert attempt is not None
+    assert attempt.status == "TIMEOUT"
 
 
 def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(

@@ -452,6 +452,7 @@ class PublicActionDebriefResponse(ApiModel):
 class PublicTimelineEventResponse(ApiModel):
     id: str
     kind: PublicTimelineEventKind
+    planning_cycle_id: UUID | None = None
     title: str
     detail: str | None = None
     actor_name: str | None = None

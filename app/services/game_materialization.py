@@ -390,6 +390,7 @@ class GameMaterializer:
             )
         )
         cycle_map: dict[UUID, PlanningCycle] = {}
+        source_cycle_by_id = {row.id: row for row in cycles}
         for row in cycles:
             if row.status == "RUNNING":
                 raise MaterializationError(
@@ -414,6 +415,8 @@ class GameMaterializer:
                 rejected_segment=deepcopy(row.rejected_segment),
                 current_violations=deepcopy(row.current_violations),
                 anti_regression_memory=deepcopy(row.anti_regression_memory),
+                started_at=row.started_at,
+                finished_at=row.finished_at,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
             )
@@ -436,7 +439,12 @@ class GameMaterializer:
                     "MATERIALIZATION_PLANNING_IN_FLIGHT",
                     "The source has a RUNNING PlanningAttempt",
                 )
-            if row.cycle_id not in cycle_map or row.task_id not in task_map:
+            source_cycle = source_cycle_by_id.get(row.cycle_id)
+            if (
+                source_cycle is None
+                or source_cycle.task_id != row.task_id
+                or row.task_id not in task_map
+            ):
                 raise MaterializationError(
                     "MATERIALIZATION_HISTORY_INVALID",
                     "A PlanningAttempt references history outside the source",
@@ -484,12 +492,24 @@ class GameMaterializer:
                     "MATERIALIZATION_HISTORY_INVALID",
                     "An AgentPlan references a task outside the source",
                 )
+            if row.planning_cycle_id is not None:
+                source_cycle = source_cycle_by_id.get(row.planning_cycle_id)
+                if source_cycle is None or source_cycle.task_id != row.task_id:
+                    raise MaterializationError(
+                        "MATERIALIZATION_HISTORY_INVALID",
+                        "An AgentPlan references a planning cycle outside its task",
+                    )
             copied = AgentPlan(
                 task_id=task_map[row.task_id].id,
                 version=row.version,
                 status=row.status,
                 strategy_summary=row.strategy_summary,
                 replan_reason=row.replan_reason,
+                planning_cycle_id=(
+                    cycle_map[row.planning_cycle_id].id
+                    if row.planning_cycle_id is not None
+                    else None
+                ),
                 supersedes_plan_id=None,
                 created_by_run_id=row.created_by_run_id,
                 created_by_actor_key=row.created_by_actor_key,

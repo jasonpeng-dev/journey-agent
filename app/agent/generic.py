@@ -338,6 +338,7 @@ class GenericAgentService:
         self._last_provider_plan_summary: str | None = None
         self._last_provider_stop_reason: str | None = None
         self._last_provider_attempt: dict[str, object] | None = None
+        self._last_planning_cycle: PlanningCycle | None = None
 
     def create_task(
         self,
@@ -439,14 +440,8 @@ class GenericAgentService:
         self._task_scope(task)
         objectives = self._objectives(task, definition)
         next_version = task.current_plan_version + 1
-        steps = self._candidate_steps(
-            definition,
-            objectives,
-            task=task,
-            reason=reason,
-            plan_version=next_version,
-        )
         self._last_provider_stop_reason = None
+        self._last_planning_cycle = None
         if self.provider is not None:
             steps = self._provider_steps(
                 task,
@@ -456,6 +451,16 @@ class GenericAgentService:
                 next_version,
                 planning_continuity=planning_continuity,
             )
+            planning_cycle = self._last_planning_cycle
+        else:
+            steps = self._candidate_steps(
+                definition,
+                objectives,
+                task=task,
+                reason=reason,
+                plan_version=next_version,
+            )
+            planning_cycle = None
         if (
             not steps
             and not self.evaluate(task).completed
@@ -465,7 +470,13 @@ class GenericAgentService:
                 "GENERIC_PLAN_NOT_FOUND",
                 "No exact-Version Action can advance the frozen Objective from current Knowledge",
             )
-        return self._persist_plan(task, steps, reason=reason, plan_version=next_version)
+        return self._persist_plan(
+            task,
+            steps,
+            reason=reason,
+            plan_version=next_version,
+            planning_cycle=planning_cycle,
+        )
 
     def plan_one_attempt(
         self,
@@ -522,7 +533,11 @@ class GenericAgentService:
             )
             planner_input_override = PlannerInput.model_validate(cycle.planner_input)
             if start_attempt > self.model_max_repair_attempts_per_cycle:
-                cycle.status = "REJECTED"
+                self._finish_planning_cycle(
+                    cycle,
+                    status="REJECTED",
+                    finished_at=datetime.now(UTC),
+                )
                 task.status = AgentTaskStatus.BLOCKED
                 task.last_error_code = "MODEL_PLAN_REJECTED"
                 self.db.flush()
@@ -552,12 +567,22 @@ class GenericAgentService:
         if not accepted:
             assert cycle is not None
             if start_attempt >= self.model_max_repair_attempts_per_cycle:
-                cycle.status = "REJECTED"
+                self._finish_planning_cycle(
+                    cycle,
+                    status="REJECTED",
+                    finished_at=datetime.now(UTC),
+                )
                 task.status = AgentTaskStatus.BLOCKED
                 task.last_error_code = "MODEL_PLAN_REJECTED"
                 self.db.flush()
             return None, cycle
-        plan = self._persist_plan(task, steps, reason=reason, plan_version=next_version)
+        plan = self._persist_plan(
+            task,
+            steps,
+            reason=reason,
+            plan_version=next_version,
+            planning_cycle=cycle,
+        )
         return plan, cycle
 
     def _persist_plan(
@@ -567,6 +592,7 @@ class GenericAgentService:
         *,
         reason: str | None,
         plan_version: int,
+        planning_cycle: PlanningCycle | None = None,
     ) -> AgentPlan:
         actor = self._actor(task.owner_actor_key)
         old_plan = self.db.scalar(
@@ -586,6 +612,7 @@ class GenericAgentService:
                 or "Execute exact-Version actions for the frozen objective scope"
             ),
             replan_reason=reason,
+            planning_cycle_id=planning_cycle.id if planning_cycle is not None else None,
             supersedes_plan_id=old_plan.id if old_plan else None,
             created_by_actor_key=actor.actor_key,
             source="PROVIDER" if self.provider is not None else "GENERIC",
@@ -1316,45 +1343,74 @@ class GenericAgentService:
         planning_continuity: PlanningContinuity | None = None,
     ) -> list[dict[str, object]]:
         assert self.provider is not None
-        context_builder = PlanningContextBuilder(self.db, self.scope)
-        planning_context = context_builder.build(
-            definition,
-            objectives,
-            task=task,
-            replan_reason=reason,
-        )
-        planner_input = context_builder.build_v2(
-            definition,
-            objectives,
-            task=task,
-            replan_reason=reason,
-        )
-        if planner_input_override is not None:
-            planner_input = planner_input_override
-        # The old catalog is retained only as a compatibility projection for
-        # existing in-process FakeProviders. It is never serialized by the
-        # OpenAI-compatible provider when ``planner_input`` is present.
-        catalog_builder = PlanningActionCatalogBuilder(self.db, self.scope)
-        catalog = catalog_builder.build(
-            definition,
-            objectives,
-            task=task,
-            replan_reason=reason,
-            planner_input=planner_input,
-        )
         call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
-        if not planning_context.relevant_actions and not self.evaluate(task).completed:
-            raise GenericAgentError(
-                "GENERIC_PLAN_NOT_FOUND",
-                "No known public Action can advance the frozen ObjectiveScope",
-            )
+        created_cycle = planning_cycle is None
         if planning_cycle is None:
             planning_cycle = self._start_planning_cycle(
                 task,
                 call_type=call_type,
-                planner_input=planner_input,
+                planner_input={},
                 objectives=objectives,
                 replan_reason=reason,
+                started_at=datetime.now(UTC),
+            )
+        self._last_planning_cycle = planning_cycle
+        context_builder = PlanningContextBuilder(self.db, self.scope)
+        try:
+            planning_context = context_builder.build(
+                definition,
+                objectives,
+                task=task,
+                replan_reason=reason,
+            )
+            planner_input = context_builder.build_v2(
+                definition,
+                objectives,
+                task=task,
+                replan_reason=reason,
+            )
+            if planner_input_override is not None:
+                planner_input = planner_input_override
+            # The old catalog is retained only as a compatibility projection for
+            # existing in-process FakeProviders. It is never serialized by the
+            # OpenAI-compatible provider when ``planner_input`` is present.
+            catalog_builder = PlanningActionCatalogBuilder(self.db, self.scope)
+            catalog = catalog_builder.build(
+                definition,
+                objectives,
+                task=task,
+                replan_reason=reason,
+                planner_input=planner_input,
+            )
+        except Exception:
+            self._finish_planning_cycle(
+                planning_cycle,
+                status="ERROR",
+                finished_at=datetime.now(UTC),
+            )
+            self.db.flush()
+            raise
+        if created_cycle:
+            payload = planner_input.model_dump(mode="json")
+            planning_cycle.planner_input = payload
+            planning_cycle.planner_input_hash = hashlib.sha256(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        if not planning_context.relevant_actions and not self.evaluate(task).completed:
+            self._finish_planning_cycle(
+                planning_cycle,
+                status="REJECTED",
+                finished_at=datetime.now(UTC),
+            )
+            self.db.flush()
+            raise GenericAgentError(
+                "GENERIC_PLAN_NOT_FOUND",
+                "No known public Action can advance the frozen ObjectiveScope",
             )
         diagnostics: tuple[PlanViolation, ...] = initial_diagnostics
         anti_regression_memory: tuple[AntiRegressionMemoryItem, ...] = initial_memory
@@ -1398,6 +1454,7 @@ class GenericAgentService:
                 started_at=datetime.now(UTC),
             )
             self.db.add(planning_attempt)
+            planning_cycle.current_attempt = repair_attempt
             self.db.flush()
             audit_id = str(uuid4())
             provider_started_at = perf_counter()
@@ -1422,8 +1479,11 @@ class GenericAgentService:
                     latency_ms=_duration_ms(provider_started_at),
                     finish_reason=None,
                 )
-                planning_cycle.current_attempt = repair_attempt
-                planning_cycle.status = "ERROR"
+                self._finish_planning_cycle(
+                    planning_cycle,
+                    status="ERROR",
+                    finished_at=datetime.now(UTC),
+                )
                 self.db.flush()
                 self._notify_provider_call(
                     "FINISHED",
@@ -1450,8 +1510,11 @@ class GenericAgentService:
                     latency_ms=_duration_ms(provider_started_at),
                     finish_reason=None,
                 )
-                planning_cycle.current_attempt = repair_attempt
-                planning_cycle.status = "ERROR"
+                self._finish_planning_cycle(
+                    planning_cycle,
+                    status="ERROR",
+                    finished_at=datetime.now(UTC),
+                )
                 self.db.flush()
                 self._notify_provider_call(
                     "FINISHED",
@@ -1470,56 +1533,67 @@ class GenericAgentService:
                 )
                 self._provider_call_started_at.pop(audit_id, None)
                 raise
-            diagnostics = _validate_plan_segment_contract(proposal, planner_input)
-            if diagnostics:
-                steps: list[dict[str, object]] = []
-            else:
-                steps, raw_diagnostics = self._validate_provider_proposal_v1(
-                    task,
-                    definition,
-                    objectives,
-                    reason,
-                    plan_version,
-                    catalog,
-                    proposal.steps,
-                    planning_context,
+            try:
+                steps, diagnostics = self._validate_and_persist_provider_attempt(
+                    task=task,
+                    definition=definition,
+                    objectives=objectives,
+                    reason=reason,
+                    plan_version=plan_version,
+                    catalog=catalog,
+                    planning_context=planning_context,
                     planner_input=planner_input,
-                    stop_reason=proposal.stop_reason,
+                    request=request,
+                    proposal=proposal,
+                    planning_attempt=planning_attempt,
+                    audit_id=audit_id,
+                    provider_started_at=provider_started_at,
                 )
-                diagnostics = tuple(PlanViolation.model_validate(item) for item in raw_diagnostics)
-            self._record_provider_plan_call(
-                task,
-                request=request,
-                proposal_steps=proposal.steps,
-                proposal_candidate_ids=tuple(
-                    item.candidate_id or "" for item in proposal.steps if item.candidate_id
-                ),
-                diagnostics=diagnostics,
-                proposal_stop_reason=proposal.stop_reason,
-                accepted=not diagnostics,
-                audit_id=audit_id,
-            )
-            self._finish_planning_attempt(
-                planning_attempt,
-                status="ACCEPTED" if not diagnostics else "REJECTED",
-                finished_at=datetime.now(UTC),
-                latency_ms=_duration_ms(provider_started_at),
-                proposal=proposal.model_dump(mode="json"),
-                rejected_segment=(proposal.model_dump(mode="json") if diagnostics else None),
-                validator_violations=[
-                    violation.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
-                    for violation in diagnostics
-                ],
-                stop_reason=proposal.stop_reason,
-                provider_metadata=provider_call_metadata(self.provider),
-            )
+            except Exception as exc:
+                proposal_payload: dict[str, object] | None
+                try:
+                    proposal_payload = proposal.model_dump(mode="json")
+                except Exception:
+                    proposal_payload = None
+                self._finish_planning_attempt(
+                    planning_attempt,
+                    status="ERROR",
+                    finished_at=datetime.now(UTC),
+                    latency_ms=_duration_ms(provider_started_at),
+                    proposal=proposal_payload,
+                    finish_reason=None,
+                )
+                self._finish_planning_cycle(
+                    planning_cycle,
+                    status="ERROR",
+                    finished_at=datetime.now(UTC),
+                )
+                self.db.flush()
+                try:
+                    self._notify_provider_call(
+                        "FINISHED",
+                        task,
+                        request,
+                        {
+                            **provider_call_metadata(self.provider),
+                            "audit_id": audit_id,
+                            "finished_at": datetime.now(UTC).isoformat(),
+                            "latency_ms": _duration_ms(provider_started_at),
+                            "wall_clock_latency_ms": _duration_ms(provider_started_at),
+                            "outcome": "ERROR",
+                            "error_code": "MODEL_PROVIDER_ERROR",
+                            "error_category": type(exc).__name__,
+                        },
+                    )
+                finally:
+                    self._provider_call_started_at.pop(audit_id, None)
+                raise
             self._last_provider_attempt = {
                 "accepted": not diagnostics,
                 "proposal": proposal.model_dump(mode="json"),
                 "diagnostics": diagnostics,
                 "repair_attempt": repair_attempt,
             }
-            planning_cycle.current_attempt = repair_attempt
             if repair_attempt > 0:
                 anti_regression_memory = _remember_prior_contradictions(
                     anti_regression_memory,
@@ -1528,7 +1602,11 @@ class GenericAgentService:
                 )
             self._provider_call_started_at.pop(audit_id, None)
             if not diagnostics:
-                planning_cycle.status = "ACCEPTED"
+                self._finish_planning_cycle(
+                    planning_cycle,
+                    status="ACCEPTED",
+                    finished_at=datetime.now(UTC),
+                )
                 planning_cycle.current_violations = []
                 planning_cycle.rejected_segment = None
                 self._last_provider_plan_summary = proposal.plan_summary.strip() or None
@@ -1546,12 +1624,80 @@ class GenericAgentService:
             if single_attempt:
                 self.db.flush()
                 return []
-        planning_cycle.status = "REJECTED"
+        self._finish_planning_cycle(
+            planning_cycle,
+            status="REJECTED",
+            finished_at=datetime.now(UTC),
+        )
         self.db.flush()
         raise GenericAgentError(
             "MODEL_PLAN_REJECTED",
             "The model provider could not produce a backend-valid current Plan",
         )
+
+    def _validate_and_persist_provider_attempt(
+        self,
+        *,
+        task: AgentTask,
+        definition: ScenarioDefinitionV2,
+        objectives: tuple[ObjectiveDefinitionV2, ...],
+        reason: str | None,
+        plan_version: int,
+        catalog: tuple[PlanningActionCandidate, ...],
+        planning_context: PlanningContext,
+        planner_input: PlannerInput,
+        request: PlanRequest,
+        proposal: PlanProposal,
+        planning_attempt: PlanningAttempt,
+        audit_id: str,
+        provider_started_at: float,
+    ) -> tuple[list[dict[str, object]], tuple[PlanViolation, ...]]:
+        assert self.provider is not None
+        diagnostics = _validate_plan_segment_contract(proposal, planner_input)
+        if diagnostics:
+            steps: list[dict[str, object]] = []
+        else:
+            steps, raw_diagnostics = self._validate_provider_proposal_v1(
+                task,
+                definition,
+                objectives,
+                reason,
+                plan_version,
+                catalog,
+                proposal.steps,
+                planning_context,
+                planner_input=planner_input,
+                stop_reason=proposal.stop_reason,
+            )
+            diagnostics = tuple(PlanViolation.model_validate(item) for item in raw_diagnostics)
+        self._record_provider_plan_call(
+            task,
+            request=request,
+            proposal_steps=proposal.steps,
+            proposal_candidate_ids=tuple(
+                item.candidate_id or "" for item in proposal.steps if item.candidate_id
+            ),
+            diagnostics=diagnostics,
+            proposal_stop_reason=proposal.stop_reason,
+            accepted=not diagnostics,
+            audit_id=audit_id,
+        )
+        proposal_payload = proposal.model_dump(mode="json")
+        self._finish_planning_attempt(
+            planning_attempt,
+            status="ACCEPTED" if not diagnostics else "REJECTED",
+            finished_at=datetime.now(UTC),
+            latency_ms=_duration_ms(provider_started_at),
+            proposal=proposal_payload,
+            rejected_segment=(proposal_payload if diagnostics else None),
+            validator_violations=[
+                violation.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+                for violation in diagnostics
+            ],
+            stop_reason=proposal.stop_reason,
+            provider_metadata=provider_call_metadata(self.provider),
+        )
+        return steps, diagnostics
 
     def _notify_provider_call(
         self,
@@ -1899,15 +2045,21 @@ class GenericAgentService:
         task: AgentTask,
         *,
         call_type: str,
-        planner_input: PlannerInput,
+        planner_input: PlannerInput | dict[str, object],
         objectives: tuple[ObjectiveDefinitionV2, ...],
         replan_reason: str | None = None,
+        started_at: datetime | None = None,
     ) -> PlanningCycle:
-        payload = planner_input.model_dump(mode="json")
+        payload = (
+            planner_input.model_dump(mode="json")
+            if isinstance(planner_input, PlannerInput)
+            else planner_input
+        )
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         cycle = PlanningCycle(
             task_id=task.id,
             game_instance_id=self.scope.game_instance_id,
+            started_at=started_at or datetime.now(UTC),
             base_call_type=call_type,
             replan_reason=replan_reason,
             frozen_objective_scope=[item.key for item in objectives],
@@ -1931,6 +2083,16 @@ class GenericAgentService:
         if cycle is None:
             raise GenericAgentError("PLANNING_CYCLE_MISSING", "No planning cycle is persisted")
         return cycle
+
+    @staticmethod
+    def _finish_planning_cycle(
+        cycle: PlanningCycle,
+        *,
+        status: str,
+        finished_at: datetime,
+    ) -> None:
+        cycle.status = status
+        cycle.finished_at = finished_at
 
     @staticmethod
     def _finish_planning_attempt(

@@ -21,6 +21,8 @@ import type {
   PublicPlanHistory,
   PublicPlanHistoryStep,
   PlayerGameState,
+  PublicPlanningAttempt,
+  PublicPlanningCycle,
   PublicTargetActionContract,
   ResourceIntelligence,
   PublicTask,
@@ -98,6 +100,9 @@ export function ActionLocationLine({ location }: { location?: ActionLocation | n
 
 function planBeforeReplan(task: PublicTask, event: PublicTimelineEvent): PublicPlanHistory | null {
   if (event.kind !== "PLAN_UPDATED") return null;
+  // New timeline events carry their PlanningCycle identity.  They must not
+  // infer a source Plan by ordinal when the cycle has no accepted Plan.
+  if (event.planning_cycle_id) return null;
   const updatedPlanId = event.id.startsWith("plan:") ? event.id.slice("plan:".length) : null;
   const updatedPlan = updatedPlanId
     ? task.plan_history.find((plan) => plan.id === updatedPlanId)
@@ -132,6 +137,136 @@ function interruptionMarkerSequence(plan: PublicPlanHistory): number | null {
   return trigger?.sequence ?? null;
 }
 
+const planningCallTypeLabel: Record<string, string> = {
+  INITIAL_PLAN: "初始规划",
+  REPLAN: "重新规划",
+  REPAIR: "修复规划",
+};
+const planningStatusLabel: Record<string, string> = {
+  RUNNING: "进行中",
+  ACCEPTED: "已通过",
+  REJECTED: "未通过",
+  ERROR: "调用失败",
+  TIMEOUT: "调用超时",
+  SUCCESS: "成功",
+};
+const planningValidatorLabel: Record<string, string> = {
+  INFORMATION_BOUNDARY_REQUIRED: "需要在信息边界停止",
+  RESOURCE_INVENTORY_UNKNOWN: "资源库存信息未知",
+  KNOWN_RESOURCE_INSUFFICIENT: "已知资源数量不足",
+  OBJECTIVE_COVERAGE_INCOMPLETE: "尚未覆盖全部目标要求",
+  ACTION_TARGET_INVALID: "行动目标不合法",
+  ACTOR_ROLE_MISMATCH: "行动队伍角色不匹配",
+  ACTOR_NOT_COMMAND_REACHABLE: "行动队伍当前无法通信",
+  ACTOR_LOCATION_UNKNOWN: "行动队伍位置未知",
+  ACTOR_NOT_AT_SOURCE: "行动队伍不在行动起点",
+  RESOURCE_SOURCE_INVALID: "资源来源不合法",
+};
+
+function planningProviderLabel(attempt: PublicPlanningAttempt): string {
+  if (attempt.status === "TIMEOUT" || attempt.provider_outcome === "TIMEOUT") {
+    return "调用超时";
+  }
+  if (attempt.status === "ERROR" || attempt.provider_outcome === "ERROR") {
+    return "调用失败";
+  }
+  if (
+    attempt.provider_outcome === "SUCCESS" ||
+    attempt.status === "ACCEPTED" ||
+    attempt.status === "REJECTED"
+  ) {
+    return "成功";
+  }
+  return attempt.status === "RUNNING" ? "进行中" : "未返回";
+}
+
+function planningValidatorStatus(attempt: PublicPlanningAttempt): string {
+  if (attempt.status === "ACCEPTED") return "通过";
+  if (attempt.status === "REJECTED" || attempt.validator_summary.length > 0) {
+    return "未通过";
+  }
+  return "未执行";
+}
+
+function planningViolationLabel(violation: Record<string, unknown>): string {
+  const code = typeof violation.code === "string" ? violation.code : null;
+  return planningValidatorLabel[code ?? ""] ?? "方案未通过校验";
+}
+
+function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
+  const [open, setOpen] = useState(false);
+  const duration = formatDuration(cycle.wall_clock_duration_ms);
+  const attemptCount = cycle.attempts.length;
+  return (
+    <section
+      className={`planning-cycle-details ${cycle.status.toLowerCase()}`}
+      data-testid={`planning-cycle-${cycle.id}`}
+    >
+      <button
+        className="planning-details-toggle"
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{open ? "▴ 收起规划详情" : "▾ 查看规划详情"}</span>
+      </button>
+      {open && (
+        <div className="planning-cycle-detail-body">
+          <div className="planning-cycle-summary">
+            <strong>
+              {planningCallTypeLabel[cycle.cycle_type === "INITIAL" ? "INITIAL_PLAN" : "REPLAN"]}
+              {" · "}
+              {planningStatusLabel[cycle.final_outcome] ?? "未完成"}
+            </strong>
+            <small>
+              {duration ?? "进行中"} · {attemptCount} 次尝试
+            </small>
+          </div>
+          {cycle.attempts.length === 0 ? (
+            <p className="planning-attempts-empty">无可用规划明细</p>
+          ) : (
+            <ol className="planning-attempts">
+              {cycle.attempts.map((attempt) => {
+                const attemptDuration = formatDuration(attempt.duration_ms);
+                return (
+                  <li
+                    className={`planning-attempt ${attempt.status.toLowerCase()}`}
+                    data-testid={`planning-attempt-${cycle.id}-${attempt.attempt_index}`}
+                    key={`${cycle.id}:${attempt.attempt_index}`}
+                  >
+                    <div className="planning-attempt-heading">
+                      <strong>
+                        {planningCallTypeLabel[attempt.call_type] ?? "规划尝试"}
+                        {" · "}
+                        {planningStatusLabel[attempt.status] ?? "未完成"}
+                      </strong>
+                      <small>{attemptDuration ?? "进行中"}</small>
+                    </div>
+                    <p>模型：{planningProviderLabel(attempt)}</p>
+                    <p>Validator：{planningValidatorStatus(attempt)}</p>
+                    {(attempt.status === "ACCEPTED" || attempt.accepted_step_count > 0) && (
+                      <p>已接受步骤：{attempt.accepted_step_count}</p>
+                    )}
+                    {attempt.validator_summary.length > 0 && (
+                      <ul>
+                        {attempt.validator_summary.map((violation, index) => (
+                          <li key={`${attempt.attempt_index}:${index}`}>
+                            原因：{planningViolationLabel(violation)}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function Timeline({ task }: { task: PublicTask | null }) {
   const timelineRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -154,7 +289,7 @@ export function Timeline({ task }: { task: PublicTask | null }) {
       {task.timeline.map((event) => {
         const base = timelinePresentation[event.kind];
         const presentation =
-          event.kind === "ACTION_RESULT" && event.success === false
+          ((event.kind === "ACTION_RESULT" || event.kind.startsWith("PLAN_")) && event.success === false)
             ? { ...base, mark: "✕", tone: "failed" }
             : base;
         const isApproval = event.kind.startsWith("APPROVAL_");
@@ -171,16 +306,24 @@ export function Timeline({ task }: { task: PublicTask | null }) {
           ? stepDescription(event.title)
           : event.kind === "GOAL_ACCEPTED"
             ? "任务已接受"
-            : event.kind === "PLAN_CREATED"
-              ? "Agent 已完成计划"
-              : event.kind === "PLAN_UPDATED"
-                ? "Agent 已重新规划"
+              : event.kind.startsWith("PLAN_") && event.success === false
+                ? "Agent 未能完成计划"
+              : event.kind === "PLAN_CREATED"
+                ? "Agent 已完成计划"
+                : event.kind === "PLAN_UPDATED"
+                  ? "Agent 已重新规划"
               : event.kind === "TASK_STARTED"
             ? "任务已接受"
             : event.kind.startsWith("TASK_")
               ? presentation.label
               : event.title;
         const planReason = replanReason(task, event);
+        const planningCycle = event.planning_cycle_id
+          ? (task.planning_process ?? []).find((cycle) => cycle.id === event.planning_cycle_id) ?? null
+          : null;
+        const planDuration = formatDuration(
+          planningCycle?.wall_clock_duration_ms ?? event.duration_ms,
+        );
         return (
           <article className={`timeline-entry ${presentation.tone}`} key={event.id}>
             <span className="timeline-mark">{presentation.mark}</span>
@@ -190,8 +333,8 @@ export function Timeline({ task }: { task: PublicTask | null }) {
                   {eventLabel}
                   {event.actor_name ? ` · ${event.actor_name}` : ""}
                 </small>
-                {formatDuration(event.duration_ms) && (
-                  <small className="timeline-duration">· {formatDuration(event.duration_ms)}</small>
+                {planDuration && (
+                  <small className="timeline-duration">· {planDuration}</small>
                 )}
               </div>
               <strong>
@@ -201,6 +344,7 @@ export function Timeline({ task }: { task: PublicTask | null }) {
                   : ""}
               </strong>
               {planReason && <p className="timeline-plan-reason">{planReason}</p>}
+              {planningCycle && <PlanningCycleDetails cycle={planningCycle} />}
               {event.kind !== "ACTION_RESULT" && <ActionLocationLine location={event.location} />}
               {event.detail && !event.kind.startsWith("PLAN_") && (
                 <p>
@@ -318,113 +462,6 @@ export function PlanHistory({ task }: { task: PublicTask }) {
         );
       })}
     </div>
-  );
-}
-
-const planningStatusLabel: Record<string, string> = {
-  RUNNING: "进行中",
-  ACCEPTED: "已通过",
-  REJECTED: "未通过",
-  ERROR: "调用失败",
-  TIMEOUT: "超时",
-};
-
-export function PlanningProcess({ task }: { task: PublicTask }) {
-  const cycles = task.planning_process ?? [];
-  const latestId = cycles.at(-1)?.id ?? null;
-  const [expanded, setExpanded] = useState<Set<string>>(
-    () => new Set(latestId ? [latestId] : []),
-  );
-  useEffect(() => {
-    setExpanded(new Set(latestId ? [latestId] : []));
-  }, [latestId]);
-  if (!cycles.length) return null;
-  return (
-    <section className="planning-process" data-testid="planning-process">
-      <header className="planning-process-heading">
-        <strong>规划过程</strong>
-        <small>Provider / Validator 摘要</small>
-      </header>
-      {cycles.map((cycle) => {
-        const open = expanded.has(cycle.id);
-        const duration = formatDuration(cycle.wall_clock_duration_ms);
-        return (
-          <section
-            className={`planning-cycle-card ${cycle.status.toLowerCase()}`}
-            data-testid={`planning-cycle-${cycle.id}`}
-            key={cycle.id}
-          >
-            <button
-              className="planning-cycle-toggle"
-              type="button"
-              aria-expanded={open}
-              onClick={() =>
-                setExpanded((current) => {
-                  const next = new Set(current);
-                  if (next.has(cycle.id)) next.delete(cycle.id);
-                  else next.add(cycle.id);
-                  return next;
-                })
-              }
-            >
-              <span>
-                <strong>
-                  {cycle.cycle_type === "INITIAL" ? "初始规划" : "重新规划"}
-                  {" · "}
-                  {planningStatusLabel[cycle.final_outcome] ?? cycle.final_outcome}
-                </strong>
-                <small>
-                  {duration ?? "进行中"} · {cycle.attempt_count} 次尝试
-                </small>
-              </span>
-              <b>{open ? "收起" : "展开"}</b>
-            </button>
-            {open && (
-              <ol className="planning-attempts">
-                {cycle.attempts.map((attempt) => {
-                  const attemptDuration = formatDuration(attempt.duration_ms);
-                  return (
-                    <li
-                      data-testid={`planning-attempt-${cycle.id}-${attempt.attempt_index}`}
-                      key={`${cycle.id}:${attempt.attempt_index}`}
-                    >
-                      <div className="planning-attempt-heading">
-                        <strong>
-                          {attempt.call_type}
-                          {" · "}
-                          {planningStatusLabel[attempt.status] ?? attempt.status}
-                        </strong>
-                        <small>{attemptDuration ?? "进行中"}</small>
-                      </div>
-                      {attempt.provider_outcome && (
-                        <p>模型：{attempt.provider_outcome}</p>
-                      )}
-                      {attempt.provider_error_category && (
-                        <p>错误：{attempt.provider_error_category}</p>
-                      )}
-                      {attempt.provider_error_code && <p>代码：{attempt.provider_error_code}</p>}
-                      {attempt.accepted_step_count > 0 && (
-                        <p>已接受步骤：{attempt.accepted_step_count}</p>
-                      )}
-                      {attempt.validator_summary.length > 0 && (
-                        <ul>
-                          {attempt.validator_summary.map((violation, index) => (
-                            <li key={`${attempt.attempt_index}:${index}`}>
-                              {String(violation.code ?? "Validator rejection")}
-                              {violation.dimension ? ` · ${String(violation.dimension)}` : ""}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </li>
-                  );
-                })}
-              </ol>
-            )}
-          </section>
-        );
-      })}
-    </section>
   );
 }
 
@@ -1648,7 +1685,6 @@ export function GamePage() {
           {!task && !selectedTaskLoading && <p className="console-empty">等待下达第一个目标。</p>}
           {selectedTaskLoading && <p className="plan-waiting-message">正在加载所选任务记录……</p>}
           {task && <div className="task-brief"><small>当前目标</small><strong>{task.goal}</strong><span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span><p>{task.objective_names.join(" · ")}</p>{task.explanation && <code>{uiLabel(task.explanation)}</code>}</div>}
-          {task && <PlanningProcess task={task} />}
           {task && !planningForTask && <PlanHistory task={task} />}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>

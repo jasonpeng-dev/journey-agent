@@ -512,6 +512,8 @@ class PlanningCycle(UUIDPrimaryKey, TimestampMixin, Base):
     game_instance_id: Mapped[UUID] = mapped_column(
         ForeignKey("game_instances.id", ondelete="CASCADE")
     )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     base_call_type: Mapped[str] = mapped_column(String(20))
     replan_reason: Mapped[str | None] = mapped_column(String(160))
     frozen_objective_scope: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -591,6 +593,7 @@ class AgentPlan(UUIDPrimaryKey, Base):
     __table_args__ = (
         UniqueConstraint("task_id", "version"),
         Index("ix_agent_plans_task_version", "task_id", "version"),
+        Index("ix_agent_plans_planning_cycle", "planning_cycle_id"),
     )
 
     task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
@@ -600,6 +603,10 @@ class AgentPlan(UUIDPrimaryKey, Base):
     )
     strategy_summary: Mapped[str] = mapped_column(Text)
     replan_reason: Mapped[str | None] = mapped_column(String(160))
+    # A stable projection boundary for the planning cycle that produced this
+    # accepted Plan. It is nullable for legacy plans created before cycle
+    # identity was persisted.
+    planning_cycle_id: Mapped[UUID | None] = mapped_column()
     supersedes_plan_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("agent_plans.id", ondelete="SET NULL")
     )

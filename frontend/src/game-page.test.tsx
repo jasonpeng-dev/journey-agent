@@ -5,7 +5,6 @@ import {
   GoalComposer,
   KnownWorldAccordions,
   PlanHistory,
-  PlanningProcess,
   TaskTabs,
   Timeline,
   WaitingStatus,
@@ -21,6 +20,8 @@ import {
 import type {
   PlayerGameState,
   PublicPlanStep,
+  PublicPlanningAttempt,
+  PublicPlanningCycle,
   PublicTask,
   ResourceIntelligence,
 } from "./types";
@@ -105,6 +106,67 @@ function actorTask(
     execution_phase: executionPhase,
     plan: { strategy_summary: "测试计划", updated: false, steps },
     briefing,
+  };
+}
+
+function planningAttempt(
+  callType: PublicPlanningAttempt["call_type"],
+  status: PublicPlanningAttempt["status"],
+  overrides: Partial<PublicPlanningAttempt> = {},
+): PublicPlanningAttempt {
+  return {
+    attempt_index: 0,
+    call_type: callType,
+    status,
+    started_at: null,
+    finished_at: null,
+    duration_ms: null,
+    provider_outcome: status === "ERROR" ? "ERROR" : "SUCCESS",
+    provider_latency_ms: null,
+    validator_summary: [],
+    provider_error_category: null,
+    provider_error_code: null,
+    accepted_step_count: status === "ACCEPTED" ? 3 : 0,
+    ...overrides,
+  };
+}
+
+function planningCycle(
+  id: string,
+  cycleType: PublicPlanningCycle["cycle_type"],
+  status: string,
+  attempts: PublicPlanningAttempt[],
+  overrides: Partial<PublicPlanningCycle> = {},
+): PublicPlanningCycle {
+  return {
+    id,
+    cycle_type: cycleType,
+    status,
+    started_at: null,
+    finished_at: null,
+    wall_clock_duration_ms: null,
+    attempt_count: attempts.length,
+    final_outcome: status,
+    attempts,
+    ...overrides,
+  };
+}
+
+function planEvent(
+  id: string,
+  kind: "PLAN_CREATED" | "PLAN_UPDATED",
+  durationMs = 999,
+  planningCycleId: string | null = null,
+): PublicTask["timeline"][number] {
+  return {
+    ...task.timeline[0],
+    id,
+    kind,
+    planning_cycle_id: planningCycleId,
+    title: kind === "PLAN_CREATED" ? "旧标题" : "另一个旧标题",
+    detail: "不应显示的计划细节",
+    result_summary: "不应显示的计划结果",
+    duration_ms: durationMs,
   };
 }
 
@@ -629,71 +691,179 @@ describe("Formal Play player projections", () => {
     expect(formatDuration(null)).toBeNull();
   });
 
-  it("renders planning cycles and expandable attempt summaries", () => {
+  it("把单次初始规划详情嵌入执行方案卡并可展开", () => {
+    const cycle = planningCycle(
+      "cycle-initial",
+      "INITIAL",
+      "ACCEPTED",
+      [planningAttempt("INITIAL_PLAN", "ACCEPTED", { duration_ms: 31000 })],
+      { wall_clock_duration_ms: 31000 },
+    );
     render(
-      <PlanningProcess
+      <Timeline
         task={{
           ...task,
-          planning_process: [
-            {
-              id: "cycle-1",
-              cycle_type: "REPLAN",
-              status: "ERROR",
-              started_at: "2026-01-01T00:00:00Z",
-              finished_at: "2026-01-01T00:07:15Z",
-              wall_clock_duration_ms: 435000,
-              attempt_count: 2,
-              final_outcome: "ERROR",
-              attempts: [
-                {
-                  attempt_index: 0,
-                  call_type: "REPLAN",
-                  status: "REJECTED",
-                  started_at: "2026-01-01T00:00:00Z",
-                  finished_at: "2026-01-01T00:03:14Z",
-                  duration_ms: 194000,
-                  provider_outcome: "SUCCESS",
-                  provider_latency_ms: 194000,
-                  validator_summary: [
-                    { code: "RESOURCE_INVENTORY_UNKNOWN", dimension: "RESOURCE" },
-                  ],
-                  provider_error_category: null,
-                  provider_error_code: null,
-                  accepted_step_count: 0,
-                },
-                {
-                  attempt_index: 1,
-                  call_type: "REPAIR",
-                  status: "ERROR",
-                  started_at: "2026-01-01T00:03:14Z",
-                  finished_at: "2026-01-01T00:07:15Z",
-                  duration_ms: 241000,
-                  provider_outcome: "ERROR",
-                  provider_latency_ms: 241000,
-                  validator_summary: [],
-                  provider_error_category: "RemoteProtocolError",
-                  provider_error_code: "MODEL_PROVIDER_HTTP_ERROR",
-                  accepted_step_count: 0,
-                },
-              ],
-            },
-          ],
+          plan_history: [task.plan_history[0]],
+          timeline: [planEvent("plan:plan-1:created", "PLAN_CREATED", 999, "cycle-initial")],
+          planning_process: [cycle],
         }}
       />,
     );
-    const cycle = screen.getByTestId("planning-cycle-cycle-1");
-    expect(screen.getByTestId("planning-process")).toBeVisible();
-    expect(within(cycle).getByText(/7m 15s/)).toBeVisible();
-    expect(screen.getByTestId("planning-attempt-cycle-1-0")).toBeVisible();
-    expect(within(cycle).getByText(/RESOURCE_INVENTORY_UNKNOWN/)).toBeVisible();
+    const cycleCard = screen.getByTestId("planning-cycle-cycle-initial");
+    expect(screen.getAllByText("Agent 已完成计划")).toHaveLength(1);
+    expect(screen.getByText("· 31s")).toBeVisible();
+    expect(screen.getAllByRole("button", { name: "▾ 查看规划详情" })).toHaveLength(1);
+    expect(document.querySelectorAll(".planning-details-toggle")).toHaveLength(1);
+    expect(screen.queryByTestId("planning-attempt-cycle-initial-0")).not.toBeInTheDocument();
 
-    const toggle = within(cycle).getByRole("button");
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByTestId("planning-attempt-cycle-1-0")).not.toBeInTheDocument();
-    fireEvent.click(toggle);
-    expect(within(cycle).getByText(/MODEL_PROVIDER_HTTP_ERROR/)).toBeVisible();
+    fireEvent.click(within(cycleCard).getByRole("button"));
+    expect(within(cycleCard).getAllByText("初始规划 · 已通过")).toHaveLength(2);
+    expect(within(cycleCard).getByText("模型：成功")).toBeVisible();
+    expect(within(cycleCard).getByText("Validator：通过")).toBeVisible();
+    expect(within(cycleCard).getByText("已接受步骤：3")).toBeVisible();
+    expect(screen.getByTestId("planning-attempt-cycle-initial-0")).toBeVisible();
+  });
+
+  it("按顺序展示重新规划和修复规划的全部 attempts", () => {
+    const initial = planningCycle(
+      "cycle-initial",
+      "INITIAL",
+      "ACCEPTED",
+      [planningAttempt("INITIAL_PLAN", "ACCEPTED")],
+    );
+    const replan = planningCycle(
+      "cycle-replan",
+      "REPLAN",
+      "ACCEPTED",
+      [
+        planningAttempt("REPLAN", "REJECTED", {
+          validator_summary: [{ code: "RESOURCE_INVENTORY_UNKNOWN" }],
+          duration_ms: 82000,
+        }),
+        planningAttempt("REPAIR", "ACCEPTED", {
+          attempt_index: 1,
+          duration_ms: 48000,
+          accepted_step_count: 7,
+        }),
+      ],
+      { wall_clock_duration_ms: 130000 },
+    );
+    render(
+      <Timeline
+        task={{
+          ...task,
+          timeline: [
+            planEvent("plan:plan-1:created", "PLAN_CREATED", 999, "cycle-initial"),
+            planEvent("plan:plan-2", "PLAN_UPDATED", 999, "cycle-replan"),
+          ],
+          planning_process: [initial, replan],
+        }}
+      />
+    );
+    const cycleCard = screen.getByTestId("planning-cycle-cycle-replan");
+    fireEvent.click(within(cycleCard).getByRole("button"));
+    const attempts = within(cycleCard).getAllByTestId(/planning-attempt-cycle-replan-/);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toHaveTextContent("重新规划 · 未通过");
+    expect(attempts[1]).toHaveTextContent("修复规划 · 已通过");
+    expect(within(cycleCard).getByText(/资源库存信息未知/)).toBeVisible();
+    expect(screen.getByText("· 2m 10s")).toBeVisible();
+    expect(within(attempts[0]).getByText("1m 22s")).toBeVisible();
+    expect(within(attempts[1]).getByText("48s")).toBeVisible();
+    expect(document.querySelectorAll(".planning-details-toggle")).toHaveLength(2);
+  });
+
+  it("失败的重新规划和修复规划也能展开且只显示中文摘要", () => {
+    const initial = planningCycle(
+      "cycle-initial",
+      "INITIAL",
+      "ACCEPTED",
+      [planningAttempt("INITIAL_PLAN", "ACCEPTED")],
+    );
+    const cycle = planningCycle(
+      "cycle-error",
+      "REPLAN",
+      "ERROR",
+      [
+        planningAttempt("REPLAN", "REJECTED", {
+          validator_summary: [{ code: "INFORMATION_BOUNDARY_REQUIRED" }],
+        }),
+        planningAttempt("REPAIR", "ERROR", {
+          attempt_index: 1,
+          provider_outcome: "ERROR",
+          provider_error_category: "RemoteProtocolError",
+          provider_error_code: "MODEL_PROVIDER_HTTP_ERROR",
+        }),
+      ],
+      { wall_clock_duration_ms: 435000 },
+    );
+    render(
+      <Timeline
+        task={{
+          ...task,
+          plan_history: [task.plan_history[0]],
+          timeline: [
+            planEvent("plan:plan-1:created", "PLAN_CREATED", 999, "cycle-initial"),
+            planEvent("planning-cycle:cycle-error", "PLAN_UPDATED", 999, "cycle-error"),
+          ],
+          planning_process: [initial, cycle],
+        }}
+      />
+    );
+    const cycleCard = screen.getByTestId("planning-cycle-cycle-error");
+    expect(screen.getByTestId("planning-cycle-cycle-initial")).toBeVisible();
+    expect(document.querySelectorAll(".planning-details-toggle")).toHaveLength(2);
+    fireEvent.click(within(cycleCard).getByRole("button"));
+    expect(within(cycleCard).getAllByTestId(/planning-attempt-cycle-error-/)).toHaveLength(2);
+    expect(within(cycleCard).getByText("重新规划 · 未通过")).toBeVisible();
+    expect(within(cycleCard).getByText("修复规划 · 调用失败")).toBeVisible();
+    expect(within(cycleCard).getByText("模型：成功")).toBeVisible();
+    expect(within(cycleCard).getByText("模型：调用失败")).toBeVisible();
+    expect(within(cycleCard).getByText(/需要在信息边界停止/)).toBeVisible();
+    expect(screen.queryByText("REPLAN")).not.toBeInTheDocument();
+    expect(screen.queryByText("REPAIR")).not.toBeInTheDocument();
+    expect(screen.queryByText("SUCCESS")).not.toBeInTheDocument();
+    expect(screen.queryByText("INFORMATION_BOUNDARY_REQUIRED")).not.toBeInTheDocument();
+    expect(screen.queryByText("MODEL_PROVIDER_HTTP_ERROR")).not.toBeInTheDocument();
+  });
+
+  it("右侧计划历史不再显示 planning attempt timeline", () => {
+    render(
+      <PlanHistory
+        task={{
+          ...task,
+          planning_process: [
+            planningCycle("cycle-history", "REPLAN", "ACCEPTED", [
+              planningAttempt("REPLAN", "ACCEPTED"),
+            ]),
+          ],
+        }}
+      />
+    );
+    expect(screen.getByText("乙 · 新行动")).toBeVisible();
+    expect(screen.queryByTestId("planning-process")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("planning-cycle-cycle-history")).not.toBeInTheDocument();
+    expect(screen.queryByText("查看规划详情")).not.toBeInTheDocument();
+  });
+
+  it("旧 cycle 缺少 attempts 时显示无可用规划明细", () => {
+    const cycle = planningCycle("cycle-legacy", "INITIAL", "ERROR", [], {
+      wall_clock_duration_ms: 10000,
+    });
+    render(
+      <Timeline
+        task={{
+          ...task,
+          plan_history: [],
+          timeline: [planEvent("planning-cycle:cycle-legacy", "PLAN_CREATED", 999, "cycle-legacy")],
+          planning_process: [cycle],
+        }}
+      />,
+    );
+    const cycleCard = screen.getByTestId("planning-cycle-cycle-legacy");
+    fireEvent.click(within(cycleCard).getByRole("button"));
+    expect(within(cycleCard).getByText("无可用规划明细")).toBeVisible();
+    expect(within(cycleCard).queryByTestId(/planning-attempt-/)).not.toBeInTheDocument();
   });
 
   it("groups spatial knowledge and reuses the action location projection", () => {

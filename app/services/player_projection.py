@@ -880,21 +880,28 @@ class PlayerProjectionService:
     ) -> dict[str, str] | None:
         """Return the Actor positions frozen for one Plan planning cycle.
 
-        AgentPlan currently stores only an audit run identifier and has no
-        foreign key to PlanningCycle. The durable association available in
-        the current schema is the same Task plus the cycle created before the
-        Plan. A missing or legacy snapshot returns None so callers can use
-        the explicit compatibility replay path.
+        New Plans carry the exact PlanningCycle identity that produced them.
+        Legacy Plans without that identity use the explicit compatibility
+        replay path; they must never be associated with a newer cycle merely
+        because it is the most recent row.
         """
 
-        cycle = self.db.scalar(
-            select(PlanningCycle)
-            .where(
-                PlanningCycle.task_id == task.id,
-                PlanningCycle.created_at <= plan.created_at,
+        if plan.planning_cycle_id is not None:
+            cycle = self.db.scalar(
+                select(PlanningCycle).where(
+                    PlanningCycle.id == plan.planning_cycle_id,
+                    PlanningCycle.task_id == task.id,
+                )
             )
-            .order_by(PlanningCycle.created_at.desc(), PlanningCycle.id.desc())
-        )
+        else:
+            cycle = self.db.scalar(
+                select(PlanningCycle)
+                .where(
+                    PlanningCycle.task_id == task.id,
+                    PlanningCycle.created_at <= plan.created_at,
+                )
+                .order_by(PlanningCycle.created_at.desc(), PlanningCycle.id.desc())
+            )
         if cycle is None or not isinstance(cycle.planner_input, dict):
             return None
         raw_actors = cycle.planner_input.get("actors")
@@ -955,30 +962,119 @@ class PlayerProjectionService:
             )
         ]
         plan_durations = _plan_durations(task)
+        planning_cycles = tuple(
+            self.db.scalars(
+                select(PlanningCycle)
+                .where(PlanningCycle.task_id == task.id)
+                .order_by(PlanningCycle.created_at, PlanningCycle.id)
+            )
+        )
+        attempts_by_cycle: dict[UUID, list[PlanningAttempt]] = {
+            cycle.id: [] for cycle in planning_cycles
+        }
+        for attempt in self.db.scalars(
+            select(PlanningAttempt)
+            .where(PlanningAttempt.task_id == task.id)
+            .order_by(PlanningAttempt.cycle_id, PlanningAttempt.attempt_index, PlanningAttempt.id)
+        ):
+            if attempt.cycle_id in attempts_by_cycle:
+                attempts_by_cycle[attempt.cycle_id].append(attempt)
+
+        cycle_by_id = {str(cycle.id): cycle for cycle in planning_cycles}
+        represented_cycle_ids: set[UUID] = set()
+        planning_entries: list[tuple[datetime, AgentPlan | None, PlanningCycle | None]] = []
         for plan in plans:
-            if plan.version == 1:
-                events.append(
-                    PublicTimelineEventResponse(
-                        id=f"plan:{plan.id}:created",
-                        kind=PublicTimelineEventKind.PLAN_CREATED,
-                        title="Agent 已完成计划",
-                        detail=_first_action_name(definition, steps_by_plan[plan.id]),
-                        occurred_at=plan.created_at,
-                        duration_ms=plan_durations.get(plan.version),
+            cycle = (
+                cycle_by_id.get(str(plan.planning_cycle_id))
+                if plan.planning_cycle_id is not None
+                else None
+            )
+            if cycle is not None:
+                if cycle.id in represented_cycle_ids:
+                    continue
+                represented_cycle_ids.add(cycle.id)
+                planning_entries.append(
+                    (
+                        _utc_datetime(plan.created_at),
+                        plan,
+                        cycle,
                     )
                 )
             else:
+                planning_entries.append((_utc_datetime(plan.created_at), plan, None))
+        has_legacy_plan = any(
+            item_plan is not None and item_cycle is None
+            for _occurred_at, item_plan, item_cycle in planning_entries
+        )
+        for cycle in planning_cycles:
+            if cycle.id in represented_cycle_ids:
+                continue
+            # A cycle created before durable AgentPlan linkage may coexist
+            # with a legacy plan for the same historical planning operation.
+            # There is no stable identity with which to associate those rows,
+            # so do not render an accepted cycle as a second plan card.  Keep
+            # the legacy AgentPlan event intact and reserve standalone cycle
+            # events for cycles that did not produce a plan (in particular
+            # failed cycles).  This avoids guessing by time, ordinal, or
+            # "most recent" row.
+            if cycle.status == "ACCEPTED" and has_legacy_plan:
+                continue
+            _cycle_started, cycle_finished = _planning_cycle_timing(
+                cycle, tuple(attempts_by_cycle[cycle.id])
+            )
+            planning_entries.append(
+                (
+                    cycle_finished or _utc_datetime(cycle.created_at),
+                    None,
+                    cycle,
+                )
+            )
+
+        for _occurred_at, planning_plan, cycle in sorted(
+            planning_entries,
+            key=lambda item: (
+                item[0],
+                item[2].id.hex if item[2] is not None else "",
+                item[1].id.hex if item[1] is not None else "",
+            ),
+        ):
+            if cycle is not None:
                 events.append(
-                    PublicTimelineEventResponse(
-                        id=f"plan:{plan.id}",
-                        kind=PublicTimelineEventKind.PLAN_UPDATED,
-                        title="Agent 已重新规划",
-                        detail=_first_action_name(definition, steps_by_plan[plan.id]),
-                        occurred_at=plan.created_at,
-                        duration_ms=plan_durations.get(plan.version),
+                    _planning_cycle_timeline_event(
+                        cycle,
+                        planning_plan,
+                        definition,
+                        steps_by_plan.get(planning_plan.id, ())
+                        if planning_plan is not None
+                        else (),
+                        tuple(attempts_by_cycle[cycle.id]),
                     )
                 )
-            plan_steps = steps_by_plan[plan.id]
+            elif planning_plan is not None and planning_plan.version == 1:
+                events.append(
+                    PublicTimelineEventResponse(
+                        id=f"plan:{planning_plan.id}:created",
+                        kind=PublicTimelineEventKind.PLAN_CREATED,
+                        title="Agent 已完成计划",
+                        detail=_first_action_name(definition, steps_by_plan[planning_plan.id]),
+                        occurred_at=planning_plan.created_at,
+                        duration_ms=plan_durations.get(planning_plan.version),
+                    )
+                )
+            elif planning_plan is not None:
+                events.append(
+                    PublicTimelineEventResponse(
+                        id=f"plan:{planning_plan.id}",
+                        kind=PublicTimelineEventKind.PLAN_UPDATED,
+                        title="Agent 已重新规划",
+                        detail=_first_action_name(definition, steps_by_plan[planning_plan.id]),
+                        occurred_at=planning_plan.created_at,
+                        duration_ms=plan_durations.get(planning_plan.version),
+                    )
+                )
+            if planning_plan is None:
+                continue
+            plan_steps = steps_by_plan[planning_plan.id]
             for step in plan_steps:
                 if step.execution_type != StepExecutionType.TOOL:
                     continue
@@ -1066,11 +1162,6 @@ class PlayerProjectionService:
                         else None
                     ),
                     occurred_at=task.completed_at,
-                    duration_ms=(
-                        _provider_failure_duration(task)
-                        if _is_provider_failure(task.last_error_code)
-                        else None
-                    ),
                 )
             )
         return events
@@ -1190,23 +1281,12 @@ def _is_no_legal_action(error_code: str | None) -> bool:
 
 def _task_explanation(task: AgentTask) -> str:
     if task.last_error_code == "MODEL_PLAN_REJECTED":
-        return "Model failed to produce a validated executable plan within the allowed repairs"
+        return "模型方案未通过验证"
     if _is_provider_failure(task.last_error_code):
         return task.last_error_detail or "模型调用失败"
     if _is_no_legal_action(task.last_error_code):
         return "当前世界状态下没有可继续执行的合法行动"
     return "行动执行失败 - 未完成世界状态更新"
-
-
-def _provider_failure_duration(task: AgentTask) -> int | None:
-    for call in reversed(_provider_calls(task)):
-        if call.get("outcome") not in {"TIMEOUT", "ERROR"}:
-            continue
-        for key in ("wall_clock_latency_ms", "latency_ms"):
-            value = call.get(key)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                return value
-    return None
 
 
 def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskStatus:
@@ -1576,21 +1656,59 @@ def _provider_calls(task: AgentTask) -> tuple[dict[str, object], ...]:
     return tuple(item for item in calls if isinstance(item, dict))
 
 
+def _planning_cycle_timeline_event(
+    cycle: PlanningCycle,
+    plan: AgentPlan | None,
+    definition: ScenarioDefinitionV2,
+    plan_steps: tuple[AgentStep, ...],
+    attempts: tuple[PlanningAttempt, ...],
+) -> PublicTimelineEventResponse:
+    cycle_started, cycle_finished = _planning_cycle_timing(cycle, attempts)
+    if cycle.status == "ACCEPTED":
+        title = "Agent 已完成计划"
+        success: bool | None = True
+    elif cycle.status == "RUNNING":
+        title = "Agent 正在规划"
+        success = None
+    else:
+        title = "Agent 未能完成计划"
+        success = False
+    if plan is not None:
+        event_id = f"plan:{plan.id}:created" if plan.version == 1 else f"plan:{plan.id}"
+        event_kind = (
+            PublicTimelineEventKind.PLAN_CREATED
+            if plan.version == 1
+            else PublicTimelineEventKind.PLAN_UPDATED
+        )
+    else:
+        event_id = f"planning-cycle:{cycle.id}"
+        event_kind = (
+            PublicTimelineEventKind.PLAN_CREATED
+            if cycle.base_call_type == "INITIAL_PLAN"
+            else PublicTimelineEventKind.PLAN_UPDATED
+        )
+    return PublicTimelineEventResponse(
+        id=event_id,
+        kind=event_kind,
+        planning_cycle_id=cycle.id,
+        title=title,
+        detail=(_first_action_name(definition, plan_steps) if plan is not None else None),
+        success=success,
+        occurred_at=(
+            plan.created_at
+            if plan is not None
+            else cycle_finished or _utc_datetime(cycle.created_at)
+        ),
+        duration_ms=_datetime_duration_ms(cycle_started, cycle_finished),
+    )
+
+
 def _planning_cycle_response(
     cycle: PlanningCycle,
     attempts: tuple[PlanningAttempt, ...],
     provider_calls: tuple[dict[str, object], ...],
 ) -> PublicPlanningCycleResponse:
-    attempt_starts = [
-        _utc_datetime(item.started_at) for item in attempts if item.started_at is not None
-    ]
-    cycle_started = min(attempt_starts) if attempt_starts else _utc_datetime(cycle.created_at)
-    attempt_finishes = [
-        _utc_datetime(item.finished_at) for item in attempts if item.finished_at is not None
-    ]
-    cycle_finished = (
-        max(attempt_finishes) if cycle.status != "RUNNING" and attempt_finishes else None
-    )
+    cycle_started, cycle_finished = _planning_cycle_timing(cycle, attempts)
     attempt_responses = tuple(
         _planning_attempt_response(item, cycle, attempts, provider_calls) for item in attempts
     )
@@ -1608,6 +1726,25 @@ def _planning_cycle_response(
         final_outcome=final_outcome,
         attempts=list(attempt_responses),
     )
+
+
+def _planning_cycle_timing(
+    cycle: PlanningCycle,
+    attempts: tuple[PlanningAttempt, ...],
+) -> tuple[datetime, datetime | None]:
+    attempt_starts = [
+        _utc_datetime(item.started_at) for item in attempts if item.started_at is not None
+    ]
+    cycle_started = _as_utc(cycle.started_at) or (
+        min(attempt_starts) if attempt_starts else _utc_datetime(cycle.created_at)
+    )
+    cycle_finished = _as_utc(cycle.finished_at)
+    if cycle_finished is None and cycle.status != "RUNNING":
+        attempt_finishes = [
+            _utc_datetime(item.finished_at) for item in attempts if item.finished_at is not None
+        ]
+        cycle_finished = max(attempt_finishes) if attempt_finishes else None
+    return cycle_started, cycle_finished
 
 
 def _planning_attempt_response(

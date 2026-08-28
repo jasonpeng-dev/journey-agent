@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
-from app.api.schemas.phase_d import PublicTaskStatus
+from app.api.schemas.phase_d import PublicTaskStatus, PublicTimelineEventKind
 from app.domain.enums import AgentPlanStatus, AgentTaskStatus, StepExecutionType
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.world import Visibility
@@ -389,6 +389,258 @@ def test_planning_process_reports_accepted_step_count(session: Session) -> None:
     projected_attempt = response.planning_process[0].attempts[0]
     assert projected_attempt.status == "ACCEPTED"
     assert projected_attempt.accepted_step_count == 2
+
+
+def test_timeline_uses_one_stable_planning_record_per_cycle(session: Session) -> None:
+    runtime, task = _runtime_task(session, "player-projection-cycle-association")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    initial = _cycle(task.id, runtime.instance.id, "central_district", base)
+    initial.started_at = base
+    initial.finished_at = base + timedelta(seconds=31)
+    replan = _cycle(
+        task.id,
+        runtime.instance.id,
+        "east_residential_district",
+        base + timedelta(seconds=40),
+    )
+    replan.base_call_type = "REPLAN"
+    replan.status = "ERROR"
+    replan.started_at = base + timedelta(seconds=40)
+    replan.finished_at = base + timedelta(seconds=115)
+    session.add_all((initial, replan))
+    session.flush()
+
+    plan = _plan(task.id, 1, base + timedelta(seconds=32))
+    plan.planning_cycle_id = initial.id
+    session.add(plan)
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+    planning_events = [event for event in response.timeline if event.kind.value.startswith("PLAN_")]
+
+    assert len(planning_events) == 2
+    assert [event.planning_cycle_id for event in planning_events] == [initial.id, replan.id]
+    assert [event.title for event in planning_events] == [
+        "Agent 已完成计划",
+        "Agent 未能完成计划",
+    ]
+    assert [event.duration_ms for event in planning_events] == [31_000, 75_000]
+    assert len(response.plan_history) == 1
+
+
+def test_accepted_cycle_and_linked_plan_render_one_timeline_card(session: Session) -> None:
+    runtime, task = _runtime_task(session, "player-projection-accepted-single-card")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cycle = _cycle(task.id, runtime.instance.id, "central_district", base)
+    cycle.started_at = base
+    cycle.finished_at = base + timedelta(seconds=31)
+    session.add(cycle)
+    session.flush()
+    session.add_all(
+        (
+            PlanningAttempt(
+                cycle_id=cycle.id,
+                task_id=task.id,
+                attempt_index=0,
+                call_type="INITIAL_PLAN",
+                status="REJECTED",
+                started_at=base,
+                finished_at=base + timedelta(seconds=10),
+                latency_ms=10_000,
+                validator_violations=[{"code": "ACTION_TARGET_INVALID"}],
+            ),
+            PlanningAttempt(
+                cycle_id=cycle.id,
+                task_id=task.id,
+                attempt_index=1,
+                call_type="REPAIR",
+                status="ACCEPTED",
+                started_at=base + timedelta(seconds=10),
+                finished_at=base + timedelta(seconds=31),
+                latency_ms=21_000,
+                proposal={"steps": [{"action_key": "one"}]},
+            ),
+        )
+    )
+    session.flush()
+
+    plan = _plan(task.id, 1, base + timedelta(seconds=32))
+    plan.planning_cycle_id = cycle.id
+    session.add(plan)
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+    planning_events = [event for event in response.timeline if event.kind.value.startswith("PLAN_")]
+
+    assert len(planning_events) == 1
+    assert planning_events[0].id == f"plan:{plan.id}:created"
+    assert planning_events[0].planning_cycle_id == cycle.id
+    assert planning_events[0].title == "Agent 已完成计划"
+    assert planning_events[0].duration_ms == 31_000
+    assert response.planning_process[0].attempt_count == 2
+    assert len(response.plan_history) == 1
+
+
+def test_accepted_cycle_without_stable_link_does_not_duplicate_legacy_plan(
+    session: Session,
+) -> None:
+    runtime, task = _runtime_task(session, "player-projection-legacy-accepted-cycle")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cycle = _cycle(task.id, runtime.instance.id, "central_district", base)
+    cycle.started_at = base
+    cycle.finished_at = base + timedelta(seconds=31)
+    session.add(cycle)
+    session.flush()
+
+    # Pre-linkage history has no reliable identity connecting this plan to the
+    # cycle.  Preserve the legacy plan event without guessing an association.
+    plan = _plan(task.id, 1, base + timedelta(seconds=32))
+    session.add(plan)
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+    planning_events = [event for event in response.timeline if event.kind.value.startswith("PLAN_")]
+
+    assert [event.id for event in planning_events] == [f"plan:{plan.id}:created"]
+    assert planning_events[0].planning_cycle_id is None
+
+
+def test_failed_cycle_without_plan_gets_one_standalone_timeline_card(session: Session) -> None:
+    runtime, task = _runtime_task(session, "player-projection-failed-cycle-single-card")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cycle = _cycle(task.id, runtime.instance.id, "central_district", base)
+    cycle.status = "ERROR"
+    cycle.started_at = base
+    cycle.finished_at = base + timedelta(seconds=10)
+    session.add(cycle)
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+    planning_events = [event for event in response.timeline if event.kind.value.startswith("PLAN_")]
+
+    assert len(planning_events) == 1
+    assert planning_events[0].id == f"planning-cycle:{cycle.id}"
+    assert planning_events[0].planning_cycle_id == cycle.id
+    assert planning_events[0].title == "Agent 未能完成计划"
+    assert response.plan_history == []
+
+
+def test_multiple_linked_accepted_cycles_do_not_duplicate_plan_cards(session: Session) -> None:
+    runtime, task = _runtime_task(session, "player-projection-multiple-accepted-cycles")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    initial = _cycle(task.id, runtime.instance.id, "central_district", base)
+    initial.started_at = base
+    initial.finished_at = base + timedelta(seconds=10)
+    replan = _cycle(
+        task.id,
+        runtime.instance.id,
+        "east_residential_district",
+        base + timedelta(seconds=20),
+    )
+    replan.base_call_type = "REPLAN"
+    replan.started_at = base + timedelta(seconds=20)
+    replan.finished_at = base + timedelta(seconds=30)
+    session.add_all((initial, replan))
+    session.flush()
+
+    first_plan = _plan(task.id, 1, base + timedelta(seconds=11))
+    first_plan.planning_cycle_id = initial.id
+    session.add(first_plan)
+    session.flush()
+    second_plan = _plan(
+        task.id,
+        2,
+        base + timedelta(seconds=31),
+        supersedes_plan_id=first_plan.id,
+    )
+    second_plan.planning_cycle_id = replan.id
+    session.add(second_plan)
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+    planning_events = [event for event in response.timeline if event.kind.value.startswith("PLAN_")]
+
+    assert len(planning_events) == 2
+    assert [event.id for event in planning_events] == [
+        f"plan:{first_plan.id}:created",
+        f"plan:{second_plan.id}",
+    ]
+    assert [event.planning_cycle_id for event in planning_events] == [initial.id, replan.id]
+    assert len(response.plan_history) == 2
+
+
+def test_task_status_event_does_not_project_provider_duration(session: Session) -> None:
+    _runtime, task = _runtime_task(session, "player-projection-task-status-duration")
+    task.status = AgentTaskStatus.BLOCKED
+    task.last_error_code = "MODEL_PROVIDER_HTTP_ERROR"
+    task.last_error_detail = "模型调用失败"
+    task.objective_resolution_metadata = {
+        "provider_calls": [
+            {
+                "call_type": "REPLAN",
+                "outcome": "ERROR",
+                "latency_ms": 241_000,
+            }
+        ]
+    }
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+    terminal = next(
+        event for event in response.timeline if event.kind == PublicTimelineEventKind.TASK_BLOCKED
+    )
+
+    assert terminal.duration_ms is None
+
+
+def test_legacy_plan_does_not_absorb_failed_cycle_timeline(session: Session) -> None:
+    runtime, task = _runtime_task(session, "player-projection-legacy-cycle")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cycle = _cycle(task.id, runtime.instance.id, "central_district", base)
+    cycle.status = "ERROR"
+    cycle.started_at = base
+    cycle.finished_at = base + timedelta(seconds=10)
+    session.add(cycle)
+    session.flush()
+    plan = _plan(task.id, 1, base + timedelta(seconds=1))
+    session.add(plan)
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+    planning_events = [event for event in response.timeline if event.kind.value.startswith("PLAN_")]
+
+    assert [event.planning_cycle_id for event in planning_events] == [None, cycle.id]
+    assert [event.id for event in planning_events] == [
+        f"plan:{plan.id}:created",
+        f"planning-cycle:{cycle.id}",
+    ]
 
 
 def test_relay_projection_uses_target_actor_plan_time_region_and_name(

@@ -309,18 +309,15 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .plan-history-steps strong, .plan-history-steps small { display: block; }
 .plan-history-steps strong { font-size: 12px; }
 .plan-history-steps small, .plan-history-steps p { margin: 3px 0 0; color: var(--console-soft); font-size: 10px; }
-.planning-process { display: grid; gap: 8px; margin: 0 0 10px; }
-.planning-process-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 0 2px; }
-.planning-process-heading strong { font-size: 12px; }
-.planning-process-heading small { color: var(--console-soft); font-size: 10px; }
-.planning-cycle-card { overflow: hidden; border: 1px solid #e4ddcf; border-radius: 12px; background: #fffdf9; }
-.planning-cycle-card.accepted { border-color: #b8d6c8; }
-.planning-cycle-card.error, .planning-cycle-card.rejected { border-color: #e9c3bd; }
-.planning-cycle-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 0; color: var(--console-ink); background: transparent; cursor: pointer; text-align: left; }
-.planning-cycle-toggle span, .planning-cycle-toggle strong, .planning-cycle-toggle small { display: block; }
-.planning-cycle-toggle strong { font-size: 12px; }
-.planning-cycle-toggle small { margin-top: 3px; color: var(--console-soft); font-size: 10px; font-variant-numeric: tabular-nums; }
-.planning-cycle-toggle > b { color: var(--console-jade); font-size: 10px; }
+.planning-cycle-details { overflow: hidden; margin-top: 10px; border: 1px solid #e4ddcf; border-radius: 10px; background: #fffdf9; }
+.planning-cycle-details.accepted { border-color: #b8d6c8; }
+.planning-cycle-details.error, .planning-cycle-details.rejected { border-color: #e9c3bd; }
+.planning-details-toggle { display: flex; width: 100%; align-items: center; justify-content: flex-start; gap: 8px; padding: 8px 10px; border: 0; color: var(--console-jade); background: transparent; cursor: pointer; font-size: 10px; text-align: left; }
+.planning-cycle-detail-body { padding: 0 9px 9px; border-top: 1px solid #eee8dd; }
+.planning-cycle-summary { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 8px 0 1px; }
+.planning-cycle-summary strong { font-size: 11px; }
+.planning-cycle-summary small { color: var(--console-soft); font-size: 10px; font-variant-numeric: tabular-nums; }
+.planning-attempts-empty { padding: 8px 0 2px; color: var(--console-soft); font-size: 11px; }
 .planning-attempts { display: grid; gap: 7px; margin: 0; padding: 9px; border-top: 1px solid #eee8dd; list-style: none; }
 .planning-attempts > li { padding: 8px 9px; border: 1px solid #e4ddcf; border-radius: 9px; background: #fff; }
 .planning-attempt-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
