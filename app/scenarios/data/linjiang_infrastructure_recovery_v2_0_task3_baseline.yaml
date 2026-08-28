@@ -1,7 +1,7 @@
 schema_version: 2
 metadata:
-  key: linjiang_infrastructure_recovery_v2_0_task3_baseline
-  name: 临江市灾后基础设施恢复 — Task3 测试基线
+  key: linjiang_infrastructure_recovery_v2_0_test
+  name: 临江市灾后基础设施恢复 — 测试版
   description: 临江灾后基础设施恢复：通信、交通、电力、水务与资源情报。
   locality:
     enabled: true
@@ -142,8 +142,8 @@ initialization:
     resource_inventory_visibility: HIDDEN
     resource_survey_completed: false
 world:
-  key: linjiang_infrastructure_recovery_v2_0_task3_baseline
-  name: 临江市灾后基础设施恢复 — Task3 测试基线
+  key: linjiang_infrastructure_recovery_v2_0_test
+  name: 临江市灾后基础设施恢复 — 测试版
   node_types:
   - key: facility
     name: 设施
@@ -498,15 +498,6 @@ world:
     - power_targetable
     - repairable
     facts:
-    - key: east_emergency_water_supply
-      name: 东部应急供水
-      description: 东部应急供水
-      value_type: ENUM
-      initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
-      allowed_values:
-      - AVAILABLE
-      - UNAVAILABLE
     - key: operational
       name: 运行状态
       description: 运行状态
@@ -1762,7 +1753,6 @@ actors:
     doctrine: []
     initial_node_key: south_waterfront_district
     allowed_action_keys:
-    - activate_emergency_water_transfer
     - inspect
     - relay_message
     - repair_water_facility
@@ -1800,37 +1790,7 @@ interactions:
 - key: travel_destination
   name: 可前往区域
   description: 作为 Travel 目标的区域。
-- key: water_transfer_target
-  name: 应急供水目标
-  description: 可启动应急供水。
 actions:
-- key: activate_emergency_water_transfer
-  name: 启动应急供水
-  description: 在水务、供电、重型工程与通信条件均已满足时启动东部应急供水。
-  required_interaction_key: water_transfer_target
-  execution_mode: IMMEDIATE
-  parameters: []
-  allowed_actor_capabilities:
-  - EXECUTE_ACTION
-  required_actor_role_key: water_repair_team
-  authority_policy:
-    autonomous_limits: []
-    approval_required_values: []
-  expected_outcomes:
-  - code: WATER_TRANSFER_ACTIVE
-    name: 应急供水已启动
-    success: true
-  planning:
-    terminal_effects:
-    - node_key: east_water_pump_station
-      fact_key: east_emergency_water_supply
-    supporting_effects: []
-    success_outcome_codes:
-    - WATER_TRANSFER_ACTIVE
-    wait_success_outcome_codes: []
-    hints: []
-  behavior: RULE
-  locality: FACILITY_REGION
 - key: clear_transport
   name: 清理交通通道
   description: 修复已确认受阻的 Transport，使其恢复可通行；不应对尚未确认受阻的未知通道执行。
@@ -2201,246 +2161,6 @@ actions:
   behavior: TRAVEL
   locality: NONE
 rules:
-- key: activate_water_requirements
-  phase: PREFLIGHT
-  action_key: activate_emergency_water_transfer
-  priority: 100
-  condition:
-    kind: NOT
-    conditions: []
-    condition:
-      kind: ALL
-      conditions:
-      - kind: FACT_EQUALS
-        conditions: []
-        condition: null
-        node:
-          kind: EXPLICIT
-          node_key: water_treatment_plant
-          anchor_node_key: null
-          relation_type_key: null
-          direction: null
-          required_fact_key: null
-        fact_key: operational
-        resource_key: null
-        resource_scope: null
-        parameter_key: null
-        operator: null
-        value: true
-        values: []
-        visibility: null
-        access: null
-        relation_type_key: null
-        relation_direction: null
-      - kind: FACT_EQUALS
-        conditions: []
-        condition: null
-        node:
-          kind: EXPLICIT
-          node_key: water_treatment_plant
-          anchor_node_key: null
-          relation_type_key: null
-          direction: null
-          required_fact_key: null
-        fact_key: power_supply
-        resource_key: null
-        resource_scope: null
-        parameter_key: null
-        operator: null
-        value: AVAILABLE
-        values: []
-        visibility: null
-        access: null
-        relation_type_key: null
-        relation_direction: null
-      - kind: FACT_EQUALS
-        conditions: []
-        condition: null
-        node:
-          kind: EXPLICIT
-          node_key: south_pump_station
-          anchor_node_key: null
-          relation_type_key: null
-          direction: null
-          required_fact_key: null
-        fact_key: operational
-        resource_key: null
-        resource_scope: null
-        parameter_key: null
-        operator: null
-        value: true
-        values: []
-        visibility: null
-        access: null
-        relation_type_key: null
-        relation_direction: null
-      - kind: FACT_EQUALS
-        conditions: []
-        condition: null
-        node:
-          kind: EXPLICIT
-          node_key: south_pump_station
-          anchor_node_key: null
-          relation_type_key: null
-          direction: null
-          required_fact_key: null
-        fact_key: power_supply
-        resource_key: null
-        resource_scope: null
-        parameter_key: null
-        operator: null
-        value: AVAILABLE
-        values: []
-        visibility: null
-        access: null
-        relation_type_key: null
-        relation_direction: null
-      - kind: FACT_EQUALS
-        conditions: []
-        condition: null
-        node:
-          kind: EXPLICIT
-          node_key: east_water_pump_station
-          anchor_node_key: null
-          relation_type_key: null
-          direction: null
-          required_fact_key: null
-        fact_key: operational
-        resource_key: null
-        resource_scope: null
-        parameter_key: null
-        operator: null
-        value: true
-        values: []
-        visibility: null
-        access: null
-        relation_type_key: null
-        relation_direction: null
-      - kind: FACT_EQUALS
-        conditions: []
-        condition: null
-        node:
-          kind: EXPLICIT
-          node_key: east_water_pump_station
-          anchor_node_key: null
-          relation_type_key: null
-          direction: null
-          required_fact_key: null
-        fact_key: power_supply
-        resource_key: null
-        resource_scope: null
-        parameter_key: null
-        operator: null
-        value: AVAILABLE
-        values: []
-        visibility: null
-        access: null
-        relation_type_key: null
-        relation_direction: null
-      - kind: FACT_EQUALS
-        conditions: []
-        condition: null
-        node:
-          kind: EXPLICIT
-          node_key: south_communication_core
-          anchor_node_key: null
-          relation_type_key: null
-          direction: null
-          required_fact_key: null
-        fact_key: operational
-        resource_key: null
-        resource_scope: null
-        parameter_key: null
-        operator: null
-        value: true
-        values: []
-        visibility: null
-        access: null
-        relation_type_key: null
-        relation_direction: null
-      condition: null
-      node: null
-      fact_key: null
-      resource_key: null
-      resource_scope: null
-      parameter_key: null
-      operator: null
-      value: null
-      values: []
-      visibility: null
-      access: null
-      relation_type_key: null
-      relation_direction: null
-    node: null
-    fact_key: null
-    resource_key: null
-    resource_scope: null
-    parameter_key: null
-    operator: null
-    value: null
-    values: []
-    visibility: null
-    access: null
-    relation_type_key: null
-    relation_direction: null
-  effects:
-  - kind: EMIT_FAILURE
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: WATER_TRANSFER_REQUIREMENTS_UNMET
-    message: 应急供水的工程与通信条件尚未满足。
-    retryable: true
-    memory_key: null
-    memory_content: null
-- key: activate_water_resolution
-  phase: RESOLVE
-  action_key: activate_emergency_water_transfer
-  priority: 0
-  condition: null
-  effects:
-  - kind: SET_FACT
-    node:
-      kind: CURRENT_TARGET
-      node_key: null
-      anchor_node_key: null
-      relation_type_key: null
-      direction: null
-      required_fact_key: null
-    fact_key: east_emergency_water_supply
-    value:
-      source: LITERAL
-      literal: AVAILABLE
-      parameter_key: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
-  - kind: EMIT_OUTCOME
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: WATER_TRANSFER_ACTIVE
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
 - key: clear_transport_municipal_repair_materials_10_required
   phase: PREFLIGHT
   action_key: clear_transport
@@ -7410,12 +7130,48 @@ objectives:
   name: 恢复东部应急供水
   description: 恢复东部应急供水调度能力。
   completion_requirements:
-  - key: east_emergency_water_supply
-    node_key: east_water_pump_station
-    fact_key: east_emergency_water_supply
+  - key: water_treatment_plant_operational
+    node_key: water_treatment_plant
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 城市水处理厂已恢复运行。
+  - key: water_treatment_plant_power_supply
+    node_key: water_treatment_plant
+    fact_key: power_supply
     accepted_values:
     - AVAILABLE
-    description: 东部应急供水已可用。
+    description: 城市水处理厂已获得供电。
+  - key: south_pump_station_operational
+    node_key: south_pump_station
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 南部主泵站已恢复运行。
+  - key: south_pump_station_power_supply
+    node_key: south_pump_station
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+    description: 南部主泵站已获得供电。
+  - key: east_water_pump_station_operational
+    node_key: east_water_pump_station
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 东部供水泵站已恢复运行。
+  - key: east_water_pump_station_power_supply
+    node_key: east_water_pump_station
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+    description: 东部供水泵站已获得供电。
+  - key: south_communication_core_operational
+    node_key: south_communication_core
+    fact_key: operational
+    accepted_values:
+    - true
+    description: 南部通信核心已恢复运行。
   prerequisites: []
   subsumes: []
   goal_aliases:
