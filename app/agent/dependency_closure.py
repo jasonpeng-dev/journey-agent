@@ -407,11 +407,69 @@ def build_dependency_closure(
     selected_diagnostic_actor_keys: set[str] = set()
     expanded_source_targets: set[tuple[str, str]] = set()
     queued_resource_dependencies: set[TypedDependency] = set()
-    resource_demand: dict[str, int] = {}
+    resource_demand_records: set[tuple[TypedDependency, str, str, str | None]] = set()
+    resource_demand: dict[str, dict[tuple[str, str, str | None], int]] = {}
     state_changed = False
 
-    def select_action(action_key: str, path: tuple[str, ...], producer_for: str) -> bool:
+    def _dependency_demand_group(dependency: TypedDependency) -> str:
+        """Identify one conjunctive dependency requirement for private demand accounting."""
+
+        return repr((dependency.dimension, dependency.subject, dependency.key, dependency.required))
+
+    def _resource_demand_total(resource_key: str, fallback: int) -> int:
+        """Aggregate resource demand without summing alternative producer branches."""
+
+        entries = resource_demand.get(resource_key)
+        if not entries:
+            return fallback
+        grouped: dict[
+            str,
+            tuple[dict[str, int], dict[tuple[str, str], int]],
+        ] = {}
+        for (group, action_key, binding_target_key), amount in entries.items():
+            action_demands, binding_demands = grouped.setdefault(group, ({}, {}))
+            if binding_target_key is None:
+                action_demands[action_key] = action_demands.get(action_key, 0) + amount
+            else:
+                binding_key = (action_key, binding_target_key)
+                binding_demands[binding_key] = binding_demands.get(binding_key, 0) + amount
+
+        total = 0
+        for action_demands, binding_demands in grouped.values():
+            branch_totals: list[int] = []
+            action_keys = set(action_demands)
+            action_keys.update(action_key for action_key, _ in binding_demands)
+            for action_key in action_keys:
+                action_amount = action_demands.get(action_key, 0)
+                binding_branches = [
+                    amount
+                    for (binding_action, _target_key), amount in binding_demands.items()
+                    if binding_action == action_key
+                ]
+                if binding_branches:
+                    branch_totals.extend(action_amount + amount for amount in binding_branches)
+                else:
+                    branch_totals.append(action_amount)
+            total += max(branch_totals, default=0)
+        return max(fallback, total)
+
+    def select_action(
+        action_key: str,
+        path: tuple[str, ...],
+        producer_for: str,
+        *,
+        demand_group: str | None = None,
+    ) -> bool:
+        demand_group = demand_group or repr(("ACTION", action_key))
         if action_key in selected_actions:
+            contract = contracts.get(action_key)
+            if contract is not None:
+                _queue_action_resource_dependencies(
+                    contract,
+                    path,
+                    action_key,
+                    demand_group,
+                )
             return False
         if len(selected_actions) >= action_limit:
             raise DependencyClosureError(
@@ -530,30 +588,22 @@ def build_dependency_closure(
                         producer_key,
                         (*path, f"known_precondition:{node_key}.{fact_key}"),
                         repr(TypedDependency("FACT", node_key, fact_key)),
+                        demand_group=demand_group,
                     )
                     break
 
         # Resource requirements declared by the canonical Action contract are
         # source-agnostic. Queue the knowledge dependency without selecting a
         # source Region; the Planner may choose any public acquisition target.
-        for effect in contract.deterministic_effects:
-            resource_key = effect.get("resource_key")
-            amount = effect.get("amount")
-            if (
-                effect.get("type") not in {"RESOURCE_DELTA", "RESOURCE_CONSUMPTION"}
-                or not isinstance(resource_key, str)
-                or isinstance(amount, bool)
-                or not isinstance(amount, int)
-                or amount >= 0
-            ):
-                continue
-            _queue_resource_dependency(resource_key, -amount, "", path, action_key)
+        _queue_action_resource_dependencies(contract, path, action_key, demand_group)
         return True
 
     def select_binding(
         binding_key: tuple[str, str],
         path: tuple[str, ...],
         producer_for: str,
+        *,
+        demand_group: str | None = None,
     ) -> bool:
         """Select and expand one Action/Target binding exactly once."""
 
@@ -561,7 +611,13 @@ def build_dependency_closure(
         if binding is None or binding_key in selected_bindings:
             return False
         action_key, target_key = binding_key
-        if action_key not in selected_actions and not select_action(action_key, path, producer_for):
+        demand_group = demand_group or repr(("BINDING", action_key, target_key))
+        if action_key not in selected_actions and not select_action(
+            action_key,
+            path,
+            producer_for,
+            demand_group=demand_group,
+        ):
             return False
         selected_bindings.add(binding_key)
         audit.setdefault(action_key, []).append(
@@ -572,7 +628,7 @@ def build_dependency_closure(
             }
         )
         relevant_nodes.add(target_key)
-        _queue_binding_resource_dependencies(binding, path, action_key)
+        _queue_binding_resource_dependencies(binding, path, action_key, demand_group)
         expand_source_dependencies(contracts[action_key], target_key, path)
         return True
 
@@ -591,6 +647,8 @@ def build_dependency_closure(
         target_key: str,
         path: tuple[str, ...],
         action_key: str,
+        demand_group: str,
+        binding_target_key: str | None = None,
     ) -> None:
         relevant_resources.add(resource_key)
         dependency = TypedDependency(
@@ -599,9 +657,15 @@ def build_dependency_closure(
             key=target_key,
             required=required_amount,
         )
-        if dependency not in queued_resource_dependencies:
-            queued_resource_dependencies.add(dependency)
-            resource_demand[resource_key] = resource_demand.get(resource_key, 0) + required_amount
+        demand_key = (dependency, demand_group, action_key, binding_target_key)
+        if demand_key not in resource_demand_records:
+            resource_demand_records.add(demand_key)
+            demands = resource_demand.setdefault(resource_key, {})
+            aggregate_key = (demand_group, action_key, binding_target_key)
+            demands[aggregate_key] = demands.get(aggregate_key, 0) + required_amount
+        if dependency in queued_resource_dependencies:
+            return
+        queued_resource_dependencies.add(dependency)
         queue.append(
             (
                 dependency,
@@ -610,10 +674,37 @@ def build_dependency_closure(
             )
         )
 
+    def _queue_action_resource_dependencies(
+        contract: PlannerActionContract,
+        path: tuple[str, ...],
+        action_key: str,
+        demand_group: str,
+    ) -> None:
+        for effect in contract.deterministic_effects:
+            resource_key = effect.get("resource_key")
+            amount = effect.get("amount")
+            if (
+                effect.get("type") not in {"RESOURCE_DELTA", "RESOURCE_CONSUMPTION"}
+                or not isinstance(resource_key, str)
+                or isinstance(amount, bool)
+                or not isinstance(amount, int)
+                or amount >= 0
+            ):
+                continue
+            _queue_resource_dependency(
+                resource_key,
+                -amount,
+                "",
+                path,
+                action_key,
+                demand_group,
+            )
+
     def _queue_binding_resource_dependencies(
         binding: PlannerTargetBinding,
         path: tuple[str, ...],
         action_key: str,
+        demand_group: str,
     ) -> None:
         """Queue source knowledge for one selected target binding only."""
 
@@ -635,6 +726,8 @@ def build_dependency_closure(
                     binding.target_key,
                     path,
                     action_key,
+                    demand_group,
+                    binding.target_key,
                 )
 
         for effect in binding.deterministic_effects:
@@ -654,6 +747,8 @@ def build_dependency_closure(
                 binding.target_key,
                 path,
                 action_key,
+                demand_group,
+                binding.target_key,
             )
 
     def expand_source_dependencies(
@@ -701,6 +796,7 @@ def build_dependency_closure(
         consumer_action: str | None,
     ) -> None:
         nonlocal state_changed
+        demand_group = _dependency_demand_group(dependency)
         if dependency in visited:
             return
         if len(visited) >= dependency_limit:
@@ -745,7 +841,12 @@ def build_dependency_closure(
                             target_key=binding_key[1],
                         )
                     relevant_nodes.add(dependency.subject)
-                    select_binding(binding_key, path, repr(dependency))
+                    select_binding(
+                        binding_key,
+                        path,
+                        repr(dependency),
+                        demand_group=demand_group,
+                    )
             for action_key, contract in contracts.items():
                 if not _contract_can_produce_fact_for_target(
                     contract,
@@ -753,7 +854,12 @@ def build_dependency_closure(
                     planner_input,
                 ):
                     continue
-                select_action(action_key, path, repr(dependency))
+                select_action(
+                    action_key,
+                    path,
+                    repr(dependency),
+                    demand_group=demand_group,
+                )
                 if action_key in selected_actions:
                     expand_source_dependencies(
                         contract,
@@ -767,7 +873,12 @@ def build_dependency_closure(
                         and effect.get("fact_key") == dependency.key
                         and binding.target_key == dependency.subject
                     ):
-                        select_binding(binding_key, path, repr(dependency))
+                        select_binding(
+                            binding_key,
+                            path,
+                            repr(dependency),
+                            demand_group=demand_group,
+                        )
         elif dependency.dimension in {"ACTOR_COMMAND_REACHABILITY", "ACTOR_LOCATION"}:
             effect_type = dependency.dimension
             if dependency.dimension == "ACTOR_COMMAND_REACHABILITY":
@@ -785,7 +896,12 @@ def build_dependency_closure(
                     )
                     for effect in contract.deterministic_effects
                 ):
-                    select_action(action_key, path, repr(dependency))
+                    select_action(
+                        action_key,
+                        path,
+                        repr(dependency),
+                        demand_group=demand_group,
+                    )
         elif dependency.dimension == "RESOURCE_SOURCE":
             known_resource = planner_input.known_world.resources.get(dependency.subject)
             required_amount = int(dependency.required or 0)
@@ -793,10 +909,7 @@ def build_dependency_closure(
             # A resource may be needed by several already relevant bindings.
             # Accumulated demand is only a closure-relevance signal: it does
             # not assign quantities to Pools or choose a source for Planner.
-            relevant_demand = max(
-                required_amount,
-                resource_demand.get(dependency.subject, required_amount),
-            )
+            relevant_demand = _resource_demand_total(dependency.subject, required_amount)
             if known_available_amount < relevant_demand:
                 for unlock_dependency in _known_linked_pool_unlock_dependencies(
                     known_resource,
@@ -855,7 +968,12 @@ def build_dependency_closure(
                         in {"REGION_RESOURCE_KNOWLEDGE", "RESOURCE_POOL_KNOWLEDGE"}
                         for effect in contract.deterministic_effects
                     ):
-                        select_action(action_key, path, repr(dependency))
+                        select_action(
+                            action_key,
+                            path,
+                            repr(dependency),
+                            demand_group=demand_group,
+                        )
             elif known_available_amount < required_amount:
                 # A known quantity deficit is a deterministic contradiction,
                 # not an UNKNOWN dependency.  Keep it in the canonical
@@ -872,7 +990,12 @@ def build_dependency_closure(
                         effect.get("type") == "RESOURCE_TRANSFER"
                         for effect in contract.deterministic_effects
                     ) and action_has_legal_executor(contract):
-                        select_action(action_key, path, repr(dependency))
+                        select_action(
+                            action_key,
+                            path,
+                            repr(dependency),
+                            demand_group=demand_group,
+                        )
 
     selected_actor_keys: set[str] = set()
     actor_states = {item.actor_key: item for item in planner_input.actors}
@@ -1002,12 +1125,28 @@ def build_dependency_closure(
                             binding_key,
                             (f"known_fact:{node_key}.{passability_key}=false",),
                             "KNOWN_BLOCKED_TRANSPORT",
+                            demand_group=_dependency_demand_group(
+                                TypedDependency(
+                                    "FACT",
+                                    node_key,
+                                    passability_key,
+                                    repr((False,)),
+                                )
+                            ),
                         )
                     else:
                         select_action(
                             action_key,
                             (f"known_fact:{node_key}.{passability_key}=false",),
                             "KNOWN_BLOCKED_TRANSPORT",
+                            demand_group=_dependency_demand_group(
+                                TypedDependency(
+                                    "FACT",
+                                    node_key,
+                                    passability_key,
+                                    repr((False,)),
+                                )
+                            ),
                         )
 
         after = (
