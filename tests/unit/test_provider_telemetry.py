@@ -120,6 +120,140 @@ def test_fast_response_records_headers_first_byte_and_bytes() -> None:
     assert metadata.timeout_subtype is None
 
 
+def test_retryable_transport_failure_retries_once_and_records_each_network_call() -> None:
+    calls = 0
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.RemoteProtocolError("peer closed the connection", request=request)
+        return _goal_response(request)
+
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(flaky))
+
+    result = provider.select_objectives(
+        GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+    )
+
+    assert result.objective_keys == ("known",)
+    assert calls == 2
+    metadata = provider.last_call_metadata
+    assert metadata is not None
+    assert metadata.outcome == "SUCCESS"
+    assert len(metadata.network_calls) == 2
+    assert metadata.network_calls[0]["call_index"] == 1
+    assert metadata.network_calls[0]["outcome"] == "ERROR"
+    assert metadata.network_calls[0]["error_category"] == "RemoteProtocolError"
+    assert metadata.network_calls[0]["retryable"] is True
+    assert metadata.network_calls[1]["call_index"] == 2
+    assert metadata.network_calls[1]["outcome"] == "SUCCESS"
+    assert metadata.network_calls[1]["response_headers_received_at"] is not None
+    assert metadata.network_calls[1]["response_bytes_received"] is not None
+
+
+def test_retryable_transport_failure_is_bounded_to_one_retry() -> None:
+    calls = 0
+
+    def broken(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadError("connection reset", request=request)
+
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(broken))
+
+    with pytest.raises(GenericProviderError) as error:
+        provider.select_objectives(
+            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        )
+
+    assert error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
+    assert calls == 2
+    metadata = provider.last_call_metadata
+    assert metadata is not None
+    assert metadata.outcome == "ERROR"
+    assert len(metadata.network_calls) == 2
+    assert all(item["outcome"] == "ERROR" for item in metadata.network_calls)
+    assert all(item["retryable"] is True for item in metadata.network_calls)
+
+
+def test_completed_response_or_invalid_response_is_never_retried() -> None:
+    status_calls = 0
+
+    def status_error(request: httpx.Request) -> httpx.Response:
+        nonlocal status_calls
+        status_calls += 1
+        return httpx.Response(503, request=request)
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(status_error)
+    )
+    with pytest.raises(GenericProviderError) as status_failure:
+        provider.select_objectives(
+            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        )
+    assert status_failure.value.code == "MODEL_PROVIDER_HTTP_ERROR"
+    assert status_calls == 1
+
+    malformed_calls = 0
+
+    def malformed(request: httpx.Request) -> httpx.Response:
+        nonlocal malformed_calls
+        malformed_calls += 1
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "not-json"}}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(malformed)
+    )
+    with pytest.raises(GenericProviderError) as malformed_failure:
+        provider.select_objectives(
+            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        )
+    assert malformed_failure.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
+    assert malformed_calls == 1
+    metadata = provider.last_call_metadata
+    assert metadata is not None
+    assert len(metadata.network_calls) == 1
+    assert metadata.network_calls[0]["outcome"] == "SUCCESS"
+
+
+def test_transport_retry_obeys_one_logical_total_deadline() -> None:
+    calls = 0
+
+    def slow_second_attempt(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.RemoteProtocolError("peer closed the connection", request=request)
+        sleep(0.15)
+        return _goal_response(request)
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(total_timeout=0.02),
+        transport=httpx.MockTransport(slow_second_attempt),
+    )
+
+    with pytest.raises(GenericProviderError) as error:
+        provider.select_objectives(
+            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        )
+
+    assert error.value.code == "MODEL_PROVIDER_TIMEOUT"
+    assert calls == 2
+    metadata = provider.last_call_metadata
+    assert metadata is not None
+    assert metadata.outcome == "TIMEOUT"
+    assert metadata.error_category == "PROVIDER_TOTAL_DEADLINE"
+    assert len(metadata.network_calls) == 2
+    assert metadata.network_calls[0]["outcome"] == "ERROR"
+    assert metadata.network_calls[1]["outcome"] == "TIMEOUT"
+    assert metadata.network_calls[1]["timeout_category"] == "PROVIDER_TOTAL_DEADLINE"
+
+
 @pytest.mark.parametrize("call_type", ["INITIAL_PLAN", "REPLAN", "REPAIR"])
 def test_enabled_uncapped_provider_uses_nullable_production_settings(
     monkeypatch: pytest.MonkeyPatch,

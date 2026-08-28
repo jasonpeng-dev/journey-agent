@@ -388,6 +388,7 @@ class ProviderCallMetadata(ProviderModel):
     total_tokens: int | None = None
     final_content_bytes: int | None = None
     finish_reason: str | None = None
+    network_calls: tuple[dict[str, object], ...] = ()
 
 
 class GenericModelProvider(Protocol):
@@ -458,6 +459,25 @@ class _ProviderPhaseTelemetry:
                 "request_cancelled_at": self._request_cancelled_at,
                 "timeout_subtype": self._timeout_subtype,
             }
+
+
+_RETRYABLE_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.CloseError,
+    httpx.RemoteProtocolError,
+)
+
+_MAX_TRANSPORT_RETRIES = 1
+
+
+def _is_retryable_transport_error(error: httpx.HTTPError) -> bool:
+    """Return whether one incomplete transport call may be retried once."""
+
+    return isinstance(error, _RETRYABLE_TRANSPORT_ERRORS) and not isinstance(
+        error, httpx.TimeoutException
+    )
 
 
 class _TelemetryResponseStream(httpx.SyncByteStream):
@@ -766,16 +786,20 @@ class OpenAICompatibleGenericProvider:
         headers: dict[str, str],
         request_body: dict[str, object],
         telemetry: _ProviderPhaseTelemetry,
+        timeout_seconds: float | None,
     ) -> httpx.Response:
         """Bound the complete synchronous HTTP call independently of HTTPX phases."""
 
-        if self._total_timeout is None:
+        if timeout_seconds is None:
             return self._post(
                 url=url,
                 headers=headers,
                 request_body=request_body,
                 telemetry=telemetry,
             )
+        if timeout_seconds <= 0:
+            telemetry.mark_timeout("PROVIDER_TOTAL_DEADLINE")
+            raise ProviderTotalTimeout
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="journey-provider")
         future = executor.submit(
             self._post,
@@ -785,7 +809,7 @@ class OpenAICompatibleGenericProvider:
             telemetry=telemetry,
         )
         try:
-            return future.result(timeout=self._total_timeout)
+            return future.result(timeout=timeout_seconds)
         except FutureTimeout as exc:
             future.cancel()
             telemetry.mark_timeout("PROVIDER_TOTAL_DEADLINE")
@@ -830,90 +854,164 @@ class OpenAICompatibleGenericProvider:
         request_body, request_size_bytes = self._build_request_body(purpose, payload)
         started_at = datetime.now(UTC)
         started = perf_counter()
-        telemetry = _ProviderPhaseTelemetry(request_started_at=started_at.isoformat())
-        try:
-            response = self._post_with_total_deadline(
-                url=f"{self._base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                request_body=request_body,
-                telemetry=telemetry,
+        network_calls: list[dict[str, object]] = []
+        response: httpx.Response | None = None
+        telemetry: _ProviderPhaseTelemetry | None = None
+        final_error: Exception | None = None
+        final_response: httpx.Response | None = None
+        final_outcome = "ERROR"
+        final_error_code = "MODEL_PROVIDER_HTTP_ERROR"
+        final_error_category: str | None = None
+
+        for call_index in range(1, _MAX_TRANSPORT_RETRIES + 2):
+            call_started_at = datetime.now(UTC)
+            call_started = perf_counter()
+            telemetry = _ProviderPhaseTelemetry(request_started_at=call_started_at.isoformat())
+            response = None
+            remaining_timeout = (
+                None
+                if self._total_timeout is None
+                else self._total_timeout - (perf_counter() - started)
             )
-            response.raise_for_status()
-        except ProviderTotalTimeout as exc:
+            try:
+                response = self._post_with_total_deadline(
+                    url=f"{self._base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    request_body=request_body,
+                    telemetry=telemetry,
+                    timeout_seconds=remaining_timeout,
+                )
+                response.raise_for_status()
+            except ProviderTotalTimeout as exc:
+                final_error = exc
+                final_response = None
+                final_outcome = "TIMEOUT"
+                final_error_code = "MODEL_PROVIDER_TIMEOUT"
+                final_error_category = "PROVIDER_TOTAL_DEADLINE"
+                network_calls.append(
+                    self._network_call_metadata(
+                        call_index=call_index,
+                        call_started=call_started,
+                        telemetry=telemetry,
+                        outcome="TIMEOUT",
+                        error_category=final_error_category,
+                        timeout_category=final_error_category,
+                    )
+                )
+                break
+            except httpx.TimeoutException as exc:
+                final_error = exc
+                final_response = None
+                final_outcome = "TIMEOUT"
+                final_error_code = "MODEL_PROVIDER_TIMEOUT"
+                final_error_category = type(exc).__name__
+                network_calls.append(
+                    self._network_call_metadata(
+                        call_index=call_index,
+                        call_started=call_started,
+                        telemetry=telemetry,
+                        outcome="TIMEOUT",
+                        error_category=final_error_category,
+                        timeout_category=telemetry.snapshot().get("timeout_subtype"),
+                    )
+                )
+                break
+            except httpx.HTTPStatusError as exc:
+                final_error = exc
+                final_response = exc.response
+                final_outcome = "ERROR"
+                final_error_code = "MODEL_PROVIDER_HTTP_ERROR"
+                final_error_category = type(exc).__name__
+                network_calls.append(
+                    self._network_call_metadata(
+                        call_index=call_index,
+                        call_started=call_started,
+                        telemetry=telemetry,
+                        outcome=final_outcome,
+                        error_category=final_error_category,
+                        response=final_response,
+                    )
+                )
+                break
+            except httpx.HTTPError as exc:
+                retryable = _is_retryable_transport_error(exc)
+                network_calls.append(
+                    self._network_call_metadata(
+                        call_index=call_index,
+                        call_started=call_started,
+                        telemetry=telemetry,
+                        outcome="ERROR",
+                        error_category=type(exc).__name__,
+                        response=getattr(exc, "response", None),
+                        retryable=retryable,
+                    )
+                )
+                if retryable and call_index <= _MAX_TRANSPORT_RETRIES:
+                    remaining_after_failure = (
+                        None
+                        if self._total_timeout is None
+                        else self._total_timeout - (perf_counter() - started)
+                    )
+                    if remaining_after_failure is None or remaining_after_failure > 0:
+                        continue
+                    final_error = ProviderTotalTimeout()
+                    final_outcome = "TIMEOUT"
+                    final_error_code = "MODEL_PROVIDER_TIMEOUT"
+                    final_error_category = "PROVIDER_TOTAL_DEADLINE"
+                    break
+                final_error = exc
+                final_response = getattr(exc, "response", None)
+                final_outcome = "ERROR"
+                final_error_code = "MODEL_PROVIDER_HTTP_ERROR"
+                final_error_category = type(exc).__name__
+                break
+            else:
+                network_calls.append(
+                    self._network_call_metadata(
+                        call_index=call_index,
+                        call_started=call_started,
+                        telemetry=telemetry,
+                        outcome="SUCCESS",
+                        response=response,
+                    )
+                )
+                break
+
+        assert telemetry is not None
+        if final_error is not None:
             latency_ms = round((perf_counter() - started) * 1000)
+            assert final_error_category is not None
             self._set_failure_metadata(
                 purpose=purpose,
                 started_at=started_at,
                 latency_ms=latency_ms,
                 context_bytes=_planning_context_bytes(payload),
                 request_size_bytes=request_size_bytes,
-                outcome="TIMEOUT",
-                error_category="PROVIDER_TOTAL_DEADLINE",
+                outcome=final_outcome,
+                error_category=final_error_category,
                 telemetry=telemetry,
+                network_calls=tuple(network_calls),
             )
             _log_provider_failure(
                 purpose=purpose,
                 model=self._model_name,
                 request_size_bytes=request_size_bytes,
-                error=exc,
-                response=None,
+                error=final_error,
+                response=final_response,
                 latency_ms=latency_ms,
                 http_timeout_seconds=self._timeout,
                 total_deadline_seconds=self._total_timeout,
             )
             raise GenericProviderError(
-                "MODEL_PROVIDER_TIMEOUT", "The model provider request timed out"
-            ) from exc
-        except httpx.TimeoutException as exc:
-            latency_ms = round((perf_counter() - started) * 1000)
-            self._set_failure_metadata(
-                purpose=purpose,
-                started_at=started_at,
-                latency_ms=latency_ms,
-                context_bytes=_planning_context_bytes(payload),
-                request_size_bytes=request_size_bytes,
-                outcome="TIMEOUT",
-                error_category=type(exc).__name__,
-                telemetry=telemetry,
-            )
-            _log_provider_failure(
-                purpose=purpose,
-                model=self._model_name,
-                request_size_bytes=request_size_bytes,
-                error=exc,
-                response=None,
-                latency_ms=latency_ms,
-                http_timeout_seconds=self._timeout,
-                total_deadline_seconds=self._total_timeout,
-            )
-            raise GenericProviderError(
-                "MODEL_PROVIDER_TIMEOUT", "The model provider request timed out"
-            ) from exc
-        except httpx.HTTPError as exc:
-            latency_ms = round((perf_counter() - started) * 1000)
-            self._set_failure_metadata(
-                purpose=purpose,
-                started_at=started_at,
-                latency_ms=latency_ms,
-                context_bytes=_planning_context_bytes(payload),
-                request_size_bytes=request_size_bytes,
-                outcome="ERROR",
-                error_category=type(exc).__name__,
-                telemetry=telemetry,
-            )
-            _log_provider_failure(
-                purpose=purpose,
-                model=self._model_name,
-                request_size_bytes=request_size_bytes,
-                error=exc,
-                response=getattr(exc, "response", None),
-                latency_ms=latency_ms,
-                http_timeout_seconds=self._timeout,
-                total_deadline_seconds=self._total_timeout,
-            )
-            raise GenericProviderError(
-                "MODEL_PROVIDER_HTTP_ERROR", "The model provider request failed"
-            ) from exc
+                final_error_code,
+                (
+                    "The model provider request timed out"
+                    if final_error_code == "MODEL_PROVIDER_TIMEOUT"
+                    else "The model provider request failed"
+                ),
+            ) from final_error
+
+        assert response is not None
         try:
             body = response.json()
             choice = body["choices"][0]
@@ -930,6 +1028,7 @@ class OpenAICompatibleGenericProvider:
                 outcome="ERROR",
                 error_category=type(exc).__name__,
                 telemetry=telemetry,
+                network_calls=tuple(network_calls),
             )
             raise GenericProviderError(
                 "MODEL_PROVIDER_RESPONSE_INVALID",
@@ -972,8 +1071,42 @@ class OpenAICompatibleGenericProvider:
                 len(content.encode("utf-8")) if isinstance(content, str) else None
             ),
             finish_reason=finish_reason,
+            network_calls=tuple(network_calls),
         )
         return parsed
+
+    @staticmethod
+    def _network_call_metadata(
+        *,
+        call_index: int,
+        call_started: float,
+        telemetry: _ProviderPhaseTelemetry,
+        outcome: str,
+        error_category: str | None = None,
+        timeout_category: object | None = None,
+        response: httpx.Response | None = None,
+        retryable: bool = False,
+    ) -> dict[str, object]:
+        snapshot = telemetry.snapshot()
+        resolved_timeout_category = timeout_category
+        if resolved_timeout_category is None:
+            resolved_timeout_category = snapshot.get("timeout_subtype")
+        if not isinstance(resolved_timeout_category, str):
+            resolved_timeout_category = None
+        return {
+            **snapshot,
+            "call_index": call_index,
+            "started_at": snapshot.get("request_started_at"),
+            "finished_at": datetime.now(UTC).isoformat(),
+            "latency_ms": round((perf_counter() - call_started) * 1000),
+            "duration_ms": round((perf_counter() - call_started) * 1000),
+            "outcome": outcome,
+            "error_category": error_category,
+            "timeout_category": resolved_timeout_category,
+            "http_status_code": response.status_code if response is not None else None,
+            "provider_request_id": _provider_request_id(response),
+            "retryable": retryable,
+        }
 
     def _set_failure_metadata(
         self,
@@ -986,6 +1119,7 @@ class OpenAICompatibleGenericProvider:
         outcome: str,
         error_category: str,
         telemetry: _ProviderPhaseTelemetry,
+        network_calls: tuple[dict[str, object], ...] = (),
     ) -> None:
         self._last_call_metadata = ProviderCallMetadata(
             call_type=purpose.upper(),
@@ -1007,6 +1141,7 @@ class OpenAICompatibleGenericProvider:
             error_category=error_category,
             context_bytes=context_bytes,
             request_size_bytes=request_size_bytes,
+            network_calls=network_calls,
         )
 
 
