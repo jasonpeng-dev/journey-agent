@@ -28,11 +28,13 @@ from app.domain.resources import (
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
+    ActionParameters,
     ActionTargetKind,
     ScenarioDefinitionV2,
     StrictScalar,
     normalize_action_parameters,
     relation_identity,
+    transport_resource_entries,
 )
 from app.domain.world import AccessState, Visibility
 from app.engine.locality import (
@@ -114,7 +116,7 @@ class GenericGameService:
         actor_key: str,
         action_key: str,
         target_node_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         operation_status: str | None = None,
         approval_granted: bool = False,
     ) -> AppliedRuleResult:
@@ -374,7 +376,7 @@ class GenericGameService:
         actor_key: str,
         action_key: str,
         target_node_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         approval_granted: bool = False,
     ) -> GenericRuleOutcome | None:
         definition = self._definition()
@@ -482,7 +484,7 @@ class GenericGameService:
         action: object,
         actor_current_node_key: str,
         target_node_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         target_actor_current_node_key: str | None = None,
     ) -> None:
         from app.domain.scenario_v2 import ActionDefinitionV2
@@ -550,7 +552,7 @@ class GenericGameService:
         target_node_key: str,
         state: DeclarativeRuleState,
         outcome: GenericRuleOutcome,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         target_actor: GameInstanceActor | None = None,
     ) -> GenericRuleOutcome:
         from app.domain.scenario_v2 import ActionDefinitionV2
@@ -658,6 +660,8 @@ class GenericGameService:
                 ),
             )
         if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+            if outcome.failure is not None:
+                return outcome
             connector = self._connector(definition, actor.current_node_key, target_node_key)
             if not self._is_passable(definition, connector, state):
                 return self._blocked_outcome(
@@ -666,85 +670,90 @@ class GenericGameService:
                     message="The one-hop Transport is currently blocked",
                     reveal=self._passability_reveal(definition, connector, state),
                 )
-            resource_key = parameters.get("resource_key")
-            amount = parameters.get("amount")
-            if not isinstance(resource_key, str) or not isinstance(amount, int):
-                raise GenericGameError(
-                    "TRANSPORT_PARAMETERS_INVALID",
-                    "Transport requires a Resource key and integer amount",
-                )
+            try:
+                cargo = transport_resource_entries(parameters)
+            except ValueError as exc:
+                raise GenericGameError("TRANSPORT_PARAMETERS_INVALID", str(exc)) from exc
             source_region = region_for_node(definition, actor.current_node_key)
             target_region = region_for_node(definition, target_node_key)
-            source_pools = self._known_source_pools(state, source_region, resource_key)
-            if not source_pools:
-                source_knowledge = state.region_resource_knowledge.get(source_region)
-                if self._region_resource_inventory_is_known(source_knowledge):
-                    return self._blocked_outcome(
-                        outcome,
-                        code="TRANSPORT_RESOURCE_INSUFFICIENT",
-                        message="The source Region lacks the requested Resource amount",
-                        retryable=True,
+            resource_keys = {item.key for item in definition.world.resources}
+            mutations: list[ResourceMutation] = []
+            for resource_key, amount in cargo:
+                if resource_key not in resource_keys:
+                    raise GenericGameError(
+                        "TRANSPORT_RESOURCE_INVALID",
+                        "Transport references an unknown Resource",
                     )
-                return self._blocked_outcome(
-                    outcome,
-                    code="TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
-                    message="The source Region Resource inventory is not known",
-                    retryable=True,
-                )
-            free_by_pool = {
-                pool.pool_key: max(
-                    0,
-                    pool.quantity
-                    - state.resource_reservations.get(
-                        resource_state_key(resource_key, source_region, pool.pool_key),
-                        0,
-                    ),
-                )
-                for pool in source_pools
-            }
-            available = sum(free_by_pool.values())
-            if available < amount:
-                if not self._region_resource_inventory_is_known(
-                    state.region_resource_knowledge.get(source_region)
-                ):
+                source_pools = self._known_source_pools(state, source_region, resource_key)
+                if not source_pools:
+                    source_knowledge = state.region_resource_knowledge.get(source_region)
+                    if self._region_resource_inventory_is_known(source_knowledge):
+                        return self._blocked_outcome(
+                            outcome,
+                            code="TRANSPORT_RESOURCE_INSUFFICIENT",
+                            message="The source Region lacks the requested Resource amount",
+                            retryable=True,
+                        )
                     return self._blocked_outcome(
                         outcome,
                         code="TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
                         message="The source Region Resource inventory is not known",
                         retryable=True,
                     )
-                return self._blocked_outcome(
-                    outcome,
-                    code="TRANSPORT_RESOURCE_INSUFFICIENT",
-                    message="The source Region lacks the requested Resource amount",
-                    retryable=True,
-                )
-            remaining = amount
-            mutations: list[ResourceMutation] = []
-            for pool in source_pools:
-                if remaining <= 0:
-                    break
-                consumed = min(free_by_pool[pool.pool_key], remaining)
+                free_by_pool = {
+                    pool.pool_key: max(
+                        0,
+                        pool.quantity
+                        - state.resource_reservations.get(
+                            resource_state_key(resource_key, source_region, pool.pool_key),
+                            0,
+                        ),
+                    )
+                    for pool in source_pools
+                }
+                available = sum(free_by_pool.values())
+                if available < amount:
+                    if not self._region_resource_inventory_is_known(
+                        state.region_resource_knowledge.get(source_region)
+                    ):
+                        return self._blocked_outcome(
+                            outcome,
+                            code="TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
+                            message="The source Region Resource inventory is not known",
+                            retryable=True,
+                        )
+                    return self._blocked_outcome(
+                        outcome,
+                        code="TRANSPORT_RESOURCE_INSUFFICIENT",
+                        message="The source Region lacks the requested Resource amount",
+                        retryable=True,
+                    )
+                remaining = amount
+                for pool in source_pools:
+                    if remaining <= 0:
+                        break
+                    consumed = min(free_by_pool[pool.pool_key], remaining)
+                    mutations.append(
+                        ResourceMutation(
+                            resource_key,
+                            -consumed,
+                            source_region,
+                            pool.pool_key,
+                        )
+                    )
+                    remaining -= consumed
                 mutations.append(
                     ResourceMutation(
                         resource_key,
-                        -consumed,
-                        source_region,
-                        pool.pool_key,
+                        amount,
+                        target_region,
+                        self._destination_pool_key(state, target_region, resource_key),
                     )
                 )
-                remaining -= consumed
-            mutations.append(
-                ResourceMutation(
-                    resource_key,
-                    amount,
-                    target_region,
-                    self._destination_pool_key(state, target_region, resource_key),
-                )
-            )
             return replace(
                 outcome,
                 resource_mutations=(*outcome.resource_mutations, *mutations),
+                actor_location_update=target_node_key,
                 fact_visibility_updates=(
                     *outcome.fact_visibility_updates,
                     *self._passability_reveal(definition, connector, state),
@@ -768,7 +777,7 @@ class GenericGameService:
         action: object,
         target_node_key: str,
         state: DeclarativeRuleState,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
     ) -> GenericRuleOutcome | None:
         from app.domain.scenario_v2 import ActionDefinitionV2
 
@@ -995,7 +1004,7 @@ class GenericGameService:
     def _require_authority(
         actor: GameInstanceActor,
         action: object,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         approval_granted: bool,
     ) -> None:
         from app.domain.scenario_v2 import ActionDefinitionV2
@@ -1184,6 +1193,7 @@ class GenericGameService:
         resources = {item.key: item for item in definition.world.resources}
         resource_mutations = self._expand_resource_mutations(outcome.resource_mutations)
         resource_rows: dict[str, GameInstanceResourceState] = {}
+        new_resource_rows: list[GameInstanceResourceState] = []
         balance_mutations_by_identity: dict[str, list[ResourceMutation]] = {}
         for mutation in resource_mutations:
             balance_mutations_by_identity.setdefault(
@@ -1239,7 +1249,10 @@ class GenericGameService:
                 reserved_value=0,
                 version=1,
             )
-            self.db.add(resource_row)
+            # Delay attaching newly-created balances until every resource
+            # bound has been checked.  A failed multi-cargo outcome must not
+            # leave an empty destination pool behind.
+            new_resource_rows.append(resource_row)
             resource_rows[identity] = resource_row
         projected_values = {key: row.value for key, row in resource_rows.items()}
         projected_reserved = {key: row.reserved_value for key, row in resource_rows.items()}
@@ -1380,6 +1393,8 @@ class GenericGameService:
                     source_rule_key=outcome.selected_rule_key,
                 )
             )
+        for resource_row in new_resource_rows:
+            self.db.add(resource_row)
 
     def _expand_resource_mutations(
         self,

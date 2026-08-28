@@ -19,7 +19,6 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from app.core.config import Settings
-from app.domain.scenario_v2 import StrictScalar
 
 log = structlog.get_logger(__name__)
 
@@ -203,7 +202,9 @@ class PlanStepProposal(ProviderModel):
     action_key: str | None = None
     actor_key: str | None = None
     target_key: str | None = None
-    parameters: dict[str, StrictScalar] = Field(default_factory=dict)
+    # Action parameters are JSON-shaped because transport_resource accepts a
+    # structured resources[] cargo list while legacy Actions remain scalar.
+    parameters: dict[str, JsonValue] = Field(default_factory=dict)
     short_actor_reason: str | None = None
     candidate_id: str | None = None
 
@@ -711,8 +712,10 @@ class OpenAICompatibleGenericProvider:
             "insert a multi-hop route. Travel changes only the executing Actor's location and "
             "never moves a Resource. transport_resource is the Region-to-Region Resource "
             "transfer Action: its source is the projected executing Actor Region, its target "
-            "is the destination Region, its parameters come from its ActionContract, and it "
-            "does not move the Actor. Do not consume or transport Resources whose required "
+            "is the destination Region, its parameters use the resources[] cargo format, and "
+            "a successful transport moves the executing Actor to that destination. Each "
+            "transport crosses exactly one legal Transport edge. Legacy resource_key/amount "
+            "parameters remain readable. Do not consume or transport Resources whose required "
             "availability is UNKNOWN. A PlanSegment may compose supporting Actions performed "
             "by multiple Actors; apply earlier causal effects before validating later Steps. "
             "Use OBJECTIVE_COMPLETION only when current Known state plus projected deterministic "

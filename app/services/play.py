@@ -29,7 +29,7 @@ from app.domain.enums import (
     WorldOperationStatus,
 )
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import StrictScalar
+from app.domain.scenario_v2 import ActionParameters
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentPlan,
@@ -503,7 +503,7 @@ class PlayOrchestrator:
             decision.actor_key,
             decision.action_key,
             decision.target_key,
-            cast(dict[str, StrictScalar], decision.parameters),
+            cast(ActionParameters, decision.parameters),
         )
         task.rejected_proposal_signatures = [
             *task.rejected_proposal_signatures,

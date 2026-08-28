@@ -13,7 +13,6 @@ from app.domain.scenario_v2 import (
     ResourceScopeKind,
     ResourceScopeV2,
     ScenarioDefinitionV2,
-    StrictScalar,
 )
 
 if TYPE_CHECKING:
@@ -188,7 +187,7 @@ def validate_action_locality(
     *,
     actor_current_node_key: str,
     target_node_key: str,
-    parameters: Mapping[str, StrictScalar],
+    parameters: Mapping[str, object],
     target_actor_node_key: str | None = None,
 ) -> str | None:
     """Validate static locality and return a connector for travel-like actions.

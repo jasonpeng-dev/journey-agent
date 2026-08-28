@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from app.domain.enums import AuthorityOutcome
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
+    ActionParameters,
     AuthorityPolicyV2,
     ScenarioDefinitionV2,
-    StrictScalar,
     normalize_action_parameters,
 )
 from app.infrastructure.db.models import GameInstanceActor
@@ -46,7 +46,7 @@ def actor_binding_matches(definition: ScenarioDefinitionV2, actor: GameInstanceA
 def evaluate_authority(
     actor: GameInstanceActor,
     action: ActionDefinitionV2,
-    parameters: dict[str, StrictScalar],
+    parameters: ActionParameters,
 ) -> GenericAuthorityDecision:
     try:
         parameters = normalize_action_parameters(action, parameters)

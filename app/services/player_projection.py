@@ -790,7 +790,10 @@ class PlayerProjectionService:
                     (item for item in definition.actions if item.key == operation.action_key),
                     None,
                 )
-                if action is None or action.behavior not in (ActionBehavior.TRAVEL,):
+                if action is None or action.behavior not in {
+                    ActionBehavior.TRAVEL,
+                    ActionBehavior.TRANSPORT_RESOURCE,
+                }:
                     return
                 destination = operation.target_key
             positions[operation.actor_key] = destination
@@ -815,7 +818,8 @@ class PlayerProjectionService:
                 target_key = step.tool_arguments.get("target_key")
                 if (
                     action is not None
-                    and action.behavior == ActionBehavior.TRAVEL
+                    and action.behavior
+                    in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}
                     and isinstance(target_key, str)
                 ):
                     # Use the planned destination for the next step.  This is

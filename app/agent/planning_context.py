@@ -37,6 +37,7 @@ from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
+    ActionDefinitionV2,
     ActionLocality,
     ActionTargetKind,
     ObjectiveDefinitionV2,
@@ -54,6 +55,28 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.services.knowledge_projection import SharedKnowledgeProjection
+
+
+def _planner_parameter_schema(action: ActionDefinitionV2) -> list[dict[str, object]]:
+    """Project the preferred structured transport input without changing YAML."""
+
+    if action.behavior != ActionBehavior.TRANSPORT_RESOURCE:
+        return [item.model_dump(mode="json") for item in action.parameters]
+    return [
+        {
+            "key": "resources",
+            "name": "Resource cargo",
+            "value_type": "OBJECT_ARRAY",
+            "required": True,
+            "minimum_items": 1,
+            "unique_by": "resource_key",
+            "item_schema": {
+                "resource_key": "STRING",
+                "amount": "POSITIVE_INTEGER",
+            },
+            "legacy_parameters": [item.model_dump(mode="json") for item in action.parameters],
+        }
+    ]
 
 
 def _canonical_resource_knowledge(raw: object) -> tuple[dict[str, object], ...]:
@@ -808,7 +831,7 @@ class PlanningContextBuilder:
                         else {}
                     ),
                 },
-                "parameter_schema": [item.model_dump(mode="json") for item in action.parameters],
+                "parameter_schema": _planner_parameter_schema(action),
                 "parameter_defaults": {
                     item.key: item.default for item in action.parameters if item.default is not None
                 },
@@ -955,6 +978,29 @@ class PlanningContextBuilder:
                         ),
                     ]
                 )
+                if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+                    hints.extend(
+                        [
+                            (
+                                "transport_resource carries one or more resource entries; "
+                                "prefer the resources[] format with unique resource_key values "
+                                "and positive amounts."
+                            ),
+                            (
+                                "The source is the executing Actor's projected current Region; "
+                                "the Action crosses exactly one legal Transport edge and moves "
+                                "that Actor to the destination on success."
+                            ),
+                            (
+                                "Prefer efficient logistics: minimize unnecessary travel and "
+                                "duplicate transport actions. When multiple required resources "
+                                "share the same downstream route, consider consolidating them "
+                                "into one transport action at a common region. Prefer shorter "
+                                "legal routes when reasonable. UNKNOWN passability is "
+                                "MAY_ATTEMPT, not blocked."
+                            ),
+                        ]
+                    )
             if hints:
                 action_context["soft_signals"] = {"hints": hints}
             result.append(action_context)

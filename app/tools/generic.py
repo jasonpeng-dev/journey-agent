@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from sqlalchemy.orm import Session
 
 from app.domain.runtime_scope import RuntimeScope
-from app.domain.scenario_v2 import StrictScalar
+from app.domain.scenario_v2 import ActionParameters
 from app.services.generic_actions import GenericActionService
 
 
@@ -19,7 +19,7 @@ class ExecuteActionArgs(BaseModel):
 
     action_key: str = Field(min_length=1, max_length=80)
     target_key: str = Field(min_length=1, max_length=80)
-    parameters: dict[str, StrictScalar] = Field(default_factory=dict)
+    parameters: dict[str, JsonValue] = Field(default_factory=dict)
     idempotency_key: str = Field(min_length=8, max_length=160)
 
 
@@ -40,7 +40,7 @@ def execute_action(
         actor_key=context.actor_key,
         action_key=args.action_key,
         target_key=args.target_key,
-        parameters=args.parameters,
+        parameters=cast(ActionParameters, args.parameters),
         idempotency_key=args.idempotency_key,
         task_id=context.task_id,
         source_step_id=context.step_id,

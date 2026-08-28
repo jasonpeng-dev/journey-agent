@@ -61,6 +61,7 @@ from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionDefinitionV2,
     ActionExecutionMode,
+    ActionParameters,
     ActionTargetKind,
     ComparisonOperator,
     ConditionV2,
@@ -77,6 +78,7 @@ from app.domain.scenario_v2 import (
     ValueSource,
     normalize_action_parameters,
     relation_identity,
+    transport_resource_entries,
 )
 from app.domain.world import Visibility
 from app.engine.locality import (
@@ -155,7 +157,7 @@ class _StaticProposalBinding:
     action: ActionDefinitionV2
     actor: GameInstanceActor
     target_key: str
-    parameters: dict[str, StrictScalar]
+    parameters: ActionParameters
 
 
 _NON_TERMINAL_TASK_STATUSES = (
@@ -1309,7 +1311,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         action: ActionDefinitionV2,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
     ) -> GameInstanceActor | None:
         actors = self.db.scalars(
             select(GameInstanceActor).where(
@@ -2443,7 +2445,10 @@ class GenericAgentService:
         validated by the current projected state instead of by this signature.
         """
 
-        effect_changes_location = action.behavior == ActionBehavior.TRAVEL
+        effect_changes_location = action.behavior in {
+            ActionBehavior.TRAVEL,
+            ActionBehavior.TRANSPORT_RESOURCE,
+        }
         if planner_input is not None:
             contract = next(
                 (item for item in planner_input.action_contracts if item.action_key == action.key),
@@ -2602,7 +2607,7 @@ class GenericAgentService:
         action: ActionDefinitionV2,
         actor_key: str,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_actor_locations: dict[str, str],
         actors: dict[str, GameInstanceActor] | None = None,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
@@ -2645,7 +2650,7 @@ class GenericAgentService:
         action: ActionDefinitionV2,
         actor_key: str,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_actor_locations: dict[str, str],
         projected_known_passability: dict[str, bool],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
@@ -2766,7 +2771,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         action: ActionDefinitionV2,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
@@ -2859,7 +2864,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         action: ActionDefinitionV2,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
@@ -2913,7 +2918,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         condition: ConditionV2 | None,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
@@ -3047,7 +3052,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         condition: ConditionV2 | None,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
@@ -3197,7 +3202,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         selector: NodeSelectorV2 | None,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
@@ -3336,7 +3341,7 @@ class GenericAgentService:
         action: ActionDefinitionV2,
         actor_key: str,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_actor_locations: dict[str, str],
         projected_pools: dict[str, _ProjectedResourcePool],
         projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
@@ -3385,13 +3390,10 @@ class GenericAgentService:
             return
 
         if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
-            resource_key = parameters.get("resource_key")
-            amount = parameters.get("amount")
-            if not isinstance(resource_key, str) or not isinstance(amount, int):
-                raise GenericAgentError(
-                    "TRANSPORT_PARAMETERS_INVALID",
-                    "Transport requires a Resource key and integer amount",
-                )
+            try:
+                cargo = transport_resource_entries(parameters)
+            except ValueError as exc:
+                raise GenericAgentError("TRANSPORT_PARAMETERS_INVALID", str(exc)) from exc
             source_node_key = projected_actor_locations.get(actor_key)
             if source_node_key is None:
                 raise GenericAgentError(
@@ -3400,15 +3402,21 @@ class GenericAgentService:
                 )
             source_region = region_for_node(definition, source_node_key)
             destination_region = region_for_node(definition, target_key)
-            consumed = self._consume_projected_resource(
-                source_region,
-                resource_key,
-                amount,
-                projected_pools,
-                projected_region_knowledge,
-                projected_known_resource_balance=projected_known_resource_balance,
-            )
-            if consumed:
+            known_resource_keys = {item.key for item in definition.world.resources}
+            for resource_key, amount in cargo:
+                if resource_key not in known_resource_keys:
+                    raise GenericAgentError(
+                        "TRANSPORT_RESOURCE_INVALID",
+                        "Transport references an unknown Resource",
+                    )
+                self._consume_projected_resource(
+                    source_region,
+                    resource_key,
+                    amount,
+                    projected_pools,
+                    projected_region_knowledge,
+                    projected_known_resource_balance=projected_known_resource_balance,
+                )
                 self._add_projected_resource(
                     destination_region,
                     resource_key,
@@ -3547,7 +3555,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         actor_key: str,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_actor_locations: dict[str, str],
         projected_pools: dict[str, _ProjectedResourcePool],
         projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
@@ -3603,7 +3611,7 @@ class GenericAgentService:
                     )
 
     @staticmethod
-    def _projected_integer_effect(expression: object, parameters: dict[str, StrictScalar]) -> int:
+    def _projected_integer_effect(expression: object, parameters: ActionParameters) -> int:
         source = getattr(expression, "source", None)
         multiplier = getattr(expression, "multiplier", 1)
         if getattr(source, "value", source) == ValueSource.LITERAL.value:
@@ -3625,7 +3633,7 @@ class GenericAgentService:
         action: ActionDefinitionV2,
         actor_key: str,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_actor_locations: dict[str, str],
         projected_known_passability: dict[str, bool],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
@@ -3636,7 +3644,7 @@ class GenericAgentService:
         planner_input: PlannerInput | None = None,
         projected_command_reachability: dict[str, CommandReachability] | None = None,
     ) -> None:
-        if action.behavior == ActionBehavior.TRAVEL:
+        if action.behavior in {ActionBehavior.TRAVEL, ActionBehavior.TRANSPORT_RESOURCE}:
             projected_actor_locations[actor_key] = target_key
         location_effects: tuple[dict[str, object], ...]
         if planner_input is None:
@@ -3754,7 +3762,7 @@ class GenericAgentService:
         action: ActionDefinitionV2,
         actor_key: str,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_resolution_effects: Sequence[EffectV2],
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
@@ -3835,7 +3843,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         rules: Sequence[RuleDefinitionV2],
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
@@ -3873,7 +3881,7 @@ class GenericAgentService:
         definition: ScenarioDefinitionV2,
         action: ActionDefinitionV2,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         projected_known_facts: dict[tuple[str, str], _ProjectedFact],
         projected_known_nodes: set[str],
         projected_known_relations: set[str],
@@ -3916,7 +3924,7 @@ class GenericAgentService:
     def _projected_effect_node_key(
         selector: NodeSelectorV2 | None,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
     ) -> str | None:
         if selector is None:
             return None
@@ -3933,7 +3941,7 @@ class GenericAgentService:
     @staticmethod
     def _projected_value(
         expression: ValueExpressionV2 | None,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
     ) -> StrictScalar | None:
         if expression is None:
             return None
@@ -3941,7 +3949,9 @@ class GenericAgentService:
             return getattr(expression, "literal", None)
         parameter_key = getattr(expression, "parameter_key", None)
         value = parameters.get(parameter_key) if isinstance(parameter_key, str) else None
-        return value
+        if isinstance(value, (str, int, bool)):
+            return value
+        return None
 
     @staticmethod
     def _apply_projected_passability_effect(
@@ -4109,7 +4119,7 @@ class GenericAgentService:
         self,
         definition: ScenarioDefinitionV2,
         candidate: PlanningActionCandidate,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         objectives: tuple[ObjectiveDefinitionV2, ...],
         plan_version: int,
         index: int,
@@ -4298,7 +4308,7 @@ class GenericAgentService:
         return None
 
     @staticmethod
-    def _default_parameters(action: ActionDefinitionV2) -> dict[str, StrictScalar]:
+    def _default_parameters(action: ActionDefinitionV2) -> ActionParameters:
         try:
             return normalize_action_parameters(action, {})
         except ValueError as exc:
@@ -5488,7 +5498,7 @@ def proposal_signature(
     actor_key: str,
     action_key: str,
     target_key: str,
-    parameters: dict[str, StrictScalar],
+    parameters: ActionParameters,
 ) -> str:
     payload = json.dumps(
         [actor_key, action_key, target_key, parameters],

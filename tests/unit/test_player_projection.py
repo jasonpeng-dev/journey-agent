@@ -179,7 +179,7 @@ def test_plan_projection_starts_from_frozen_planner_input_position(session: Sess
 
     assert [locations[step.id].summary for step in steps] == [
         _summary(spatial, "east_residential_district", "central_district"),
-        _summary(spatial, "east_residential_district", "central_district"),
+        _summary(spatial, "central_district", "central_district"),
         _summary(spatial, "central_district", "west_logistics_district"),
     ]
 

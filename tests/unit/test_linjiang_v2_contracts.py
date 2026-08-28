@@ -346,7 +346,15 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     )
 
     transport = actions["transport_resource"]
-    assert {item["key"] for item in transport["parameter_schema"]} == {
+    assert {item["key"] for item in transport["parameter_schema"]} == {"resources"}
+    parameter_schema = transport["parameter_schema"][0]
+    assert parameter_schema["value_type"] == "OBJECT_ARRAY"
+    assert parameter_schema["unique_by"] == "resource_key"
+    assert parameter_schema["item_schema"] == {
+        "resource_key": "STRING",
+        "amount": "POSITIVE_INTEGER",
+    }
+    assert {item["key"] for item in parameter_schema["legacy_parameters"]} == {
         "resource_key",
         "amount",
     }
@@ -359,7 +367,10 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
         for item in transport["planner_constraints"]["knowledge"]
     )
     assert any(
-        effect["type"] == "RESOURCE_TRANSFER" and effect["destination"] == "target_key"
+        effect["type"] == "RESOURCE_TRANSFER"
+        and effect["destination"] == "target_region"
+        and effect["pool"] == "runtime_known_inflow"
+        and effect["cargo"] == "parameters.resources"
         for effect in transport["planner_effects"]
     )
 
@@ -891,10 +902,7 @@ def test_dependency_closure_keeps_generic_resource_transport_for_late_action(
         for item in closure.planner_input.action_contracts
         if item.action_key == "transport_resource"
     )
-    assert {item["key"] for item in transport_contract.parameters} == {
-        "amount",
-        "resource_key",
-    }
+    assert {item["key"] for item in transport_contract.parameters} == {"resources"}
     region_keys = {
         item["key"]
         for item in closure.planner_input.known_world.nodes

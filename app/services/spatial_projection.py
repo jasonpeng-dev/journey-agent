@@ -15,7 +15,7 @@ from app.domain.scenario_v2 import (
     ActionDefinitionV2,
     ActionLocality,
     ScenarioDefinitionV2,
-    StrictScalar,
+    transport_resource_entries,
 )
 from app.engine.locality import (
     LocalityEngineError,
@@ -114,7 +114,7 @@ class SpatialDisplayProjector:
         *,
         target_node_key: str,
         source_node_key: str | None = None,
-        parameters: Mapping[str, StrictScalar] | None = None,
+        parameters: Mapping[str, object] | None = None,
         compact: bool = False,
     ) -> ActionLocationProjection | None:
         """Return one common location label for every Player-facing action view."""
@@ -134,15 +134,16 @@ class SpatialDisplayProjector:
             if source_region is not None and target_region is not None:
                 detail = None
                 if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
-                    resource_key = values.get("resource_key")
-                    amount = values.get("amount")
-                    resource_name = self._resource_names.get(str(resource_key))
-                    if (
-                        resource_name is not None
-                        and isinstance(amount, int)
-                        and not isinstance(amount, bool)
-                    ):
-                        detail = f"{resource_name} \u00d7{amount}"
+                    try:
+                        cargo = transport_resource_entries(values)
+                    except ValueError:
+                        cargo = ()
+                    cargo_labels = [
+                        f"{self._resource_names.get(resource_key, resource_key)} \u00d7{amount}"
+                        for resource_key, amount in cargo
+                    ]
+                    if cargo_labels:
+                        detail = "、".join(cargo_labels)
                 return ActionLocationProjection(
                     kind="ROUTE",
                     summary=f"{source_region.name} → {target_region.name}",

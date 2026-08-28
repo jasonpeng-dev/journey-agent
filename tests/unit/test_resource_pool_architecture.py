@@ -1086,14 +1086,27 @@ def test_repeated_transport_accumulates_in_one_canonical_destination_balance(
     _prepare_general_parts_transport(session, runtime)
     game = GenericGameService(session, scope)
 
-    for amount in (5, 3):
-        result = game.execute(
-            actor_key="logistics_team_alpha",
-            action_key="transport_resource",
-            target_node_key="central_district",
-            parameters={"resource_key": "general_engineering_parts", "amount": amount},
-        )
-        assert result.outcome.failure is None
+    first = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="transport_resource",
+        target_node_key="central_district",
+        parameters={"resource_key": "general_engineering_parts", "amount": 5},
+    )
+    assert first.outcome.failure is None
+    returned = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_node_key="west_logistics_district",
+        parameters={},
+    )
+    assert returned.outcome.failure is None
+    second = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="transport_resource",
+        target_node_key="central_district",
+        parameters={"resource_key": "general_engineering_parts", "amount": 3},
+    )
+    assert second.outcome.failure is None
 
     central_rows = [
         row
@@ -1501,6 +1514,7 @@ def _synthetic_region_definition() -> Any:
         (),
         {
             "nodes": nodes,
+            "resources": (type("SyntheticResource", (), {"key": "synthetic_resource"})(),),
             "node": lambda self, key: node_by_key.get(key),
         },
     )()
@@ -1903,7 +1917,6 @@ def test_runtime_transport_inflow_can_cross_unknown_region(
         definition,
         f"runtime-known-inflow-{resource_key}",
     )
-    game = GenericGameService(session, scope)
 
     first = _runtime_transport(
         session,
@@ -1926,16 +1939,9 @@ def test_runtime_transport_inflow_can_cross_unknown_region(
     )
     recovered = RuntimeRecoveryService(session).recover(GameInstanceId(runtime.instance.id))
     scope = recovered.scope
-    game = GenericGameService(session, scope)
     actor = session.get(GameInstanceActor, (runtime.instance.id, "logistics_team_alpha"))
     assert actor is not None
-    travelled = game.execute(
-        actor_key="logistics_team_alpha",
-        action_key="travel",
-        target_node_key="south_waterfront_district",
-        parameters={},
-    )
-    assert travelled.outcome.failure is None
+    assert actor.current_node_key == "south_waterfront_district"
 
     second = _runtime_transport(
         session,
@@ -1982,7 +1988,6 @@ def test_runtime_transport_inflow_shortfall_preserves_unknown_error(session: Ses
         definition,
         "runtime-inflow-shortfall",
     )
-    game = GenericGameService(session, scope)
     first = _runtime_transport(
         session,
         scope,
@@ -1991,13 +1996,6 @@ def test_runtime_transport_inflow_shortfall_preserves_unknown_error(session: Ses
         amount=10,
     )
     assert first.outcome.failure is None
-    travelled = game.execute(
-        actor_key="logistics_team_alpha",
-        action_key="travel",
-        target_node_key="south_waterfront_district",
-        parameters={},
-    )
-    assert travelled.outcome.failure is None
 
     result = _runtime_transport(
         session,
@@ -2037,7 +2035,6 @@ def test_survey_after_inflow_reveals_base_without_double_counting(session: Sessi
         definition,
         "runtime-survey-after-inflow",
     )
-    game = GenericGameService(session, scope)
     first = _runtime_transport(
         session,
         scope,
@@ -2046,13 +2043,7 @@ def test_survey_after_inflow_reveals_base_without_double_counting(session: Sessi
         amount=10,
     )
     assert first.outcome.failure is None
-    travelled = game.execute(
-        actor_key="logistics_team_alpha",
-        action_key="travel",
-        target_node_key="south_waterfront_district",
-        parameters={},
-    )
-    assert travelled.outcome.failure is None
+    game = GenericGameService(session, scope)
     surveyed = game.execute(
         actor_key="logistics_team_alpha",
         action_key="survey_resources",
@@ -2097,22 +2088,23 @@ def test_runtime_transport_inflow_supports_local_rule_resource_consumption(
         "runtime-inflow-local-repair",
     )
     game = GenericGameService(session, scope)
-    first = _runtime_transport(
-        session,
-        scope,
-        resource_key=resource_key,
-        target_region="south_waterfront_district",
-        amount=10,
+    combined = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="transport_resource",
+        target_node_key="south_waterfront_district",
+        parameters={
+            "resources": [
+                {"resource_key": resource_key, "amount": 10},
+                {"resource_key": "general_engineering_parts", "amount": 5},
+            ]
+        },
     )
-    assert first.outcome.failure is None
-    general_inflow = _runtime_transport(
-        session,
-        scope,
-        resource_key="general_engineering_parts",
-        target_region="south_waterfront_district",
-        amount=5,
+    assert combined.outcome.failure is None
+    logistics = session.get(
+        GameInstanceActor,
+        (runtime.instance.id, "logistics_team_alpha"),
     )
-    assert general_inflow.outcome.failure is None
+    assert logistics is not None and logistics.current_node_key == "south_waterfront_district"
     water = session.get(
         GameInstanceActor,
         (runtime.instance.id, "water_repair_team_alpha"),
@@ -2179,7 +2171,6 @@ def test_runtime_transport_known_base_and_inflow_are_combined(session: Session) 
     south_knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
     south_knowledge.resource_survey_completed = True
     session.flush()
-    game = GenericGameService(session, scope)
     first = _runtime_transport(
         session,
         scope,
@@ -2188,13 +2179,6 @@ def test_runtime_transport_known_base_and_inflow_are_combined(session: Session) 
         amount=10,
     )
     assert first.outcome.failure is None
-    travelled = game.execute(
-        actor_key="logistics_team_alpha",
-        action_key="travel",
-        target_node_key="south_waterfront_district",
-        parameters={},
-    )
-    assert travelled.outcome.failure is None
     second = _runtime_transport(
         session,
         scope,
@@ -2236,7 +2220,6 @@ def test_runtime_transport_known_zero_base_accepts_inflow(session: Session) -> N
     south_knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
     south_knowledge.resource_survey_completed = True
     session.flush()
-    game = GenericGameService(session, scope)
     first = _runtime_transport(
         session,
         scope,
@@ -2245,13 +2228,6 @@ def test_runtime_transport_known_zero_base_accepts_inflow(session: Session) -> N
         amount=10,
     )
     assert first.outcome.failure is None
-    travelled = game.execute(
-        actor_key="logistics_team_alpha",
-        action_key="travel",
-        target_node_key="south_waterfront_district",
-        parameters={},
-    )
-    assert travelled.outcome.failure is None
     second = _runtime_transport(
         session,
         scope,
@@ -2295,7 +2271,6 @@ def test_runtime_transport_inflow_does_not_reveal_hidden_base_pool(session: Sess
         definition,
         "runtime-hidden-base-isolated",
     )
-    game = GenericGameService(session, scope)
     first = _runtime_transport(
         session,
         scope,
@@ -2304,13 +2279,6 @@ def test_runtime_transport_inflow_does_not_reveal_hidden_base_pool(session: Sess
         amount=10,
     )
     assert first.outcome.failure is None
-    travelled = game.execute(
-        actor_key="logistics_team_alpha",
-        action_key="travel",
-        target_node_key="south_waterfront_district",
-        parameters={},
-    )
-    assert travelled.outcome.failure is None
     second = _runtime_transport(
         session,
         scope,
@@ -2355,12 +2323,10 @@ def test_runtime_transport_inflow_supports_three_hop_transit(session: Session) -
             "waterfront_access_corridor",
         ),
     )
-    game = GenericGameService(session, scope)
-
-    for target_region, corridor_target in (
-        ("central_district", "central_district"),
-        ("east_residential_district", "east_residential_district"),
-        ("south_waterfront_district", "south_waterfront_district"),
+    for target_region in (
+        "central_district",
+        "east_residential_district",
+        "south_waterfront_district",
     ):
         transported = _runtime_transport(
             session,
@@ -2370,14 +2336,6 @@ def test_runtime_transport_inflow_supports_three_hop_transit(session: Session) -
             amount=10,
         )
         assert transported.outcome.failure is None
-        if target_region != "south_waterfront_district":
-            travelled = game.execute(
-                actor_key="logistics_team_alpha",
-                action_key="travel",
-                target_node_key=corridor_target,
-                parameters={},
-            )
-            assert travelled.outcome.failure is None
 
     south = session.get(
         GameInstanceResourceState,

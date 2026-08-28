@@ -57,6 +57,21 @@ def test_action_location_formats_route_transport_facility_and_connector() -> Non
     assert transport.summary == (f"{north.name} \u2192 {central.name}")
     assert "\u00d710" in (transport.detail or "")
 
+    multi_transport = projector.action_location(
+        actions["transport_resource"],
+        source_node_key="north_industrial_district",
+        target_node_key="central_district",
+        parameters={
+            "resources": [
+                {"resource_key": "electrical_repair_parts", "amount": 10},
+                {"resource_key": "general_engineering_parts", "amount": 15},
+            ]
+        },
+    )
+    assert multi_transport is not None
+    assert "\u00d710" in (multi_transport.detail or "")
+    assert "\u00d715" in (multi_transport.detail or "")
+
     repair = projector.action_location(
         actions["repair_electrical"],
         target_node_key="east_distribution_station",

@@ -137,9 +137,18 @@ def action_planner_constraints(
         )
     if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
         contract["semantics"] = {
-            "actor_location": "UNCHANGED",
+            "actor_location": "TARGET_REGION",
             "resource_transfer": "PROJECTED_ACTOR_REGION_TO_TARGET_REGION",
-            "parameters": ["resource_key", "amount"],
+            "parameters": ["resources"],
+            "legacy_parameters": ["resource_key", "amount"],
+            "cargo": {
+                "minimum_items": 1,
+                "unique_by": "resource_key",
+                "item_schema": {
+                    "resource_key": "STRING",
+                    "amount": "POSITIVE_INTEGER",
+                },
+            },
         }
         knowledge.append(
             {
@@ -322,18 +331,25 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
         effects.extend(
             [
                 {
+                    "type": "ACTOR_LOCATION",
+                    "actor": "executor",
+                    "value": "target_key",
+                },
+                {
                     "type": "RESOURCE_CONSUMPTION",
                     "source": "PROJECTED_ACTOR_REGION",
                     "pool_filter": "VISIBLE_AVAILABLE",
-                    "resource_key": "parameters.resource_key",
-                    "amount": "parameters.amount",
+                    "cargo": "parameters.resources",
+                    "item_resource_key": "resource_key",
+                    "item_amount": "amount",
                 },
                 {
                     "type": "RESOURCE_TRANSFER",
-                    "destination": "target_key",
-                    "pool": "default",
-                    "resource_key": "parameters.resource_key",
-                    "amount": "parameters.amount",
+                    "destination": "target_region",
+                    "pool": "runtime_known_inflow",
+                    "cargo": "parameters.resources",
+                    "item_resource_key": "resource_key",
+                    "item_amount": "amount",
                 },
                 {
                     "type": "KNOWLEDGE_REVEAL_ON_FAILURE",

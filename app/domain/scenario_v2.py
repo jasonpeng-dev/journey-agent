@@ -7,6 +7,7 @@ decoder; later Phase R stages interpret its rules without generating code.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Literal
@@ -55,6 +56,7 @@ type SymbolicCode = Annotated[
     ),
 ]
 type StrictScalar = StrictStr | StrictInt | StrictBool
+type ActionParameters = dict[str, object]
 
 
 class FrozenDefinitionModel(BaseModel):
@@ -964,7 +966,7 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
 
 def _validate_parameter_value(
     definition: ActionParameterV2,
-    value: StrictScalar,
+    value: object,
     *,
     field: str,
 ) -> None:
@@ -986,7 +988,7 @@ def _validate_parameter_value(
 
 
 def validate_action_parameters(
-    action: ActionDefinitionV2, parameters: dict[str, StrictScalar]
+    action: ActionDefinitionV2, parameters: Mapping[str, object]
 ) -> None:
     """Validate one Action input without reading runtime state.
 
@@ -999,8 +1001,8 @@ def validate_action_parameters(
 
 
 def normalize_action_parameters(
-    action: ActionDefinitionV2, parameters: dict[str, StrictScalar]
-) -> dict[str, StrictScalar]:
+    action: ActionDefinitionV2, parameters: Mapping[str, object]
+) -> ActionParameters:
     """Merge Action defaults and strictly validate one canonical input.
 
     Scenario authors declare the parameter schema, including defaults.  A
@@ -1009,11 +1011,14 @@ def normalize_action_parameters(
     function never mutates the caller's dictionary.
     """
 
+    if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+        return _normalize_transport_resource_parameters(action, parameters)
+
     definitions = {item.key: item for item in action.parameters}
     unknown = set(parameters) - set(definitions)
     if unknown:
         raise ValueError("Action input contains unknown parameters")
-    normalized: dict[str, StrictScalar] = dict(parameters)
+    normalized: ActionParameters = dict(parameters)
     for key, definition in definitions.items():
         if key not in parameters:
             if definition.required and definition.default is None:
@@ -1023,6 +1028,91 @@ def normalize_action_parameters(
         if key in normalized:
             _validate_parameter_value(definition, normalized[key], field=key)
     return normalized
+
+
+def transport_resource_entries(
+    parameters: Mapping[str, object],
+) -> tuple[tuple[str, int], ...]:
+    """Return one canonical cargo list from new or legacy transport input.
+
+    The helper deliberately owns only shape validation.  Resource existence,
+    knowledge, locality, and quantity authority remain Runtime/Validator
+    concerns.  It is shared by those layers and by Player-facing projections
+    so old persisted ``resource_key``/``amount`` inputs remain readable.
+    """
+
+    if "resources" in parameters:
+        if "resource_key" in parameters or "amount" in parameters:
+            raise ValueError("Transport input cannot mix resources with legacy parameters")
+        raw_resources = parameters["resources"]
+        if not isinstance(raw_resources, (list, tuple)):
+            raise ValueError("Transport resources must be a list")
+    else:
+        raw_resources = [
+            {
+                "resource_key": parameters.get("resource_key"),
+                "amount": parameters.get("amount"),
+            }
+        ]
+
+    entries: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for item in raw_resources:
+        if not isinstance(item, Mapping):
+            raise ValueError("Each transport resource must be an object")
+        if set(item) != {"resource_key", "amount"}:
+            raise ValueError("Each transport resource needs resource_key and amount only")
+        resource_key = item.get("resource_key")
+        amount = item.get("amount")
+        if not isinstance(resource_key, str) or not resource_key:
+            raise ValueError("Transport resource_key must be a non-empty string")
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise ValueError("Transport amount must be a positive integer")
+        if resource_key in seen:
+            raise ValueError("Transport resources cannot repeat a resource_key")
+        seen.add(resource_key)
+        entries.append((resource_key, amount))
+    if not entries:
+        raise ValueError("Transport requires at least one resource")
+    return tuple(entries)
+
+
+def _normalize_transport_resource_parameters(
+    action: ActionDefinitionV2,
+    parameters: Mapping[str, object],
+) -> ActionParameters:
+    definitions = {item.key: item for item in action.parameters}
+    if "resources" in parameters:
+        unknown = set(parameters) - {"resources"}
+        if unknown:
+            raise ValueError("Action input contains unknown transport parameters")
+        entries = transport_resource_entries(parameters)
+    else:
+        unknown = set(parameters) - set(definitions)
+        if unknown:
+            raise ValueError("Action input contains unknown parameters")
+        for key in ("resource_key", "amount"):
+            definition = definitions.get(key)
+            if definition is None or key not in parameters:
+                raise ValueError(f"Action input is missing required parameter {key}")
+            _validate_parameter_value(definition, parameters[key], field=key)
+        entries = transport_resource_entries(parameters)
+    resource_definition = definitions.get("resource_key")
+    amount_definition = definitions.get("amount")
+    for resource_key, amount in entries:
+        if resource_definition is not None:
+            _validate_parameter_value(
+                resource_definition,
+                resource_key,
+                field="resources[].resource_key",
+            )
+        if amount_definition is not None:
+            _validate_parameter_value(amount_definition, amount, field="resources[].amount")
+    return {
+        "resources": [
+            {"resource_key": resource_key, "amount": amount} for resource_key, amount in entries
+        ]
+    }
 
 
 def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
@@ -1542,6 +1632,7 @@ __all__ = [
     "ActionExecutionMode",
     "ActionLocality",
     "ActionParameterType",
+    "ActionParameters",
     "ConditionKind",
     "EffectKind",
     "EngineCapability",
@@ -1554,4 +1645,5 @@ __all__ = [
     "ResourceScopeV2",
     "RulePhase",
     "ScenarioDefinitionV2",
+    "transport_resource_entries",
 ]

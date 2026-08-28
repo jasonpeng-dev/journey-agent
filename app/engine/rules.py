@@ -31,6 +31,8 @@ from app.domain.scenario_v2 import (
     StrictScalar,
     ValueExpressionV2,
     ValueSource,
+    normalize_action_parameters,
+    transport_resource_entries,
 )
 from app.domain.world import AccessState, Visibility
 from app.engine.locality import LocalityEngineError, resolve_resource_scope
@@ -105,7 +107,7 @@ class DeclarativeRuleState:
 class ActionRuleContext:
     action_key: str
     target_node_key: str
-    parameters: Mapping[str, StrictScalar]
+    parameters: Mapping[str, object]
     actor_key: str | None = None
     target_actor_key: str | None = None
     operation_status: str | None = None
@@ -345,8 +347,22 @@ class DeclarativeRuleEngine:
             return _compare(value, condition.operator, condition.value)
         if kind == ConditionKind.PARAMETER_COMPARE:
             assert condition.parameter_key and condition.operator and condition.value is not None
-            value = _required(context.parameters, condition.parameter_key, "RULE_PARAMETER_MISSING")
-            return _compare(value, condition.operator, condition.value)
+            parameter_value = context.parameters.get(condition.parameter_key)
+            if parameter_value is None and condition.parameter_key in {"resource_key", "amount"}:
+                try:
+                    entries = transport_resource_entries(context.parameters)
+                except ValueError as exc:
+                    raise RuleEngineError("RULE_PARAMETER_INVALID", str(exc)) from exc
+                if len(entries) == 1:
+                    parameter_value = entries[0][
+                        0 if condition.parameter_key == "resource_key" else 1
+                    ]
+            if parameter_value is None:
+                raise RuleEngineError(
+                    "RULE_PARAMETER_MISSING",
+                    f"Required rule state is missing: {condition.parameter_key}",
+                )
+            return _compare(_strict_scalar(parameter_value), condition.operator, condition.value)
         if kind == ConditionKind.NODE_VISIBLE:
             assert condition.node and condition.visibility
             node = self._node(state, self._one_node(condition.node, state, context))
@@ -588,7 +604,9 @@ class DeclarativeRuleEngine:
             assert expression.literal is not None
             return expression.literal
         assert expression.parameter_key is not None
-        return _required(context.parameters, expression.parameter_key, "RULE_PARAMETER_MISSING")
+        return _strict_scalar(
+            _required(context.parameters, expression.parameter_key, "RULE_PARAMETER_MISSING")
+        )
 
     @staticmethod
     def _integer(expression: IntegerExpressionV2, context: ActionRuleContext) -> int:
@@ -675,6 +693,12 @@ class DeclarativeRuleEngine:
 
     @staticmethod
     def _validate_context(action: ActionDefinitionV2, context: ActionRuleContext) -> None:
+        if action.behavior.value == "TRANSPORT_RESOURCE":
+            try:
+                normalize_action_parameters(action, context.parameters)
+            except ValueError as exc:
+                raise RuleEngineError("RULE_PARAMETER_INVALID", str(exc)) from exc
+            return
         definitions = {parameter.key: parameter for parameter in action.parameters}
         if set(context.parameters).difference(definitions):
             raise RuleEngineError(
@@ -720,6 +744,15 @@ def _required[Key, Value](mapping: Mapping[Key, Value], key: Key, code: str) -> 
         return mapping[key]
     except KeyError:
         raise RuleEngineError(code, f"Required rule state is missing: {key}") from None
+
+
+def _strict_scalar(value: object) -> StrictScalar:
+    if isinstance(value, (str, int, bool)):
+        return value
+    raise RuleEngineError(
+        "RULE_PARAMETER_TYPE_INVALID",
+        "Rule expressions require a scalar Action parameter",
+    )
 
 
 def key_for_resource(
