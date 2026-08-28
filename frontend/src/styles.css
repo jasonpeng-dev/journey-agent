@@ -20,6 +20,9 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .game-card-lineage { margin: 4px 0 0; color: var(--console-soft); font-size: 10px; }
 .game-card-main { color: inherit; text-decoration: none; }
 .game-card-main h2 { margin-bottom: 8px; }
+.game-card-scenario { display: grid; gap: 3px; margin: 0; }
+.game-card-scenario-name { color: #13231e; font-size: 11px; font-weight: 700; line-height: 1.35; }
+.game-card-scenario-version { color: #68756f; font-size: 11px; }
 .game-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 13px; border-top: 1px solid #e5dfd3; }
 .game-card-actions button, .game-card-actions a { padding: 8px 10px; border: 1px solid #d7d0c2; border-radius: 8px; color: #23493d; background: white; cursor: pointer; font-size: 12px; text-decoration: none; }
 .game-card-actions button:disabled { cursor: wait; opacity: .55; }

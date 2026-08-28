@@ -33,6 +33,7 @@ from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentTask,
     GameInstance,
+    Scenario,
     ScenarioVersion,
     WorldOperation,
 )
@@ -418,6 +419,8 @@ def game_history(
 def game_summary(db: Session, game: GameInstance) -> GameSummaryResponse:
     version = db.get(ScenarioVersion, game.scenario_version_id)
     assert version is not None
+    scenario = db.get(Scenario, version.scenario_id)
+    assert scenario is not None
     active_task = db.scalar(
         select(AgentTask.id).where(
             AgentTask.game_instance_id == game.id,
@@ -427,6 +430,7 @@ def game_summary(db: Session, game: GameInstance) -> GameSummaryResponse:
     return GameSummaryResponse(
         id=game.id,
         scenario_id=version.scenario_id,
+        scenario_name=scenario.name,
         scenario_version_id=version.id,
         scenario_version_number=version.version_number,
         scenario_content_hash=version.content_hash,

@@ -347,6 +347,15 @@ describe("Formal Play player projections", () => {
     expect(screen.getByText("已知地点 · 2")).toBeVisible();
     expect(screen.getByText("参与者 · 1")).toBeVisible();
     expect(screen.getByText("已知事实 · 1")).toBeVisible();
+    expect(
+      Array.from(document.querySelectorAll<HTMLElement>(".knowledge-accordion")).slice(0, 3).map(
+        (section) => section.dataset.testid,
+      ),
+    ).toEqual([
+      "knowledge-accordion-locations",
+      "knowledge-accordion-actors",
+      "knowledge-accordion-resources",
+    ]);
     expect(within(screen.getByTestId("knowledge-accordion-resources")).getByRole("button")).toHaveAttribute(
       "aria-expanded",
       "true",
@@ -355,16 +364,56 @@ describe("Formal Play player projections", () => {
       "aria-expanded",
       "false",
     );
-    expect(screen.getByText("粮食")).toBeVisible();
-    expect(screen.queryByText("首都议事厅")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("knowledge-accordion-actors")).getByRole("button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    const locations = within(screen.getByTestId("knowledge-accordion-locations"));
+    expect(locations.queryByText("首都议事厅")).not.toBeInTheDocument();
     expect(screen.queryByText("韩烈")).not.toBeInTheDocument();
     expect(screen.queryByText("山谷安全")).not.toBeInTheDocument();
 
-    fireEvent.click(within(screen.getByTestId("knowledge-accordion-locations")).getByRole("button"));
-    expect(screen.getByText("首都议事厅")).toBeVisible();
-    fireEvent.click(within(screen.getByTestId("knowledge-accordion-resources")).getByRole("button"));
-    expect(screen.queryByText("粮食")).not.toBeInTheDocument();
+    fireEvent.click(locations.getByRole("button"));
+    expect(locations.getByText("首都议事厅")).toBeVisible();
+    const actors = within(screen.getByTestId("knowledge-accordion-actors"));
+    fireEvent.click(actors.getByRole("button"));
+    expect(actors.getByText("韩烈")).toBeVisible();
+    const resourcesSection = screen.getByTestId("knowledge-accordion-resources");
+    const resourceRegionSummary = resourcesSection.querySelector("details.knowledge-region > summary");
+    expect(resourceRegionSummary).not.toBeNull();
+    expect(resourcesSection.querySelectorAll("details.knowledge-region[open]")).toHaveLength(1);
+    expect(screen.getByText("粮食")).toBeVisible();
+    fireEvent.click(resourceRegionSummary!);
+    expect(resourcesSection.querySelectorAll("details.knowledge-region[open]")).toHaveLength(0);
+    fireEvent.click(resourceRegionSummary!);
+    expect(screen.getByText("粮食")).toBeVisible();
     expect(screen.getByText("可用资源状态")).toBeVisible();
+  });
+
+  it("opens non-empty resource regions by default and preserves manual state across rerenders", () => {
+    const resources = [
+      { key: "known", name: "Known", value: 10, reserved_value: 0, scope_region_key: "known", scope_region_name: "Known Region" },
+      { key: "empty", name: "Empty", value: 0, reserved_value: 0, scope_region_key: "empty", scope_region_name: "Empty Region" },
+    ];
+    const view = render(
+      <KnownWorldAccordions resources={resources} visibleNodes={[]} actors={[]} knownFacts={[]} />,
+    );
+
+    const resourceSection = within(screen.getByTestId("knowledge-accordion-resources"));
+    const knownRegion = resourceSection.getByText("Known Region").closest("details")!;
+    const emptyRegion = resourceSection.getByText("Empty Region").closest("details")!;
+    expect(knownRegion).toHaveAttribute("open");
+    expect(emptyRegion).not.toHaveAttribute("open");
+
+    fireEvent.click(knownRegion.querySelector("summary")!);
+    fireEvent.click(emptyRegion.querySelector("summary")!);
+    view.rerender(
+      <KnownWorldAccordions resources={resources} visibleNodes={[]} actors={[]} knownFacts={[]} />,
+    );
+
+    const rerenderedResourceSection = within(screen.getByTestId("knowledge-accordion-resources"));
+    expect(rerenderedResourceSection.getByText("Known Region").closest("details")).not.toHaveAttribute("open");
+    expect(rerenderedResourceSection.getByText("Empty Region").closest("details")).toHaveAttribute("open");
   });
 
   it("renders a Region resource summary as available over known total", () => {
@@ -444,12 +493,154 @@ describe("Formal Play player projections", () => {
       />,
     );
 
+    expect(screen.getByText("资源 · 已探查区域 1 / 1")).toBeVisible();
+    expect(screen.getByText("North Region")).toBeVisible();
+    expect(screen.getByText("已完成查探")).toBeVisible();
     expect(
       Array.from(document.querySelectorAll(".knowledge-status-pill")).map(
         (node) => node.textContent,
       ),
-    ).toEqual(["5 / 105", "0", "20", "5", "80", "12"]);
+    ).toEqual(["5 / 105", "20", "5", "80", "12"]);
+    expect(screen.queryByText("Known Zero")).not.toBeInTheDocument();
  });
+
+  it("保留未查探区域的可见资源并独立显示查探状态", () => {
+    const resourceIntelligence: ResourceIntelligence = {
+      total_regions: 3,
+      visible_region_count: 3,
+      regions: {
+        surveyed: {
+          region_name: "已查探区域",
+          resource_inventory_visibility: "VISIBLE",
+          resource_survey_completed: true,
+          resources: {},
+        },
+        unsurveyed: {
+          region_name: "未查探区域",
+          resource_inventory_visibility: "HIDDEN",
+          resource_survey_completed: false,
+          resources: {
+            municipal_repair_materials: {
+              resource_name: "市政维修材料",
+              known_available: 10,
+              known_total: 10,
+              pools: [
+                {
+                  pool_key: "known-inflow",
+                  quantity: 10,
+                  facility_key: null,
+                  facility_name: null,
+                  availability: "AVAILABLE",
+                },
+              ],
+            },
+          },
+        },
+        hidden: {
+          region_name: "完全未知区域",
+          resource_inventory_visibility: "HIDDEN",
+          resource_survey_completed: false,
+          resources: {},
+        },
+      },
+      global_resources: {},
+    };
+
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        resourceIntelligence={resourceIntelligence}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={{
+          ...task,
+          timeline: [
+            {
+              ...task.timeline[0],
+              kind: "ACTION_RESULT",
+              title: "历史运输 ×99",
+              result_summary: null,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("资源 · 已探查区域 1 / 3")).toBeVisible();
+    expect(screen.getByText("已查探区域")).toBeVisible();
+    expect(screen.getAllByText("已完成查探")).toHaveLength(1);
+    expect(screen.getByText("未查探区域")).toBeVisible();
+    expect(screen.getByText("完全未知区域")).toBeVisible();
+    expect(screen.getAllByText("未完成查探")).toHaveLength(2);
+    expect(screen.getByText("市政维修材料")).toBeVisible();
+    expect(screen.getByText("10")).toBeVisible();
+    expect(screen.getByText("已确认")).toBeVisible();
+    expect(screen.queryByText("已知资源")).not.toBeInTheDocument();
+    expect(screen.queryByText("历史运输 ×99")).not.toBeInTheDocument();
+    expect(screen.queryByText("隐藏资源")).not.toBeInTheDocument();
+  });
+
+  it("未查探区域只显示正数已知资源，空区域保留占位提示", () => {
+    const resourceIntelligence: ResourceIntelligence = {
+      total_regions: 2,
+      visible_region_count: 0,
+      regions: {
+        empty: {
+          region_name: "空区域",
+          resource_inventory_visibility: "HIDDEN",
+          resource_survey_completed: false,
+          resources: {
+            hidden_zero: {
+              resource_name: "隐藏的零库存",
+              known_available: 0,
+              known_total: 0,
+              pools: [],
+            },
+          },
+        },
+        mixed: {
+          region_name: "混合区域",
+          resource_inventory_visibility: "HIDDEN",
+          resource_survey_completed: false,
+          resources: {
+            known: {
+              resource_name: "已知转入资源",
+              known_available: 10,
+              known_total: 10,
+              pools: [],
+            },
+            zero: {
+              resource_name: "不应显示的零库存",
+              known_available: 0,
+              known_total: 0,
+              pools: [],
+            },
+          },
+        },
+      },
+      global_resources: {},
+    };
+
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        resourceIntelligence={resourceIntelligence}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("空区域"));
+    expect(screen.getByText("空区域")).toBeVisible();
+    expect(screen.getByText("混合区域")).toBeVisible();
+    expect(screen.getAllByText("暂无资源信息")).toHaveLength(1);
+    expect(screen.getByText("已知转入资源")).toBeVisible();
+    expect(screen.getByText("10")).toBeVisible();
+    expect(screen.queryByText("隐藏的零库存")).not.toBeInTheDocument();
+    expect(screen.queryByText("不应显示的零库存")).not.toBeInTheDocument();
+  });
 
   it("filters structural relations and presents meaningful relations without machine keys", () => {
     render(
@@ -684,6 +875,78 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText("不应显示的调整结果")).not.toBeInTheDocument();
   });
 
+  it("规划进行中时统一显示正在规划", () => {
+    const initial = planningCycle(
+      "cycle-running-initial",
+      "INITIAL",
+      "RUNNING",
+      [planningAttempt("INITIAL_PLAN", "RUNNING")],
+    );
+    const replan = planningCycle(
+      "cycle-running-replan",
+      "REPLAN",
+      "RUNNING",
+      [planningAttempt("REPLAN", "RUNNING")],
+    );
+    const repair = planningCycle(
+      "cycle-running-repair",
+      "REPLAN",
+      "RUNNING",
+      [
+        planningAttempt("REPLAN", "REJECTED", {
+          validator_summary: [{ code: "INFORMATION_BOUNDARY_REQUIRED" }],
+        }),
+        planningAttempt("REPAIR", "RUNNING", { attempt_index: 1 }),
+      ],
+    );
+    render(
+      <Timeline
+        task={{
+          ...task,
+          timeline: [
+            planEvent("running-initial", "PLAN_CREATED", 999, initial.id),
+            planEvent("running-replan", "PLAN_UPDATED", 999, replan.id),
+            planEvent("running-repair", "PLAN_UPDATED", 999, repair.id),
+          ],
+          planning_process: [initial, replan, repair],
+        }}
+      />,
+    );
+
+    expect(screen.getAllByText("Agent 正在规划")).toHaveLength(3);
+    expect(screen.queryByText("Agent 已完成计划")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent 已重新规划")).not.toBeInTheDocument();
+  });
+
+  it("规划从进行中到完成时更新同一张卡片", () => {
+    const running = planningCycle(
+      "cycle-live",
+      "INITIAL",
+      "RUNNING",
+      [planningAttempt("INITIAL_PLAN", "RUNNING")],
+    );
+    const accepted = planningCycle(
+      "cycle-live",
+      "INITIAL",
+      "ACCEPTED",
+      [planningAttempt("INITIAL_PLAN", "ACCEPTED", { duration_ms: 31000 })],
+      { wall_clock_duration_ms: 31000 },
+    );
+    const timeline = [planEvent("plan-live", "PLAN_CREATED", 999, running.id)];
+    const { rerender } = render(
+      <Timeline task={{ ...task, timeline, planning_process: [running] }} />,
+    );
+
+    expect(screen.getAllByTestId("planning-cycle-cycle-live")).toHaveLength(1);
+    expect(screen.getByText("Agent 正在规划")).toBeVisible();
+
+    rerender(<Timeline task={{ ...task, timeline, planning_process: [accepted] }} />);
+
+    expect(screen.getAllByTestId("planning-cycle-cycle-live")).toHaveLength(1);
+    expect(screen.getByText("Agent 已完成计划")).toBeVisible();
+    expect(screen.queryByText("Agent 正在规划")).not.toBeInTheDocument();
+  });
+
   it("operation transient state is scoped to its Task", () => {
     const operation = { kind: "planning" as const, taskId: "task-2", startedAt: 100 };
     expect(operationBelongsToTask(operation, "task-2")).toBe(true);
@@ -905,7 +1168,7 @@ describe("Formal Play player projections", () => {
         knownFacts={[{ node_key: "corridor", fact_key: "passable", name: "Passability", value: false, node_name: "West Corridor", endpoint_region_keys: ["central", "west"], endpoint_region_names: ["Central Region", "West Region"] }]}
       />,
     );
-    expect(screen.getAllByText("Parts")).toHaveLength(3);
+    expect(screen.getAllByText("Parts")).toHaveLength(1);
     fireEvent.click(within(screen.getByTestId("knowledge-accordion-locations")).getByRole("button"));
     const locations = within(screen.getByTestId("knowledge-accordion-locations"));
     expect(locations.getByText("Central Region")).toBeVisible();
@@ -958,8 +1221,11 @@ describe("Formal Play player projections", () => {
       />,
     );
     const updatedResources = within(screen.getByTestId("knowledge-accordion-resources"));
+    fireEvent.click(updatedResources.getByText("West Region"));
+    fireEvent.click(updatedResources.getByText("Central Region"));
     expect(updatedResources.getByText("Central Region")).toBeVisible();
-    expect(updatedResources.getAllByText("0")).toHaveLength(2);
+    expect(updatedResources.getAllByText("暂无资源信息")).toHaveLength(2);
+    expect(updatedResources.queryByText("0")).not.toBeInTheDocument();
   });
 
   it("flattens facts by region and uses one compact location format in history and timeline", () => {

@@ -193,6 +193,29 @@ function planningViolationLabel(violation: Record<string, unknown>): string {
   return planningValidatorLabel[code ?? ""] ?? "方案未通过校验";
 }
 
+function planningHeadline(
+  event: PublicTimelineEvent,
+  cycle: PublicPlanningCycle | null,
+): string {
+  if (cycle) {
+    const status = cycle.status.toUpperCase();
+    if (status === "RUNNING") return "Agent 正在规划";
+    if (status === "ACCEPTED") {
+      return cycle.cycle_type === "INITIAL" ? "Agent 已完成计划" : "Agent 已重新规划";
+    }
+    return "Agent 未能完成计划";
+  }
+  const isApproval = event.kind.startsWith("APPROVAL_");
+  if (isApproval) return stepDescription(event.title);
+  if (event.kind === "GOAL_ACCEPTED") return "任务已接受";
+  if (event.kind.startsWith("PLAN_") && event.success === false) return "Agent 未能完成计划";
+  if (event.kind === "PLAN_CREATED") return "Agent 已完成计划";
+  if (event.kind === "PLAN_UPDATED") return "Agent 已重新规划";
+  if (event.kind === "TASK_STARTED") return "任务已接受";
+  if (event.kind.startsWith("TASK_")) return timelinePresentation[event.kind].label;
+  return event.title;
+}
+
 function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
   const [open, setOpen] = useState(false);
   return (
@@ -287,28 +310,14 @@ export function Timeline({ task }: { task: PublicTask | null }) {
           ? "执行方案"
           : event.kind.startsWith("TASK_")
             ? "任务状态"
-            : isApproval
-              ? "玩家决定"
-              : presentation.label;
-        const headline = isApproval
-          ? stepDescription(event.title)
-          : event.kind === "GOAL_ACCEPTED"
-            ? "任务已接受"
-              : event.kind.startsWith("PLAN_") && event.success === false
-                ? "Agent 未能完成计划"
-              : event.kind === "PLAN_CREATED"
-                ? "Agent 已完成计划"
-                : event.kind === "PLAN_UPDATED"
-                  ? "Agent 已重新规划"
-              : event.kind === "TASK_STARTED"
-            ? "任务已接受"
-            : event.kind.startsWith("TASK_")
-              ? presentation.label
-              : event.title;
-        const planReason = replanReason(task, event);
+              : isApproval
+                ? "玩家决定"
+                : presentation.label;
         const planningCycle = event.planning_cycle_id
           ? (task.planning_process ?? []).find((cycle) => cycle.id === event.planning_cycle_id) ?? null
           : null;
+        const headline = planningHeadline(event, planningCycle);
+        const planReason = replanReason(task, event);
         const planDuration = formatDuration(
           planningCycle?.wall_clock_duration_ms ?? event.duration_ms,
         );
@@ -568,8 +577,17 @@ export function KnownWorldAccordions({
     relations: false,
   });
   const [expandedFacilities, setExpandedFacilities] = useState<Record<string, boolean>>({});
+  const [expandedResourceRegions, setExpandedResourceRegions] = useState<Record<string, boolean>>({});
   const toggle = (id: KnowledgeAccordionKey) => {
     setExpanded((current) => ({ ...current, [id]: !current[id] }));
+  };
+  const resourceRegionOpen = (key: string, defaultOpen: boolean) =>
+    expandedResourceRegions[key] ?? defaultOpen;
+  const toggleResourceRegion = (key: string, defaultOpen: boolean) => {
+    setExpandedResourceRegions((current) => ({
+      ...current,
+      [key]: !(current[key] ?? defaultOpen),
+    }));
   };
   const resourceGroups = groupResourcesByRegion(resources);
   const locationGroups = groupNodesByRegion(visibleNodes);
@@ -656,6 +674,11 @@ export function KnownWorldAccordions({
   }
   const resourceName = (key: string, candidate?: string) =>
     resourceDisplayName(key, candidate ?? resourceNames.get(key));
+  const surveyedRegionCount = resourceIntelligence
+    ? Object.values(resourceIntelligence.regions).filter(
+        (region) => region.resource_survey_completed,
+      ).length
+    : null;
   const statusTone = (value: string | number | boolean) =>
     value === false || value === 0 || value === "false" || value === "UNKNOWN" || value === "UNAVAILABLE" || value === "BLOCKED"
       ? "neutral"
@@ -939,116 +962,6 @@ export function KnownWorldAccordions({
   return (
     <div className="knowledge-accordions">
       <KnowledgeAccordion
-        id="resources"
-        countLabel={
-          resourceIntelligence
-            ? resourceIntelligence.visible_region_count + " / " + resourceIntelligence.total_regions
-            : undefined
-        }
-        title="资源"
-        count={resources.length}
-        summary="可用资源状态"
-        open={expanded.resources}
-        onToggle={() => toggle("resources")}
-      >
-        {resourceIntelligence && (
-          <div className="console-region-groups">
-            {Object.entries(resourceIntelligence.regions)
-              .filter(
-                ([, region]) =>
-                  region.resource_inventory_visibility === "VISIBLE" ||
-                  Object.keys(region.resources).length > 0,
-              )
-              .map(([regionKey, region]) => (
-                <details className="knowledge-region" open key={regionKey}>
-                  <summary>
-                    <span>
-                      <strong>{region.region_name ?? regionKey}</strong>
-                      <small>{region.resource_survey_completed ? "已完成查探" : "可进行完整查探"}</small>
-                    </span>
-                  </summary>
-                  <div className="knowledge-region-content">
-                    <div className="knowledge-entry-list">
-                      {Object.entries(region.resources).length === 0 ? (
-                        <div className="knowledge-entry-empty">当前无已记录资源</div>
-                      ) : (
-                        Object.entries(region.resources).map(([resourceKey, resource]) => (
-                          <div className="knowledge-entry" key={regionKey + ":" + resourceKey}>
-                            <div className="knowledge-entry-copy">
-                              <strong>{resource.resource_name}</strong>
-                              {resource.pools
-                                .filter((pool) => pool.availability === "UNAVAILABLE")
-                                .map((pool, index) => (
-                                  <small key={index}>
-                                    暂不可用 {pool.quantity}
-                                    {pool.facility_name ? ` · ${pool.facility_name}` : ""}
-                                    {resourceRequirementText(pool.availability_requirement)
-                                      ? " · " + resourceRequirementText(pool.availability_requirement)
-                                      : ""}
-                                  </small>
-                                ))}
-                            </div>
-                            <span className="console-pill success knowledge-status-pill">
-                              {resource.known_total == null || resource.known_total === resource.known_available
-                                ? resource.known_available
-                                : resource.known_available + " / " + resource.known_total}
-                            </span>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </details>
-              ))}
-            {Object.entries(resourceIntelligence.global_resources).length > 0 && (
-              <details className="knowledge-region" open>
-                <summary><span><strong>全局资源</strong></span></summary>
-                <div className="knowledge-region-content">
-                  <div className="knowledge-entry-list">
-                    {Object.entries(resourceIntelligence.global_resources).map(([resourceKey, resource]) => (
-                      <div className="knowledge-entry" key={"global:" + resourceKey}>
-                        <div className="knowledge-entry-copy"><strong>{resource.resource_name}</strong></div>
-                        <span className="console-pill success knowledge-status-pill">
-                          {resource.known_total == null || resource.known_total === resource.known_available
-                            ? resource.known_available
-                            : resource.known_available + " / " + resource.known_total}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </details>
-            )}
-          </div>
-        )}
-        <div className="console-region-groups">
-          {(resourceIntelligence ? [] : resourceGroups).map((group) => (
-            <details className="knowledge-region" open key={group.key}>
-              <summary>
-                <span>
-                  <strong>{group.name}</strong>
-                  <small>{group.items.length} 项资源</small>
-                </span>
-              </summary>
-              <div className="knowledge-region-content">
-                <div className="knowledge-entry-list">
-                {group.items.map((resource) => (
-                  <div className="knowledge-entry" key={`${group.key}:${resource.key}`}>
-                    <div className="knowledge-entry-copy">
-                      <strong>{resource.name}</strong>
-                    </div>
-                    <span className={`console-pill ${statusTone(resource.value)} knowledge-status-pill`}>
-                      {resource.value}
-                    </span>
-                  </div>
-                ))}
-                </div>
-              </div>
-            </details>
-          ))}
-        </div>
-      </KnowledgeAccordion>
-      <KnowledgeAccordion
         id="locations"
         title="已知地点"
         count={visibleNodes.length}
@@ -1092,6 +1005,142 @@ export function KnownWorldAccordions({
                           {actor.command_reachability === "DISCONNECTED" ? "失联" : "在线"}
                         </span>
                       </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </details>
+          ))}
+        </div>
+      </KnowledgeAccordion>
+      <KnowledgeAccordion
+        id="resources"
+        countLabel={
+          resourceIntelligence
+            ? "已探查区域 " + surveyedRegionCount + " / " + resourceIntelligence.total_regions
+            : undefined
+        }
+        title="资源"
+        count={resources.length}
+        summary="可用资源状态"
+        open={expanded.resources}
+        onToggle={() => toggle("resources")}
+      >
+        {resourceIntelligence && (
+          <div className="console-region-groups">
+            {Object.entries(resourceIntelligence.regions).map(([regionKey, region]) => {
+              const knownResources = Object.entries(region.resources).filter(
+                ([, resource]) => (resource.known_total ?? resource.known_available) > 0,
+              );
+              return (
+                <details
+                  className="knowledge-region"
+                  key={regionKey}
+                  open={resourceRegionOpen(regionKey, knownResources.length > 0)}
+                >
+                  <summary
+                    onClick={(event) => {
+                      event.preventDefault();
+                      toggleResourceRegion(regionKey, knownResources.length > 0);
+                    }}
+                  >
+                    <span>
+                      <strong>{region.region_name ?? regionKey}</strong>
+                      <small>{region.resource_survey_completed ? "已完成查探" : "未完成查探"}</small>
+                    </span>
+                  </summary>
+                  <div className="knowledge-region-content">
+                    <div className="knowledge-entry-list">
+                      {knownResources.length === 0 ? (
+                        <div className="knowledge-empty-state">暂无资源信息</div>
+                      ) : (
+                        knownResources.map(([resourceKey, resource]) => (
+                          <div className="knowledge-entry" key={regionKey + ":" + resourceKey}>
+                            <div className="knowledge-entry-copy">
+                              <strong>{resource.resource_name}</strong>
+                              {!region.resource_survey_completed && <small>已确认</small>}
+                              {resource.pools
+                                .filter(
+                                  (pool) => pool.availability === "UNAVAILABLE" && pool.quantity > 0,
+                                )
+                                .map((pool, index) => (
+                                  <small key={index}>
+                                    暂不可用 {pool.quantity}
+                                    {pool.facility_name ? ` · ${pool.facility_name}` : ""}
+                                    {resourceRequirementText(pool.availability_requirement)
+                                      ? " · " + resourceRequirementText(pool.availability_requirement)
+                                      : ""}
+                                  </small>
+                                ))}
+                            </div>
+                            <span className="console-pill success knowledge-status-pill">
+                              {resource.known_total == null || resource.known_total === resource.known_available
+                                ? resource.known_available
+                                : resource.known_available + " / " + resource.known_total}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </details>
+              );
+            })}
+            {Object.entries(resourceIntelligence.global_resources).some(
+              ([, resource]) => (resource.known_total ?? resource.known_available) > 0,
+            ) && (
+              <details className="knowledge-region" open>
+                <summary><span><strong>全局资源</strong></span></summary>
+                <div className="knowledge-region-content">
+                  <div className="knowledge-entry-list">
+                    {Object.entries(resourceIntelligence.global_resources)
+                      .filter(([, resource]) => (resource.known_total ?? resource.known_available) > 0)
+                      .map(([resourceKey, resource]) => (
+                        <div className="knowledge-entry" key={"global:" + resourceKey}>
+                          <div className="knowledge-entry-copy"><strong>{resource.resource_name}</strong></div>
+                          <span className="console-pill success knowledge-status-pill">
+                            {resource.known_total == null || resource.known_total === resource.known_available
+                              ? resource.known_available
+                              : resource.known_available + " / " + resource.known_total}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              </details>
+            )}
+          </div>
+        )}
+        <div className="console-region-groups">
+          {(resourceIntelligence ? [] : resourceGroups).map((group) => (
+            <details
+              className="knowledge-region"
+              key={group.key}
+              open={resourceRegionOpen(group.key, group.items.some((resource) => resource.value > 0))}
+            >
+              <summary
+                onClick={(event) => {
+                  event.preventDefault();
+                  toggleResourceRegion(group.key, group.items.some((resource) => resource.value > 0));
+                }}
+              >
+                <span>
+                  <strong>{group.name}</strong>
+                  <small>{group.items.length} 项资源</small>
+                </span>
+              </summary>
+              <div className="knowledge-region-content">
+                <div className="knowledge-entry-list">
+                  {group.items.filter((resource) => resource.value > 0).length === 0 ? (
+                    <div className="knowledge-empty-state">暂无资源信息</div>
+                  ) : group.items.filter((resource) => resource.value > 0).map((resource) => (
+                    <div className="knowledge-entry" key={`${group.key}:${resource.key}`}>
+                      <div className="knowledge-entry-copy">
+                        <strong>{resource.name}</strong>
+                      </div>
+                      <span className={`console-pill ${statusTone(resource.value)} knowledge-status-pill`}>
+                        {resource.value}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -1547,7 +1596,7 @@ export function GamePage() {
       <section className="scenario-strip">
         <div><span>场景</span><strong>{scenario.data?.name ?? "正在加载……"}</strong></div>
         <div><span>实例</span><strong>{game.id.slice(0, 8)}</strong></div>
-        <div><span>精确版本</span><strong>版本 {game.scenario_version_number} · {game.scenario_content_hash.slice(0, 10)}</strong></div>
+        <div><span>精确版本</span><strong>版本 {game.scenario_version_number}</strong></div>
         <div><span>运行状态</span><strong className={`console-pill ${game.status === "ACTIVE" ? "success" : "neutral"}`}>{uiLabel(game.status)}</strong></div>
       </section>
       <section className="command-grid">

@@ -55,7 +55,7 @@ from app.domain.enums import (
     StepExecutionType,
     WorldOperationStatus,
 )
-from app.domain.resources import resource_state_key
+from app.domain.resources import is_runtime_known_inflow_pool, resource_state_key
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
@@ -3456,11 +3456,12 @@ class GenericAgentService:
                 and pool.visibility == ResourcePoolVisibility.VISIBLE
                 and (
                     region_key is None
-                    or pool.facility_key is not None
+                    or is_runtime_known_inflow_pool(pool.pool_key)
                     or (
                         region_key in projected_region_knowledge
                         and projected_region_knowledge[region_key].visibility
                         == ResourceInventoryVisibility.VISIBLE
+                        and projected_region_knowledge[region_key].survey_completed
                     )
                 )
             )

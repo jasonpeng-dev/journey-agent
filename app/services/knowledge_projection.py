@@ -17,7 +17,7 @@ from app.domain.enums import (
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
-from app.domain.resources import resource_pool_initial_states
+from app.domain.resources import is_runtime_known_inflow_pool, resource_pool_initial_states
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
@@ -593,13 +593,13 @@ class SharedKnowledgeProjection:
             if visibility != ResourcePoolVisibility.VISIBLE:
                 continue
             region_key = row.scope_node_key
-            if region_key is not None:
+            if region_key is not None and not is_runtime_known_inflow_pool(row.pool_key):
                 region_state = region_states.get(region_key)
                 if (
-                    region_state is not None
-                    and region_state.resource_inventory_visibility
+                    region_state is None
+                    or region_state.resource_inventory_visibility
                     != ResourceInventoryVisibility.VISIBLE
-                    and row.facility_key is None
+                    or not region_state.resource_survey_completed
                 ):
                     continue
             availability_requirement = self.availability_requirement_for_pool(row)

@@ -12,7 +12,7 @@ from app.domain.enums import (
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
-from app.domain.resources import resource_state_key
+from app.domain.resources import is_runtime_known_inflow_pool, resource_state_key
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
     ActionParameterType,
@@ -633,6 +633,11 @@ class DeclarativeRuleEngine:
         resource_key: str,
         scope_node_key: str | None,
     ) -> int:
+        knowledge = (
+            state.region_resource_knowledge.get(scope_node_key)
+            if scope_node_key is not None
+            else None
+        )
         visible_pools = [
             pool
             for pool in state.resource_pools.values()
@@ -642,13 +647,12 @@ class DeclarativeRuleEngine:
                 and pool.visibility == ResourcePoolVisibility.VISIBLE
                 and (
                     scope_node_key is None
-                    or pool.facility_key is not None
+                    or is_runtime_known_inflow_pool(pool.pool_key)
                     or (
-                        state.region_resource_knowledge.get(scope_node_key) is not None
-                        and state.region_resource_knowledge[
-                            scope_node_key
-                        ].resource_inventory_visibility
+                        knowledge is not None
+                        and knowledge.resource_inventory_visibility
                         == ResourceInventoryVisibility.VISIBLE
+                        and knowledge.resource_survey_completed
                     )
                 )
             )

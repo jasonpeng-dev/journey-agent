@@ -7,8 +7,10 @@ from sqlalchemy.orm import Session
 from app.domain.enums import (
     CommandReachability,
     ResourceInventoryVisibility,
+    ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
+from app.domain.resources import RUNTIME_KNOWN_INFLOW_POOL_KEY, resource_state_key
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.domain.world import Visibility
@@ -320,6 +322,29 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
     )
     assert general is not None
     general.value = 20
+    for resource_key, quantity in (
+        ("communication_equipment", 10),
+        ("general_engineering_parts", 15),
+    ):
+        session.add(
+            GameInstanceResourceState(
+                game_instance_id=runtime.instance.id,
+                resource_identity=resource_state_key(
+                    resource_key,
+                    "north_industrial_district",
+                    RUNTIME_KNOWN_INFLOW_POOL_KEY,
+                ),
+                resource_key=resource_key,
+                scope_node_key="north_industrial_district",
+                pool_key=RUNTIME_KNOWN_INFLOW_POOL_KEY,
+                facility_key=None,
+                value=quantity,
+                reserved_value=0,
+                visibility=ResourcePoolVisibility.VISIBLE,
+                availability=ResourcePoolAvailability.AVAILABLE,
+                survey_discoverable=False,
+            )
+        )
     session.flush()
 
     result = GenericGameService(session, scope).execute(
@@ -340,6 +365,7 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
             for fact in node.facts
         )
     assert knowledge.resource_survey_completed is False
+    assert general.value == 20
     hidden_pool = session.get(
         GameInstanceResourceState,
         (

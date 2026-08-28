@@ -8,6 +8,19 @@ from app.domain.scenario_v2 import (
     ScenarioDefinitionV2,
 )
 
+RUNTIME_KNOWN_INFLOW_POOL_KEY = "__runtime_known_inflow__"
+
+
+def is_runtime_known_inflow_pool(pool_key: str) -> bool:
+    """Return whether a Pool row represents deterministic transported stock.
+
+    This reserved runtime identity is separate from authored/default Pools so
+    a known transport inflow can remain public without making an unsurveyed
+    Region's authored inventory public.
+    """
+
+    return pool_key == RUNTIME_KNOWN_INFLOW_POOL_KEY
+
 
 def resource_identity(
     resource_key: str,
@@ -98,9 +111,11 @@ def valid_resource_state_identity(
 
     if resource_key not in {item.key for item in definition.world.resources}:
         return False
-    if pool_key != "default" and pool_key not in {
-        item.pool_key for item in definition.initialization.resource_pools
-    }:
+    if (
+        pool_key != "default"
+        and not is_runtime_known_inflow_pool(pool_key)
+        and pool_key not in {item.pool_key for item in definition.initialization.resource_pools}
+    ):
         return False
     if scope_node_key is None:
         return True
@@ -112,6 +127,8 @@ def valid_resource_state_identity(
 
 
 __all__ = [
+    "RUNTIME_KNOWN_INFLOW_POOL_KEY",
+    "is_runtime_known_inflow_pool",
     "resource_identity",
     "resource_pool_initial_states",
     "resource_state_key",

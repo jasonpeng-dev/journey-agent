@@ -46,7 +46,7 @@ export type ScenarioVersionDetail = ScenarioVersion & {
 export type ScenarioExample = { key: string; name: string; description: string; maturity: string };
 
 export type GameSummary = {
-  id: string; scenario_id: string; scenario_version_id: string; scenario_version_number: number;
+  id: string; scenario_id: string; scenario_name: string; scenario_version_id: string; scenario_version_number: number;
   scenario_content_hash: string; status: "ACTIVE" | "SUSPENDED" | "ARCHIVED" | "FAILED" | "COMPLETED";
   runtime_revision: number;
   is_checkpoint: boolean;

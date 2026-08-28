@@ -31,6 +31,7 @@ from app.domain.enums import (
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
+from app.domain.resources import RUNTIME_KNOWN_INFLOW_POOL_KEY, resource_state_key
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ActionBehavior, ScenarioDefinitionV2
 from app.domain.world import Visibility
@@ -49,6 +50,7 @@ from app.services.generic_game import GenericGameError, GenericGameService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
+from app.services.runtime_recovery import RuntimeRecoveryService
 from app.services.scenarios import ScenarioService
 from tests.scenario_fixtures import LINJIANG_V2_TEST
 
@@ -333,6 +335,124 @@ def test_hidden_pool_is_absent_from_shared_planner_and_player_safe_projection(
     assert "north_hidden_pool" not in context_json
     assert '"pool_key"' not in context_json
     assert runtime.instance.id == scope.game_instance_id
+
+
+def test_authored_visible_pool_stays_private_before_region_survey(
+    session: Session,
+) -> None:
+    definition = _pool_definition()
+    runtime, scope = _runtime(
+        session,
+        definition,
+        "resource-pool-visible-before-survey",
+        use_platform_player=True,
+    )
+    pool = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            "electrical_repair_parts@north_industrial_district@north_hidden_pool",
+        ),
+    )
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "north_industrial_district"),
+    )
+    assert pool is not None and knowledge is not None
+    pool.visibility = ResourcePoolVisibility.VISIBLE
+    pool.facility_key = None
+    pool.availability = ResourcePoolAvailability.AVAILABLE
+    pool.availability_requirement = None
+    knowledge.resource_inventory_visibility = ResourceInventoryVisibility.HIDDEN
+    knowledge.resource_survey_completed = False
+    session.flush()
+
+    projection = SharedKnowledgeProjection(session, scope, definition)
+    visible = projection.visible_resource_pools()
+    assert not any(item.pool_key == "north_hidden_pool" for item in visible)
+    assert (
+        projection.resource_intelligence()["regions"]["north_industrial_district"]["resources"]
+        == {}
+    )
+
+    player = PlayerProjectionService(session).game_state(GameInstanceId(runtime.instance.id))
+    player_region = player.resource_intelligence["regions"]["north_industrial_district"]
+    assert player_region["resource_survey_completed"] is False
+    assert player_region["resources"] == {}
+
+
+def test_fresh_linjiang_hides_authored_unsurveyed_inventory_from_all_projections(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(
+        session,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        "resource-pool-fresh-linjiang-knowledge",
+        use_platform_player=True,
+    )
+    projection = SharedKnowledgeProjection(session, scope, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
+    intelligence = projection.resource_intelligence()
+
+    assert (
+        intelligence["regions"]["central_district"]["resources"]["general_engineering_parts"][
+            "known_available"
+        ]
+        == 10
+    )
+    for region_key in (
+        "east_residential_district",
+        "north_industrial_district",
+        "south_waterfront_district",
+        "southeast_heights_district",
+        "west_logistics_district",
+    ):
+        assert intelligence["regions"][region_key]["resource_survey_completed"] is False
+        assert intelligence["regions"][region_key]["resources"] == {}
+
+    planner = projection.planner_resources()
+    assert planner["regions"]["east_residential_district"]["resources"] == {}
+    assert planner["regions"]["north_industrial_district"]["resources"] == {}
+    assert planner["regions"]["south_waterfront_district"]["resources"] == {}
+    assert planner["regions"]["southeast_heights_district"]["resources"] == {}
+    assert planner["regions"]["west_logistics_district"]["resources"] == {}
+
+    task = GenericAgentService(session, scope).create_task(
+        runtime.session,
+        "restore central communications",
+        initialize_plan=False,
+    )
+    planner_input = PlanningContextBuilder(session, scope).build_v2(
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        (LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives[0],),
+        task=task,
+        replan_reason=None,
+    )
+    for resource in planner_input.known_world.resources.values():
+        assert isinstance(resource, dict)
+        scopes = resource.get("scopes", {})
+        assert isinstance(scopes, dict)
+        assert all(
+            region_key not in scopes
+            for region_key in (
+                "east_residential_district",
+                "north_industrial_district",
+                "south_waterfront_district",
+                "southeast_heights_district",
+                "west_logistics_district",
+            )
+        )
+
+    player = PlayerProjectionService(session).game_state(GameInstanceId(runtime.instance.id))
+    assert player.resource_intelligence["regions"]["west_logistics_district"]["resources"] == {}
+    state = GenericGameService(session, scope)._locked_state(LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
+    assert (
+        GenericGameService._known_source_pools(
+            state,
+            "east_residential_district",
+            "communication_equipment",
+        )
+        == ()
+    )
 
 
 def test_missing_pool_is_known_zero_only_after_completed_visible_survey(
@@ -718,7 +838,7 @@ def test_transport_aggregates_multiple_visible_available_pools_and_creates_desti
     }
     assert rows[("west_logistics_district", "west_pool_a")] == 0
     assert rows[("west_logistics_district", "west_pool_b")] == 15
-    assert rows[("central_district", "default")] == 40
+    assert rows[("central_district", RUNTIME_KNOWN_INFLOW_POOL_KEY)] == 40
     intelligence = SharedKnowledgeProjection(session, scope, definition).resource_intelligence()
     west_summary = intelligence["regions"]["west_logistics_district"]["resources"][
         "electrical_repair_parts"
@@ -921,7 +1041,8 @@ def test_transport_reuses_canonical_destination_and_player_aggregates_legacy_dup
     ]
     assert {(row.pool_key, row.value) for row in central_rows} == {
         ("default", 0),
-        ("central_general_stock", 5),
+        ("central_general_stock", 0),
+        (RUNTIME_KNOWN_INFLOW_POOL_KEY, 5),
     }
     player_rows = _central_general_parts_player_rows(session, runtime)
     assert len(player_rows) == 1
@@ -984,7 +1105,10 @@ def test_repeated_transport_accumulates_in_one_canonical_destination_balance(
             )
         )
     ]
-    assert [(row.pool_key, row.value) for row in central_rows] == [("central_general_stock", 8)]
+    assert {(row.pool_key, row.value) for row in central_rows} == {
+        ("central_general_stock", 0),
+        (RUNTIME_KNOWN_INFLOW_POOL_KEY, 8),
+    }
     player_rows = _central_general_parts_player_rows(session, runtime)
     assert len(player_rows) == 1
     assert player_rows[0].value == 8
@@ -1035,7 +1159,14 @@ def test_transport_excludes_reserved_source_inventory(
     )
     destination = session.get(
         GameInstanceResourceState,
-        (runtime.instance.id, "electrical_repair_parts@central_district"),
+        (
+            runtime.instance.id,
+            resource_state_key(
+                "electrical_repair_parts",
+                "central_district",
+                RUNTIME_KNOWN_INFLOW_POOL_KEY,
+            ),
+        ),
     )
     assert source is not None and source.value == 10 and source.reserved_value == 10
     assert destination is not None and destination.value == 10
@@ -1121,9 +1252,15 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
         GameInstanceFactState,
         (runtime.instance.id, "north_power_substation", "operational"),
     )
-    assert pool is not None and fact is not None
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "north_industrial_district"),
+    )
+    assert pool is not None and fact is not None and knowledge is not None
     pool.visibility = ResourcePoolVisibility.VISIBLE
     fact.visibility = Visibility.HIDDEN
+    knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    knowledge.resource_survey_completed = True
     session.flush()
 
     projection = SharedKnowledgeProjection(session, scope, definition)
@@ -1624,3 +1761,633 @@ def test_unknown_base_inventory_with_projected_inflow_stays_unknown() -> None:
 
     assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
     assert balance[("middle_region", "synthetic_resource")] == 10
+
+
+def _runtime_transport_definition(
+    key: str,
+    *,
+    resource_key: str = "municipal_repair_materials",
+    source_region: str = "east_residential_district",
+    source_quantity: int = 10,
+    south_base_quantity: int | None = None,
+    hidden_south_quantity: int | None = None,
+    extra_pools: tuple[dict[str, Any], ...] = (),
+) -> ScenarioDefinitionV2:
+    document: dict[str, Any] = deepcopy(_pool_definition().model_dump(mode="json"))
+    normalized_key = key.replace("-", "_")
+    document["metadata"]["key"] = normalized_key
+    document["metadata"]["name"] = key
+    document["world"]["key"] = normalized_key
+    document["world"]["name"] = key
+    for node in document["world"]["nodes"]:
+        if (
+            node["node_type_key"] == "region"
+            and "transport_destination" not in node["interaction_keys"]
+        ):
+            node["interaction_keys"].append("transport_destination")
+    document["initialization"]["region_resource_knowledge"].append(
+        {
+            "region_key": "south_waterfront_district",
+            "resource_inventory_visibility": "HIDDEN",
+            "resource_survey_completed": False,
+        }
+    )
+    document["initialization"]["resource_pools"].append(
+        {
+            "pool_key": "runtime_transport_source",
+            "resource_key": resource_key,
+            "region_key": source_region,
+            "quantity": source_quantity,
+            "visibility": "VISIBLE",
+            "availability": "AVAILABLE",
+        }
+    )
+    if south_base_quantity is not None:
+        document["initialization"]["resource_pools"].append(
+            {
+                "pool_key": "runtime_south_known_base",
+                "resource_key": resource_key,
+                "region_key": "south_waterfront_district",
+                "quantity": south_base_quantity,
+                "visibility": "VISIBLE",
+                "availability": "AVAILABLE",
+            }
+        )
+    if hidden_south_quantity is not None:
+        document["initialization"]["resource_pools"].append(
+            {
+                "pool_key": "runtime_south_hidden_base",
+                "resource_key": resource_key,
+                "region_key": "south_waterfront_district",
+                "facility_key": "south_substation",
+                "quantity": hidden_south_quantity,
+                "visibility": "HIDDEN",
+                "availability": "AVAILABLE",
+                "survey_discoverable": True,
+            }
+        )
+    document["initialization"]["resource_pools"].extend(extra_pools)
+    return ScenarioDefinitionV2.model_validate(document)
+
+
+def _prepare_runtime_transport(
+    session: Session,
+    definition: ScenarioDefinitionV2,
+    creation_key: str,
+    *,
+    actor_start: str = "east_residential_district",
+    source_region: str = "east_residential_district",
+    corridors: tuple[str, ...] = (
+        "waterfront_access_corridor",
+        "southeast_access_corridor",
+    ),
+) -> tuple[object, object]:
+    runtime, scope = _runtime(session, definition, creation_key)
+    actor = session.get(GameInstanceActor, (runtime.instance.id, "logistics_team_alpha"))
+    assert actor is not None
+    actor.current_node_key = actor_start
+    source_knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, source_region),
+    )
+    south_knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "south_waterfront_district"),
+    )
+    assert source_knowledge is not None and south_knowledge is not None
+    source_knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    source_knowledge.resource_survey_completed = True
+    south_knowledge.resource_inventory_visibility = ResourceInventoryVisibility.HIDDEN
+    south_knowledge.resource_survey_completed = False
+    for corridor in corridors:
+        passability = session.get(
+            GameInstanceFactState,
+            (runtime.instance.id, corridor, "passable"),
+        )
+        assert passability is not None
+        passability.truth_value = True
+    session.flush()
+    return runtime, scope
+
+
+def _runtime_transport(
+    session: Session,
+    scope: object,
+    *,
+    resource_key: str,
+    target_region: str,
+    amount: int,
+) -> object:
+    return GenericGameService(session, scope).execute(
+        actor_key="logistics_team_alpha",
+        action_key="transport_resource",
+        target_node_key=target_region,
+        parameters={"resource_key": resource_key, "amount": amount},
+    )
+
+
+@pytest.mark.parametrize(
+    "resource_key",
+    ("municipal_repair_materials", "general_engineering_parts", "electrical_repair_parts"),
+)
+def test_runtime_transport_inflow_can_cross_unknown_region(
+    session: Session,
+    resource_key: str,
+) -> None:
+    definition = _runtime_transport_definition(
+        f"runtime-known-inflow-{resource_key}",
+        resource_key=resource_key,
+    )
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        f"runtime-known-inflow-{resource_key}",
+    )
+    game = GenericGameService(session, scope)
+
+    first = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="south_waterfront_district",
+        amount=10,
+    )
+    assert first.outcome.failure is None
+    projection = SharedKnowledgeProjection(session, scope, definition)
+    summary = projection.resource_intelligence()["regions"]["south_waterfront_district"][
+        "resources"
+    ][resource_key]
+    assert summary["known_available"] == 10
+    assert (
+        projection.planner_resources()["regions"]["south_waterfront_district"]["resources"][
+            resource_key
+        ]["known_available"]
+        == 10
+    )
+    recovered = RuntimeRecoveryService(session).recover(GameInstanceId(runtime.instance.id))
+    scope = recovered.scope
+    game = GenericGameService(session, scope)
+    actor = session.get(GameInstanceActor, (runtime.instance.id, "logistics_team_alpha"))
+    assert actor is not None
+    travelled = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_node_key="south_waterfront_district",
+        parameters={},
+    )
+    assert travelled.outcome.failure is None
+
+    second = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="southeast_heights_district",
+        amount=10,
+    )
+    assert second.outcome.failure is None
+    source = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            f"{resource_key}@east_residential_district@runtime_transport_source",
+        ),
+    )
+    south = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            resource_state_key(
+                resource_key,
+                "south_waterfront_district",
+                RUNTIME_KNOWN_INFLOW_POOL_KEY,
+            ),
+        ),
+    )
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "south_waterfront_district"),
+    )
+    assert source is not None and source.value == 0
+    assert south is not None and south.value == 0
+    assert knowledge is not None
+    assert knowledge.resource_inventory_visibility == ResourceInventoryVisibility.HIDDEN
+    assert knowledge.resource_survey_completed is False
+
+
+def test_runtime_transport_inflow_shortfall_preserves_unknown_error(session: Session) -> None:
+    resource_key = "municipal_repair_materials"
+    definition = _runtime_transport_definition("runtime-inflow-shortfall")
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        "runtime-inflow-shortfall",
+    )
+    game = GenericGameService(session, scope)
+    first = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="south_waterfront_district",
+        amount=10,
+    )
+    assert first.outcome.failure is None
+    travelled = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_node_key="south_waterfront_district",
+        parameters={},
+    )
+    assert travelled.outcome.failure is None
+
+    result = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="southeast_heights_district",
+        amount=15,
+    )
+    assert result.outcome.failure is not None
+    assert result.outcome.failure.code == "TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN"
+    south = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            resource_state_key(
+                resource_key,
+                "south_waterfront_district",
+                RUNTIME_KNOWN_INFLOW_POOL_KEY,
+            ),
+        ),
+    )
+    target = session.get(
+        GameInstanceResourceState,
+        (runtime.instance.id, f"{resource_key}@southeast_heights_district"),
+    )
+    assert south is not None and south.value == 10
+    assert target is None
+
+
+def test_survey_after_inflow_reveals_base_without_double_counting(session: Session) -> None:
+    definition = _runtime_transport_definition(
+        "runtime-survey-after-inflow",
+        south_base_quantity=5,
+    )
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        "runtime-survey-after-inflow",
+    )
+    game = GenericGameService(session, scope)
+    first = _runtime_transport(
+        session,
+        scope,
+        resource_key="municipal_repair_materials",
+        target_region="south_waterfront_district",
+        amount=10,
+    )
+    assert first.outcome.failure is None
+    travelled = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_node_key="south_waterfront_district",
+        parameters={},
+    )
+    assert travelled.outcome.failure is None
+    surveyed = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="survey_resources",
+        target_node_key="south_waterfront_district",
+        parameters={},
+    )
+    assert surveyed.outcome.failure is None
+
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "south_waterfront_district"),
+    )
+    assert knowledge is not None and knowledge.resource_survey_completed is True
+    summary = SharedKnowledgeProjection(session, scope, definition).resource_intelligence()[
+        "regions"
+    ]["south_waterfront_district"]["resources"]["municipal_repair_materials"]
+    assert summary["known_total"] == 15
+    assert summary["known_available"] == 15
+
+
+def test_runtime_transport_inflow_supports_local_rule_resource_consumption(
+    session: Session,
+) -> None:
+    resource_key = "water_system_parts"
+    definition = _runtime_transport_definition(
+        "runtime-inflow-local-repair",
+        resource_key=resource_key,
+        extra_pools=(
+            {
+                "pool_key": "runtime_general_support_source",
+                "resource_key": "general_engineering_parts",
+                "region_key": "east_residential_district",
+                "quantity": 5,
+                "visibility": "VISIBLE",
+                "availability": "AVAILABLE",
+            },
+        ),
+    )
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        "runtime-inflow-local-repair",
+    )
+    game = GenericGameService(session, scope)
+    first = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="south_waterfront_district",
+        amount=10,
+    )
+    assert first.outcome.failure is None
+    general_inflow = _runtime_transport(
+        session,
+        scope,
+        resource_key="general_engineering_parts",
+        target_region="south_waterfront_district",
+        amount=5,
+    )
+    assert general_inflow.outcome.failure is None
+    water = session.get(
+        GameInstanceActor,
+        (runtime.instance.id, "water_repair_team_alpha"),
+    )
+    assert water is not None
+    water.current_node_key = "south_waterfront_district"
+    water.command_reachability = "ONLINE"
+    session.flush()
+
+    repaired = game.execute(
+        actor_key="water_repair_team_alpha",
+        action_key="repair_water_facility",
+        target_node_key="south_pump_station",
+        parameters={},
+    )
+    assert repaired.outcome.failure is None
+    municipal = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            resource_state_key(
+                resource_key,
+                "south_waterfront_district",
+                RUNTIME_KNOWN_INFLOW_POOL_KEY,
+            ),
+        ),
+    )
+    general = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            resource_state_key(
+                "general_engineering_parts",
+                "south_waterfront_district",
+                RUNTIME_KNOWN_INFLOW_POOL_KEY,
+            ),
+        ),
+    )
+    fact = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "south_pump_station", "operational"),
+    )
+    assert municipal is not None and municipal.value == 0
+    assert general is not None and general.value == 0
+    assert fact is not None and fact.truth_value is True
+
+
+def test_runtime_transport_known_base_and_inflow_are_combined(session: Session) -> None:
+    resource_key = "municipal_repair_materials"
+    definition = _runtime_transport_definition(
+        "runtime-known-base-and-inflow",
+        south_base_quantity=5,
+    )
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        "runtime-known-base-and-inflow",
+    )
+    south_knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "south_waterfront_district"),
+    )
+    assert south_knowledge is not None
+    south_knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    south_knowledge.resource_survey_completed = True
+    session.flush()
+    game = GenericGameService(session, scope)
+    first = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="south_waterfront_district",
+        amount=10,
+    )
+    assert first.outcome.failure is None
+    travelled = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_node_key="south_waterfront_district",
+        parameters={},
+    )
+    assert travelled.outcome.failure is None
+    second = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="southeast_heights_district",
+        amount=12,
+    )
+    assert second.outcome.failure is None
+    south = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            resource_state_key(
+                "municipal_repair_materials",
+                "south_waterfront_district",
+                "runtime_south_known_base",
+            ),
+        ),
+    )
+    assert south is not None and south.value == 3
+
+
+def test_runtime_transport_known_zero_base_accepts_inflow(session: Session) -> None:
+    resource_key = "municipal_repair_materials"
+    definition = _runtime_transport_definition(
+        "runtime-known-zero-base-and-inflow",
+        south_base_quantity=0,
+    )
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        "runtime-known-zero-base-and-inflow",
+    )
+    south_knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "south_waterfront_district"),
+    )
+    assert south_knowledge is not None
+    south_knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    south_knowledge.resource_survey_completed = True
+    session.flush()
+    game = GenericGameService(session, scope)
+    first = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="south_waterfront_district",
+        amount=10,
+    )
+    assert first.outcome.failure is None
+    travelled = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_node_key="south_waterfront_district",
+        parameters={},
+    )
+    assert travelled.outcome.failure is None
+    second = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="southeast_heights_district",
+        amount=10,
+    )
+    assert second.outcome.failure is None
+
+
+def test_runtime_transport_without_inflow_keeps_unknown_region_unknown(session: Session) -> None:
+    definition = _runtime_transport_definition("runtime-no-inflow")
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        "runtime-no-inflow",
+    )
+    actor = session.get(GameInstanceActor, (runtime.instance.id, "logistics_team_alpha"))
+    assert actor is not None
+    actor.current_node_key = "south_waterfront_district"
+    session.flush()
+
+    result = GenericGameService(session, scope).execute(
+        actor_key="logistics_team_alpha",
+        action_key="transport_resource",
+        target_node_key="southeast_heights_district",
+        parameters={"resource_key": "municipal_repair_materials", "amount": 10},
+    )
+    assert result.outcome.failure is not None
+    assert result.outcome.failure.code == "TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN"
+
+
+def test_runtime_transport_inflow_does_not_reveal_hidden_base_pool(session: Session) -> None:
+    resource_key = "municipal_repair_materials"
+    definition = _runtime_transport_definition(
+        "runtime-hidden-base-isolated",
+        hidden_south_quantity=90,
+    )
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        "runtime-hidden-base-isolated",
+    )
+    game = GenericGameService(session, scope)
+    first = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="south_waterfront_district",
+        amount=10,
+    )
+    assert first.outcome.failure is None
+    travelled = game.execute(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_node_key="south_waterfront_district",
+        parameters={},
+    )
+    assert travelled.outcome.failure is None
+    second = _runtime_transport(
+        session,
+        scope,
+        resource_key=resource_key,
+        target_region="southeast_heights_district",
+        amount=10,
+    )
+    assert second.outcome.failure is None
+    hidden = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            "municipal_repair_materials@south_waterfront_district@runtime_south_hidden_base",
+        ),
+    )
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "south_waterfront_district"),
+    )
+    assert hidden is not None and hidden.value == 90
+    assert hidden.visibility == ResourcePoolVisibility.HIDDEN
+    assert knowledge is not None
+    assert knowledge.resource_inventory_visibility == ResourceInventoryVisibility.HIDDEN
+    assert knowledge.resource_survey_completed is False
+
+
+def test_runtime_transport_inflow_supports_three_hop_transit(session: Session) -> None:
+    resource_key = "municipal_repair_materials"
+    definition = _runtime_transport_definition(
+        "runtime-three-hop-transit",
+        source_region="west_logistics_district",
+    )
+    runtime, scope = _prepare_runtime_transport(
+        session,
+        definition,
+        "runtime-three-hop-transit",
+        actor_start="west_logistics_district",
+        source_region="west_logistics_district",
+        corridors=(
+            "west_freight_corridor",
+            "central_river_tunnel",
+            "waterfront_access_corridor",
+        ),
+    )
+    game = GenericGameService(session, scope)
+
+    for target_region, corridor_target in (
+        ("central_district", "central_district"),
+        ("east_residential_district", "east_residential_district"),
+        ("south_waterfront_district", "south_waterfront_district"),
+    ):
+        transported = _runtime_transport(
+            session,
+            scope,
+            resource_key=resource_key,
+            target_region=target_region,
+            amount=10,
+        )
+        assert transported.outcome.failure is None
+        if target_region != "south_waterfront_district":
+            travelled = game.execute(
+                actor_key="logistics_team_alpha",
+                action_key="travel",
+                target_node_key=corridor_target,
+                parameters={},
+            )
+            assert travelled.outcome.failure is None
+
+    south = session.get(
+        GameInstanceResourceState,
+        (
+            runtime.instance.id,
+            resource_state_key(
+                resource_key,
+                "south_waterfront_district",
+                RUNTIME_KNOWN_INFLOW_POOL_KEY,
+            ),
+        ),
+    )
+    assert south is not None and south.value == 10

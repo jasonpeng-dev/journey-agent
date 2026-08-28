@@ -82,6 +82,7 @@ def test_player_contract_rejects_hidden_truth_and_developer_contract_owns_it() -
     game = GameSummaryResponse(
         id=uuid4(),
         scenario_id=uuid4(),
+        scenario_name="测试场景系列",
         scenario_version_id=uuid4(),
         scenario_version_number=1,
         scenario_content_hash="a" * 64,

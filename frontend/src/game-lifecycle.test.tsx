@@ -28,6 +28,7 @@ function renderCards(game: GameSummary) {
 const archivedGame: GameSummary = {
   id: "source-game",
   scenario_id: "scenario",
+  scenario_name: "测试场景系列",
   scenario_version_id: "version",
   scenario_version_number: 1,
   scenario_content_hash: "a".repeat(64),
@@ -48,6 +49,14 @@ afterEach(() => {
 });
 
 describe("Game lifecycle actions", () => {
+  it("shows the authoritative scenario series name above the version without exposing its hash", () => {
+    renderCards(archivedGame);
+
+    expect(screen.getByText("测试场景系列")).toHaveClass("game-card-scenario-name");
+    expect(screen.getByText("场景版本 1")).toHaveClass("game-card-scenario-version");
+    expect(screen.queryByText("aaaaaaaaaaaa")).not.toBeInTheDocument();
+  });
+
   it("offers Fork from an archived card and navigates to the new target", async () => {
     vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000001");
     const fork = vi.spyOn(api, "forkGame").mockResolvedValue({

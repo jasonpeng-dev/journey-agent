@@ -18,6 +18,8 @@ from app.domain.enums import (
     ResourcePoolVisibility,
 )
 from app.domain.resources import (
+    RUNTIME_KNOWN_INFLOW_POOL_KEY,
+    is_runtime_known_inflow_pool,
     resource_identity,
     resource_pool_initial_states,
     resource_state_key,
@@ -676,12 +678,7 @@ class GenericGameService:
             source_pools = self._known_source_pools(state, source_region, resource_key)
             if not source_pools:
                 source_knowledge = state.region_resource_knowledge.get(source_region)
-                if (
-                    source_knowledge is not None
-                    and source_knowledge.resource_inventory_visibility
-                    == ResourceInventoryVisibility.VISIBLE
-                    and source_knowledge.resource_survey_completed
-                ):
+                if self._region_resource_inventory_is_known(source_knowledge):
                     return self._blocked_outcome(
                         outcome,
                         code="TRANSPORT_RESOURCE_INSUFFICIENT",
@@ -707,6 +704,15 @@ class GenericGameService:
             }
             available = sum(free_by_pool.values())
             if available < amount:
+                if not self._region_resource_inventory_is_known(
+                    state.region_resource_knowledge.get(source_region)
+                ):
+                    return self._blocked_outcome(
+                        outcome,
+                        code="TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
+                        message="The source Region Resource inventory is not known",
+                        retryable=True,
+                    )
                 return self._blocked_outcome(
                     outcome,
                     code="TRANSPORT_RESOURCE_INSUFFICIENT",
@@ -841,22 +847,9 @@ class GenericGameService:
         target_region: str,
         resource_key: str,
     ) -> str:
-        """Choose the canonical visible destination pool for a Transport."""
+        """Return the separate persistent Pool identity for transport inflow."""
 
-        candidates = sorted(
-            (
-                pool
-                for pool in state.resource_pools.values()
-                if pool.region_key == target_region
-                and pool.resource_key == resource_key
-                and pool.facility_key is None
-                and pool.visibility == ResourcePoolVisibility.VISIBLE
-                and pool.availability == ResourcePoolAvailability.AVAILABLE
-            ),
-            key=lambda item: item.pool_key,
-        )
-        non_default = [pool for pool in candidates if pool.pool_key != "default"]
-        return non_default[0].pool_key if non_default else "default"
+        return RUNTIME_KNOWN_INFLOW_POOL_KEY
 
     @staticmethod
     def _known_source_pools(
@@ -876,17 +869,29 @@ class GenericGameService:
                         and pool.visibility == ResourcePoolVisibility.VISIBLE
                         and pool.availability == ResourcePoolAvailability.AVAILABLE
                         and (
-                            pool.facility_key is not None
-                            or (
-                                knowledge is not None
-                                and knowledge.resource_inventory_visibility
-                                == ResourceInventoryVisibility.VISIBLE
-                            )
+                            is_runtime_known_inflow_pool(pool.pool_key)
+                            or GenericGameService._region_resource_inventory_is_known(knowledge)
                         )
                     )
                 ),
                 key=lambda item: item.pool_key,
             )
+        )
+
+    @staticmethod
+    def _region_resource_inventory_is_known(
+        knowledge: RuleRegionResourceKnowledgeState | None,
+    ) -> bool:
+        """Return whether a Region's complete base inventory is known.
+
+        A deterministic transport inflow is represented by a separate Pool
+        identity and therefore does not need this Region-level confirmation.
+        """
+
+        return bool(
+            knowledge is not None
+            and knowledge.resource_inventory_visibility == ResourceInventoryVisibility.VISIBLE
+            and knowledge.resource_survey_completed
         )
 
     @staticmethod
@@ -1395,8 +1400,24 @@ class GenericGameService:
                     )
                 )
             )
+            knowledge = self.db.get(
+                GameInstanceRegionResourceKnowledge,
+                (self.scope.game_instance_id, mutation.scope_node_key),
+            )
             visible_rows = tuple(
-                row for row in all_rows if row.visibility == ResourcePoolVisibility.VISIBLE
+                row
+                for row in all_rows
+                if row.visibility == ResourcePoolVisibility.VISIBLE
+                and (
+                    row.scope_node_key is None
+                    or is_runtime_known_inflow_pool(row.pool_key)
+                    or (
+                        knowledge is not None
+                        and ResourceInventoryVisibility(knowledge.resource_inventory_visibility)
+                        == ResourceInventoryVisibility.VISIBLE
+                        and bool(knowledge.resource_survey_completed)
+                    )
+                )
             )
             rows = sorted(
                 (
@@ -1406,21 +1427,6 @@ class GenericGameService:
                 ),
                 key=lambda row: row.pool_key,
             )
-            knowledge = self.db.get(
-                GameInstanceRegionResourceKnowledge,
-                (self.scope.game_instance_id, mutation.scope_node_key),
-            )
-            rows = [
-                row
-                for row in rows
-                if mutation.scope_node_key is None
-                or row.facility_key is not None
-                or (
-                    knowledge is not None
-                    and ResourceInventoryVisibility(knowledge.resource_inventory_visibility)
-                    == ResourceInventoryVisibility.VISIBLE
-                )
-            ]
             inventory_status = resource_knowledge_status(
                 inventory_visibility=(
                     ResourceInventoryVisibility(knowledge.resource_inventory_visibility)
@@ -1453,7 +1459,13 @@ class GenericGameService:
             free_by_pool = {row.pool_key: max(0, row.value - row.reserved_value) for row in rows}
             available = sum(free_by_pool.values())
             if available < remaining:
-                if inventory_status == "UNKNOWN":
+                inventory_known = mutation.scope_node_key is None or (
+                    knowledge is not None
+                    and ResourceInventoryVisibility(knowledge.resource_inventory_visibility)
+                    == ResourceInventoryVisibility.VISIBLE
+                    and bool(knowledge.resource_survey_completed)
+                )
+                if not inventory_known:
                     raise GenericGameError(
                         "RESOURCE_INVENTORY_UNKNOWN",
                         "The Resource inventory is not known or available",

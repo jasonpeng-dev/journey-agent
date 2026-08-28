@@ -67,6 +67,7 @@ from app.infrastructure.db.models import (
     PlanningAttempt,
     PlanningCycle,
     PlayerExecutionCheckpoint,
+    Scenario,
     ScenarioVersion,
     WorldOperation,
 )
@@ -447,12 +448,15 @@ class PlayerProjectionService:
     def _game_summary(self, game: GameInstance, task: AgentTask | None) -> GameSummaryResponse:
         version = self.db.get(ScenarioVersion, game.scenario_version_id)
         assert version is not None
+        scenario = self.db.get(Scenario, version.scenario_id)
+        assert scenario is not None
         active_task_id = (
             task.id if task is not None and task.status in _PUBLIC_ACTIVE_TASKS else None
         )
         return GameSummaryResponse(
             id=game.id,
             scenario_id=version.scenario_id,
+            scenario_name=scenario.name,
             scenario_version_id=version.id,
             scenario_version_number=version.version_number,
             scenario_content_hash=version.content_hash,

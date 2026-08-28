@@ -297,6 +297,7 @@ class CheckpointGameRequest(ApiModel):
 class GameSummaryResponse(ApiModel):
     id: UUID
     scenario_id: UUID
+    scenario_name: str = Field(min_length=1, max_length=160)
     scenario_version_id: UUID
     scenario_version_number: int = Field(ge=1)
     scenario_content_hash: str = Field(min_length=64, max_length=64)

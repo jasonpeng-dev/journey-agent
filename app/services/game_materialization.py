@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.enums import DecisionStatus, WorldOperationStatus
 from app.domain.resources import (
+    is_runtime_known_inflow_pool,
     resource_identity,
     resource_pool_initial_states,
     valid_resource_state_identity,
@@ -730,7 +731,11 @@ class GameMaterializer:
                 ),
                 None,
             )
-        if static_pool is None and row.pool_key != "default":
+        if (
+            static_pool is None
+            and row.pool_key != "default"
+            and not is_runtime_known_inflow_pool(row.pool_key)
+        ):
             raise MaterializationError(
                 "MATERIALIZATION_RUNTIME_INVALID",
                 "The source contains an unknown Resource Pool",
