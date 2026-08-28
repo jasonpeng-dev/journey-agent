@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GoalComposer,
   KnownWorldAccordions,
+  MissionLogPanel,
   PlanHistory,
   TaskTabs,
   Timeline,
@@ -192,6 +193,8 @@ describe("Formal Play player projections", () => {
     );
     expect(screen.getByTestId("goal-composer")).toBeVisible();
     expect(screen.getByText("当前 · 下达目标")).toBeVisible();
+    expect(screen.queryByText("选择任务", { selector: "label" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/智能体只会选择当前精确版本/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("自定义目标")).toHaveValue("打开北部贸易路线");
     fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -691,6 +694,15 @@ describe("Formal Play player projections", () => {
     expect(formatDuration(null)).toBeNull();
   });
 
+  it("任务执行记录使用加高面板布局", () => {
+    render(
+      <MissionLogPanel>
+        <span>timeline</span>
+      </MissionLogPanel>,
+    );
+    expect(screen.getByTestId("mission-log-panel")).toHaveClass("mission-log-panel--tall");
+  });
+
   it("把单次初始规划详情嵌入执行方案卡并可展开", () => {
     const cycle = planningCycle(
       "cycle-initial",
@@ -712,12 +724,16 @@ describe("Formal Play player projections", () => {
     const cycleCard = screen.getByTestId("planning-cycle-cycle-initial");
     expect(screen.getAllByText("Agent 已完成计划")).toHaveLength(1);
     expect(screen.getByText("· 31s")).toBeVisible();
-    expect(screen.getAllByRole("button", { name: "▾ 查看规划详情" })).toHaveLength(1);
+    expect(screen.getByText("1 次尝试")).toBeVisible();
+    expect(screen.getByText("Agent 已完成计划").parentElement).toHaveClass("timeline-plan-headline");
+    expect(screen.getAllByRole("button", { name: "▸ 查看规划详情" })).toHaveLength(1);
     expect(document.querySelectorAll(".planning-details-toggle")).toHaveLength(1);
     expect(screen.queryByTestId("planning-attempt-cycle-initial-0")).not.toBeInTheDocument();
 
     fireEvent.click(within(cycleCard).getByRole("button"));
-    expect(within(cycleCard).getAllByText("初始规划 · 已通过")).toHaveLength(2);
+    expect(within(cycleCard).getAllByText("初始规划 · 已通过")).toHaveLength(1);
+    expect(screen.getByText("1 次尝试")).toBeVisible();
+    expect(screen.getByRole("button", { name: "▾ 收起规划详情" })).toBeVisible();
     expect(within(cycleCard).getByText("模型：成功")).toBeVisible();
     expect(within(cycleCard).getByText("Validator：通过")).toBeVisible();
     expect(within(cycleCard).getByText("已接受步骤：3")).toBeVisible();
@@ -768,6 +784,10 @@ describe("Formal Play player projections", () => {
     expect(attempts[1]).toHaveTextContent("修复规划 · 已通过");
     expect(within(cycleCard).getByText(/资源库存信息未知/)).toBeVisible();
     expect(screen.getByText("· 2m 10s")).toBeVisible();
+    expect(screen.getByText("2 次尝试")).toBeVisible();
+    expect(screen.getByText("Agent 已重新规划").parentElement).toHaveClass("timeline-plan-headline");
+    expect(within(cycleCard).queryByText("2 次尝试")).not.toBeInTheDocument();
+    expect(within(cycleCard).queryByText("重新规划 · 已通过")).not.toBeInTheDocument();
     expect(within(attempts[0]).getByText("1m 22s")).toBeVisible();
     expect(within(attempts[1]).getByText("48s")).toBeVisible();
     expect(document.querySelectorAll(".planning-details-toggle")).toHaveLength(2);
@@ -812,6 +832,7 @@ describe("Formal Play player projections", () => {
     );
     const cycleCard = screen.getByTestId("planning-cycle-cycle-error");
     expect(screen.getByTestId("planning-cycle-cycle-initial")).toBeVisible();
+    expect(screen.getByText("2 次尝试")).toBeVisible();
     expect(document.querySelectorAll(".planning-details-toggle")).toHaveLength(2);
     fireEvent.click(within(cycleCard).getByRole("button"));
     expect(within(cycleCard).getAllByTestId(/planning-attempt-cycle-error-/)).toHaveLength(2);

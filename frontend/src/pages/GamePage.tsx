@@ -195,8 +195,6 @@ function planningViolationLabel(violation: Record<string, unknown>): string {
 
 function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
   const [open, setOpen] = useState(false);
-  const duration = formatDuration(cycle.wall_clock_duration_ms);
-  const attemptCount = cycle.attempts.length;
   return (
     <section
       className={`planning-cycle-details ${cycle.status.toLowerCase()}`}
@@ -208,20 +206,10 @@ function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
-        <span>{open ? "▴ 收起规划详情" : "▾ 查看规划详情"}</span>
+        <span>{open ? "▾ 收起规划详情" : "▸ 查看规划详情"}</span>
       </button>
       {open && (
         <div className="planning-cycle-detail-body">
-          <div className="planning-cycle-summary">
-            <strong>
-              {planningCallTypeLabel[cycle.cycle_type === "INITIAL" ? "INITIAL_PLAN" : "REPLAN"]}
-              {" · "}
-              {planningStatusLabel[cycle.final_outcome] ?? "未完成"}
-            </strong>
-            <small>
-              {duration ?? "进行中"} · {attemptCount} 次尝试
-            </small>
-          </div>
           {cycle.attempts.length === 0 ? (
             <p className="planning-attempts-empty">无可用规划明细</p>
           ) : (
@@ -333,16 +321,34 @@ export function Timeline({ task }: { task: PublicTask | null }) {
                   {eventLabel}
                   {event.actor_name ? ` · ${event.actor_name}` : ""}
                 </small>
-                {planDuration && (
+                {planningCycle ? (
+                  planDuration && (
+                  <div className="timeline-plan-meta">
+                    <small className="timeline-duration">· {planDuration}</small>
+                  </div>
+                  )
+                ) : planDuration ? (
                   <small className="timeline-duration">· {planDuration}</small>
-                )}
+                ) : null}
               </div>
-              <strong>
-                {headline}
-                {event.kind === "ACTION_RESULT" && actionLocationText(event.location)
-                  ? ` · ${actionLocationText(event.location)}`
-                  : ""}
-              </strong>
+              {planningCycle ? (
+                <div className="timeline-plan-headline">
+                  <strong>
+                    {headline}
+                    {event.kind === "ACTION_RESULT" && actionLocationText(event.location)
+                      ? ` · ${actionLocationText(event.location)}`
+                      : ""}
+                  </strong>
+                  <small className="timeline-attempt-count">{planningCycle.attempt_count} 次尝试</small>
+                </div>
+              ) : (
+                <strong>
+                  {headline}
+                  {event.kind === "ACTION_RESULT" && actionLocationText(event.location)
+                    ? ` · ${actionLocationText(event.location)}`
+                    : ""}
+                </strong>
+              )}
               {planReason && <p className="timeline-plan-reason">{planReason}</p>}
               {planningCycle && <PlanningCycleDetails cycle={planningCycle} />}
               {event.kind !== "ACTION_RESULT" && <ActionLocationLine location={event.location} />}
@@ -1248,7 +1254,6 @@ export function GoalComposer({
           if (!resolving && goal.trim() && (showCustomInput || selectedObjective)) onSubmit();
         }}
       >
-        <label htmlFor="objective-select">选择任务</label>
         <select
           id="objective-select"
           aria-label="选择任务"
@@ -1298,9 +1303,6 @@ export function GoalComposer({
             testId="goal-resolving-status"
           />
         )}
-        {!resolving && (
-          <p>智能体只会选择当前精确版本中定义的目标和行动；场景作者定义的内容保持其原始语言。</p>
-        )}
       </form>
     </section>
   );
@@ -1315,6 +1317,14 @@ function scenarioObjectiveOptions(
     }
     return [{ key: item.key, name: item.name }];
   });
+}
+
+export function MissionLogPanel({ children }: { children: ReactNode }) {
+  return (
+    <section className="command-panel mission-log-panel mission-log-panel--tall" data-testid="mission-log-panel">
+      {children}
+    </section>
+  );
 }
 
 export function GamePage() {
@@ -1555,7 +1565,7 @@ export function GamePage() {
           />
         </aside>
         <div className="conversation-column-v2">
-          <section className="command-panel mission-log-panel">
+          <MissionLogPanel>
             <header className="command-panel-heading">
               <div><p>02 · 历史</p><h1>任务执行记录</h1></div>
               <span className="console-pill neutral">已发生事件</span>
@@ -1588,7 +1598,7 @@ export function GamePage() {
                 </div>
               )}
             </div>
-          </section>
+          </MissionLogPanel>
           {task && (
           <section className="command-panel current-report-panel" data-task-id={task.id}>
             <header className="command-panel-heading">
