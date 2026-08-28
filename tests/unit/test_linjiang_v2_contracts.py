@@ -36,6 +36,7 @@ from app.agent.provider import (
     PlanStepProposal,
 )
 from app.domain.enums import (
+    AgentTaskStatus,
     CommandReachability,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
@@ -121,8 +122,12 @@ def test_dependency_closure_uses_known_available_not_total_at_scope() -> None:
     assert not _has_known_available_resource_at(resource, "central_district", 6)
 
 
-def _v2_0_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
-    document = LINJIANG_V2_TEST.model_dump(mode="json")
+def _v2_0_runtime(
+    session: Session,
+    key: str,
+    definition: ScenarioDefinitionV2 | None = None,
+):  # type: ignore[no-untyped-def]
+    document = (definition or LINJIANG_V2_TEST).model_dump(mode="json")
     central_telecom = next(
         node for node in document["world"]["nodes"] if node["key"] == "central_telecom_hub"
     )
@@ -2019,6 +2024,77 @@ def test_linjiang_v2_0_hidden_block_is_discovered_only_during_runtime(
     assert any(
         item.key == "central_river_tunnel.passable" for item in result.applied.knowledge_changes
     )
+
+
+def test_recreated_task_can_execute_task_scoped_first_travel_without_provider(
+    session: Session,
+) -> None:
+    document = LINJIANG_V2_TEST.model_dump(mode="json")
+    north_corridor = next(
+        node for node in document["world"]["nodes"] if node["key"] == "north_service_corridor"
+    )
+    north_passability = next(fact for fact in north_corridor["facts"] if fact["key"] == "passable")
+    north_passability["initial_value"] = True
+    north_passability["initial_visibility"] = "KNOWN"
+    current_equivalent = ScenarioDefinitionV2.model_validate(document)
+    runtime, scope = _v2_0_runtime(
+        session,
+        "linjiang-v2-0-recreated-task-travel",
+        current_equivalent,
+    )
+    agent = GenericAgentService(session, scope)
+    first_task = agent.create_task(
+        runtime.session,
+        "restore east emergency power network",
+        initialize_plan=False,
+    )
+    actor = session.get(
+        GameInstanceActor,
+        (runtime.instance.id, "logistics_team_alpha"),
+    )
+    assert actor is not None
+
+    legacy_key = f"task-restore_east_emergency_power_network-plan-1-{runtime.instance.id}-1-travel"
+    first_result = GenericActionService(session, scope).execute_action(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_key="west_logistics_district",
+        parameters={},
+        idempotency_key=legacy_key,
+        task_id=first_task.id,
+    )
+    assert first_result.applied is not None
+    assert first_result.applied.outcome.failure is None
+
+    actor.current_node_key = "central_district"
+    first_task.status = AgentTaskStatus.ABORTED
+    session.flush()
+
+    second_task = agent.create_task(
+        runtime.session,
+        "restore east emergency power network",
+        initialize_plan=False,
+    )
+    second_key = agent._action_idempotency_key(
+        second_task.id,
+        plan_version=1,
+        step_index=1,
+        action_key="travel",
+    )
+    second_result = GenericActionService(session, scope).execute_action(
+        actor_key="logistics_team_alpha",
+        action_key="travel",
+        target_key="north_industrial_district",
+        parameters={},
+        idempotency_key=second_key,
+        task_id=second_task.id,
+    )
+
+    assert second_key != legacy_key
+    assert second_result.replayed is False
+    assert second_result.applied is not None
+    assert second_result.applied.outcome.failure is None
+    assert actor.current_node_key == "north_industrial_district"
 
 
 def test_linjiang_v2_0_relay_recovery_path_is_sequentially_validated(

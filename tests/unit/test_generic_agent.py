@@ -509,3 +509,35 @@ def test_incomplete_objective_keeps_normal_provider_planning_path(
     assert plan is not None
     steps = session.scalars(select(AgentStep).where(AgentStep.plan_id == plan.id)).all()
     assert len(steps) == 1
+
+
+def test_action_idempotency_keys_are_scoped_to_recreated_tasks(session: Session) -> None:
+    provider = _RecordingProvider(_accepted_proposal())
+    agent, runtime = _agent(session, provider=provider)
+
+    first = agent.create_task(
+        runtime.session,
+        "stabilize the patient",
+        initialize_plan=False,
+    )
+    first_plan = agent.plan(first)
+    first_step = session.scalar(select(AgentStep).where(AgentStep.plan_id == first_plan.id))
+    assert first_step is not None
+    first_key = str(first_step.tool_arguments["idempotency_key"])
+
+    first.status = AgentTaskStatus.ABORTED
+    session.flush()
+
+    second = agent.create_task(
+        runtime.session,
+        "stabilize the patient",
+        initialize_plan=False,
+    )
+    second_plan = agent.plan(second)
+    second_step = session.scalar(select(AgentStep).where(AgentStep.plan_id == second_plan.id))
+    assert second_step is not None
+    second_key = str(second_step.tool_arguments["idempotency_key"])
+
+    assert first_key != second_key
+    assert str(first.id) in first_key
+    assert str(second.id) in second_key

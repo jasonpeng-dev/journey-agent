@@ -8,7 +8,8 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
-from app.domain.enums import AgentPlanStatus, StepExecutionType
+from app.api.schemas.phase_d import PublicTaskStatus
+from app.domain.enums import AgentPlanStatus, AgentTaskStatus, StepExecutionType
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
@@ -27,7 +28,7 @@ from app.scenarios.builtin import (
 )
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
-from app.services.player_projection import PlayerProjectionService
+from app.services.player_projection import PlayerProjectionService, _task_explanation, _task_status
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.spatial_projection import SpatialDisplayProjector
 
@@ -181,6 +182,29 @@ def test_plan_projection_starts_from_frozen_planner_input_position(session: Sess
         _summary(spatial, "east_residential_district", "central_district"),
         _summary(spatial, "central_district", "west_logistics_district"),
     ]
+
+
+def test_runtime_action_failure_is_not_projected_as_no_legal_action(session: Session) -> None:
+    _runtime, task = _runtime_task(session, "player-projection-action-failure")
+    task.status = AgentTaskStatus.BLOCKED
+    task.last_error_code = "ACTION_IDEMPOTENCY_CONFLICT"
+
+    assert (
+        _task_status(task.status, task.last_error_code) == PublicTaskStatus.ACTION_EXECUTION_FAILED
+    )
+    assert _task_explanation(task) == "行动执行失败 - 未完成世界状态更新"
+
+
+def test_unreachable_projection_remains_reserved_for_feasibility_errors(session: Session) -> None:
+    _runtime, task = _runtime_task(session, "player-projection-unreachable")
+    task.status = AgentTaskStatus.BLOCKED
+    task.last_error_code = "UNREACHABLE_IN_CURRENT_STATE"
+
+    assert (
+        _task_status(task.status, task.last_error_code)
+        == PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE
+    )
+    assert _task_explanation(task) == "当前世界状态下没有可继续执行的合法行动"
 
 
 def test_replan_projection_uses_its_own_frozen_position_not_scenario_initial(

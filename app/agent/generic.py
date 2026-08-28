@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -1115,6 +1115,25 @@ class GenericAgentService:
             tuple(evaluations),
         )
 
+    @staticmethod
+    def _action_idempotency_key(
+        task_id: UUID,
+        *,
+        plan_version: int,
+        action_key: str,
+        step_index: int | None = None,
+    ) -> str:
+        """Build an Action key unique to one Task's Plan step.
+
+        Action operations are instance-scoped, while a GameInstance may
+        contain multiple historical Tasks for the same Objective.  The Task
+        identity therefore has to be part of the key; Objective keys alone
+        can collide when a player starts the same Objective again.
+        """
+
+        step_identity = str(step_index) if step_index is not None else "candidate"
+        return f"task-{task_id}-plan-{plan_version}-{step_identity}-{action_key}"[:160]
+
     def _candidate_steps(
         self,
         definition: ScenarioDefinitionV2,
@@ -1186,11 +1205,11 @@ class GenericAgentService:
                 "action_key": action.key,
                 "target_key": target_key,
                 "parameters": parameters,
-                "idempotency_key": (
-                    f"task-{'-'.join(item.key for item in objectives)}-plan-{plan_version}-"
-                    f"{self.scope.game_instance_id}-"
-                    f"{action.key}"
-                )[:160],
+                "idempotency_key": self._action_idempotency_key(
+                    task.id,
+                    plan_version=plan_version,
+                    action_key=action.key,
+                ),
             }
             signature = proposal_signature(actor.actor_key, action.key, target_key, parameters)
             if signature in rejected_signatures:
@@ -1760,6 +1779,7 @@ class GenericAgentService:
                     plan_version,
                     index,
                     reason,
+                    task.id,
                     allow_epistemic=True,
                 )
             except GenericAgentError as exc:
@@ -3931,6 +3951,7 @@ class GenericAgentService:
         plan_version: int,
         index: int,
         reason: str | None,
+        task_id: UUID,
         *,
         allow_epistemic: bool = False,
     ) -> list[dict[str, object]]:
@@ -4008,10 +4029,12 @@ class GenericAgentService:
             "action_key": action.key,
             "target_key": candidate.target_key,
             "parameters": parameters,
-            "idempotency_key": (
-                f"task-{'-'.join(item.key for item in objectives)}-plan-{plan_version}-"
-                f"{self.scope.game_instance_id}-{index}-{action.key}"
-            )[:160],
+            "idempotency_key": self._action_idempotency_key(
+                task_id,
+                plan_version=plan_version,
+                step_index=index,
+                action_key=action.key,
+            ),
         }
         steps: list[dict[str, object]] = [
             {

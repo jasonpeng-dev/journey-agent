@@ -49,6 +49,7 @@ const taskTone: Record<string, string> = {
   NEEDS_PLAYER_INPUT: "warning",
   BLOCKED_BY_PLAYER_DECISION: "danger",
   UNREACHABLE_IN_CURRENT_STATE: "danger",
+  ACTION_EXECUTION_FAILED: "danger",
   MODEL_PLAN_REJECTED: "danger",
   MODEL_PROVIDER_TIMEOUT: "danger",
   MODEL_PROVIDER_FAILURE: "danger",

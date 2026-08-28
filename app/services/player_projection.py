@@ -1178,12 +1178,24 @@ def _is_provider_failure(error_code: str | None) -> bool:
     return error_code == "MODEL_PROVIDER_TIMEOUT" or error_code in _PROVIDER_FAILURE_CODES
 
 
+_NO_LEGAL_ACTION_CODES = {
+    "UNREACHABLE_IN_CURRENT_STATE",
+    "PLAN_SEGMENT_BLOCKED",
+}
+
+
+def _is_no_legal_action(error_code: str | None) -> bool:
+    return error_code in _NO_LEGAL_ACTION_CODES
+
+
 def _task_explanation(task: AgentTask) -> str:
     if task.last_error_code == "MODEL_PLAN_REJECTED":
         return "Model failed to produce a validated executable plan within the allowed repairs"
     if _is_provider_failure(task.last_error_code):
         return task.last_error_detail or "模型调用失败"
-    return "当前世界状态下没有可继续执行的合法行动"
+    if _is_no_legal_action(task.last_error_code):
+        return "当前世界状态下没有可继续执行的合法行动"
+    return "行动执行失败 - 未完成世界状态更新"
 
 
 def _provider_failure_duration(task: AgentTask) -> int | None:
@@ -1207,7 +1219,9 @@ def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskS
             return PublicTaskStatus.MODEL_PROVIDER_TIMEOUT
         if _is_provider_failure(error_code):
             return PublicTaskStatus.MODEL_PROVIDER_FAILURE
-        return PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE
+        if _is_no_legal_action(error_code):
+            return PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE
+        return PublicTaskStatus.ACTION_EXECUTION_FAILED
     return {
         AgentTaskStatus.ACTIVE: PublicTaskStatus.ACTIVE,
         AgentTaskStatus.WAITING_FOR_WORLD_EVENT: PublicTaskStatus.ACTIVE,
@@ -1220,6 +1234,8 @@ def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskS
             else PublicTaskStatus.MODEL_PROVIDER_FAILURE
             if _is_provider_failure(error_code)
             else PublicTaskStatus.UNREACHABLE_IN_CURRENT_STATE
+            if _is_no_legal_action(error_code)
+            else PublicTaskStatus.ACTION_EXECUTION_FAILED
         ),
         AgentTaskStatus.ABORTED: PublicTaskStatus.ABORTED,
     }[status]
