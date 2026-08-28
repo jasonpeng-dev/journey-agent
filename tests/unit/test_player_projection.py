@@ -16,6 +16,7 @@ from app.infrastructure.db.models import (
     AgentStep,
     GameInstanceActor,
     GameInstanceFactState,
+    PlanningAttempt,
     PlanningCycle,
     Player,
 )
@@ -235,6 +236,135 @@ def test_replan_projection_uses_its_own_frozen_position_not_scenario_initial(
         "west_logistics_district",
         "central_district",
     )
+
+
+def test_planning_process_projects_cycle_wall_time_and_safe_attempt_summaries(
+    session: Session,
+) -> None:
+    runtime, task = _runtime_task(session, "player-planning-process")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cycle = _cycle(task.id, runtime.instance.id, "central_district", base)
+    cycle.base_call_type = "REPLAN"
+    cycle.status = "ERROR"
+    cycle.current_attempt = 1
+    session.add(cycle)
+    session.flush()
+    first = PlanningAttempt(
+        cycle_id=cycle.id,
+        task_id=task.id,
+        attempt_index=0,
+        call_type="REPLAN",
+        status="REJECTED",
+        started_at=base,
+        finished_at=base + timedelta(seconds=194),
+        latency_ms=194000,
+        proposal={"steps": [{"action_key": "hidden_from_player"}]},
+        validator_violations=[
+            {
+                "code": "RESOURCE_INVENTORY_UNKNOWN",
+                "dimension": "RESOURCE",
+                "step_id": "step-1",
+                "action_key": "transport_resource",
+                "actual": "must not be projected",
+            }
+        ],
+    )
+    second = PlanningAttempt(
+        cycle_id=cycle.id,
+        task_id=task.id,
+        attempt_index=1,
+        call_type="REPAIR",
+        status="ERROR",
+        started_at=base + timedelta(seconds=194),
+        finished_at=base + timedelta(seconds=435),
+        latency_ms=241000,
+    )
+    session.add_all((first, second))
+    task.objective_resolution_metadata = {
+        "provider_calls": [
+            {
+                "call_type": "REPLAN",
+                "repair_attempt": 0,
+                "outcome": "SUCCESS",
+                "wall_clock_latency_ms": 194000,
+            },
+            {
+                "call_type": "REPAIR",
+                "repair_attempt": 1,
+                "outcome": "ERROR",
+                "error_code": "MODEL_PROVIDER_HTTP_ERROR",
+                "error_category": "RemoteProtocolError",
+                "wall_clock_latency_ms": 241000,
+            },
+        ]
+    }
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+
+    assert response.plan_history == []
+    assert len(response.planning_process) == 1
+    projected_cycle = response.planning_process[0]
+    assert projected_cycle.cycle_type == "REPLAN"
+    assert projected_cycle.status == "ERROR"
+    assert projected_cycle.wall_clock_duration_ms == 435000
+    assert projected_cycle.attempt_count == 2
+    assert projected_cycle.final_outcome == "ERROR"
+    assert [item.status for item in projected_cycle.attempts] == ["REJECTED", "ERROR"]
+    assert [item.duration_ms for item in projected_cycle.attempts] == [194000, 241000]
+    assert projected_cycle.attempts[0].provider_outcome == "SUCCESS"
+    assert projected_cycle.attempts[0].validator_summary == [
+        {
+            "code": "RESOURCE_INVENTORY_UNKNOWN",
+            "dimension": "RESOURCE",
+            "step_id": "step-1",
+            "action_key": "transport_resource",
+        }
+    ]
+    assert projected_cycle.attempts[1].provider_error_code == "MODEL_PROVIDER_HTTP_ERROR"
+    assert projected_cycle.attempts[1].provider_error_category == "RemoteProtocolError"
+    serialized = response.model_dump(mode="json")
+    assert "provider_payload" not in json.dumps(serialized)
+    assert "hidden_from_player" not in json.dumps(serialized)
+    assert "must not be projected" not in json.dumps(serialized)
+
+
+def test_planning_process_reports_accepted_step_count(session: Session) -> None:
+    runtime, task = _runtime_task(session, "player-planning-process-accepted")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cycle = _cycle(task.id, runtime.instance.id, "central_district", base)
+    cycle.status = "ACCEPTED"
+    cycle.current_attempt = 0
+    session.add(cycle)
+    session.flush()
+    session.add(
+        PlanningAttempt(
+            cycle_id=cycle.id,
+            task_id=task.id,
+            attempt_index=0,
+            call_type="INITIAL_PLAN",
+            status="ACCEPTED",
+            started_at=base,
+            finished_at=base + timedelta(seconds=5),
+            latency_ms=5000,
+            proposal={"steps": [{"action_key": "one"}, {"action_key": "two"}]},
+        )
+    )
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+
+    projected_attempt = response.planning_process[0].attempts[0]
+    assert projected_attempt.status == "ACCEPTED"
+    assert projected_attempt.accepted_step_count == 2
 
 
 def test_relay_projection_uses_target_actor_plan_time_region_and_name(

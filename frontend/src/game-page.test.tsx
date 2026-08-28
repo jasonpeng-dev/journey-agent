@@ -5,6 +5,7 @@ import {
   GoalComposer,
   KnownWorldAccordions,
   PlanHistory,
+  PlanningProcess,
   TaskTabs,
   Timeline,
   WaitingStatus,
@@ -624,7 +625,75 @@ describe("Formal Play player projections", () => {
     expect(operationBelongsToTask(operation, "task-1")).toBe(false);
     expect(operationBelongsToTask(null, "task-2")).toBe(false);
     expect(formatDuration(0)).toBe("1s");
+    expect(formatDuration(435000)).toBe("7m 15s");
     expect(formatDuration(null)).toBeNull();
+  });
+
+  it("renders planning cycles and expandable attempt summaries", () => {
+    render(
+      <PlanningProcess
+        task={{
+          ...task,
+          planning_process: [
+            {
+              id: "cycle-1",
+              cycle_type: "REPLAN",
+              status: "ERROR",
+              started_at: "2026-01-01T00:00:00Z",
+              finished_at: "2026-01-01T00:07:15Z",
+              wall_clock_duration_ms: 435000,
+              attempt_count: 2,
+              final_outcome: "ERROR",
+              attempts: [
+                {
+                  attempt_index: 0,
+                  call_type: "REPLAN",
+                  status: "REJECTED",
+                  started_at: "2026-01-01T00:00:00Z",
+                  finished_at: "2026-01-01T00:03:14Z",
+                  duration_ms: 194000,
+                  provider_outcome: "SUCCESS",
+                  provider_latency_ms: 194000,
+                  validator_summary: [
+                    { code: "RESOURCE_INVENTORY_UNKNOWN", dimension: "RESOURCE" },
+                  ],
+                  provider_error_category: null,
+                  provider_error_code: null,
+                  accepted_step_count: 0,
+                },
+                {
+                  attempt_index: 1,
+                  call_type: "REPAIR",
+                  status: "ERROR",
+                  started_at: "2026-01-01T00:03:14Z",
+                  finished_at: "2026-01-01T00:07:15Z",
+                  duration_ms: 241000,
+                  provider_outcome: "ERROR",
+                  provider_latency_ms: 241000,
+                  validator_summary: [],
+                  provider_error_category: "RemoteProtocolError",
+                  provider_error_code: "MODEL_PROVIDER_HTTP_ERROR",
+                  accepted_step_count: 0,
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+    const cycle = screen.getByTestId("planning-cycle-cycle-1");
+    expect(screen.getByTestId("planning-process")).toBeVisible();
+    expect(within(cycle).getByText(/7m 15s/)).toBeVisible();
+    expect(screen.getByTestId("planning-attempt-cycle-1-0")).toBeVisible();
+    expect(within(cycle).getByText(/RESOURCE_INVENTORY_UNKNOWN/)).toBeVisible();
+
+    const toggle = within(cycle).getByRole("button");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("planning-attempt-cycle-1-0")).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(within(cycle).getByText(/MODEL_PROVIDER_HTTP_ERROR/)).toBeVisible();
   });
 
   it("groups spatial knowledge and reuses the action location projection", () => {

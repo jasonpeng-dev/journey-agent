@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -31,6 +31,8 @@ from app.api.schemas.phase_d import (
     PublicPlanHistoryStepStatus,
     PublicPlanInterruptionKind,
     PublicPlanInterruptionResponse,
+    PublicPlanningAttemptResponse,
+    PublicPlanningCycleResponse,
     PublicPlanResponse,
     PublicPlanStepResponse,
     PublicRelationResponse,
@@ -62,6 +64,7 @@ from app.infrastructure.db.models import (
     GameInstance,
     GameInstanceActor,
     GameInstanceResourceState,
+    PlanningAttempt,
     PlanningCycle,
     PlayerExecutionCheckpoint,
     ScenarioVersion,
@@ -613,6 +616,7 @@ class PlayerProjectionService:
                 )
                 for plan in plans
             ],
+            planning_process=self._planning_process(task),
             timeline=self._timeline(
                 task,
                 definition,
@@ -661,6 +665,37 @@ class PlayerProjectionService:
                 else None
             ),
         )
+
+    def _planning_process(self, task: AgentTask) -> list[PublicPlanningCycleResponse]:
+        """Project durable planning telemetry without exposing model payloads."""
+
+        cycles = tuple(
+            self.db.scalars(
+                select(PlanningCycle)
+                .where(PlanningCycle.task_id == task.id)
+                .order_by(PlanningCycle.created_at, PlanningCycle.id)
+            )
+        )
+        if not cycles:
+            return []
+        attempts_by_cycle: dict[UUID, list[PlanningAttempt]] = {cycle.id: [] for cycle in cycles}
+        attempts = self.db.scalars(
+            select(PlanningAttempt)
+            .where(PlanningAttempt.task_id == task.id)
+            .order_by(PlanningAttempt.cycle_id, PlanningAttempt.attempt_index, PlanningAttempt.id)
+        )
+        for attempt in attempts:
+            if attempt.cycle_id in attempts_by_cycle:
+                attempts_by_cycle[attempt.cycle_id].append(attempt)
+        provider_calls = _provider_calls(task)
+        return [
+            _planning_cycle_response(
+                cycle,
+                tuple(attempts_by_cycle[cycle.id]),
+                provider_calls,
+            )
+            for cycle in cycles
+        ]
 
     def _locations_by_step(
         self,
@@ -1523,6 +1558,179 @@ def _provider_calls(task: AgentTask) -> tuple[dict[str, object], ...]:
     if not isinstance(calls, list):
         return ()
     return tuple(item for item in calls if isinstance(item, dict))
+
+
+def _planning_cycle_response(
+    cycle: PlanningCycle,
+    attempts: tuple[PlanningAttempt, ...],
+    provider_calls: tuple[dict[str, object], ...],
+) -> PublicPlanningCycleResponse:
+    attempt_starts = [
+        _utc_datetime(item.started_at) for item in attempts if item.started_at is not None
+    ]
+    cycle_started = min(attempt_starts) if attempt_starts else _utc_datetime(cycle.created_at)
+    attempt_finishes = [
+        _utc_datetime(item.finished_at) for item in attempts if item.finished_at is not None
+    ]
+    cycle_finished = (
+        max(attempt_finishes) if cycle.status != "RUNNING" and attempt_finishes else None
+    )
+    attempt_responses = tuple(
+        _planning_attempt_response(item, cycle, attempts, provider_calls) for item in attempts
+    )
+    final_outcome = cycle.status
+    if attempt_responses and attempt_responses[-1].status in {"ERROR", "TIMEOUT"}:
+        final_outcome = attempt_responses[-1].status
+    return PublicPlanningCycleResponse(
+        id=cycle.id,
+        cycle_type=("INITIAL" if cycle.base_call_type == "INITIAL_PLAN" else "REPLAN"),
+        status=cycle.status,
+        started_at=cycle_started,
+        finished_at=cycle_finished,
+        wall_clock_duration_ms=_datetime_duration_ms(cycle_started, cycle_finished),
+        attempt_count=len(attempt_responses),
+        final_outcome=final_outcome,
+        attempts=list(attempt_responses),
+    )
+
+
+def _planning_attempt_response(
+    attempt: PlanningAttempt,
+    cycle: PlanningCycle,
+    attempts: tuple[PlanningAttempt, ...],
+    provider_calls: tuple[dict[str, object], ...],
+) -> PublicPlanningAttemptResponse:
+    cycle_started = min(
+        (_utc_datetime(item.started_at) for item in attempts if item.started_at is not None),
+        default=_utc_datetime(cycle.created_at),
+    )
+    cycle_finished = max(
+        (_utc_datetime(item.finished_at) for item in attempts if item.finished_at is not None),
+        default=None,
+    )
+    provider_call = _provider_call_for_attempt(
+        attempt,
+        provider_calls,
+        cycle_started=cycle_started,
+        cycle_finished=cycle_finished,
+    )
+    provider_outcome = _string_value(provider_call, "outcome")
+    status = attempt.status
+    if status == "ERROR" and provider_outcome == "TIMEOUT":
+        status = "TIMEOUT"
+    provider_latency_ms = _provider_call_latency(provider_call)
+    if provider_latency_ms is None:
+        provider_latency_ms = attempt.latency_ms
+    accepted_step_count = 0
+    if status == "ACCEPTED" and isinstance(attempt.proposal, dict):
+        steps = attempt.proposal.get("steps")
+        if isinstance(steps, list):
+            accepted_step_count = len(steps)
+    duration_ms = _datetime_duration_ms(_as_utc(attempt.started_at), _as_utc(attempt.finished_at))
+    if duration_ms is None:
+        duration_ms = attempt.latency_ms
+    return PublicPlanningAttemptResponse(
+        attempt_index=attempt.attempt_index,
+        call_type=attempt.call_type,
+        status=status,
+        started_at=_as_utc(attempt.started_at),
+        finished_at=_as_utc(attempt.finished_at),
+        duration_ms=duration_ms,
+        provider_outcome=provider_outcome,
+        provider_latency_ms=provider_latency_ms,
+        validator_summary=_safe_validator_summary(attempt.validator_violations),
+        provider_error_category=_string_value(provider_call, "error_category"),
+        provider_error_code=_string_value(provider_call, "error_code"),
+        accepted_step_count=accepted_step_count,
+    )
+
+
+def _provider_call_for_attempt(
+    attempt: PlanningAttempt,
+    provider_calls: tuple[dict[str, object], ...],
+    *,
+    cycle_started: datetime | None,
+    cycle_finished: datetime | None,
+) -> dict[str, object] | None:
+    exact: list[dict[str, object]] = []
+    fallback: list[dict[str, object]] = []
+    for call in provider_calls:
+        if call.get("call_type") != attempt.call_type:
+            continue
+        repair_attempt = call.get("repair_attempt")
+        if isinstance(repair_attempt, int) and repair_attempt != attempt.attempt_index:
+            continue
+        fallback.append(call)
+        started_at = _parse_datetime(call.get("started_at"))
+        if started_at is not None and cycle_started is not None and started_at < cycle_started:
+            continue
+        if started_at is not None and cycle_finished is not None and started_at > cycle_finished:
+            continue
+        exact.append(call)
+    if exact:
+        return exact[-1]
+    if fallback:
+        return fallback[-1]
+    return None
+
+
+def _safe_validator_summary(
+    violations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    safe: list[dict[str, Any]] = []
+    for violation in violations:
+        item = {
+            key: violation[key]
+            for key in ("code", "dimension", "step_id", "action_key")
+            if key in violation and isinstance(violation[key], (str, int, bool))
+        }
+        if item:
+            safe.append(item)
+    return safe
+
+
+def _provider_call_latency(call: dict[str, object] | None) -> int | None:
+    if call is None:
+        return None
+    for key in ("wall_clock_latency_ms", "latency_ms"):
+        value = call.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
+
+
+def _string_value(call: dict[str, object] | None, key: str) -> str | None:
+    if call is None:
+        return None
+    value = call.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return _utc_datetime(value)
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(value))
+    except ValueError:
+        return None
+
+
+def _datetime_duration_ms(started_at: datetime | None, finished_at: datetime | None) -> int | None:
+    if started_at is None or finished_at is None:
+        return None
+    return max(0, round((finished_at - started_at).total_seconds() * 1000))
 
 
 def _call_latency_ms(call: dict[str, object]) -> int:

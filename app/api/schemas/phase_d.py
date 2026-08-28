@@ -369,6 +369,37 @@ class PublicPlanHistoryResponse(ApiModel):
     steps: list[PublicPlanHistoryStepResponse]
 
 
+class PublicPlanningAttemptResponse(ApiModel):
+    """Player-safe summary of one Provider/Validator planning attempt."""
+
+    attempt_index: int = Field(ge=0)
+    call_type: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    provider_outcome: str | None = None
+    provider_latency_ms: int | None = Field(default=None, ge=0)
+    validator_summary: list[dict[str, Any]] = Field(default_factory=list)
+    provider_error_category: str | None = None
+    provider_error_code: str | None = None
+    accepted_step_count: int = Field(default=0, ge=0)
+
+
+class PublicPlanningCycleResponse(ApiModel):
+    """Player-safe summary of one INITIAL/REPLAN planning cycle."""
+
+    id: UUID
+    cycle_type: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    wall_clock_duration_ms: int | None = Field(default=None, ge=0)
+    attempt_count: int = Field(ge=0)
+    final_outcome: str
+    attempts: list[PublicPlanningAttemptResponse] = Field(default_factory=list)
+
+
 class MissionRoadmapStageResponse(ApiModel):
     key: str
     name: str
@@ -445,6 +476,7 @@ class PublicTaskResponse(ApiModel):
     roadmap: MissionRoadmapResponse
     plan: PublicPlanResponse | None = None
     plan_history: list[PublicPlanHistoryResponse] = Field(default_factory=list)
+    planning_process: list[PublicPlanningCycleResponse] = Field(default_factory=list)
     timeline: list[PublicTimelineEventResponse] = Field(default_factory=list)
     briefing: PublicActionBriefingResponse | None = None
     debrief: PublicActionDebriefResponse | None = None

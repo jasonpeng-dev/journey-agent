@@ -320,6 +320,113 @@ export function PlanHistory({ task }: { task: PublicTask }) {
   );
 }
 
+const planningStatusLabel: Record<string, string> = {
+  RUNNING: "进行中",
+  ACCEPTED: "已通过",
+  REJECTED: "未通过",
+  ERROR: "调用失败",
+  TIMEOUT: "超时",
+};
+
+export function PlanningProcess({ task }: { task: PublicTask }) {
+  const cycles = task.planning_process ?? [];
+  const latestId = cycles.at(-1)?.id ?? null;
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(latestId ? [latestId] : []),
+  );
+  useEffect(() => {
+    setExpanded(new Set(latestId ? [latestId] : []));
+  }, [latestId]);
+  if (!cycles.length) return null;
+  return (
+    <section className="planning-process" data-testid="planning-process">
+      <header className="planning-process-heading">
+        <strong>规划过程</strong>
+        <small>Provider / Validator 摘要</small>
+      </header>
+      {cycles.map((cycle) => {
+        const open = expanded.has(cycle.id);
+        const duration = formatDuration(cycle.wall_clock_duration_ms);
+        return (
+          <section
+            className={`planning-cycle-card ${cycle.status.toLowerCase()}`}
+            data-testid={`planning-cycle-${cycle.id}`}
+            key={cycle.id}
+          >
+            <button
+              className="planning-cycle-toggle"
+              type="button"
+              aria-expanded={open}
+              onClick={() =>
+                setExpanded((current) => {
+                  const next = new Set(current);
+                  if (next.has(cycle.id)) next.delete(cycle.id);
+                  else next.add(cycle.id);
+                  return next;
+                })
+              }
+            >
+              <span>
+                <strong>
+                  {cycle.cycle_type === "INITIAL" ? "初始规划" : "重新规划"}
+                  {" · "}
+                  {planningStatusLabel[cycle.final_outcome] ?? cycle.final_outcome}
+                </strong>
+                <small>
+                  {duration ?? "进行中"} · {cycle.attempt_count} 次尝试
+                </small>
+              </span>
+              <b>{open ? "收起" : "展开"}</b>
+            </button>
+            {open && (
+              <ol className="planning-attempts">
+                {cycle.attempts.map((attempt) => {
+                  const attemptDuration = formatDuration(attempt.duration_ms);
+                  return (
+                    <li
+                      data-testid={`planning-attempt-${cycle.id}-${attempt.attempt_index}`}
+                      key={`${cycle.id}:${attempt.attempt_index}`}
+                    >
+                      <div className="planning-attempt-heading">
+                        <strong>
+                          {attempt.call_type}
+                          {" · "}
+                          {planningStatusLabel[attempt.status] ?? attempt.status}
+                        </strong>
+                        <small>{attemptDuration ?? "进行中"}</small>
+                      </div>
+                      {attempt.provider_outcome && (
+                        <p>模型：{attempt.provider_outcome}</p>
+                      )}
+                      {attempt.provider_error_category && (
+                        <p>错误：{attempt.provider_error_category}</p>
+                      )}
+                      {attempt.provider_error_code && <p>代码：{attempt.provider_error_code}</p>}
+                      {attempt.accepted_step_count > 0 && (
+                        <p>已接受步骤：{attempt.accepted_step_count}</p>
+                      )}
+                      {attempt.validator_summary.length > 0 && (
+                        <ul>
+                          {attempt.validator_summary.map((violation, index) => (
+                            <li key={`${attempt.attempt_index}:${index}`}>
+                              {String(violation.code ?? "Validator rejection")}
+                              {violation.dimension ? ` · ${String(violation.dimension)}` : ""}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </section>
+        );
+      })}
+    </section>
+  );
+}
+
 export function WaitingStatus({
   startedAt,
   label,
@@ -1540,6 +1647,7 @@ export function GamePage() {
           {!task && !selectedTaskLoading && <p className="console-empty">等待下达第一个目标。</p>}
           {selectedTaskLoading && <p className="plan-waiting-message">正在加载所选任务记录……</p>}
           {task && <div className="task-brief"><small>当前目标</small><strong>{task.goal}</strong><span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span><p>{task.objective_names.join(" · ")}</p>{task.explanation && <code>{uiLabel(task.explanation)}</code>}</div>}
+          {task && <PlanningProcess task={task} />}
           {task && !planningForTask && <PlanHistory task={task} />}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>

@@ -10,7 +10,11 @@ export type ActivePlayOperation = {
 
 export function formatDuration(durationMs: number | null | undefined): string | null {
   if (durationMs === null || durationMs === undefined || durationMs < 0) return null;
-  return `${Math.max(1, Math.round(durationMs / 1000))}s`;
+  const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
 }
 
 export function operationBelongsToTask(

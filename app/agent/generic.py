@@ -1398,7 +1398,7 @@ class GenericAgentService:
             except GenericProviderError as exc:
                 self._finish_planning_attempt(
                     planning_attempt,
-                    status="ERROR",
+                    status=("TIMEOUT" if exc.code == "MODEL_PROVIDER_TIMEOUT" else "ERROR"),
                     finished_at=datetime.now(UTC),
                     latency_ms=_duration_ms(provider_started_at),
                     finish_reason=None,
