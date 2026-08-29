@@ -359,6 +359,11 @@ class GenericActionService:
             "outcome_code": applied.outcome.outcome_code,
             "runtime_revision": applied.runtime_revision,
             "actor_location_update": applied.outcome.actor_location_update,
+            # Keep the deterministic resource delta in the persisted
+            # operation snapshot so Player projections can describe what
+            # actually happened.  This is observational data only; Runtime
+            # mutation has already been applied by GenericGameService.
+            "resource_mutations": [asdict(item) for item in applied.outcome.resource_mutations],
             "failure": (
                 asdict(applied.outcome.failure) if applied.outcome.failure is not None else None
             ),

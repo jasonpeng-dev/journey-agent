@@ -8,8 +8,19 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
-from app.api.schemas.phase_d import PublicTaskStatus, PublicTimelineEventKind
-from app.domain.enums import AgentPlanStatus, AgentTaskStatus, StepExecutionType
+from app.api.schemas.phase_d import (
+    PublicPlanDisplayStatus,
+    PublicResourceUsageKind,
+    PublicTaskStatus,
+    PublicTimelineEventKind,
+)
+from app.domain.enums import (
+    AgentPlanStatus,
+    AgentStepStatus,
+    AgentTaskStatus,
+    StepExecutionType,
+    WorldOperationStatus,
+)
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
@@ -20,6 +31,7 @@ from app.infrastructure.db.models import (
     PlanningAttempt,
     PlanningCycle,
     Player,
+    WorldOperation,
 )
 from app.scenarios.builtin import (
     LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
@@ -487,6 +499,151 @@ def test_accepted_cycle_and_linked_plan_render_one_timeline_card(session: Sessio
     assert planning_events[0].duration_ms == 31_000
     assert response.planning_process[0].attempt_count == 2
     assert len(response.plan_history) == 1
+
+
+def test_plan_history_projects_display_outcome_duration_and_planned_resources(
+    session: Session,
+) -> None:
+    runtime, task = _runtime_task(session, "player-projection-plan-presentation")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cycle = _cycle(task.id, runtime.instance.id, "central_district", base)
+    cycle.started_at = base
+    cycle.finished_at = base + timedelta(seconds=130)
+    cycle.planner_input = {
+        **cycle.planner_input,
+        "target_bindings": [
+            {
+                "action_key": "repair_industrial_facility",
+                "target_key": "utility_service_depot",
+                "requirements": [
+                    {
+                        "cost": {
+                            "general_engineering_parts": 5,
+                            "municipal_repair_materials": 20,
+                        }
+                    }
+                ],
+            }
+        ],
+    }
+    session.add(cycle)
+    session.flush()
+    attempt = PlanningAttempt(
+        cycle_id=cycle.id,
+        task_id=task.id,
+        attempt_index=0,
+        call_type="INITIAL_PLAN",
+        status="ACCEPTED",
+        started_at=base,
+        finished_at=base + timedelta(seconds=130),
+        latency_ms=130_000,
+        proposal={"steps": [{"action_key": "repair_industrial_facility"}]},
+    )
+    session.add(attempt)
+    session.flush()
+    plan = _plan(task.id, 1, base + timedelta(seconds=131))
+    plan.planning_cycle_id = cycle.id
+    session.add(plan)
+    session.flush()
+    step = _step(
+        plan.id,
+        1,
+        "repair_industrial_facility",
+        "utility_service_depot",
+        {},
+    )
+    step.status = AgentStepStatus.SUCCEEDED
+    session.add(step)
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+
+    history = response.plan_history[0]
+    assert history.display_status == PublicPlanDisplayStatus.STAGE_COMPLETED
+    assert history.display_reason == "准备继续规划"
+    assert history.duration_ms == 130_000
+    assert history.planning_cycle_id == cycle.id
+    projected_step = history.steps[0]
+    assert projected_step.resource_usage_kind == PublicResourceUsageKind.CONSUME
+    assert [(item.resource_key, item.amount) for item in projected_step.resource_usage] == [
+        ("general_engineering_parts", 5),
+        ("municipal_repair_materials", 20),
+    ]
+
+
+def test_execution_history_projects_persisted_resource_mutations(
+    session: Session,
+) -> None:
+    runtime, task = _runtime_task(session, "player-projection-actual-resource-usage")
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    cycle = _cycle(task.id, runtime.instance.id, "west_logistics_district", base)
+    cycle.started_at = base
+    cycle.finished_at = base + timedelta(seconds=12)
+    session.add(cycle)
+    session.flush()
+    plan = _plan(task.id, 1, base + timedelta(seconds=13))
+    plan.planning_cycle_id = cycle.id
+    session.add(plan)
+    session.flush()
+    step = _step(
+        plan.id,
+        1,
+        "transport_resource",
+        "central_district",
+        {
+            "resources": [
+                {"resource_key": "municipal_repair_materials", "amount": 10},
+                {"resource_key": "general_engineering_parts", "amount": 5},
+            ]
+        },
+    )
+    step.status = AgentStepStatus.SUCCEEDED
+    step.completed_at = base + timedelta(seconds=20)
+    session.add(step)
+    session.flush()
+    session.add(
+        WorldOperation(
+            player_id=runtime.instance.player_id,
+            game_instance_id=runtime.instance.id,
+            task_id=task.id,
+            source_step_id=step.id,
+            actor_key=step.assigned_actor_key,
+            action_key="transport_resource",
+            execution_mode="FORMAL",
+            target_key="central_district",
+            status=WorldOperationStatus.RESOLVED,
+            parameters=step.tool_arguments["parameters"],
+            outcome={
+                "resource_mutations": [
+                    {"resource_key": "municipal_repair_materials", "amount": -10},
+                    {"resource_key": "municipal_repair_materials", "amount": 10},
+                    {"resource_key": "general_engineering_parts", "amount": -5},
+                    {"resource_key": "general_engineering_parts", "amount": 5},
+                ]
+            },
+            idempotency_key="player-projection-actual-resource-usage-operation",
+        )
+    )
+    session.flush()
+
+    response = PlayerProjectionService(session).task(
+        task,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+        known_facts={},
+    )
+
+    event = next(
+        item for item in response.timeline if item.kind == PublicTimelineEventKind.ACTION_RESULT
+    )
+    assert event.resource_usage_kind == PublicResourceUsageKind.TRANSPORT
+    assert [(item.resource_key, item.amount) for item in event.resource_usage] == [
+        ("municipal_repair_materials", 10),
+        ("general_engineering_parts", 5),
+    ]
 
 
 def test_accepted_cycle_without_stable_link_does_not_duplicate_legacy_plan(

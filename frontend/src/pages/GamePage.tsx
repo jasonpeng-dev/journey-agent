@@ -21,8 +21,10 @@ import type {
   PublicPlanHistory,
   PublicPlanHistoryStep,
   PlayerGameState,
+  PublicPlanDisplayStatus,
   PublicPlanningAttempt,
   PublicPlanningCycle,
+  PublicResourceUsage,
   PublicTargetActionContract,
   ResourceIntelligence,
   PublicTask,
@@ -33,6 +35,7 @@ import { errorText, resultLabel, stepDescription, uiLabel } from "../ui";
 import {
   debriefButtonLabel,
   formatDuration,
+  planningRefetchInterval,
   segmentCompletionMessage,
   syncPlayStateCaches,
   type ActivePlayOperation,
@@ -57,18 +60,19 @@ const taskTone: Record<string, string> = {
   MODEL_PROVIDER_FAILURE: "danger",
   ABORTED: "neutral",
 };
-const planStatusLabel: Record<PublicPlanHistory["status"], string> = {
+const planDisplayStatusLabel: Record<PublicPlanDisplayStatus, string> = {
   EXECUTING: "执行中",
   ADJUSTED: "已调整",
-  COMPLETED: "已完成",
+  STAGE_COMPLETED: "阶段完成",
+  OBJECTIVE_COMPLETED: "目标完成",
   BLOCKED: "已阻塞",
 };
 const planStepMark: Record<PublicPlanHistoryStep["status"], string> = {
   PLANNED: "○",
-  CURRENT: "●",
+  CURRENT: "→",
   COMPLETED: "✓",
   FAILED: "✕",
-  CANCELLED: "–",
+  CANCELLED: "○",
 };
 const timelinePresentation: Record<
   PublicTimelineEvent["kind"],
@@ -137,62 +141,6 @@ function interruptionMarkerSequence(plan: PublicPlanHistory): number | null {
   return trigger?.sequence ?? null;
 }
 
-const planningCallTypeLabel: Record<string, string> = {
-  INITIAL_PLAN: "初始规划",
-  REPLAN: "重新规划",
-  REPAIR: "修复规划",
-};
-const planningStatusLabel: Record<string, string> = {
-  RUNNING: "进行中",
-  ACCEPTED: "已通过",
-  REJECTED: "未通过",
-  ERROR: "调用失败",
-  TIMEOUT: "调用超时",
-  SUCCESS: "成功",
-};
-const planningValidatorLabel: Record<string, string> = {
-  INFORMATION_BOUNDARY_REQUIRED: "需要在信息边界停止",
-  RESOURCE_INVENTORY_UNKNOWN: "资源库存信息未知",
-  KNOWN_RESOURCE_INSUFFICIENT: "已知资源数量不足",
-  OBJECTIVE_COVERAGE_INCOMPLETE: "尚未覆盖全部目标要求",
-  ACTION_TARGET_INVALID: "行动目标不合法",
-  ACTOR_ROLE_MISMATCH: "行动队伍角色不匹配",
-  ACTOR_NOT_COMMAND_REACHABLE: "行动队伍当前无法通信",
-  ACTOR_LOCATION_UNKNOWN: "行动队伍位置未知",
-  ACTOR_NOT_AT_SOURCE: "行动队伍不在行动起点",
-  RESOURCE_SOURCE_INVALID: "资源来源不合法",
-};
-
-function planningProviderLabel(attempt: PublicPlanningAttempt): string {
-  if (attempt.status === "TIMEOUT" || attempt.provider_outcome === "TIMEOUT") {
-    return "调用超时";
-  }
-  if (attempt.status === "ERROR" || attempt.provider_outcome === "ERROR") {
-    return "调用失败";
-  }
-  if (
-    attempt.provider_outcome === "SUCCESS" ||
-    attempt.status === "ACCEPTED" ||
-    attempt.status === "REJECTED"
-  ) {
-    return "成功";
-  }
-  return attempt.status === "RUNNING" ? "进行中" : "未返回";
-}
-
-function planningValidatorStatus(attempt: PublicPlanningAttempt): string {
-  if (attempt.status === "ACCEPTED") return "通过";
-  if (attempt.status === "REJECTED" || attempt.validator_summary.length > 0) {
-    return "未通过";
-  }
-  return "未执行";
-}
-
-function planningViolationLabel(violation: Record<string, unknown>): string {
-  const code = typeof violation.code === "string" ? violation.code : null;
-  return planningValidatorLabel[code ?? ""] ?? "方案未通过校验";
-}
-
 function planningHeadline(
   event: PublicTimelineEvent,
   cycle: PublicPlanningCycle | null,
@@ -216,6 +164,100 @@ function planningHeadline(
   return event.title;
 }
 
+function planningAttemptPresentation(
+  cycle: PublicPlanningCycle,
+  attempt: PublicPlanningAttempt,
+  index: number,
+): { status: string; detail: string } {
+  if (attempt.status === "RUNNING") {
+    return { status: "规划中", detail: "正在生成执行方案…" };
+  }
+  if (attempt.status === "ACCEPTED") {
+    const count = attempt.accepted_step_count;
+    return {
+      status: "已完成",
+      detail: count > 0 ? `已生成 ${count} 步执行方案` : "已生成执行方案",
+    };
+  }
+  if (attempt.status === "REJECTED" && index < cycle.attempts.length - 1) {
+    return { status: "需要调整", detail: "当前方案需要调整" };
+  }
+  if (attempt.status === "REJECTED") {
+    return { status: "未能完成", detail: "多次尝试后仍未生成可执行方案" };
+  }
+  if (index < cycle.attempts.length - 1) {
+    return { status: "未能完成", detail: "本次规划未能完成" };
+  }
+  return {
+    status: "未能完成",
+    detail: "规划服务未能完成本次规划",
+  };
+}
+
+function planDisplayStatus(plan: PublicPlanHistory): PublicPlanDisplayStatus {
+  if (plan.display_status) return plan.display_status;
+  if (plan.status === "EXECUTING") return "EXECUTING";
+  if (plan.status === "ADJUSTED") return "ADJUSTED";
+  if (plan.status === "BLOCKED") return "BLOCKED";
+  return "OBJECTIVE_COMPLETED";
+}
+
+function resourceUsageText(
+  usage: PublicResourceUsage[] | undefined,
+  kind: PublicPlanHistoryStep["resource_usage_kind"] | PublicTimelineEvent["resource_usage_kind"],
+  {transportLabel = true}: {transportLabel?: boolean} = {},
+): string | null {
+  if (!usage || usage.length === 0) return null;
+  const prefix = kind === "TRANSPORT" && transportLabel ? "运输：" : kind === "CONSUME" ? "消耗：" : "";
+  return prefix + usage.map((item) => `${item.resource_name} ×${item.amount}`).join(" · ");
+}
+
+function locationWithoutResourceDetail(
+  location: ActionLocation | null | undefined,
+  usage: PublicResourceUsage[] | undefined,
+): ActionLocation | null | undefined {
+  if (!location || !usage || usage.length === 0 || !location.detail) return location;
+  return { ...location, detail: null };
+}
+
+function PlanStepLocation({ step }: { step: PublicPlanHistoryStep }) {
+  const usage = step.resource_usage ?? [];
+  const resourceText = resourceUsageText(usage, step.resource_usage_kind);
+  if (!resourceText) return <ActionLocationLine location={step.location} />;
+  const location = locationWithoutResourceDetail(step.location, usage);
+  if (usage.length <= 2) {
+    if (location) {
+      return (
+        <ActionLocationLine
+          location={{
+            ...location,
+            detail: [location.detail, resourceText].filter(Boolean).join(" · ") || null,
+          }}
+        />
+      );
+    }
+    return <p className="plan-resource-line">{resourceText}</p>;
+  }
+  return (
+    <>
+      <ActionLocationLine location={location} />
+      <p className="plan-resource-line plan-resource-line--stacked">{resourceText}</p>
+    </>
+  );
+}
+
+function timelineResultText(event: PublicTimelineEvent): string | null {
+  const usageText = resourceUsageText(event.resource_usage, event.resource_usage_kind, {
+    transportLabel: false,
+  });
+  const result = meaningfulResult(event.result_summary);
+  if (!usageText && !result) return null;
+  const status = resultLabel(result) ?? (
+    event.resource_usage_kind === "TRANSPORT" ? "资源已运输" : "资源已消耗"
+  );
+  return [status, usageText].filter(Boolean).join(" · ");
+}
+
 function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
   const [open, setOpen] = useState(false);
   return (
@@ -237,8 +279,9 @@ function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
             <p className="planning-attempts-empty">无可用规划明细</p>
           ) : (
             <ol className="planning-attempts">
-              {cycle.attempts.map((attempt) => {
+              {cycle.attempts.map((attempt, index) => {
                 const attemptDuration = formatDuration(attempt.duration_ms);
+                const presentation = planningAttemptPresentation(cycle, attempt, index);
                 return (
                   <li
                     className={`planning-attempt ${attempt.status.toLowerCase()}`}
@@ -247,26 +290,13 @@ function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
                   >
                     <div className="planning-attempt-heading">
                       <strong>
-                        {planningCallTypeLabel[attempt.call_type] ?? "规划尝试"}
+                        第 {index + 1} 次尝试
                         {" · "}
-                        {planningStatusLabel[attempt.status] ?? "未完成"}
+                        {presentation.status}
                       </strong>
-                      <small>{attemptDuration ?? "进行中"}</small>
+                      {attemptDuration && <small>{attemptDuration}</small>}
                     </div>
-                    <p>模型：{planningProviderLabel(attempt)}</p>
-                    <p>Validator：{planningValidatorStatus(attempt)}</p>
-                    {(attempt.status === "ACCEPTED" || attempt.accepted_step_count > 0) && (
-                      <p>已接受步骤：{attempt.accepted_step_count}</p>
-                    )}
-                    {attempt.validator_summary.length > 0 && (
-                      <ul>
-                        {attempt.validator_summary.map((violation, index) => (
-                          <li key={`${attempt.attempt_index}:${index}`}>
-                            原因：{planningViolationLabel(violation)}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
+                    <p>{presentation.detail}</p>
                   </li>
                 );
               })}
@@ -321,6 +351,8 @@ export function Timeline({ task }: { task: PublicTask | null }) {
         const planDuration = formatDuration(
           planningCycle?.wall_clock_duration_ms ?? event.duration_ms,
         );
+        const eventLocation = locationWithoutResourceDetail(event.location, event.resource_usage);
+        const actionResultText = timelineResultText(event);
         return (
           <article className={`timeline-entry ${presentation.tone}`} key={event.id}>
             <span className="timeline-mark">{presentation.mark}</span>
@@ -344,8 +376,8 @@ export function Timeline({ task }: { task: PublicTask | null }) {
                 <div className="timeline-plan-headline">
                   <strong>
                     {headline}
-                    {event.kind === "ACTION_RESULT" && actionLocationText(event.location)
-                      ? ` · ${actionLocationText(event.location)}`
+                    {event.kind === "ACTION_RESULT" && actionLocationText(eventLocation)
+                      ? ` · ${actionLocationText(eventLocation)}`
                       : ""}
                   </strong>
                   <small className="timeline-attempt-count">{planningCycle.attempt_count} 次尝试</small>
@@ -353,22 +385,22 @@ export function Timeline({ task }: { task: PublicTask | null }) {
               ) : (
                 <strong>
                   {headline}
-                  {event.kind === "ACTION_RESULT" && actionLocationText(event.location)
-                    ? ` · ${actionLocationText(event.location)}`
+                  {event.kind === "ACTION_RESULT" && actionLocationText(eventLocation)
+                    ? ` · ${actionLocationText(eventLocation)}`
                     : ""}
                 </strong>
               )}
               {planReason && <p className="timeline-plan-reason">{planReason}</p>}
               {planningCycle && <PlanningCycleDetails cycle={planningCycle} />}
-              {event.kind !== "ACTION_RESULT" && <ActionLocationLine location={event.location} />}
+              {event.kind !== "ACTION_RESULT" && <ActionLocationLine location={eventLocation} />}
               {event.detail && !event.kind.startsWith("PLAN_") && (
                 <p>
                   说明：
                   {uiLabel(event.detail)}
                 </p>
               )}
-              {!event.kind.startsWith("PLAN_") && meaningfulResult(event.result_summary) && (
-                <p>{resultLabel(meaningfulResult(event.result_summary))}</p>
+              {!event.kind.startsWith("PLAN_") && actionResultText && (
+                <p className="timeline-action-result">{actionResultText}</p>
               )}
               {!event.kind.startsWith("PLAN_") && event.knowledge_changes.length > 0 && (
                 <ul className="knowledge-gains">
@@ -392,86 +424,106 @@ export function Timeline({ task }: { task: PublicTask | null }) {
 
 export function PlanHistory({ task }: { task: PublicTask }) {
   const latestId = task.plan_history.at(-1)?.id ?? null;
-  const [expanded, setExpanded] = useState<Set<string>>(
-    () => new Set(latestId ? [latestId] : []),
-  );
+  type PlanDisplayState = "COLLAPSED" | "COMPACT" | "FULL";
+  const [displayStates, setDisplayStates] = useState<Record<string, PlanDisplayState>>({});
+  const initializedTaskId = useRef<string | null>(null);
   useEffect(() => {
-    setExpanded(new Set(latestId ? [latestId] : []));
-  }, [latestId]);
+    setDisplayStates((current) => {
+      const next = initializedTaskId.current === task.id ? { ...current } : {};
+      initializedTaskId.current = task.id;
+      task.plan_history.forEach((plan) => {
+        if (!next[plan.id]) next[plan.id] = plan.id === latestId ? "COMPACT" : "COLLAPSED";
+      });
+      return next;
+    });
+  }, [latestId, task.id, task.plan_history]);
   if (!task.plan_history.length) return <p className="console-empty">尚未生成执行方案。</p>;
   return (
     <div className="plan-history">
       {task.plan_history.map((plan) => {
-        const open = expanded.has(plan.id);
+        const state = displayStates[plan.id] ?? (plan.id === latestId ? "COMPACT" : "COLLAPSED");
+        const open = state !== "COLLAPSED";
         const markerSequence = interruptionMarkerSequence(plan);
         const interruption = plan.interruption;
-        const title = plan.ordinal === 1 ? "初始方案" : `调整方案 ${plan.ordinal - 1}`;
+        const displayStatus = planDisplayStatus(plan);
+        const reason = plan.display_reason ?? (
+          plan.interruption
+            ? `${plan.interruption.step_name} ${
+                plan.interruption.kind === "KNOWLEDGE_CONFLICT" ? "冲突" : "失败"
+              }`
+            : plan.failed_step_name
+              ? `${plan.failed_step_name} 失败`
+              : null
+        );
+        const steps = state === "COLLAPSED" ? [] : plan.steps;
+        const toggleLabel = state === "COLLAPSED" ? "展开" : state === "COMPACT" ? "展开全部" : "收起";
         return (
-          <section className={`plan-history-card ${plan.status.toLowerCase()}`} key={plan.id}>
+          <section
+            className={`plan-history-card ${displayStatus.toLowerCase()} ${state.toLowerCase()}`}
+            key={plan.id}
+          >
             <button
               className="plan-history-toggle"
               type="button"
               aria-expanded={open}
               onClick={() =>
-                setExpanded((current) => {
-                  const next = new Set(current);
-                  if (next.has(plan.id)) next.delete(plan.id);
-                  else next.add(plan.id);
-                  return next;
+                setDisplayStates((current) => {
+                  const currentState = current[plan.id] ?? state;
+                  const nextState = currentState === "COLLAPSED"
+                    ? "COMPACT"
+                    : currentState === "COMPACT"
+                      ? "FULL"
+                      : "COLLAPSED";
+                  return { ...current, [plan.id]: nextState };
                 })
               }
             >
-              <span>
-                <strong>
-                  {title} · {planStatusLabel[plan.status]}
-                </strong>
+              <span className="plan-history-heading">
+                <strong>执行方案 {plan.ordinal} · {planDisplayStatusLabel[displayStatus]}</strong>
                 <small>
-                  {plan.completed_steps}/{plan.total_steps} 完成
-                  {plan.interruption
-                    ? ` · ${plan.interruption.step_name} ${
-                        plan.interruption.kind === "KNOWLEDGE_CONFLICT" ? "冲突" : "失败"
-                      }`
-                    : plan.failed_step_name
-                      ? ` · ${plan.failed_step_name} 失败`
-                      : ""}
+                  {plan.completed_steps}/{plan.total_steps} 完成{reason ? ` · ${reason}` : ""}
                 </small>
               </span>
-              <b>{open ? "收起" : "展开"}</b>
+              <span className="plan-history-meta">
+                <b>{toggleLabel}</b>
+              </span>
             </button>
             {open && (
-              <ol className="plan-history-steps">
-                {plan.steps.map((step) => (
-                  <Fragment key={step.id}>
-                    <li className={step.status.toLowerCase()}>
-                      <b>{planStepMark[step.status]}</b>
-                      <div>
-                        <strong>{step.assigned_actor_name} · {step.action_name}</strong>
-                        {step.subtitle && (
-                          <div className="action-location-line plan-step-subtitle">
-                            <strong>{step.subtitle}</strong>
-                          </div>
-                        )}
-                        <ActionLocationLine location={step.location} />
-                        {meaningfulResult(step.result_summary) && (
-                          <p>{resultLabel(meaningfulResult(step.result_summary))}</p>
-                        )}
-                      </div>
-                    </li>
-                    {markerSequence === step.sequence && interruption && (
-                      <li className="plan-interruption">
-                        <b>!</b>
+              <div className={state === "COMPACT" ? "plan-history-step-viewport compact" : undefined}>
+                <ol className="plan-history-steps">
+                  {steps.map((step) => (
+                    <Fragment key={step.id}>
+                      <li className={step.status.toLowerCase()}>
+                        <b>{planStepMark[step.status]}</b>
                         <div>
-                          <strong>计划已中断</strong>
-                          <p>
-                            原因：{interruption.step_name}{" "}
-                            {interruption.kind === "KNOWLEDGE_CONFLICT" ? "冲突" : "失败"}
-                          </p>
+                          <strong>{step.assigned_actor_name} · {step.action_name}</strong>
+                          {step.subtitle && (
+                            <div className="action-location-line plan-step-subtitle">
+                              <strong>{step.subtitle}</strong>
+                            </div>
+                          )}
+                          <PlanStepLocation step={step} />
+                          {meaningfulResult(step.result_summary) && (
+                            <p>{resultLabel(meaningfulResult(step.result_summary))}</p>
+                          )}
                         </div>
                       </li>
-                    )}
-                  </Fragment>
-                ))}
-              </ol>
+                      {markerSequence === step.sequence && interruption && (
+                        <li className="plan-interruption">
+                          <b>!</b>
+                          <div>
+                            <strong>计划已中断</strong>
+                            <p>
+                              原因：{interruption.step_name}{" "}
+                              {interruption.kind === "KNOWLEDGE_CONFLICT" ? "冲突" : "失败"}
+                            </p>
+                          </div>
+                        </li>
+                      )}
+                    </Fragment>
+                  ))}
+                </ol>
+              </div>
             )}
           </section>
         );
@@ -1432,6 +1484,8 @@ export function GamePage() {
     placeholderData: (previous) => previous,
     refetchOnWindowFocus: !continuousExecuting,
     refetchOnReconnect: !continuousExecuting,
+    refetchInterval: (query) =>
+      planningRefetchInterval(query.state.data, activeOperation, continuousExecuting),
   });
   const livePlay = useQuery({
     queryKey: ["play", gameId, "live"],
@@ -1439,6 +1493,8 @@ export function GamePage() {
     placeholderData: (previous) => previous,
     refetchOnWindowFocus: !continuousExecuting,
     refetchOnReconnect: !continuousExecuting,
+    refetchInterval: (query) =>
+      planningRefetchInterval(query.state.data, activeOperation, continuousExecuting),
   });
   const scenario = useQuery({
     queryKey: ["scenario", play.data?.game.scenario_id],

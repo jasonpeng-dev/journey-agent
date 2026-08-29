@@ -86,12 +86,33 @@ class PublicPlanHistoryStatus(StrEnum):
     BLOCKED = "BLOCKED"
 
 
+class PublicPlanDisplayStatus(StrEnum):
+    """Player-facing outcome of one accepted Plan segment."""
+
+    EXECUTING = "EXECUTING"
+    ADJUSTED = "ADJUSTED"
+    STAGE_COMPLETED = "STAGE_COMPLETED"
+    OBJECTIVE_COMPLETED = "OBJECTIVE_COMPLETED"
+    BLOCKED = "BLOCKED"
+
+
 class PublicPlanHistoryStepStatus(StrEnum):
     PLANNED = "PLANNED"
     CURRENT = "CURRENT"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class PublicResourceUsageKind(StrEnum):
+    CONSUME = "CONSUME"
+    TRANSPORT = "TRANSPORT"
+
+
+class PublicResourceUsageResponse(ApiModel):
+    resource_key: str
+    resource_name: str
+    amount: int = Field(gt=0)
 
 
 class PublicPlanInterruptionKind(StrEnum):
@@ -351,6 +372,8 @@ class PublicPlanHistoryStepResponse(ApiModel):
     status: PublicPlanHistoryStepStatus
     result_summary: str | None = None
     location: PublicActionLocationResponse | None = None
+    resource_usage: list[PublicResourceUsageResponse] = Field(default_factory=list)
+    resource_usage_kind: PublicResourceUsageKind | None = None
 
 
 class PublicPlanInterruptionResponse(ApiModel):
@@ -364,6 +387,10 @@ class PublicPlanHistoryResponse(ApiModel):
     id: UUID
     ordinal: int = Field(ge=1)
     status: PublicPlanHistoryStatus
+    display_status: PublicPlanDisplayStatus | None = None
+    display_reason: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    planning_cycle_id: UUID | None = None
     completed_steps: int = Field(ge=0)
     total_steps: int = Field(ge=0)
     failed_step_name: str | None = None
@@ -462,6 +489,8 @@ class PublicTimelineEventResponse(ApiModel):
     knowledge_changes: list[PublicKnowledgeChangeResponse] = Field(default_factory=list)
     occurred_at: datetime | None = None
     location: PublicActionLocationResponse | None = None
+    resource_usage: list[PublicResourceUsageResponse] = Field(default_factory=list)
+    resource_usage_kind: PublicResourceUsageKind | None = None
     # A persisted operation snapshot, never a live client timer.  This is
     # derived from the task's provider/application audit metadata so it stays
     # stable after a page refresh.

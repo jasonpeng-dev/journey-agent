@@ -16,6 +16,7 @@ import {
   debriefButtonLabel,
   formatDuration,
   operationBelongsToTask,
+  planningRefetchInterval,
   segmentCompletionMessage,
   syncPlayStateCaches,
 } from "./playPresentation";
@@ -227,6 +228,33 @@ describe("Formal Play player projections", () => {
     writes.length = 0;
     syncPlayStateCaches(setQueryData, "game", "old-task", state);
     expect(writes.map((item) => item.key)).toEqual([["play", "game", "live"]]);
+  });
+
+  it("polls authoritative PLAY state while planning is active and stops at a terminal state", () => {
+    const runningState = {
+      current_task: { planning_process: [{ status: "RUNNING" }] },
+    } as PlayerGameState;
+    const terminalState = {
+      current_task: { planning_process: [{ status: "ACCEPTED" }] },
+    } as PlayerGameState;
+
+    expect(planningRefetchInterval(runningState, null, false)).toBe(1500);
+    expect(planningRefetchInterval(terminalState, null, false)).toBe(false);
+    expect(
+      planningRefetchInterval(
+        undefined,
+        { kind: "planning", taskId: "task", startedAt: 0 },
+        false,
+      ),
+    ).toBe(1500);
+    expect(
+      planningRefetchInterval(
+        undefined,
+        { kind: "replanning", taskId: "task", startedAt: 0 },
+        false,
+      ),
+    ).toBe(1500);
+    expect(planningRefetchInterval(runningState, null, true)).toBe(false);
   });
 
   it("keeps the segment-complete debrief copy and ordinary/failure labels distinct", () => {
@@ -848,19 +876,161 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText("当前参与者")).not.toBeInTheDocument();
   });
 
-  it("默认展开最新方案、折叠旧方案，并允许查看冻结历史", () => {
+  it("默认以紧凑模式展示最新方案，并允许循环查看冻结历史", () => {
     render(<PlanHistory task={task} />);
     expect(document.querySelectorAll(".plan-history-card")).toHaveLength(2);
     expect(screen.getByText("乙 · 新行动")).toBeVisible();
     expect(screen.queryByText("甲 · 旧行动", { selector: ".plan-history-steps strong" })).not.toBeInTheDocument();
-    const latestToggle = screen.getByRole("button", { name: /调整方案 1 · 执行中/ });
+    const latestToggle = screen.getByRole("button", { name: /执行方案 2 · 执行中/ });
+    expect(latestToggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(latestToggle);
+    expect(latestToggle).toHaveTextContent("收起");
     expect(latestToggle).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(latestToggle);
     expect(latestToggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("乙 · 新行动")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /初始方案 · 已调整/ }));
+    fireEvent.click(screen.getByRole("button", { name: /执行方案 1 · 已调整/ }));
     expect(screen.getByText("甲 · 旧行动", { selector: ".plan-history-steps strong" })).toBeVisible();
     expect(screen.getByText("甲 · 取消行动").closest("li")).toHaveClass("cancelled");
+  });
+
+  it("用玩家状态、规划次数和资源信息展示三档方案卡", () => {
+    const cycle = planningCycle(
+      "cycle-stage",
+      "REPLAN",
+      "ACCEPTED",
+      [planningAttempt("REPLAN", "REJECTED"), planningAttempt("REPAIR", "ACCEPTED")],
+    );
+    const steps: PublicTask["plan_history"][number]["steps"] = Array.from(
+      { length: 6 },
+      (_, index) => ({
+        id: `stage-step-${index + 1}`,
+        sequence: index + 1,
+        action_name: index === 5 ? "运输资源" : index === 4 ? "修复设施" : `行动 ${index + 1}`,
+        assigned_actor_name: "应急物流一队",
+        status: "COMPLETED" as const,
+        result_summary: null,
+        location: index === 5
+          ? { kind: "ROUTE" as const, summary: "中央城区 → 东部居民区", detail: "旧资源文字 ×10" }
+          : index === 4
+            ? { kind: "FACILITY" as const, summary: "东部居民区 · 应急设施", detail: null }
+          : null,
+        resource_usage: index === 5
+          ? [
+              { resource_key: "municipal", resource_name: "市政维修材料", amount: 10 },
+              { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+              { resource_key: "electrical", resource_name: "电力维修部件", amount: 2 },
+            ]
+          : index === 4
+            ? [
+                { resource_key: "water", resource_name: "水务系统部件", amount: 15 },
+                { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+              ]
+          : [],
+        resource_usage_kind: index === 5 ? "TRANSPORT" as const : index === 4 ? "CONSUME" as const : null,
+      }),
+    );
+    const plan = {
+      id: "stage-plan",
+      ordinal: 2,
+      status: "COMPLETED" as const,
+      display_status: "STAGE_COMPLETED" as const,
+      display_reason: "获取资源信息",
+      duration_ms: 130000,
+      planning_cycle_id: cycle.id,
+      completed_steps: 6,
+      total_steps: 6,
+      failed_step_name: null,
+      steps,
+    };
+    const { rerender } = render(
+      <PlanHistory task={{ ...task, plan_history: [plan], planning_process: [cycle] }} />,
+    );
+
+    const card = screen.getByRole("button", { name: /执行方案 2 · 阶段完成/ });
+    expect(within(card).queryByText("2m 10s")).not.toBeInTheDocument();
+    expect(within(card).queryByText("2 次尝试")).not.toBeInTheDocument();
+    expect(card).toHaveTextContent("展开全部");
+    expect(screen.getByText("运输：市政维修材料 ×10 · 通用工程部件 ×5 · 电力维修部件 ×2")).toBeVisible();
+    expect(screen.getByText(/消耗：水务系统部件 ×15 · 通用工程部件 ×5/)).toBeVisible();
+
+    fireEvent.click(card);
+    expect(card).toHaveTextContent("收起");
+    expect(screen.getByText(/应急物流一队 · 行动 1/)).toBeVisible();
+    fireEvent.click(card);
+    expect(card).toHaveTextContent("展开");
+    expect(screen.queryByText(/应急物流一队 · 行动 1/)).not.toBeInTheDocument();
+
+    const updatedPlan = { ...plan, display_status: "OBJECTIVE_COMPLETED" as const };
+    rerender(<PlanHistory task={{ ...task, plan_history: [updatedPlan], planning_process: [cycle] }} />);
+    expect(screen.getByRole("button", { name: /执行方案 2 · 目标完成/ })).toBeVisible();
+    expect(screen.queryByText("2 次尝试")).not.toBeInTheDocument();
+  });
+
+  it("普通 polling 不重置方案 compact viewport 的手动滚动位置", () => {
+    const steps = Array.from({ length: 8 }, (_, index) => ({
+      id: `scroll-step-${index + 1}`,
+      sequence: index + 1,
+      action_name: `行动 ${index + 1}`,
+      assigned_actor_name: "应急物流一队",
+      status: "COMPLETED" as const,
+      result_summary: null,
+      location: null,
+    }));
+    const scrollPlan = {
+      ...task.plan_history[0],
+      id: "scroll-plan",
+      ordinal: 1,
+      status: "COMPLETED" as const,
+      display_status: "STAGE_COMPLETED" as const,
+      completed_steps: 8,
+      total_steps: 8,
+      steps,
+    };
+    const view = { ...task, plan_history: [scrollPlan] };
+    const { rerender } = render(<PlanHistory task={view} />);
+    const viewport = document.querySelector<HTMLElement>(".plan-history-step-viewport.compact");
+    expect(viewport).not.toBeNull();
+    expect(viewport!.querySelectorAll(".plan-history-steps > li")).toHaveLength(8);
+    viewport!.scrollTop = 123;
+    rerender(<PlanHistory task={{
+      ...view,
+      version: 2,
+      plan_history: [{
+        ...scrollPlan,
+        steps: steps.map((step, index) => index === 5 ? { ...step, status: "CURRENT" as const } : step),
+      }],
+    }} />);
+    expect(viewport!.scrollTop).toBe(123);
+  });
+
+  it("在执行历史结果行展示实际资源语义，而不是重复路线详情", () => {
+    render(
+      <Timeline
+        task={{
+          ...task,
+          timeline: [{
+            ...task.timeline[0],
+            id: "transport-result-with-usage",
+            kind: "ACTION_RESULT",
+            title: "运输资源",
+            actor_name: "应急物流一队",
+            result_summary: "行动已完成",
+            success: true,
+            location: { kind: "ROUTE", summary: "西部物流区 → 中央城区", detail: "旧资源文字 ×10" },
+            resource_usage: [
+              { resource_key: "municipal", resource_name: "市政维修材料", amount: 10 },
+              { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+            ],
+            resource_usage_kind: "TRANSPORT",
+          }],
+        }}
+      />,
+    );
+    expect(screen.getByText("运输资源 · 西部物流区 → 中央城区")).toBeVisible();
+    expect(screen.getByText("资源已运输 · 市政维修材料 ×10 · 通用工程部件 ×5")).toBeVisible();
+    expect(screen.queryByText(/旧资源文字/)).not.toBeInTheDocument();
+    expect(screen.queryByText("行动已完成")).not.toBeInTheDocument();
   });
 
   it("任务日志只渲染已经进入历史的安全事件", () => {
@@ -1027,12 +1197,12 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByTestId("planning-attempt-cycle-initial-0")).not.toBeInTheDocument();
 
     fireEvent.click(within(cycleCard).getByRole("button"));
-    expect(within(cycleCard).getAllByText("初始规划 · 已通过")).toHaveLength(1);
+    expect(within(cycleCard).getAllByText("第 1 次尝试 · 已完成")).toHaveLength(1);
     expect(screen.getByText("1 次尝试")).toBeVisible();
     expect(screen.getByRole("button", { name: "▾ 收起规划详情" })).toBeVisible();
-    expect(within(cycleCard).getByText("模型：成功")).toBeVisible();
-    expect(within(cycleCard).getByText("Validator：通过")).toBeVisible();
-    expect(within(cycleCard).getByText("已接受步骤：3")).toBeVisible();
+    expect(within(cycleCard).getByText("已生成 3 步执行方案")).toBeVisible();
+    expect(within(cycleCard).queryByText("模型：成功")).not.toBeInTheDocument();
+    expect(within(cycleCard).queryByText("Validator：通过")).not.toBeInTheDocument();
     expect(screen.getByTestId("planning-attempt-cycle-initial-0")).toBeVisible();
   });
 
@@ -1076,9 +1246,10 @@ describe("Formal Play player projections", () => {
     fireEvent.click(within(cycleCard).getByRole("button"));
     const attempts = within(cycleCard).getAllByTestId(/planning-attempt-cycle-replan-/);
     expect(attempts).toHaveLength(2);
-    expect(attempts[0]).toHaveTextContent("重新规划 · 未通过");
-    expect(attempts[1]).toHaveTextContent("修复规划 · 已通过");
-    expect(within(cycleCard).getByText(/资源库存信息未知/)).toBeVisible();
+    expect(attempts[0]).toHaveTextContent("第 1 次尝试 · 需要调整");
+    expect(attempts[1]).toHaveTextContent("第 2 次尝试 · 已完成");
+    expect(within(cycleCard).getByText("当前方案需要调整")).toBeVisible();
+    expect(within(cycleCard).getByText("已生成 7 步执行方案")).toBeVisible();
     expect(screen.getByText("· 2m 10s")).toBeVisible();
     expect(screen.getByText("2 次尝试")).toBeVisible();
     expect(screen.getByText("Agent 已重新规划").parentElement).toHaveClass("timeline-plan-headline");
@@ -1132,11 +1303,12 @@ describe("Formal Play player projections", () => {
     expect(document.querySelectorAll(".planning-details-toggle")).toHaveLength(2);
     fireEvent.click(within(cycleCard).getByRole("button"));
     expect(within(cycleCard).getAllByTestId(/planning-attempt-cycle-error-/)).toHaveLength(2);
-    expect(within(cycleCard).getByText("重新规划 · 未通过")).toBeVisible();
-    expect(within(cycleCard).getByText("修复规划 · 调用失败")).toBeVisible();
-    expect(within(cycleCard).getByText("模型：成功")).toBeVisible();
-    expect(within(cycleCard).getByText("模型：调用失败")).toBeVisible();
-    expect(within(cycleCard).getByText(/需要在信息边界停止/)).toBeVisible();
+    expect(within(cycleCard).getByText("第 1 次尝试 · 需要调整")).toBeVisible();
+    expect(within(cycleCard).getByText("第 2 次尝试 · 未能完成")).toBeVisible();
+    expect(within(cycleCard).getByText("规划服务未能完成本次规划")).toBeVisible();
+    expect(within(cycleCard).getByText("当前方案需要调整")).toBeVisible();
+    expect(within(cycleCard).queryByText("模型：成功")).not.toBeInTheDocument();
+    expect(within(cycleCard).queryByText("模型：调用失败")).not.toBeInTheDocument();
     expect(screen.queryByText("REPLAN")).not.toBeInTheDocument();
     expect(screen.queryByText("REPAIR")).not.toBeInTheDocument();
     expect(screen.queryByText("SUCCESS")).not.toBeInTheDocument();
@@ -1419,7 +1591,7 @@ describe("Formal Play player projections", () => {
         }}
       />,
     );
-    expect(screen.getByRole("button", { name: /初始方案/ })).toHaveTextContent("前往区域 冲突");
+    expect(screen.getByRole("button", { name: /执行方案 1/ })).toHaveTextContent("前往区域 冲突");
     expect(screen.getByText("计划已中断")).toBeVisible();
     const conflictMarker = screen.getByText("计划已中断").closest("li");
     expect(conflictMarker).toHaveTextContent("原因：前往区域 冲突");

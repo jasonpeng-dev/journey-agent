@@ -8,6 +8,22 @@ export type ActivePlayOperation = {
   startedAt: number;
 };
 
+const PLANNING_POLL_INTERVAL_MS = 1500;
+
+export function planningRefetchInterval(
+  state: PlayerGameState | undefined,
+  activeOperation: ActivePlayOperation | null,
+  continuousExecuting: boolean,
+): number | false {
+  if (continuousExecuting) return false;
+  const hasRunningCycle = state?.current_task?.planning_process?.some(
+    (cycle) => cycle.status === "RUNNING",
+  ) ?? false;
+  const hasActivePlanningRequest =
+    activeOperation?.kind === "planning" || activeOperation?.kind === "replanning";
+  return hasRunningCycle || hasActivePlanningRequest ? PLANNING_POLL_INTERVAL_MS : false;
+}
+
 export function formatDuration(durationMs: number | null | undefined): string | null {
   if (durationMs === null || durationMs === undefined || durationMs < 0) return null;
   const totalSeconds = Math.max(1, Math.round(durationMs / 1000));

@@ -25,6 +25,7 @@ from app.api.schemas.phase_d import (
     PublicGameStatus,
     PublicKnowledgeChangeResponse,
     PublicNodeResponse,
+    PublicPlanDisplayStatus,
     PublicPlanHistoryResponse,
     PublicPlanHistoryStatus,
     PublicPlanHistoryStepResponse,
@@ -37,6 +38,8 @@ from app.api.schemas.phase_d import (
     PublicPlanStepResponse,
     PublicRelationResponse,
     PublicResourceResponse,
+    PublicResourceUsageKind,
+    PublicResourceUsageResponse,
     PublicStepStatus,
     PublicTargetActionContractResponse,
     PublicTaskResponse,
@@ -55,7 +58,12 @@ from app.domain.enums import (
     WorldOperationStatus,
 )
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ActionBehavior, ActionDefinitionV2, ScenarioDefinitionV2
+from app.domain.scenario_v2 import (
+    ActionBehavior,
+    ActionDefinitionV2,
+    ScenarioDefinitionV2,
+    transport_resource_entries,
+)
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentPlan,
@@ -501,6 +509,31 @@ class PlayerProjectionService:
             )
             for plan in plans
         }
+        planning_cycles = tuple(
+            self.db.scalars(
+                select(PlanningCycle)
+                .where(PlanningCycle.task_id == task.id)
+                .order_by(PlanningCycle.created_at, PlanningCycle.id)
+            )
+        )
+        planning_cycles_by_id = {cycle.id: cycle for cycle in planning_cycles}
+        attempts_by_cycle: dict[UUID, tuple[PlanningAttempt, ...]] = {
+            cycle.id: () for cycle in planning_cycles
+        }
+        attempts_for_task = self.db.scalars(
+            select(PlanningAttempt)
+            .where(PlanningAttempt.task_id == task.id)
+            .order_by(PlanningAttempt.cycle_id, PlanningAttempt.attempt_index, PlanningAttempt.id)
+        )
+        attempt_lists: dict[UUID, list[PlanningAttempt]] = {
+            cycle.id: [] for cycle in planning_cycles
+        }
+        for attempt in attempts_for_task:
+            if attempt.cycle_id in attempt_lists:
+                attempt_lists[attempt.cycle_id].append(attempt)
+        attempts_by_cycle = {
+            cycle_id: tuple(attempts) for cycle_id, attempts in attempt_lists.items()
+        }
         spatial = SpatialDisplayProjector(definition)
         actor_positions_by_step = self._actor_positions_by_step(
             task,
@@ -606,6 +639,10 @@ class PlayerProjectionService:
                     subtitle_by_step=relay_subtitle_by_step,
                     task_status=task.status,
                     is_latest=plan == latest,
+                    planning_cycle=_cycle_for_plan(planning_cycles_by_id, plan.planning_cycle_id),
+                    planning_attempts=_attempts_for_cycle(
+                        attempts_by_cycle, plan.planning_cycle_id
+                    ),
                     current_step_id=(
                         current_step.id
                         if plan == latest
@@ -1122,6 +1159,12 @@ class PlayerProjectionService:
                         location_by_step=location_by_step,
                     )
                     assert debrief is not None
+                    action = _action_definition(definition, step)
+                    resource_usage, resource_usage_kind = _actual_resource_usage(
+                        action,
+                        action_operation,
+                        definition,
+                    )
                     events.append(
                         PublicTimelineEventResponse(
                             id=f"result:{step.id}",
@@ -1137,6 +1180,8 @@ class PlayerProjectionService:
                             ),
                             occurred_at=_action_cycle_completed_at(step, plan_steps),
                             location=location_by_step.get(step.id),
+                            resource_usage=resource_usage,
+                            resource_usage_kind=resource_usage_kind,
                         )
                     )
         terminal_kind = {
@@ -1329,6 +1374,24 @@ def _task_status(status: AgentTaskStatus, error_code: str | None) -> PublicTaskS
     }[status]
 
 
+def _attempts_for_cycle(
+    attempts_by_cycle: dict[UUID, tuple[PlanningAttempt, ...]],
+    cycle_id: UUID | None,
+) -> tuple[PlanningAttempt, ...]:
+    if cycle_id is None:
+        return ()
+    return attempts_by_cycle.get(cycle_id, ())
+
+
+def _cycle_for_plan(
+    planning_cycles_by_id: dict[UUID, PlanningCycle],
+    cycle_id: UUID | None,
+) -> PlanningCycle | None:
+    if cycle_id is None:
+        return None
+    return planning_cycles_by_id.get(cycle_id)
+
+
 def _plan_history_entry(
     task: AgentTask,
     plan: AgentPlan,
@@ -1338,38 +1401,46 @@ def _plan_history_entry(
     *,
     task_status: AgentTaskStatus,
     is_latest: bool,
+    planning_cycle: PlanningCycle | None,
+    planning_attempts: tuple[PlanningAttempt, ...],
     current_step_id: UUID | None,
     location_by_step: dict[UUID, PublicActionLocationResponse | None],
     subtitle_by_step: dict[UUID, str],
 ) -> PublicPlanHistoryResponse:
     tool_steps = tuple(step for step in steps if step.execution_type == StepExecutionType.TOOL)
-    public_steps = [
-        PublicPlanHistoryStepResponse(
-            id=step.id,
-            sequence=step.sequence,
-            action_name=(
-                action.name
-                if (action := _action_definition(definition, step))
-                else step.description
-            ),
-            assigned_actor_name=actors.get(step.assigned_actor_key, step.assigned_actor_key),
-            subtitle=subtitle_by_step.get(step.id),
-            status=_plan_history_step_status(
-                step,
-                plan,
-                current_step_id,
-                steps,
-                task_terminal=is_latest
-                and task_status
-                in (AgentTaskStatus.FAILED, AgentTaskStatus.BLOCKED, AgentTaskStatus.ABORTED),
-            ),
-            result_summary=(
-                "行动未完成" if _plan_action_failed(step, steps) else _result_summary(step)
-            ),
-            location=location_by_step.get(step.id),
+    public_steps: list[PublicPlanHistoryStepResponse] = []
+    for step in tool_steps:
+        action = _action_definition(definition, step)
+        resource_usage, resource_usage_kind = _planned_resource_usage(
+            action,
+            step,
+            planning_cycle,
+            definition,
         )
-        for step in tool_steps
-    ]
+        public_steps.append(
+            PublicPlanHistoryStepResponse(
+                id=step.id,
+                sequence=step.sequence,
+                action_name=action.name if action is not None else step.description,
+                assigned_actor_name=actors.get(step.assigned_actor_key, step.assigned_actor_key),
+                subtitle=subtitle_by_step.get(step.id),
+                status=_plan_history_step_status(
+                    step,
+                    plan,
+                    current_step_id,
+                    steps,
+                    task_terminal=is_latest
+                    and task_status
+                    in (AgentTaskStatus.FAILED, AgentTaskStatus.BLOCKED, AgentTaskStatus.ABORTED),
+                ),
+                result_summary=(
+                    "行动未完成" if _plan_action_failed(step, steps) else _result_summary(step)
+                ),
+                location=location_by_step.get(step.id),
+                resource_usage=resource_usage,
+                resource_usage_kind=resource_usage_kind,
+            )
+        )
     failed_step = next(
         (step for step in public_steps if step.status == PublicPlanHistoryStepStatus.FAILED),
         None,
@@ -1394,10 +1465,33 @@ def _plan_history_entry(
         in (AgentTaskStatus.FAILED, AgentTaskStatus.BLOCKED, AgentTaskStatus.ABORTED)
     ):
         status = PublicPlanHistoryStatus.BLOCKED
+    display_status = _plan_display_status(
+        plan,
+        tool_steps,
+        steps,
+        task_status=task_status,
+        is_latest=is_latest,
+        plan_invalidated=_plan_invalidation_for(task, plan.version) is not None,
+    )
+    cycle_started, cycle_finished = (
+        _planning_cycle_timing(planning_cycle, planning_attempts)
+        if planning_cycle is not None
+        else (None, None)
+    )
     return PublicPlanHistoryResponse(
         id=plan.id,
         ordinal=plan.version,
         status=status,
+        display_status=display_status,
+        display_reason=_plan_display_reason(
+            display_status,
+            plan,
+            tool_steps,
+            steps,
+            definition,
+        ),
+        duration_ms=_datetime_duration_ms(cycle_started, cycle_finished),
+        planning_cycle_id=plan.planning_cycle_id,
         completed_steps=sum(
             step.status == PublicPlanHistoryStepStatus.COMPLETED for step in public_steps
         ),
@@ -1406,6 +1500,235 @@ def _plan_history_entry(
         interruption=interruption,
         steps=public_steps,
     )
+
+
+def _plan_display_status(
+    plan: AgentPlan,
+    tool_steps: tuple[AgentStep, ...],
+    plan_steps: tuple[AgentStep, ...],
+    *,
+    task_status: AgentTaskStatus,
+    is_latest: bool,
+    plan_invalidated: bool,
+) -> PublicPlanDisplayStatus:
+    if plan.status == AgentPlanStatus.SUCCEEDED or (
+        is_latest and task_status == AgentTaskStatus.SUCCEEDED
+    ):
+        return PublicPlanDisplayStatus.OBJECTIVE_COMPLETED
+    if plan.status == AgentPlanStatus.FAILED:
+        return PublicPlanDisplayStatus.BLOCKED
+    if is_latest and task_status in (
+        AgentTaskStatus.FAILED,
+        AgentTaskStatus.BLOCKED,
+        AgentTaskStatus.ABORTED,
+    ):
+        return PublicPlanDisplayStatus.BLOCKED
+    if plan_invalidated:
+        return PublicPlanDisplayStatus.ADJUSTED
+    if _plan_is_completed_segment(plan, tool_steps, plan_steps):
+        return PublicPlanDisplayStatus.STAGE_COMPLETED
+    if plan.status == AgentPlanStatus.SUPERSEDED:
+        return PublicPlanDisplayStatus.ADJUSTED
+    return PublicPlanDisplayStatus.EXECUTING
+
+
+def _plan_is_completed_segment(
+    plan: AgentPlan,
+    tool_steps: tuple[AgentStep, ...],
+    plan_steps: tuple[AgentStep, ...],
+) -> bool:
+    if not tool_steps or any(_plan_action_failed(step, plan_steps) for step in tool_steps):
+        return False
+    if any(
+        step.status not in (AgentStepStatus.SUCCEEDED, AgentStepStatus.SKIPPED)
+        for step in tool_steps
+    ):
+        return False
+    return plan.stop_reason != "BLOCKED"
+
+
+def _plan_display_reason(
+    display_status: PublicPlanDisplayStatus,
+    plan: AgentPlan,
+    tool_steps: tuple[AgentStep, ...],
+    plan_steps: tuple[AgentStep, ...],
+    definition: ScenarioDefinitionV2,
+) -> str | None:
+    if display_status == PublicPlanDisplayStatus.OBJECTIVE_COMPLETED:
+        return None
+    if display_status == PublicPlanDisplayStatus.STAGE_COMPLETED:
+        last_step = next(
+            (step for step in reversed(tool_steps) if step.status == AgentStepStatus.SUCCEEDED),
+            None,
+        )
+        action = _action_definition(definition, last_step) if last_step is not None else None
+        return {
+            "survey_resources": "获取资源信息",
+            "inspect": "状态已查明",
+            "repair_communications": "区域状态已查明",
+        }.get(action.key if action is not None else "", "准备继续规划")
+    if display_status not in (
+        PublicPlanDisplayStatus.ADJUSTED,
+        PublicPlanDisplayStatus.BLOCKED,
+    ):
+        return None
+    failed_step = next(
+        (step for step in tool_steps if _plan_action_failed(step, plan_steps)),
+        None,
+    )
+    if failed_step is None:
+        return None
+    action = _action_definition(definition, failed_step)
+    failure_code = (failed_step.failure_code or "").upper()
+    if "BLOCKED" in failure_code:
+        return "发现通道受阻"
+    if action is not None and action.behavior == ActionBehavior.TRAVEL:
+        return "前往区域失败"
+    if action is not None and action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+        return "资源运输失败"
+    if action is not None and action.key.startswith("repair_"):
+        return "设施修复失败"
+    return "行动执行失败"
+
+
+def _planned_resource_usage(
+    action: ActionDefinitionV2 | None,
+    step: AgentStep,
+    planning_cycle: PlanningCycle | None,
+    definition: ScenarioDefinitionV2,
+) -> tuple[list[PublicResourceUsageResponse], PublicResourceUsageKind | None]:
+    if action is None:
+        return [], None
+    raw_parameters = step.tool_arguments.get("parameters")
+    parameters = raw_parameters if isinstance(raw_parameters, dict) else {}
+    if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+        try:
+            amounts = dict(transport_resource_entries(parameters))
+        except ValueError:
+            return [], None
+        return _resource_usage_items(amounts, definition), (
+            PublicResourceUsageKind.TRANSPORT if amounts else None
+        )
+    if planning_cycle is None or not isinstance(planning_cycle.planner_input, dict):
+        return [], None
+    target_key = step.tool_arguments.get("target_key")
+    action_key = action.key
+    amounts = _planner_input_resource_costs(
+        planning_cycle.planner_input,
+        action_key=action_key,
+        target_key=target_key if isinstance(target_key, str) else None,
+    )
+    return _resource_usage_items(amounts, definition), (
+        PublicResourceUsageKind.CONSUME if amounts else None
+    )
+
+
+def _planner_input_resource_costs(
+    planner_input: dict[str, Any],
+    *,
+    action_key: str,
+    target_key: str | None,
+) -> dict[str, int]:
+    amounts: dict[str, int] = {}
+    target_bindings = planner_input.get("target_bindings")
+    if isinstance(target_bindings, list):
+        for binding in target_bindings:
+            if not isinstance(binding, dict):
+                continue
+            if binding.get("action_key") != action_key or (
+                target_key is not None and binding.get("target_key") != target_key
+            ):
+                continue
+            requirements = binding.get("requirements")
+            if isinstance(requirements, list):
+                for requirement in requirements:
+                    if not isinstance(requirement, dict):
+                        continue
+                    _merge_resource_amounts(amounts, requirement.get("cost"))
+            _merge_resource_effects(amounts, binding.get("deterministic_effects"))
+            break
+    action_contracts = planner_input.get("action_contracts")
+    if isinstance(action_contracts, list):
+        for contract in action_contracts:
+            if not isinstance(contract, dict) or contract.get("action_key") != action_key:
+                continue
+            _merge_resource_effects(amounts, contract.get("deterministic_effects"))
+            break
+    return amounts
+
+
+def _merge_resource_amounts(target: dict[str, int], raw_cost: object) -> None:
+    if not isinstance(raw_cost, dict):
+        return
+    for resource_key, amount in raw_cost.items():
+        if isinstance(resource_key, str) and isinstance(amount, int) and amount > 0:
+            target[resource_key] = max(target.get(resource_key, 0), amount)
+
+
+def _merge_resource_effects(target: dict[str, int], raw_effects: object) -> None:
+    if not isinstance(raw_effects, list):
+        return
+    for effect in raw_effects:
+        if not isinstance(effect, dict) or effect.get("type") not in {
+            "RESOURCE_DELTA",
+            "RESOURCE_CONSUMPTION",
+        }:
+            continue
+        resource_key = effect.get("resource_key")
+        amount = effect.get("amount")
+        if isinstance(resource_key, str) and isinstance(amount, int) and amount != 0:
+            target[resource_key] = max(target.get(resource_key, 0), abs(amount))
+
+
+def _resource_usage_items(
+    amounts: dict[str, int], definition: ScenarioDefinitionV2
+) -> list[PublicResourceUsageResponse]:
+    names = {resource.key: resource.name for resource in definition.world.resources}
+    return [
+        PublicResourceUsageResponse(
+            resource_key=resource_key,
+            resource_name=names.get(resource_key, resource_key),
+            amount=amount,
+        )
+        for resource_key, amount in amounts.items()
+        if amount > 0
+    ]
+
+
+def _actual_resource_usage(
+    action: ActionDefinitionV2 | None,
+    operation: WorldOperation | None,
+    definition: ScenarioDefinitionV2,
+) -> tuple[list[PublicResourceUsageResponse], PublicResourceUsageKind | None]:
+    if action is None or operation is None or not isinstance(operation.outcome, dict):
+        return [], None
+    if operation.outcome.get("failure") is not None:
+        return [], None
+    raw_mutations = operation.outcome.get("resource_mutations")
+    if not isinstance(raw_mutations, list):
+        return [], None
+    amounts: dict[str, int] = {}
+    for mutation in raw_mutations:
+        if not isinstance(mutation, dict):
+            continue
+        resource_key = mutation.get("resource_key")
+        amount = mutation.get("amount")
+        if not isinstance(resource_key, str) or not isinstance(amount, int):
+            continue
+        if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+            if amount > 0:
+                amounts[resource_key] = amounts.get(resource_key, 0) + amount
+        elif amount < 0:
+            amounts[resource_key] = amounts.get(resource_key, 0) + abs(amount)
+    usage = _resource_usage_items(amounts, definition)
+    if not usage:
+        return [], None
+    kind = (
+        PublicResourceUsageKind.TRANSPORT
+        if action.behavior == ActionBehavior.TRANSPORT_RESOURCE
+        else PublicResourceUsageKind.CONSUME
+    )
+    return usage, kind
 
 
 def _plan_interruption(

@@ -306,9 +306,12 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .plan-history-card.adjusted { background: #fcfaf4; }
 .plan-history-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 0; color: var(--console-ink); background: transparent; cursor: pointer; text-align: left; }
 .plan-history-toggle span, .plan-history-toggle strong, .plan-history-toggle small { display: block; }
+.plan-history-heading { min-width: 0; flex: 1 1 auto; }
 .plan-history-toggle strong { font-size: 13px; }
 .plan-history-toggle small { margin-top: 4px; color: var(--console-soft); font-size: 10px; }
-.plan-history-toggle > b { color: var(--console-jade); font-size: 10px; }
+.plan-history-meta { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: 2px; text-align: right; }
+.plan-history-meta small { margin-top: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.plan-history-meta b { color: var(--console-jade); font-size: 10px; }
 .timeline-plan-reason { margin: 4px 0 0; color: var(--console-soft); font-size: 10px; }
 .plan-history-steps { display: grid; gap: 8px; margin: 0; padding: 12px 12px 10px; border-top: 1px solid #eee8dd; list-style: none; }
 .plan-history-steps li { display: flex; gap: 10px; padding: 10px 11px; border: 1px solid #e4ddcf; border-radius: 12px; background: #fffdf9; box-shadow: 0 3px 9px rgb(78 65 39 / 4%); }
@@ -323,6 +326,9 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .plan-history-steps strong, .plan-history-steps small { display: block; }
 .plan-history-steps strong { font-size: 12px; }
 .plan-history-steps small, .plan-history-steps p { margin: 3px 0 0; color: var(--console-soft); font-size: 10px; }
+.plan-history-step-viewport.compact { max-height: 368px; overflow-y: auto; }
+.plan-resource-line { margin: 4px 0 0; color: var(--console-soft); font-size: 10px; line-height: 1.35; }
+.plan-resource-line--stacked { margin-top: 6px; }
 .planning-cycle-details { overflow: hidden; margin-top: 10px; border: 1px solid #e4ddcf; border-radius: 10px; background: #fffdf9; }
 .planning-cycle-details.accepted { border-color: #b8d6c8; }
 .planning-cycle-details.error, .planning-cycle-details.rejected { border-color: #e9c3bd; }
