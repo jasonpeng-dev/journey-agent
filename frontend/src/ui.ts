@@ -212,6 +212,12 @@ export function uiLabel(value: string | null | undefined): string {
   return labels[value] ?? value.replaceAll("_", " ");
 }
 
+export function taskExplanationLabel(status: string, explanation: string | null): string | null {
+  if (!explanation) return null;
+  const explanationLabel = uiLabel(explanation);
+  return explanationLabel === uiLabel(status) ? null : explanationLabel;
+}
+
 export function fieldLabel(value: string): string {
   return fieldLabels[value] ?? value.replaceAll("_", " ");
 }

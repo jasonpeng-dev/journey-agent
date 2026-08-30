@@ -21,12 +21,14 @@ import {
   segmentCompletionMessage,
   syncPlayStateCaches,
 } from "./playPresentation";
+import { taskExplanationLabel, uiLabel } from "./ui";
 import type {
   PlayerGameState,
   PublicPlanStep,
   PublicPlanningAttempt,
   PublicPlanningCycle,
   PublicTask,
+  MissionRoadmapStage,
   ResourceIntelligence,
 } from "./types";
 
@@ -183,6 +185,9 @@ describe("Formal Play player projections", () => {
   it("renders projected roadmap resource progress without inventing hidden requirements", () => {
     render(
       <MissionRoadmap
+        summary="Objective summary"
+        regionNames={{ central: "Central District" }}
+        resourceNames={{ relief: "Relief Supplies" }}
         stages={[
           {
             key: "objective:relief",
@@ -206,8 +211,364 @@ describe("Formal Play player projections", () => {
       />,
     );
 
-    expect(screen.getByText("建立持续保障")).toBeInTheDocument();
-    expect(screen.getByText("中央应急救援物资（当前：20，要求：≥30）")).toBeInTheDocument();
+    expect(screen.queryByText("建立持续保障")).not.toBeInTheDocument();
+    expect(screen.queryByText("中央应急救援物资（当前：20，要求：≥30）")).not.toBeInTheDocument();
+    const detailsToggle = screen.getByRole("button");
+    expect(detailsToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("Objective summary")).toBeVisible();
+    fireEvent.click(screen.getByText("Objective summary"));
+    expect(screen.getByText("建立持续保障")).toBeVisible();
+    expect(screen.getByText(/20.*30/)).toBeVisible();
+    expect(screen.getByText("Central District\uFF1ARelief Supplies\u50A8\u5907 20 / 30")).toBeVisible();
+    expect(detailsToggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByText("收起详情"));
+    expect(detailsToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/20.*30/)).not.toBeInTheDocument();
+  });
+
+  it("suppresses a task explanation duplicated by the status pill", () => {
+    expect(taskExplanationLabel("MODEL_PLAN_REJECTED", "MODEL_PLAN_REJECTED")).toBeNull();
+    expect(taskExplanationLabel("MODEL_PLAN_REJECTED", "MODEL_PROVIDER_FAILURE")).toBe(uiLabel("MODEL_PROVIDER_FAILURE"));
+  });
+
+  it("renders each resource reserve requirement with its region and resource names", () => {
+    render(
+      <MissionRoadmap
+        regionNames={{
+          central: "Central District",
+          east: "East Residential District",
+          southeast: "Southeast Heights",
+        }}
+        resourceNames={{ relief: "Emergency Relief Supplies" }}
+        stages={[{
+          key: "objective:reserves",
+          name: "Sustained relief",
+          description: "Public objective",
+          status: "CURRENT",
+          objective_key: "reserves",
+          requirements: [
+            { key: "central", kind: "RESOURCE_AT_LEAST", description: "Generic reserve description", region_key: "central", resource_key: "relief", minimum: 30, current_known_available: 0 },
+            { key: "east", kind: "RESOURCE_AT_LEAST", description: "Generic reserve description", region_key: "east", resource_key: "relief", minimum: 30, current_known_available: 12 },
+            { key: "southeast", kind: "RESOURCE_AT_LEAST", description: "Generic reserve description", region_key: "southeast", resource_key: "relief", minimum: 30, current_known_available: 30 },
+          ],
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Central District\uFF1AEmergency Relief Supplies\u50A8\u5907 0 / 30")).toBeVisible();
+    expect(screen.getByText("East Residential District\uFF1AEmergency Relief Supplies\u50A8\u5907 12 / 30")).toBeVisible();
+    expect(screen.getByText("Southeast Heights\uFF1AEmergency Relief Supplies\u50A8\u5907 30 / 30")).toBeVisible();
+    expect(screen.queryByText("Generic reserve description")).not.toBeInTheDocument();
+    expect(screen.queryByText(/central_district|east_residential|southeast_heights/)).not.toBeInTheDocument();
+  });
+
+  it("renders known FACT requirements as goals when a semantic label is available", () => {
+    render(
+      <MissionRoadmap
+        nodeNames={{ city_distribution_center: "City Distribution Center" }}
+        stages={[{
+          key: "objective:logistics",
+          name: "Sustained logistics",
+          description: "Public objective",
+          status: "CURRENT",
+          objective_key: "logistics",
+          requirements: [{
+            key: "logistics_capability",
+            node_key: "city_distribution_center",
+            fact_key: "sustained_humanitarian_logistics",
+            accepted_values: ["AVAILABLE"],
+            description: "持续人道物流能力已建立。",
+          }],
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("建立持续人道物流能力")).toBeVisible();
+    expect(screen.queryByText("持续人道物流能力已建立。")).not.toBeInTheDocument();
+  });
+
+  it("keeps non-resource roadmap requirements while hiding resource detail rows", () => {
+    render(
+      <MissionRoadmap
+        stages={[{
+          key: "objective:mixed",
+          name: "综合保障",
+          description: "公开目标",
+          status: "CURRENT",
+          objective_key: "mixed",
+          requirements: [
+            {
+              key: "reserve",
+              kind: "RESOURCE_AT_LEAST",
+              description: "不应显示的资源要求",
+              region_key: "central",
+              resource_key: "relief",
+              minimum: 30,
+            },
+            { key: "power", description: "设施状态已恢复" },
+          ],
+        }]}
+      />,
+    );
+
+    expect(screen.queryByText("设施状态已恢复")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("设施状态已恢复")).toBeVisible();
+    expect(screen.getByText(/0.*30/)).toBeVisible();
+  });
+
+  it("keeps objective details closed when the task identity changes", () => {
+    const stages: MissionRoadmapStage[] = [{
+      key: "objective:details",
+      name: "Details stage",
+      description: "Visible objective",
+      status: "CURRENT",
+      objective_key: "details",
+      requirements: [{ key: "fact", description: "Visible fact" }],
+    }];
+    const view = render(<MissionRoadmap key="task-1" stages={stages} />);
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Visible fact")).toBeVisible();
+
+    view.rerender(<MissionRoadmap key="task-2" stages={stages} />);
+    expect(screen.getByRole("button")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Visible fact")).not.toBeInTheDocument();
+  });
+
+  function reserveTask(minimum = 30, status = "ACTIVE", executionPhase: PublicTask["execution_phase"] = "AWAITING_ACTION_ACK"): PublicTask {
+    return {
+      ...task,
+      status,
+      execution_phase: executionPhase,
+      roadmap: {
+        stages: [{
+          key: "objective:relief",
+          name: "建立持续保障",
+          description: "公开目标",
+          status: "CURRENT",
+          objective_key: "relief",
+          requirements: [{
+            key: "central_relief",
+            kind: "RESOURCE_AT_LEAST",
+            description: "中央应急救援物资",
+            region_key: "central",
+            resource_key: "relief",
+            minimum,
+            current_known_available: 999,
+          }],
+        }],
+      },
+    };
+  }
+
+  function reserveIntelligence(available: number, includeResource = true): ResourceIntelligence {
+    return {
+      total_regions: 1,
+      visible_region_count: 0,
+      regions: {
+        central: {
+          region_name: "中央城区",
+          resource_inventory_visibility: "HIDDEN",
+          resource_survey_completed: false,
+          resources: includeResource ? {
+            relief: {
+              resource_name: "中央应急救援物资",
+              known_available: available,
+              known_total: available,
+              pools: [],
+            },
+          } : {},
+        },
+      },
+      global_resources: {},
+    };
+  }
+
+  function renderReserveTask(available: number, reserve = reserveTask(), includeResource = true) {
+    return render(
+      <KnownWorldAccordions
+        resources={[{ key: "relief", name: "中央应急救援物资", value: 0, reserved_value: 0 }]}
+        resourceIntelligence={reserveIntelligence(available, includeResource)}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={reserve}
+      />,
+    );
+  }
+
+  it("shows a reserve-only synthetic row without an original resource badge", () => {
+    renderReserveTask(0, reserveTask(), false);
+
+    const region = screen.getByText("中央城区").closest("details");
+    expect(region).not.toBeNull();
+    expect(region).toHaveAttribute("open");
+
+    expect(within(region!).getByText("中央应急救援物资")).toBeVisible();
+    expect(within(region!).getByText("储备 0 / 30")).toBeVisible();
+    expect(region!.querySelectorAll(".knowledge-resource-pills .knowledge-status-pill")).toHaveLength(1);
+    expect(within(region!).queryByText("暂无资源信息")).not.toBeInTheDocument();
+    expect(within(region!).queryByText("已确认")).not.toBeInTheDocument();
+  });
+
+  it("auto-opens a region once when a reserve requirement is revealed", () => {
+    const hiddenTask = { ...reserveTask(), roadmap: { stages: [] } };
+    const view = renderReserveTask(0, reserveTask(), false);
+    let region = screen.getByText("中央城区").closest("details")!;
+
+    expect(region).toHaveAttribute("open");
+    fireEvent.click(region.querySelector("summary")!);
+    expect(region).not.toHaveAttribute("open");
+
+    view.rerender(
+      <KnownWorldAccordions
+        resources={[{ key: "relief", name: "中央应急救援物资", value: 0, reserved_value: 0 }]}
+        resourceIntelligence={reserveIntelligence(0, false)}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={hiddenTask}
+      />,
+    );
+    region = screen.getByText("中央城区").closest("details")!;
+    expect(region).not.toHaveAttribute("open");
+
+    view.rerender(
+      <KnownWorldAccordions
+        resources={[{ key: "relief", name: "中央应急救援物资", value: 0, reserved_value: 0 }]}
+        resourceIntelligence={reserveIntelligence(0, false)}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={reserveTask()}
+      />,
+    );
+    region = screen.getByText("中央城区").closest("details")!;
+    expect(region).toHaveAttribute("open");
+
+    fireEvent.click(region.querySelector("summary")!);
+    view.rerender(
+      <KnownWorldAccordions
+        resources={[{ key: "relief", name: "中央应急救援物资", value: 0, reserved_value: 0 }]}
+        resourceIntelligence={reserveIntelligence(20, false)}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={reserveTask()}
+      />,
+    );
+    expect(screen.getByText("中央城区").closest("details")).not.toHaveAttribute("open");
+  });
+
+  it("shows an unmet RESOURCE_AT_LEAST reserve badge from the current resource projection", () => {
+    renderReserveTask(20);
+
+    const reserve = screen.getByText("\u50a8\u5907 20 / 30");
+    expect(reserve).toHaveClass("warning");
+    expect(reserve).toHaveClass("resource-reserve-pill");
+    expect(reserve).not.toHaveTextContent(">=");
+    expect(reserve).not.toHaveTextContent("≥");
+    expect(reserve).not.toHaveTextContent("目标");
+    expect(reserve).not.toHaveTextContent("已完成");
+    expect(screen.getByText("中央应急救援物资")).toBeVisible();
+  });
+
+  it("updates reserve amount and color without clamping the current value", () => {
+    const view = renderReserveTask(0);
+    expect(screen.getByText("\u50a8\u5907 0 / 30")).toHaveClass("warning");
+
+    view.rerender(
+      <KnownWorldAccordions
+        resources={[]}
+        resourceIntelligence={reserveIntelligence(45)}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={reserveTask()}
+      />,
+    );
+    const reserve = screen.getByText("\u50a8\u5907 45 / 30");
+    expect(reserve).toHaveClass("success");
+    expect(screen.queryByText("\u50a8\u5907 0 / 30")).not.toBeInTheDocument();
+  });
+
+  it("keeps the original resource badge beside the reserve badge", () => {
+    renderReserveTask(20);
+    const pills = Array.from(document.querySelectorAll(
+      ".knowledge-resource-pills .knowledge-status-pill",
+    )).map((node) => node.textContent);
+    expect(pills).toEqual(["储备 20 / 30", "20"]);
+  });
+
+  it("does not expose a hidden or unrelated resource requirement", () => {
+    const hiddenRequirementTask = { ...reserveTask(), roadmap: { stages: [] } };
+    const view = renderReserveTask(20, hiddenRequirementTask);
+    expect(screen.queryByText("\u50a8\u5907 20 / 30")).not.toBeInTheDocument();
+
+    view.rerender(
+      <KnownWorldAccordions
+        resources={[]}
+        resourceIntelligence={reserveIntelligence(20)}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={{
+          ...reserveTask(),
+          roadmap: {
+            stages: [{
+              ...reserveTask().roadmap.stages[0],
+              requirements: [{
+                key: "other",
+                kind: "RESOURCE_AT_LEAST",
+                description: "其他区域资源",
+                region_key: "west",
+                resource_key: "relief",
+                minimum: 30,
+              }],
+            }],
+          },
+        }}
+      />,
+    );
+    expect(screen.queryByText("\u50a8\u5907 20 / 30")).not.toBeInTheDocument();
+  });
+
+  it("reveals a reserve badge only when the requirement becomes visible", () => {
+    const view = renderReserveTask(20, { ...reserveTask(), roadmap: { stages: [] } });
+    expect(screen.queryByText("\u50a8\u5907 20 / 30")).not.toBeInTheDocument();
+
+    view.rerender(
+      <KnownWorldAccordions
+        resources={[]}
+        resourceIntelligence={reserveIntelligence(20)}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={reserveTask()}
+      />,
+    );
+    expect(screen.getByText("\u50a8\u5907 20 / 30")).toBeInTheDocument();
+  });
+
+  it("hides reserve badges for terminal or no-longer-current tasks", () => {
+    const view = renderReserveTask(20, reserveTask(30, "COMPLETED", "COMPLETED"));
+    expect(screen.queryByText("\u50a8\u5907 20 / 30")).not.toBeInTheDocument();
+
+    view.rerender(
+      <KnownWorldAccordions
+        resources={[]}
+        resourceIntelligence={reserveIntelligence(20)}
+        visibleNodes={[]}
+        actors={[]}
+        knownFacts={[]}
+        task={reserveTask()}
+        resourceTask={null}
+      />,
+    );
+    expect(screen.queryByText("\u50a8\u5907 20 / 30")).not.toBeInTheDocument();
   });
 
   it("renders a standalone GameInstance goal composer", () => {
@@ -536,6 +897,12 @@ describe("Formal Play player projections", () => {
                  facility_key: "heavy_equipment_yard",
                  facility_name: "Heavy Equipment Yard",
                  availability: "UNAVAILABLE",
+                 availability_requirement: {
+                   node_key: "heavy_equipment_yard",
+                   fact_key: "other",
+                   operator: "EQ",
+                   value: true,
+                 },
                },
              ],
            },
@@ -593,8 +960,66 @@ describe("Formal Play player projections", () => {
         (node) => node.textContent,
       ),
     ).toEqual(["5 / 105", "20", "5", "80", "12"]);
+    const generalParts = screen.getByText("General Engineering Parts").closest(".knowledge-entry")!;
+    expect(generalParts).toHaveTextContent("暂不可用 50 · 解锁条件：已知地点满足解锁条件");
+    expect(generalParts).not.toHaveTextContent("Heavy Equipment Yard");
     expect(screen.queryByText("Known Zero")).not.toBeInTheDocument();
  });
+
+  it("does not duplicate a bound facility beside its unlock condition", () => {
+    const resourceIntelligence: ResourceIntelligence = {
+      total_regions: 1,
+      visible_region_count: 1,
+      regions: {
+        north: {
+          region_name: "North Region",
+          resource_inventory_visibility: "VISIBLE",
+          resource_survey_completed: true,
+          resources: {
+            parts: {
+              resource_name: "Parts",
+              known_available: 5,
+              known_total: 5,
+              pools: [{
+                pool_key: "locked-parts",
+                quantity: 50,
+                facility_key: "heavy_equipment_yard",
+                facility_name: "Heavy Equipment Yard",
+                availability: "UNAVAILABLE",
+                availability_requirement: {
+                  node_key: "heavy_equipment_yard",
+                  fact_key: "operational",
+                  operator: "EQ",
+                  value: true,
+                },
+              }],
+            },
+          },
+        },
+      },
+      global_resources: {},
+    };
+
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        resourceIntelligence={resourceIntelligence}
+        visibleNodes={[{
+          key: "heavy_equipment_yard",
+          name: "Heavy Equipment Yard",
+          accessible: true,
+          node_type_key: "facility",
+          region_key: "north",
+        }]}
+        actors={[]}
+        knownFacts={[]}
+      />,
+    );
+
+    const entry = screen.getByText("Parts").closest(".knowledge-entry");
+    expect(entry).not.toBeNull();
+    expect(entry!.textContent?.match(/Heavy Equipment Yard/g)).toHaveLength(1);
+  });
 
   it("保留未查探区域的可见资源并独立显示查探状态", () => {
     const resourceIntelligence: ResourceIntelligence = {

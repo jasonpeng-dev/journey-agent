@@ -80,6 +80,9 @@ export type MissionRoadmapRequirement = {
   key: string;
   kind?: "RESOURCE_AT_LEAST";
   description: string;
+  node_key?: string;
+  fact_key?: string;
+  accepted_values?: Array<string | number | boolean>;
   region_key?: string;
   resource_key?: string;
   minimum?: number;

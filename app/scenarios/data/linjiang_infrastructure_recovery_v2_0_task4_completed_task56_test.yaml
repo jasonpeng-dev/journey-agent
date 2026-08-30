@@ -7339,6 +7339,12 @@ rules:
     value:
       source: LITERAL
       literal: true
+  - kind: SET_RESOURCE_POOL_AVAILABILITY
+    pool_key: warehouse_aid_general
+    availability: AVAILABLE
+  - kind: SET_RESOURCE_POOL_AVAILABILITY
+    pool_key: warehouse_aid_municipal
+    availability: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
 - key: repair_industrial_facility_rail_freight_yard_heavy_support_required

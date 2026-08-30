@@ -25,6 +25,7 @@ import type {
   PublicPlanningAttempt,
   PublicPlanningCycle,
   PublicResourceUsage,
+  MissionRoadmapRequirement,
   MissionRoadmapStage,
   PublicTargetActionContract,
   ResourceIntelligence,
@@ -32,7 +33,7 @@ import type {
   PublicTimelineEvent,
   ScenarioVersionDetail,
 } from "../types";
-import { errorText, resultLabel, stepDescription, uiLabel } from "../ui";
+import { errorText, resultLabel, stepDescription, taskExplanationLabel, uiLabel } from "../ui";
 import {
   debriefButtonLabel,
   formatDuration,
@@ -61,6 +62,7 @@ const taskTone: Record<string, string> = {
   MODEL_PROVIDER_FAILURE: "danger",
   ABORTED: "neutral",
 };
+
 const planDisplayStatusLabel: Record<PublicPlanDisplayStatus, string> = {
   EXECUTING: "执行中",
   ADJUSTED: "已调整",
@@ -142,28 +144,112 @@ function interruptionMarkerSequence(plan: PublicPlanHistory): number | null {
   return trigger?.sequence ?? null;
 }
 
-export function MissionRoadmap({ stages }: { stages: MissionRoadmapStage[] }) {
+type MissionRoadmapNames = {
+  regionNames?: Record<string, string>;
+  resourceNames?: Record<string, string>;
+  nodeNames?: Record<string, string>;
+};
+
+const FACT_GOAL_LABELS: Record<string, string> = {
+  sustained_humanitarian_logistics: "建立持续人道物流能力",
+  sustained_generation_capability: "建立持续发电能力",
+};
+
+const FACT_GOAL_SUFFIXES: Record<string, string> = {
+  operational: "恢复运行",
+  power_supply: "恢复供电",
+  passable: "恢复通行",
+  emergency_power: "恢复应急供电",
+  heavy_engineering_support: "获得重型工程支援",
+  heavy_engineering_support_ready: "部署重型工程支援",
+  rail_freight_capability: "恢复铁路货运能力",
+  emergency_delivery_support: "建立应急配送能力",
+  external_relief_supply_ready: "建立外援供应能力",
+};
+
+function missionRoadmapRequirementText(
+  requirement: MissionRoadmapRequirement,
+  names: MissionRoadmapNames,
+): string {
+  if (
+    requirement.kind === "RESOURCE_AT_LEAST"
+    && requirement.region_key
+    && requirement.resource_key
+    && typeof requirement.minimum === "number"
+  ) {
+    const regionName = names.regionNames?.[requirement.region_key] ?? "相关区域";
+    const resourceName = resourceDisplayName(
+      requirement.resource_key,
+      names.resourceNames?.[requirement.resource_key],
+    );
+    return `${regionName}：${resourceName}储备 ${requirement.current_known_available ?? 0} / ${requirement.minimum}`;
+  }
+
+  if (requirement.fact_key) {
+    const accepted = requirement.accepted_values ?? [];
+    const positive = accepted.some((value) => value === true || value === "AVAILABLE");
+    if (positive) {
+      const directLabel = FACT_GOAL_LABELS[requirement.fact_key];
+      if (directLabel) return directLabel;
+      const suffix = FACT_GOAL_SUFFIXES[requirement.fact_key];
+      if (suffix) {
+        const nodeName = requirement.node_key
+          ? names.nodeNames?.[requirement.node_key] ?? "目标设施"
+          : "目标设施";
+        return nodeName + suffix;
+      }
+    }
+  }
+
+  return requirement.description;
+}
+
+export function MissionRoadmap({
+  stages,
+  summary,
+  regionNames,
+  resourceNames,
+  nodeNames,
+}: {
+  stages: MissionRoadmapStage[];
+  summary?: string;
+  regionNames?: Record<string, string>;
+  resourceNames?: Record<string, string>;
+  nodeNames?: Record<string, string>;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   if (stages.length === 0) return null;
   return (
-    <ol className="mission-roadmap" aria-label="任务路线图">
-      {stages.map((stage) => (
-        <li key={stage.key} className={stage.status.toLowerCase()}>
-          <b aria-hidden="true">
-            {stage.status === "COMPLETED" ? "✓" : stage.status === "CURRENT" ? "→" : "·"}
-          </b>
-          <div>
-            <strong>{stage.name}</strong>
-            {stage.requirements.map((requirement) => (
-              <small key={requirement.key}>
-                {requirement.kind === "RESOURCE_AT_LEAST"
-                  ? `${requirement.description}（当前：${requirement.current_known_available ?? 0}，要求：≥${requirement.minimum ?? 0}）`
-                  : requirement.description}
-              </small>
-            ))}
-          </div>
-        </li>
-      ))}
-    </ol>
+    <div className="mission-roadmap-details">
+      <button
+        type="button"
+        className="mission-roadmap-toggle"
+        aria-expanded={detailsOpen}
+        onClick={() => setDetailsOpen((current) => !current)}
+      >
+        {summary && <span className="mission-roadmap-toggle-summary">{summary}</span>}
+        <span className="mission-roadmap-toggle-label">{detailsOpen ? "收起详情" : "查看详情"}</span>
+      </button>
+      {detailsOpen && (
+        <ol className="mission-roadmap" aria-label="任务路线图">
+          {stages.map((stage) => (
+            <li key={stage.key} className={stage.status.toLowerCase()}>
+              <b aria-hidden="true">
+                {stage.status === "COMPLETED" ? "✓" : stage.status === "CURRENT" ? "→" : "·"}
+              </b>
+              <div>
+                <strong>{stage.name}</strong>
+                {stage.requirements.map((requirement) => (
+                  <small key={requirement.key}>
+                    {missionRoadmapRequirementText(requirement, { regionNames, resourceNames, nodeNames })}
+                  </small>
+                ))}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
   );
 }
 
@@ -672,6 +758,7 @@ type KnownWorldAccordionsProps = {
   knownRelations?: NonNullable<PlayerGameState["known_relations"]>;
   knownTargetActionContracts?: PublicTargetActionContract[];
   task?: PublicTask | null;
+  resourceTask?: PublicTask | null;
 };
 
 export function KnownWorldAccordions({
@@ -683,6 +770,7 @@ export function KnownWorldAccordions({
   knownRelations = [],
   knownTargetActionContracts = [],
   task = null,
+  resourceTask,
 }: KnownWorldAccordionsProps) {
   const [expanded, setExpanded] = useState<Record<KnowledgeAccordionKey, boolean>>({
     resources: true,
@@ -693,6 +781,7 @@ export function KnownWorldAccordions({
   });
   const [expandedFacilities, setExpandedFacilities] = useState<Record<string, boolean>>({});
   const [expandedResourceRegions, setExpandedResourceRegions] = useState<Record<string, boolean>>({});
+  const previousVisibleReserveRegionSignature = useRef<string | null>(null);
   const toggle = (id: KnowledgeAccordionKey) => {
     setExpanded((current) => ({ ...current, [id]: !current[id] }));
   };
@@ -789,6 +878,54 @@ export function KnownWorldAccordions({
   }
   const resourceName = (key: string, candidate?: string) =>
     resourceDisplayName(key, candidate ?? resourceNames.get(key));
+  const reserveTask = resourceTask === undefined ? task : resourceTask;
+  const resourceReserveRequirements = new Map<string, number>();
+  if (
+    reserveTask
+    && ["ACTIVE", "NEEDS_PLAYER_INPUT"].includes(reserveTask.status)
+    && !["COMPLETED", "BLOCKED", "ABORTED"].includes(reserveTask.execution_phase)
+  ) {
+    reserveTask.roadmap.stages.forEach((stage) => {
+      stage.requirements.forEach((requirement) => {
+        if (
+          requirement.kind === "RESOURCE_AT_LEAST"
+          && typeof requirement.region_key === "string"
+          && typeof requirement.resource_key === "string"
+          && typeof requirement.minimum === "number"
+        ) {
+          resourceReserveRequirements.set(
+            `${requirement.region_key}:${requirement.resource_key}`,
+            requirement.minimum,
+          );
+        }
+      });
+    });
+  }
+  const visibleReserveRegionKeys = new Set<string>();
+  resourceReserveRequirements.forEach((_minimum, requirementKey) => {
+    const separator = requirementKey.indexOf(":");
+    if (separator > 0) visibleReserveRegionKeys.add(requirementKey.slice(0, separator));
+  });
+  const visibleReserveRegionSignature = Array.from(visibleReserveRegionKeys).sort().join("|");
+  useEffect(() => {
+    const previousSignature = previousVisibleReserveRegionSignature.current;
+    if (previousSignature !== null) {
+      const previousKeys = new Set(previousSignature ? previousSignature.split("|") : []);
+      const newlyVisibleRegionKeys = (visibleReserveRegionSignature
+        ? visibleReserveRegionSignature.split("|")
+        : []).filter((regionKey) => !previousKeys.has(regionKey));
+      if (newlyVisibleRegionKeys.length > 0) {
+        setExpandedResourceRegions((current) => {
+          const next = { ...current };
+          newlyVisibleRegionKeys.forEach((regionKey) => {
+            next[regionKey] = true;
+          });
+          return next;
+        });
+      }
+    }
+    previousVisibleReserveRegionSignature.current = visibleReserveRegionSignature;
+  }, [visibleReserveRegionSignature]);
   const surveyedRegionCount = resourceIntelligence
     ? Object.values(resourceIntelligence.regions).filter(
         (region) => region.resource_survey_completed,
@@ -1144,20 +1281,49 @@ export function KnownWorldAccordions({
         {resourceIntelligence && (
           <div className="console-region-groups">
             {Object.entries(resourceIntelligence.regions).map(([regionKey, region]) => {
-              const knownResources = Object.entries(region.resources).filter(
-                ([, resource]) => (resource.known_total ?? resource.known_available) > 0,
+              const displayResources = Object.entries(region.resources).map(
+                ([resourceKey, resource]) => ({ resourceKey, resource, synthetic: false }),
               );
+              resourceReserveRequirements.forEach((minimum, requirementKey) => {
+                const separator = requirementKey.indexOf(":");
+                const requirementRegionKey = requirementKey.slice(0, separator);
+                const requirementResourceKey = requirementKey.slice(separator + 1);
+                if (
+                  requirementRegionKey === regionKey
+                  && !Object.prototype.hasOwnProperty.call(region.resources, requirementResourceKey)
+                ) {
+                  displayResources.push({
+                    resourceKey: requirementResourceKey,
+                    resource: {
+                      resource_name: resourceName(requirementResourceKey),
+                      known_available: 0,
+                      known_total: 0,
+                      pools: [],
+                    },
+                    synthetic: true,
+                  });
+                }
+              });
+              const knownResources = displayResources.filter(
+                ({ resourceKey, resource }) =>
+                  (resource.known_total ?? resource.known_available) > 0
+                  || resourceReserveRequirements.has(`${regionKey}:${resourceKey}`),
+              );
+              const hasPositiveResource = knownResources.some(
+                ({ resource }) => resource.known_available > 0,
+              );
+              const defaultOpen = hasPositiveResource || visibleReserveRegionKeys.has(regionKey);
               return (
                 <details
                   className="knowledge-region"
                   key={regionKey}
-                  open={resourceRegionOpen(regionKey, knownResources.length > 0)}
+                  open={resourceRegionOpen(regionKey, defaultOpen)}
                 >
-                  <summary
-                    onClick={(event) => {
-                      event.preventDefault();
-                      toggleResourceRegion(regionKey, knownResources.length > 0);
-                    }}
+                    <summary
+                      onClick={(event) => {
+                        event.preventDefault();
+                        toggleResourceRegion(regionKey, defaultOpen);
+                      }}
                   >
                     <span>
                       <strong>{region.region_name ?? regionKey}</strong>
@@ -1169,30 +1335,44 @@ export function KnownWorldAccordions({
                       {knownResources.length === 0 ? (
                         <div className="knowledge-empty-state">暂无资源信息</div>
                       ) : (
-                        knownResources.map(([resourceKey, resource]) => (
+                        knownResources.map(({ resourceKey, resource, synthetic }) => (
                           <div className="knowledge-entry" key={regionKey + ":" + resourceKey}>
                             <div className="knowledge-entry-copy">
                               <strong>{resource.resource_name}</strong>
-                              {!region.resource_survey_completed && <small>已确认</small>}
+                              {!synthetic && !region.resource_survey_completed && <small>已确认</small>}
                               {resource.pools
                                 .filter(
                                   (pool) => pool.availability === "UNAVAILABLE" && pool.quantity > 0,
                                 )
                                 .map((pool, index) => (
-                                  <small key={index}>
-                                    暂不可用 {pool.quantity}
-                                    {pool.facility_name ? ` · ${pool.facility_name}` : ""}
-                                    {resourceRequirementText(pool.availability_requirement)
-                                      ? " · " + resourceRequirementText(pool.availability_requirement)
-                                      : ""}
-                                  </small>
+                                  (() => {
+                                    const requirement = resourceRequirementText(pool.availability_requirement);
+                                    return (
+                                      <small key={index}>
+                                        暂不可用 {pool.quantity}
+                                        {!requirement && pool.facility_name ? ` · ${pool.facility_name}` : ""}
+                                        {requirement ? " · " + requirement : ""}
+                                      </small>
+                                    );
+                                  })()
                                 ))}
                             </div>
-                            <span className="console-pill success knowledge-status-pill">
-                              {resource.known_total == null || resource.known_total === resource.known_available
-                                ? resource.known_available
-                                : resource.known_available + " / " + resource.known_total}
-                            </span>
+                            <div className="knowledge-resource-pills">
+                              {resourceReserveRequirements.has(`${regionKey}:${resourceKey}`) && (
+                                <span
+                                  className={`console-pill ${resource.known_available >= resourceReserveRequirements.get(`${regionKey}:${resourceKey}`)! ? "success" : "warning"} knowledge-status-pill resource-reserve-pill`}
+                                >
+                                  {"储备 " + resource.known_available + " / " + resourceReserveRequirements.get(`${regionKey}:${resourceKey}`)}
+                                </span>
+                              )}
+                              {!synthetic && (
+                                <span className="console-pill success knowledge-status-pill">
+                                  {resource.known_total == null || resource.known_total === resource.known_available
+                                    ? resource.known_available
+                                    : resource.known_available + " / " + resource.known_total}
+                                </span>
+                              )}
+                            </div>
                           </div>
                         ))
                       )}
@@ -1231,12 +1411,18 @@ export function KnownWorldAccordions({
             <details
               className="knowledge-region"
               key={group.key}
-              open={resourceRegionOpen(group.key, group.items.some((resource) => resource.value > 0))}
+              open={resourceRegionOpen(
+                group.key,
+                group.items.some((resource) => resource.value > 0) || visibleReserveRegionKeys.has(group.key),
+              )}
             >
               <summary
                 onClick={(event) => {
                   event.preventDefault();
-                  toggleResourceRegion(group.key, group.items.some((resource) => resource.value > 0));
+                  toggleResourceRegion(
+                    group.key,
+                    group.items.some((resource) => resource.value > 0) || visibleReserveRegionKeys.has(group.key),
+                  );
                 }}
               >
                 <span>
@@ -1483,6 +1669,17 @@ function scenarioObjectiveOptions(
   });
 }
 
+function definitionNameMap(value: unknown): Record<string, string> {
+  if (!Array.isArray(value)) return {};
+  return Object.fromEntries(value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const entry = item as Record<string, unknown>;
+    return typeof entry.key === "string" && typeof entry.name === "string"
+      ? [[entry.key, entry.name]]
+      : [];
+  }));
+}
+
 export function MissionLogPanel({ children }: { children: ReactNode }) {
   return (
     <section className="command-panel mission-log-panel mission-log-panel--tall" data-testid="mission-log-panel">
@@ -1655,6 +1852,31 @@ export function GamePage() {
   const { game } = play.data;
   const liveGame = livePlay.data.game;
   const objectiveOptions = scenarioObjectiveOptions(scenarioVersion.data);
+  const rawScenarioWorld = scenarioVersion.data?.definition_document.world;
+  const scenarioWorld = rawScenarioWorld && typeof rawScenarioWorld === "object" && !Array.isArray(rawScenarioWorld)
+    ? rawScenarioWorld as Record<string, unknown>
+    : {};
+  const roadmapNodeNames = {
+    ...definitionNameMap(scenarioWorld.nodes),
+    ...Object.fromEntries(play.data.visible_nodes.map((node) => [node.key, node.name])),
+  };
+  const roadmapRegionNames = {
+    ...roadmapNodeNames,
+    ...Object.fromEntries(
+      Object.entries(play.data.resource_intelligence?.regions ?? {}).flatMap(([key, region]) => (
+        region.region_name ? [[key, region.region_name]] : []
+      )),
+    ),
+  };
+  const roadmapResourceNames = {
+    ...definitionNameMap(scenarioWorld.resources),
+    ...Object.fromEntries(play.data.resources.map((resource) => [resource.key, resource.name])),
+    ...Object.fromEntries(
+      Object.values(play.data.resource_intelligence?.regions ?? {}).flatMap((region) => (
+        Object.entries(region.resources).map(([key, resource]) => [key, resource.resource_name])
+      )),
+    ),
+  };
   const selectedTaskLoading = Boolean(
     selectedTaskId !== null && loadedTask?.id !== selectedTaskId,
   );
@@ -1742,6 +1964,7 @@ export function GamePage() {
             knownRelations={play.data.known_relations}
             knownTargetActionContracts={play.data.known_target_action_contracts}
             task={task}
+            resourceTask={selectedTaskActive ? task : null}
           />
         </aside>
         <div className="conversation-column-v2">
@@ -1880,8 +2103,24 @@ export function GamePage() {
           {task && goalAccepted && !planningForTask && !replanningForTask && <p className="plan-waiting-message">尚未开始规划。</p>}
           {!task && !selectedTaskLoading && <p className="console-empty">等待下达第一个目标。</p>}
           {selectedTaskLoading && <p className="plan-waiting-message">正在加载所选任务记录……</p>}
-          {task && <div className="task-brief"><small>当前目标</small><strong>{task.goal}</strong><span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span><p>{task.objective_names.join(" · ")}</p>{task.explanation && <code>{uiLabel(task.explanation)}</code>}</div>}
-          {task && <MissionRoadmap stages={task.roadmap.stages} />}
+          {task && (
+            <div className="task-brief">
+              <small>当前目标</small>
+              <strong>{task.goal}</strong>
+              <span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span>
+              {taskExplanationLabel(task.status, task.explanation) && <code>{taskExplanationLabel(task.status, task.explanation)}</code>}
+              {task.roadmap.stages.length > 0 && (
+                <MissionRoadmap
+                  key={task.id}
+                  stages={task.roadmap.stages}
+                  summary={task.objective_names.join(" · ")}
+                  regionNames={roadmapRegionNames}
+                  resourceNames={roadmapResourceNames}
+                  nodeNames={roadmapNodeNames}
+                />
+              )}
+            </div>
+          )}
           {task && !planningForTask && <PlanHistory task={task} />}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>

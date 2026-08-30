@@ -202,6 +202,91 @@ def test_task56_resource_budget_and_hidden_supply_contract() -> None:
     assert pools["south_emergency_fuel"].visibility.value == "HIDDEN"
 
 
+def test_task5_warehouse_bootstrap_unlocks_aid_and_supports_completion(
+    session: Session,
+) -> None:
+    runtime, scope, agent, _definition_value = _runtime(session, "task56-warehouse-bootstrap")
+    game_id = runtime.instance.id  # type: ignore[attr-defined]
+    industrial = session.get(
+        GameInstanceActor,
+        (game_id, "industrial_repair_team_alpha"),
+    )
+    assert industrial is not None
+    industrial.current_node_key = "west_logistics_district"
+    _known_inflow(session, game_id, "west_logistics_district", "general_engineering_parts", 5)
+    session.flush()
+
+    pools = {
+        row.pool_key: row
+        for row in session.scalars(
+            select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == game_id
+            )
+        )
+    }
+    assert pools["warehouse_aid_general"].availability == ResourcePoolAvailability.UNAVAILABLE
+    assert pools["warehouse_aid_municipal"].availability == ResourcePoolAvailability.UNAVAILABLE
+
+    actions = GenericActionService(session, scope)
+    warehouse = actions.execute_action(
+        actor_key=industrial.actor_key,
+        action_key="repair_industrial_facility",
+        target_key="emergency_supply_warehouse",
+        parameters={},
+        idempotency_key="task56-repair-warehouse",
+    )
+    assert warehouse.applied is not None and warehouse.applied.outcome.failure is None
+
+    session.refresh(pools["warehouse_aid_general"])
+    session.refresh(pools["warehouse_aid_municipal"])
+    assert pools["warehouse_aid_general"].availability == ResourcePoolAvailability.AVAILABLE
+    assert pools["warehouse_aid_municipal"].availability == ResourcePoolAvailability.AVAILABLE
+    assert pools["warehouse_aid_general"].value == 20
+    assert pools["warehouse_aid_municipal"].value == 60
+    warehouse_operational = session.get(
+        GameInstanceFactState,
+        (game_id, "emergency_supply_warehouse", "operational"),
+    )
+    assert warehouse_operational is not None and warehouse_operational.truth_value is True
+    session.refresh(pools["warehouse_relief_supply"])
+    assert pools["warehouse_relief_supply"].availability == ResourcePoolAvailability.UNAVAILABLE
+
+    for target_key, suffix in (
+        ("rail_freight_yard", "rail"),
+        ("vehicle_depot", "vehicle"),
+        ("city_distribution_center", "distribution"),
+    ):
+        repaired = actions.execute_action(
+            actor_key=industrial.actor_key,
+            action_key="repair_industrial_facility",
+            target_key=target_key,
+            parameters={},
+            idempotency_key=f"task56-repair-{suffix}",
+        )
+        assert repaired.applied is not None and repaired.applied.outcome.failure is None
+
+    _set_fact(
+        session,
+        game_id,
+        "city_distribution_center",
+        "sustained_humanitarian_logistics",
+        "AVAILABLE",
+    )
+    for region in (
+        "central_district",
+        "east_residential_district",
+        "southeast_heights_district",
+    ):
+        _known_inflow(session, game_id, region, "emergency_relief_supplies", 30)
+    session.flush()
+    task = agent.create_task(
+        runtime.session,  # type: ignore[attr-defined]
+        "establish_citywide_sustained_emergency_support",
+        initialize_plan=False,
+    )
+    assert task.status == AgentTaskStatus.SUCCEEDED
+
+
 def test_task56_world_cleanup_bridge_and_reference_integrity() -> None:
     definition = _definition()
     node_keys = {item.key for item in definition.world.nodes}
