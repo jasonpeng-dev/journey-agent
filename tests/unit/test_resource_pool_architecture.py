@@ -39,6 +39,7 @@ from app.engine.rules import GenericRuleOutcome, ResourceMutation
 from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
+    GameInstanceNodeState,
     GameInstanceRegionResourceKnowledge,
     GameInstanceResourceState,
     Player,
@@ -55,6 +56,26 @@ from app.services.scenarios import ScenarioService
 from tests.scenario_fixtures import LINJIANG_V2_TEST
 
 LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0 = LINJIANG_V2_TEST
+
+
+def _remove_unknown_pool_effects(document: dict[str, Any]) -> None:
+    """Keep synthetic pool fixtures valid when the canonical pool set evolves."""
+
+    known_pool_keys = {pool["pool_key"] for pool in document["initialization"]["resource_pools"]}
+    retained_rules: list[dict[str, Any]] = []
+    for rule in document["rules"]:
+        effects = [
+            effect
+            for effect in rule.get("effects", [])
+            if not (
+                effect.get("pool_key") is not None and effect.get("pool_key") not in known_pool_keys
+            )
+        ]
+        if not effects:
+            continue
+        rule["effects"] = effects
+        retained_rules.append(rule)
+    document["rules"] = retained_rules
 
 
 def _pool_definition() -> ScenarioDefinitionV2:
@@ -165,6 +186,7 @@ def _pool_definition() -> ScenarioDefinitionV2:
         if actor["key"] == "electrical_repair_team_alpha":
             actor["initial_node_key"] = "east_residential_district"
             actor["command_reachability"] = "ONLINE"
+    _remove_unknown_pool_effects(document)
     return ScenarioDefinitionV2.model_validate(document)
 
 
@@ -193,6 +215,8 @@ def _legacy_balance_definition() -> ScenarioDefinitionV2:
             "general_engineering_parts",
             "municipal_repair_materials",
             "water_system_parts",
+            "emergency_relief_supplies",
+            "emergency_fuel",
         )
     ]
     pool_keys = {
@@ -205,6 +229,7 @@ def _legacy_balance_definition() -> ScenarioDefinitionV2:
         for rule in document["rules"]
         if not any(pool_key in str(rule) for pool_key in pool_keys)
     ]
+    _remove_unknown_pool_effects(document)
     return ScenarioDefinitionV2.model_validate(document)
 
 
@@ -393,13 +418,8 @@ def test_fresh_linjiang_hides_authored_unsurveyed_inventory_from_all_projections
     projection = SharedKnowledgeProjection(session, scope, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
     intelligence = projection.resource_intelligence()
 
-    assert (
-        intelligence["regions"]["central_district"]["resources"]["general_engineering_parts"][
-            "known_available"
-        ]
-        == 10
-    )
     for region_key in (
+        "central_district",
         "east_residential_district",
         "north_industrial_district",
         "south_waterfront_district",
@@ -410,11 +430,15 @@ def test_fresh_linjiang_hides_authored_unsurveyed_inventory_from_all_projections
         assert intelligence["regions"][region_key]["resources"] == {}
 
     planner = projection.planner_resources()
-    assert planner["regions"]["east_residential_district"]["resources"] == {}
-    assert planner["regions"]["north_industrial_district"]["resources"] == {}
-    assert planner["regions"]["south_waterfront_district"]["resources"] == {}
-    assert planner["regions"]["southeast_heights_district"]["resources"] == {}
-    assert planner["regions"]["west_logistics_district"]["resources"] == {}
+    for region_key in (
+        "central_district",
+        "east_residential_district",
+        "north_industrial_district",
+        "south_waterfront_district",
+        "southeast_heights_district",
+        "west_logistics_district",
+    ):
+        assert planner["regions"][region_key]["resources"] == {}
 
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
@@ -910,11 +934,7 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
     assert knowledge is not None
     knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
     knowledge.resource_survey_completed = True
-    for pool_key in (
-        "north_emergency_engineering_stock",
-        "north_heavy_equipment_stock",
-        "north_service_depot_stock",
-    ):
+    for pool_key in ("north_emergency_engineering_stock", "north_service_depot_stock"):
         pool = session.get(
             GameInstanceResourceState,
             (
@@ -926,6 +946,18 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
         pool.visibility = ResourcePoolVisibility.VISIBLE
         if pool_key != "north_emergency_engineering_stock":
             pool.availability_requirement = None
+    heavy_equipment_state = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "heavy_equipment_yard"),
+    )
+    assert heavy_equipment_state is not None
+    heavy_equipment_state.visibility = Visibility.KNOWN
+    utility_service_state = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "utility_service_depot"),
+    )
+    assert utility_service_state is not None
+    utility_service_state.visibility = Visibility.KNOWN
     session.flush()
 
     shared = SharedKnowledgeProjection(session, scope, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
@@ -954,31 +986,27 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
     assert player_summary["known_available"] == 5
     assert {pool["pool_key"] for pool in player_summary["pools"]} == {
         "north_emergency_engineering_stock",
-        "north_heavy_equipment_stock",
         "north_service_depot_stock",
     }
 
     nodes_by_key = {node.key: node for node in state.visible_nodes}
-    for facility_key, facility_name in {
-        "heavy_equipment_yard": "重型工程设备场",
-        "utility_service_depot": "市政工程维修基地",
-    }.items():
-        associated = nodes_by_key[facility_key].associated_known_resources
-        assert len(associated) == 1
-        assert associated[0]["resource_key"] == "general_engineering_parts"
-        assert associated[0]["resource_name"] == "通用工程部件"
-        assert associated[0]["facility_name"] == facility_name
-        assert associated[0]["quantity"] == 50
-        assert associated[0]["availability"] == "UNAVAILABLE"
-        assert associated[0]["availability_requirement"] == {
-            "node_key": facility_key,
-            "fact_key": "operational",
-            "value": True,
-        }
-        assert associated[0]["availability_requirement_status"] == "KNOWN"
-        assert "known_value" not in associated[0]["availability_requirement"]
+    assert nodes_by_key["heavy_equipment_yard"].associated_known_resources == []
+    associated = nodes_by_key["utility_service_depot"].associated_known_resources
+    assert len(associated) == 1
+    assert associated[0]["resource_key"] == "general_engineering_parts"
+    assert associated[0]["resource_name"] == "通用工程部件"
+    assert associated[0]["facility_name"] == "市政工程维修基地"
+    assert associated[0]["quantity"] == 100
+    assert associated[0]["availability"] == "UNAVAILABLE"
+    assert associated[0]["availability_requirement"] == {
+        "node_key": "utility_service_depot",
+        "fact_key": "operational",
+        "value": True,
+    }
+    assert associated[0]["availability_requirement_status"] == "KNOWN"
+    assert "known_value" not in associated[0]["availability_requirement"]
 
-    for pool_key in ("north_heavy_equipment_stock", "north_service_depot_stock"):
+    for pool_key in ("north_service_depot_stock",):
         pool = session.get(
             GameInstanceResourceState,
             (
@@ -996,9 +1024,8 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
     assert {
         pool["pool_key"]: pool["availability"]
         for pool in refreshed_pools
-        if pool["pool_key"] in {"north_heavy_equipment_stock", "north_service_depot_stock"}
+        if pool["pool_key"] in {"north_service_depot_stock"}
     } == {
-        "north_heavy_equipment_stock": "AVAILABLE",
         "north_service_depot_stock": "AVAILABLE",
     }
     refreshed_nodes = {node.key: node for node in refreshed.visible_nodes}
@@ -2112,6 +2139,12 @@ def test_runtime_transport_inflow_supports_local_rule_resource_consumption(
     assert water is not None
     water.current_node_key = "south_waterfront_district"
     water.command_reachability = "ONLINE"
+    pump_state = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "south_pump_station"),
+    )
+    assert pump_state is not None
+    pump_state.visibility = Visibility.KNOWN
     session.flush()
 
     repaired = game.execute(

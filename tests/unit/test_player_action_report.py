@@ -19,39 +19,48 @@ def test_resource_discovery_qualifies_same_resource_by_facility_source() -> None
     pools = {
         item.pool_key: item
         for item in resource_pool_initial_states(definition)
-        if item.pool_key in {"north_heavy_equipment_stock", "north_service_depot_stock"}
+        if item.pool_key in {"north_service_depot_stock", "warehouse_aid_general"}
     }
+    pool_keys = ("north_service_depot_stock", "warehouse_aid_general")
 
     changes = format_player_knowledge_changes(
         [
             {
                 "kind": "RESOURCE_DISCOVERED",
                 "key": resource_state_key(
-                    pools["north_heavy_equipment_stock"].resource_key,
-                    pools["north_heavy_equipment_stock"].region_key,
-                    pools["north_heavy_equipment_stock"].pool_key,
+                    pools[pool_keys[0]].resource_key,
+                    pools[pool_keys[0]].region_key,
+                    pools[pool_keys[0]].pool_key,
                 ),
                 "name": "general_engineering_parts",
-                "value": 50,
+                "value": 100,
             },
             {
                 "kind": "RESOURCE_DISCOVERED",
                 "key": resource_state_key(
-                    pools["north_service_depot_stock"].resource_key,
-                    pools["north_service_depot_stock"].region_key,
-                    pools["north_service_depot_stock"].pool_key,
+                    pools[pool_keys[1]].resource_key,
+                    pools[pool_keys[1]].region_key,
+                    pools[pool_keys[1]].pool_key,
                 ),
                 "name": "general_engineering_parts",
-                "value": 50,
+                "value": 20,
             },
         ],
         definition,
     )
 
     assert len(changes) == 2
-    assert changes[0].name == "重型工程设备场 · 通用工程部件"
-    assert changes[1].name == "市政工程维修基地 · 通用工程部件"
-    assert [change.value for change in changes] == [50, 50]
+    expected_names = []
+    for pool_key in pool_keys:
+        pool = pools[pool_key]
+        facility = definition.world.node(pool.facility_key)
+        resource = next(
+            item for item in definition.world.resources if item.key == pool.resource_key
+        )
+        assert facility is not None
+        expected_names.append(f"{facility.name} · {resource.name}")
+    assert [change.name for change in changes] == expected_names
+    assert [change.value for change in changes] == [100, 20]
     assert all("general_engineering_parts" not in _render(change) for change in changes)
     assert all("@" not in _render(change) for change in changes)
 

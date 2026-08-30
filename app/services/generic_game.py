@@ -51,6 +51,7 @@ from app.engine.rules import (
     DeclarativeRuleState,
     FactVisibilityMutation,
     GenericRuleOutcome,
+    NodeVisibilityMutation,
     RegionResourceSurveyMutation,
     RegionResourceVisibilityMutation,
     ResourceMutation,
@@ -606,11 +607,16 @@ class GenericGameService:
                 region = region_for_node(definition, target_node_key)
             except LocalityEngineError as exc:
                 raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+            node_reveals, fact_reveals = self._facility_region_reveals(region, definition, state)
             return replace(
                 outcome,
                 fact_visibility_updates=(
                     *outcome.fact_visibility_updates,
-                    *self._facility_region_reveals(region, definition, state),
+                    *fact_reveals,
+                ),
+                node_visibility_updates=(
+                    *outcome.node_visibility_updates,
+                    *node_reveals,
                 ),
             )
         if action.behavior == ActionBehavior.SURVEY_RESOURCES:
@@ -980,11 +986,12 @@ class GenericGameService:
         region: str,
         definition: ScenarioDefinitionV2,
         state: DeclarativeRuleState,
-    ) -> tuple[FactVisibilityMutation, ...]:
+    ) -> tuple[tuple[NodeVisibilityMutation, ...], tuple[FactVisibilityMutation, ...]]:
         facility_type = definition.metadata.locality.facility_node_type_key
         if facility_type is None:
-            return ()
-        reveals: list[FactVisibilityMutation] = []
+            return (), ()
+        node_reveals: list[NodeVisibilityMutation] = []
+        fact_reveals: list[FactVisibilityMutation] = []
         for node in definition.world.nodes:
             if node.node_type_key != facility_type:
                 continue
@@ -994,11 +1001,16 @@ class GenericGameService:
                 continue
             if node_region != region:
                 continue
+            state_node = state.nodes.get(node.key)
+            if state_node is not None and state_node.visibility != Visibility.KNOWN:
+                node_reveals.append(NodeVisibilityMutation(node.key, Visibility.KNOWN))
             for fact in node.facts:
                 state_fact = state.facts.get((node.key, fact.key))
                 if state_fact is not None and state_fact.visibility != Visibility.KNOWN:
-                    reveals.append(FactVisibilityMutation(node.key, fact.key, Visibility.KNOWN))
-        return tuple(reveals)
+                    fact_reveals.append(
+                        FactVisibilityMutation(node.key, fact.key, Visibility.KNOWN)
+                    )
+        return tuple(node_reveals), tuple(fact_reveals)
 
     @staticmethod
     def _require_authority(

@@ -28,6 +28,7 @@ from app.infrastructure.db.models import (
     AgentStep,
     GameInstanceActor,
     GameInstanceFactState,
+    GameInstanceNodeState,
     PlanningAttempt,
     PlanningCycle,
     Player,
@@ -876,6 +877,12 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
         scenario_version_id=version.id,
         creation_key="player-projection-known-target-contracts",
     )
+    utility_node_state = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "utility_service_depot"),
+    )
+    assert utility_node_state is not None
+    utility_node_state.visibility = Visibility.KNOWN
     projection = PlayerProjectionService(session)
     state = projection.game_state(GameInstanceId(runtime.instance.id))
     contracts = {

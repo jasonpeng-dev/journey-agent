@@ -40,12 +40,16 @@ def _definition_with_pool(
     resource_key: str,
     region_key: str,
     quantity: int,
+    public_facility_keys: tuple[str, ...] = (),
 ) -> ScenarioDefinitionV2:
     document = deepcopy(V2_0.model_dump(mode="json"))
     document["metadata"]["key"] = key
     document["metadata"]["name"] = key
     document["world"]["key"] = key
     document["world"]["name"] = key
+    for node in document["world"]["nodes"]:
+        if node["key"] in public_facility_keys:
+            node["initial_visibility"] = "KNOWN"
     document["initialization"]["resource_pools"].append(
         {
             "pool_key": pool_key,
@@ -116,7 +120,7 @@ def test_v3_initializes_facility_and_route_knowledge_boundaries(session: Session
         for node in definition.world.nodes
         if node.node_type_key == definition.metadata.locality.transport_node_type_key
     ]
-    assert len(facilities) == 30
+    assert len(facilities) == 29
     assert len(transports) == 6
     expected_communication = {
         "central_district": ("central_telecom_hub", False, Visibility.HIDDEN),
@@ -133,14 +137,29 @@ def test_v3_initializes_facility_and_route_knowledge_boundaries(session: Session
         assert communication.fact("operational").initial_value is operational
         assert communication.fact("operational").initial_visibility == visibility
     for facility in facilities:
-        region = region_for_node(definition, facility.key)
-        expected_visibility = expected_communication[region][2]
         assert {fact.key for fact in facility.facts} >= {
             "operational",
             "power_supply",
         }
-        assert facility.initial_visibility == Visibility.KNOWN
-        assert all(fact.initial_visibility == expected_visibility for fact in facility.facts)
+        region = region_for_node(definition, facility.key)
+        expected_visibility = (
+            Visibility.KNOWN
+            if region
+            not in {
+                "central_district",
+                "north_industrial_district",
+                "south_waterfront_district",
+            }
+            or facility.key in {value[0] for value in expected_communication.values()}
+            else Visibility.HIDDEN
+        )
+        assert facility.initial_visibility == expected_visibility
+        if expected_visibility == Visibility.HIDDEN:
+            assert all(fact.initial_visibility == Visibility.HIDDEN for fact in facility.facts)
+    for communication_key, _operational, expected_visibility in expected_communication.values():
+        communication = definition.world.node(communication_key)
+        assert communication is not None
+        assert all(fact.initial_visibility == expected_visibility for fact in communication.facts)
     for transport in transports:
         passable = next(fact for fact in transport.facts if fact.key == "passable")
         assert passable.initial_visibility == Visibility.HIDDEN
@@ -152,12 +171,12 @@ def test_inspect_reveals_non_resource_facility_facts_only(session: Session) -> N
     result = GenericGameService(session, scope).execute(
         actor_key="logistics_team_alpha",
         action_key="inspect",
-        target_node_key="utility_service_depot",
+        target_node_key="north_communication_relay",
         parameters={},
     )
     assert result.outcome.failure is None
     definition = V2_0
-    facility = definition.world.node("utility_service_depot")
+    facility = definition.world.node("north_communication_relay")
     assert facility is not None
     assert all(
         _fact(session, runtime.instance.id, facility.key, fact.key).visibility == Visibility.KNOWN
@@ -173,7 +192,7 @@ def test_inspect_reveals_non_resource_facility_facts_only(session: Session) -> N
         GameInstanceResourceState,
         (
             runtime.instance.id,
-            "general_engineering_parts@north_industrial_district@north_heavy_equipment_stock",
+            "general_engineering_parts@north_industrial_district@north_service_depot_stock",
         ),
     )
     assert pool is not None and pool.visibility == ResourcePoolVisibility.HIDDEN
@@ -186,6 +205,7 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
         resource_key="general_engineering_parts",
         region_key="north_industrial_district",
         quantity=1,
+        public_facility_keys=("utility_service_depot",),
     )
     inspect_definition = _definition_with_pool(
         "linjiang_v2_0_inspect_then_survey_definition",
@@ -193,6 +213,7 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
         resource_key="general_engineering_parts",
         region_key="north_industrial_district",
         quantity=1,
+        public_facility_keys=("utility_service_depot",),
     )
 
     def discovered_pool(scope, definition):
@@ -202,7 +223,7 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
                 for item in SharedKnowledgeProjection(
                     session, scope, definition
                 ).visible_resource_pools()
-                if item.pool_key == "north_heavy_equipment_stock"
+                if item.pool_key == "north_service_depot_stock"
             ),
             None,
         )
@@ -230,7 +251,7 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
     before_inspect = discovered_pool(survey_first_scope, survey_definition)
     assert before_inspect is not None
     assert before_inspect.availability_requirement == {
-        "node_key": "heavy_equipment_yard",
+        "node_key": "utility_service_depot",
         "fact_key": "operational",
         "value": True,
     }
@@ -239,7 +260,7 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
         _fact(
             session,
             survey_first_runtime.instance.id,
-            "heavy_equipment_yard",
+            "utility_service_depot",
             "operational",
         ).visibility
         == Visibility.HIDDEN
@@ -247,7 +268,7 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
     inspected = survey_first_game.execute(
         actor_key="logistics_team_alpha",
         action_key="inspect",
-        target_node_key="heavy_equipment_yard",
+        target_node_key="utility_service_depot",
         parameters={},
     )
     assert inspected.outcome.failure is None
@@ -270,7 +291,7 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
     inspected_first = inspect_first_game.execute(
         actor_key="logistics_team_alpha",
         action_key="inspect",
-        target_node_key="heavy_equipment_yard",
+        target_node_key="utility_service_depot",
         parameters={},
     )
     assert inspected_first.outcome.failure is None
@@ -370,7 +391,7 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
         GameInstanceResourceState,
         (
             runtime.instance.id,
-            "general_engineering_parts@north_industrial_district@north_heavy_equipment_stock",
+            "general_engineering_parts@north_industrial_district@north_service_depot_stock",
         ),
     )
     assert hidden_pool is not None
@@ -388,6 +409,14 @@ def test_route_attempts_reveal_truth_and_clear_requires_known_blocked(
         quantity=10,
     )
     runtime, scope = _runtime(session, definition, "linjiang_v2_0_route_reveal")
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "central_district"),
+    )
+    assert knowledge is not None
+    knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    knowledge.resource_survey_completed = True
+    session.flush()
     game = GenericGameService(session, scope)
     _set_actor(session, runtime.instance.id, "logistics_team_alpha", "south_waterfront_district")
     travelled = game.execute(

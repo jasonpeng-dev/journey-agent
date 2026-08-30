@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -19,19 +20,20 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     Player,
 )
-from app.scenarios.builtin import load_builtin_scenario
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.scenarios.validation import ScenarioDefinitionValidator
 from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import load_test_scenario
 
-FILE = "linjiang_infrastructure_recovery_v2_0_task4_completed_task56_test.yaml"
+_SCENARIO_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "scenarios"
+FILE = _SCENARIO_FIXTURES / "linjiang_infrastructure_recovery_v2_0_task4_completed_task56_test.yaml"
 
 
 def _definition() -> ScenarioDefinitionV2:
-    return load_builtin_scenario(FILE)
+    return load_test_scenario(FILE)
 
 
 def _initial_fact(definition: ScenarioDefinitionV2, node_key: str, fact_key: str):  # type: ignore[no-untyped-def]
@@ -130,7 +132,9 @@ def test_task4_completed_baseline_and_task56_initial_status() -> None:
 
 def test_task1_through_task4_contracts_match_the_task2_completed_baseline() -> None:
     definition = _definition()
-    baseline = load_builtin_scenario("linjiang_infrastructure_recovery_v2_0_task3_baseline.yaml")
+    baseline = load_test_scenario(
+        _SCENARIO_FIXTURES / "linjiang_infrastructure_recovery_v2_0_task3_baseline.yaml"
+    )
     objective_keys = {
         "restore_central_communication_capability",
         "restore_north_basic_engineering_support",

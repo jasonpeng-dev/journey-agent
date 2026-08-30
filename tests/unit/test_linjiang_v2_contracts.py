@@ -22,7 +22,6 @@ from app.agent.generic import (
 from app.agent.planner_contract import (
     action_planner_constraints,
     action_planner_effects,
-    declarative_action_effects,
 )
 from app.agent.planning_context import PlanningContextBuilder, _canonical_planner_input
 from app.agent.provider import (
@@ -136,6 +135,7 @@ def _v2_0_runtime(
     water_treatment = next(
         node for node in document["world"]["nodes"] if node["key"] == "water_treatment_plant"
     )
+    water_treatment["initial_visibility"] = "KNOWN"
     for fact in water_treatment["facts"]:
         fact["initial_visibility"] = "KNOWN"
     for relation in document["world"]["relations"]:
@@ -168,6 +168,21 @@ def _linjiang_v4_runtime(session: Session, key: str):  # type: ignore[no-untyped
     )
     scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
     return runtime, scope
+
+
+def _mark_region_resource_surveyed(
+    session: Session,
+    instance_id: object,
+    region_key: str,
+) -> None:
+    knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (instance_id, region_key),
+    )
+    assert knowledge is not None
+    knowledge.resource_inventory_visibility = ResourceInventoryVisibility.VISIBLE
+    knowledge.resource_survey_completed = True
+    session.flush()
 
 
 class _RepeatingPlanProvider:
@@ -292,9 +307,11 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     definition_actions = {item.key: item for item in definition.actions}
 
     assert set(definition_actions) == {
-        "activate_emergency_water_transfer",
         "clear_transport",
+        "commission_sustained_generation",
         "deploy_heavy_engineering_support",
+        "establish_sustained_humanitarian_logistics",
+        "generate_power",
         "inspect",
         "relay_message",
         "repair_communications",
@@ -305,6 +322,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
         "survey_resources",
         "transport_resource",
         "travel",
+        "receive_external_relief_supplies",
     }
 
     actors = {item["actor_key"]: item for item in context.relevant_actors}
@@ -439,35 +457,21 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     serialized = json.dumps(
         context.compact_dump(), ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
-    assert len(serialized) < 65_000, len(serialized)
+    # The final canonical scenario carries the additional Task5/Task6 action
+    # contracts in this high-recall context; keep a bounded payload guard.
+    assert len(serialized) < 80_000, len(serialized)
     assert "north_heavy_equipment_stock" not in json.dumps(
         context.compact_dump(), ensure_ascii=False
     )
-    communication = context.current_knowledge["resources"]["communication_equipment"]
-    assert communication["known_total"] == 0
-    assert communication["known_available"] == 0
-    assert communication["scopes"]["central_district"]["known_total"] == 0
-    assert communication["scopes"]["central_district"]["known_available"] == 0
+    assert "communication_equipment" not in context.current_knowledge["resources"]
+    assert "general_engineering_parts" not in context.current_knowledge["resources"]
 
     for action in definition_actions.values():
         constraints = action_planner_constraints(action)
         effects = action_planner_effects(action)
         assert "executor" in constraints
         assert isinstance(effects, list)
-    activation_effects = declarative_action_effects(
-        definition,
-        definition_actions["activate_emergency_water_transfer"],
-        known_node_keys={item.key for item in definition.world.nodes},
-        known_facts={
-            tuple(identity.split(".", 1)): value
-            for identity, value in context.current_knowledge["facts"].items()
-            if isinstance(identity, str) and "." in identity and isinstance(value, (str, int, bool))
-        },
-    )
-    assert any(
-        effect["type"] == "FACT_MUTATION" and effect["fact_key"] == "east_emergency_water_supply"
-        for effect in activation_effects
-    )
+    assert "activate_emergency_water_transfer" not in definition_actions
 
 
 def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
@@ -606,8 +610,8 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     }
     assert resource_knowledge["central_district"] == {
         "region_key": "central_district",
-        "resource_inventory_visibility": "VISIBLE",
-        "resource_survey_completed": True,
+        "resource_inventory_visibility": "HIDDEN",
+        "resource_survey_completed": False,
     }
     assert resource_knowledge["southeast_heights_district"]["resource_survey_completed"] is False
     assert len(resource_knowledge) == 6
@@ -1002,6 +1006,7 @@ def test_dependency_closure_does_not_add_transport_when_target_has_resource(
     session: Session,
 ) -> None:
     runtime, scope = _linjiang_v4_runtime(session, "linjiang-v4-resource-already-at-target")
+    _mark_region_resource_surveyed(session, runtime.instance.id, "central_district")
     agent = GenericAgentService(session, scope)
     task = agent.create_task(
         runtime.session,
@@ -1344,6 +1349,7 @@ def test_linjiang_v2_0_completed_survey_repair_diagnostic_is_typed(
     session: Session,
 ) -> None:
     runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-survey-diagnostic")
+    _mark_region_resource_surveyed(session, runtime.instance.id, "central_district")
     provider = _RepeatingPlanProvider(
         (
             PlanStepProposal(
@@ -1380,6 +1386,7 @@ def test_linjiang_v2_0_known_resource_deficit_repair_diagnostic_is_typed(
     session: Session,
 ) -> None:
     runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-resource-diagnostic")
+    _mark_region_resource_surveyed(session, runtime.instance.id, "central_district")
     communications = session.get(
         GameInstanceActor,
         (runtime.instance.id, "communications_repair_team_alpha"),
@@ -1488,15 +1495,36 @@ def test_linjiang_v2_0_known_preflight_repair_diagnostic_has_public_witness(
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
-    assert diagnostic.code == "ACTION_OUTSIDE_PLANNER_CONTEXT"
-    assert diagnostic.failure_code == "ACTION_OUTSIDE_PLANNER_CONTEXT"
-    assert diagnostic.dimension == "ACTION_BINDING"
+    assert diagnostic.code == "ACTION_PRECONDITION_FAILED"
+    assert diagnostic.failure_code == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
+    assert diagnostic.dimension == "ACTION_PRECONDITION"
     assert diagnostic.step_id == "repair-water-without-support"
     assert diagnostic.action_key == "repair_water_facility"
     assert diagnostic.actor_key == "water_repair_team_alpha"
     assert diagnostic.target_key == "water_treatment_plant"
-    assert diagnostic.required == "ACTION_IN_CANONICAL_ACTION_CONTRACTS"
-    assert diagnostic.actual == "repair_water_facility"
+    assert diagnostic.required == "PREFLIGHT_CONDITION_NOT_MATCHED"
+    assert diagnostic.actual == "KNOWN_FAILURE_CONDITION_MATCHED"
+    assert diagnostic.known_predicate == {
+        "operator": "ALL",
+        "predicates": [
+            {
+                "kind": "FACT_EQUALS",
+                "node_key": "water_treatment_plant",
+                "fact_key": "repair_profile",
+                "operator": "EQ",
+                "expected": "water_treatment_plant",
+                "actual": "water_treatment_plant",
+            },
+            {
+                "kind": "FACT_NOT_EQUALS",
+                "node_key": "water_treatment_plant",
+                "fact_key": "heavy_engineering_support_ready",
+                "operator": "NE",
+                "expected": True,
+                "actual": False,
+            },
+        ],
+    }
 
 
 def test_validator_stops_projected_diagnostics_after_static_root_failure(
@@ -1665,6 +1693,7 @@ def test_linjiang_v2_0_projected_repair_applies_selected_target_cost_once(
     session: Session,
 ) -> None:
     runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-selected-target-cost")
+    _mark_region_resource_surveyed(session, runtime.instance.id, "central_district")
     communications = session.get(
         GameInstanceActor,
         (runtime.instance.id, "communications_repair_team_alpha"),
@@ -2417,36 +2446,10 @@ def test_linjiang_v2_power_and_support_rules() -> None:
         (item.node_key, item.fact_key, item.value) for item in deployed.fact_updates
     }
 
-    activate_rule = next(
-        item for item in definition.rules if item.key == "activate_water_requirements"
-    )
-    assert "heavy_engineering_support_ready" not in str(activate_rule.model_dump())
-
-    activation_requirements = {
-        ("water_treatment_plant", "operational"): True,
-        ("water_treatment_plant", "power_supply"): "AVAILABLE",
-        ("south_pump_station", "operational"): True,
-        ("south_pump_station", "power_supply"): "AVAILABLE",
-        ("east_water_pump_station", "operational"): True,
-        ("east_water_pump_station", "power_supply"): "AVAILABLE",
-        ("south_communication_core", "operational"): True,
-    }
-    activation = engine.evaluate(
-        _rule_state(
-            definition,
-            resources={},
-            fact_overrides=activation_requirements,
-        ),
-        ActionRuleContext(
-            action_key="activate_emergency_water_transfer",
-            target_node_key="east_water_pump_station",
-            parameters={},
-            actor_key="water_repair_team_alpha",
-            actor_current_node_key="east_residential_district",
-        ),
-    )
-    assert activation.failure is None
-    assert activation.outcome_code == "WATER_TRANSFER_ACTIVE"
+    action_keys = {item.key for item in definition.actions}
+    assert "activate_emergency_water_transfer" not in action_keys
+    assert "activate_water_requirements" not in {item.key for item in definition.rules}
+    assert "activate_water_resolution" not in {item.key for item in definition.rules}
 
 
 def test_linjiang_v2_runtime_initializes_knowledge_and_reachability(session: Session) -> None:
@@ -2476,7 +2479,8 @@ def test_linjiang_v2_runtime_initializes_knowledge_and_reachability(session: Ses
             )
         )
     }
-    assert region_knowledge["central_district"].resource_inventory_visibility == "VISIBLE"
+    assert region_knowledge["central_district"].resource_inventory_visibility == "HIDDEN"
+    assert region_knowledge["central_district"].resource_survey_completed is False
     assert region_knowledge["southeast_heights_district"].resource_inventory_visibility == "HIDDEN"
     assert region_knowledge["southeast_heights_district"].resource_survey_completed is False
 

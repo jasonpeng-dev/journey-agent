@@ -1,6 +1,7 @@
 import json
 from collections import deque
 from collections.abc import Iterable
+from copy import deepcopy
 from time import sleep
 from types import SimpleNamespace
 from typing import Literal, NoReturn
@@ -29,6 +30,7 @@ from app.agent.provider import (
 from app.core.config import Settings
 from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId
+from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import (
     AgentPlan,
     AgentStep,
@@ -123,6 +125,20 @@ def _generic_plan() -> tuple[PlanStepProposal, ...]:
         _step("diagnose_patient", "patient_one", "doctor_lee"),
         _step("treat_patient", "patient_one", "doctor_lee", {"dosage": 2}),
     )
+
+
+def _plan_order_definition() -> ScenarioDefinitionV2:
+    """Keep plan-order coverage independent from diagnosis preflight coverage."""
+
+    document = deepcopy(GENERIC_TEST.model_dump(mode="json"))
+    document["metadata"]["key"] = "generic_plan_order"
+    document["metadata"]["name"] = "Generic Plan Order"
+    document["world"]["key"] = "generic_plan_order"
+    document["world"]["name"] = "Generic Plan Order"
+    document["rules"] = [
+        rule for rule in document["rules"] if rule["key"] != "treatment_needs_diagnosis"
+    ]
+    return ScenarioDefinitionV2.model_validate(document)
 
 
 def _step(
@@ -576,7 +592,7 @@ def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
     )
-    runtime, _scope = _runtime(session, GENERIC_TEST)
+    runtime, _scope = _runtime(session, _plan_order_definition())
 
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")

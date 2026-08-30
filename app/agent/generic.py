@@ -3923,6 +3923,28 @@ class GenericAgentService:
                     current = projected_known_facts.get((target_key, fact.key))
                     if current is not None:
                         current.visibility = Visibility.KNOWN
+        if action.behavior == ActionBehavior.REPAIR_COMMUNICATIONS:
+            facility_type = definition.metadata.locality.facility_node_type_key
+            if facility_type is not None:
+                try:
+                    region = region_for_node(definition, target_key)
+                except LocalityEngineError:
+                    region = None
+                if region is not None:
+                    for node in definition.world.nodes:
+                        if node.node_type_key != facility_type:
+                            continue
+                        try:
+                            node_region = region_for_node(definition, node.key)
+                        except LocalityEngineError:
+                            continue
+                        if node_region != region:
+                            continue
+                        projected_known_nodes.add(node.key)
+                        for fact in node.facts:
+                            current = projected_known_facts.get((node.key, fact.key))
+                            if current is not None:
+                                current.visibility = Visibility.KNOWN
 
         fact_values: dict[tuple[str, str], set[StrictScalar]] = {}
         fact_visibility: dict[tuple[str, str], set[Visibility]] = {}

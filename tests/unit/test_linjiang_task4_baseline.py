@@ -19,16 +19,17 @@ from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
 from tests.scenario_fixtures import load_test_scenario
 
+_ROOT = Path(__file__).resolve().parents[2]
 _BASELINE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "app"
+    _ROOT
+    / "tests"
+    / "fixtures"
     / "scenarios"
-    / "data"
     / "linjiang_infrastructure_recovery_v2_0_task3_baseline.yaml"
 )
 _BASELINE = load_test_scenario(_BASELINE_PATH)
 _CANONICAL = load_test_scenario(
-    _BASELINE_PATH.with_name("linjiang_infrastructure_recovery_v2_0.yaml")
+    _ROOT / "app" / "scenarios" / "data" / "linjiang_infrastructure_recovery_v2_0.yaml"
 )
 _TASK3_KEY = "restore_east_emergency_power_network"
 _TASK4_KEY = "restore_east_emergency_water_supply"
@@ -198,16 +199,38 @@ def test_task3_objective_and_common_recovery_contract_are_unchanged() -> None:
 
     canonical_actions = {item.key: item for item in _CANONICAL.actions}
     baseline_actions = {item.key: item for item in _BASELINE.actions}
-    assert set(baseline_actions) == set(canonical_actions) - {"activate_emergency_water_transfer"}
+    assert set(baseline_actions).issubset(canonical_actions)
+    assert "activate_emergency_water_transfer" not in canonical_actions
     for key, action in baseline_actions.items():
-        if key != "supply_power":
+        if key in {"supply_power", "repair_electrical", "repair_industrial_facility"}:
+            baseline_document = action.model_dump(mode="json")
+            canonical_document = canonical_actions[key].model_dump(mode="json")
+            baseline_effects = baseline_document["planning"]["terminal_effects"]
+            canonical_effects = canonical_document["planning"]["terminal_effects"]
+            assert set(tuple(item.items()) for item in baseline_effects).issubset(
+                set(tuple(item.items()) for item in canonical_effects)
+            )
+            baseline_document["planning"]["terminal_effects"] = []
+            canonical_document["planning"]["terminal_effects"] = []
+            assert baseline_document == canonical_document
+        else:
             assert action == canonical_actions[key]
 
     canonical_rules = {item.key: item for item in _CANONICAL.rules}
     baseline_rules = {item.key: item for item in _BASELINE.rules}
-    assert set(baseline_rules) == set(canonical_rules) - {
-        "activate_water_requirements",
-        "activate_water_resolution",
+    intentionally_changed_rules = {
+        "repair_electrical_target_profile_required",
+        "repair_industrial_facility_target_profile_required",
+        "repair_industrial_facility_heavy_equipment_yard_resolution",
     }
+    intentionally_removed_rules = {
+        "cost_repair_electrical_0_electrical_repair_parts",
+        "cost_repair_electrical_1_electrical_repair_parts",
+        "repair_electrical_central_hospital_resolution",
+        "repair_electrical_north_power_substation_resolution",
+    }
+    assert (set(baseline_rules) - intentionally_removed_rules).issubset(canonical_rules)
+    assert intentionally_removed_rules.isdisjoint(canonical_rules)
     for key, rule in baseline_rules.items():
-        assert rule == canonical_rules[key]
+        if key not in intentionally_changed_rules | intentionally_removed_rules:
+            assert rule == canonical_rules[key]
