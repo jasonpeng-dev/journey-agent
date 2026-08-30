@@ -75,12 +75,12 @@ def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
     for objective in normalized["objectives"]:
         objective["completion_requirements"].sort(key=lambda item: item["key"])
         for requirement in objective["completion_requirements"]:
-            requirement["accepted_values"].sort(key=_scalar_sort_key)
+            requirement.get("accepted_values", []).sort(key=_scalar_sort_key)
         objective["prerequisites"].sort(key=lambda item: item["key"])
         for prerequisite in objective["prerequisites"]:
             prerequisite["requirements"].sort(key=lambda item: item["key"])
             for requirement in prerequisite["requirements"]:
-                requirement["accepted_values"].sort(key=_scalar_sort_key)
+                requirement.get("accepted_values", []).sort(key=_scalar_sort_key)
         objective["subsumes"].sort()
         objective["goal_aliases"].sort(key=lambda value: value.casefold())
         objective["goal_examples"].sort(key=lambda value: value.casefold())

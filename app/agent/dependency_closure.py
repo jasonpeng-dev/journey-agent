@@ -18,7 +18,11 @@ from app.agent.provider import (
     PlannerTargetBinding,
 )
 from app.domain.enums import ResourceInventoryVisibility
-from app.domain.scenario_v2 import ObjectiveDefinitionV2, ScenarioDefinitionV2
+from app.domain.scenario_v2 import (
+    ObjectiveDefinitionV2,
+    ObjectiveRequirementKind,
+    ScenarioDefinitionV2,
+)
 from app.services.knowledge_projection import resource_knowledge_status
 
 
@@ -366,6 +370,7 @@ def build_dependency_closure(
     contracts = {item.action_key: item for item in planner_input.action_contracts}
     bindings = {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
     queue: deque[tuple[TypedDependency, tuple[str, ...], str | None]] = deque()
+    known_facts = planner_input.known_world.facts
     for objective in objectives:
         requirements = (
             *objective.completion_requirements,
@@ -376,14 +381,35 @@ def build_dependency_closure(
             ),
         )
         for requirement in requirements:
+            gate = getattr(requirement, "knowledge_gate", None)
+            if gate is not None and known_facts.get(f"{gate.node_key}.{gate.fact_key}") not in (
+                gate.accepted_values
+            ):
+                continue
+            if (
+                getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
+                == ObjectiveRequirementKind.RESOURCE_AT_LEAST
+            ):
+                assert requirement.resource_key is not None
+                assert requirement.region_key is not None
+                assert requirement.minimum is not None
+                dependency = TypedDependency(
+                    "RESOURCE_SOURCE",
+                    requirement.resource_key,
+                    requirement.region_key,
+                    requirement.minimum,
+                )
+            else:
+                assert requirement.node_key is not None and requirement.fact_key is not None
+                dependency = TypedDependency(
+                    "FACT",
+                    requirement.node_key,
+                    requirement.fact_key,
+                    repr(tuple(requirement.accepted_values)),
+                )
             queue.append(
                 (
-                    TypedDependency(
-                        "FACT",
-                        requirement.node_key,
-                        requirement.fact_key,
-                        repr(tuple(requirement.accepted_values)),
-                    ),
+                    dependency,
                     (f"objective:{objective.key}", f"requirement:{requirement.key}"),
                     None,
                 )
@@ -393,12 +419,19 @@ def build_dependency_closure(
     selected_actions: set[str] = set()
     selected_bindings: set[tuple[str, str]] = set()
     relevant_nodes = {
-        requirement.node_key
+        node_key
         for objective in objectives
         for requirement in (
             *objective.completion_requirements,
             *(item for group in objective.prerequisites for item in group.requirements),
         )
+        for node_key in (
+            requirement.node_key
+            if getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
+            == ObjectiveRequirementKind.FACT
+            else requirement.region_key,
+        )
+        if node_key is not None
     }
     relevant_resources: set[str] = set()
     unknowns: dict[str, dict[str, object]] = {}
@@ -563,34 +596,28 @@ def build_dependency_closure(
                 continue
             node_key = precondition.get("node_key")
             fact_key = precondition.get("fact_key")
-            current_value = precondition.get("current_value")
             if not isinstance(node_key, str) or not isinstance(fact_key, str):
                 continue
             # The contradiction witness is public Known state; retain its
             # node so a selected producer has a legal public target context.
             relevant_nodes.add(node_key)
-            for producer_key, producer in contracts.items():
-                for effect in producer.deterministic_effects:
-                    if effect.get("type") != "FACT_MUTATION" or effect.get("fact_key") != fact_key:
-                        continue
-                    target = effect.get("target")
-                    if target not in {"target_key", "target_node", node_key}:
-                        continue
-                    effect_value = effect.get("value")
-                    if isinstance(effect_value, dict):
-                        literal = effect_value.get("literal")
-                        if literal is None or literal == current_value:
-                            continue
-                        effect_value = literal
-                    if effect_value == current_value:
-                        continue
-                    select_action(
-                        producer_key,
-                        (*path, f"known_precondition:{node_key}.{fact_key}"),
-                        repr(TypedDependency("FACT", node_key, fact_key)),
-                        demand_group=demand_group,
-                    )
-                    break
+            failure_condition = precondition.get("failure_condition")
+            if not isinstance(failure_condition, dict):
+                continue
+            kind = failure_condition.get("kind")
+            if kind == "FACT_NOT_EQUALS" or (
+                kind == "FACT_COMPARE" and failure_condition.get("operator") == "NE"
+            ):
+                values = (failure_condition.get("value"),)
+            else:
+                continue
+            queue.append(
+                (
+                    TypedDependency("FACT", node_key, fact_key, repr(values)),
+                    (*path, f"known_precondition:{node_key}.{fact_key}"),
+                    action_key,
+                )
+            )
 
         # Resource requirements declared by the canonical Action contract are
         # source-agnostic. Queue the knowledge dependency without selecting a
@@ -710,24 +737,60 @@ def build_dependency_closure(
 
         for requirement in binding.requirements:
             cost = requirement.get("cost")
-            if not isinstance(cost, dict):
+            if isinstance(cost, dict):
+                for resource_key, required_amount in cost.items():
+                    if (
+                        not isinstance(resource_key, str)
+                        or isinstance(required_amount, bool)
+                        or not isinstance(required_amount, int)
+                        or required_amount <= 0
+                    ):
+                        continue
+                    _queue_resource_dependency(
+                        resource_key,
+                        required_amount,
+                        binding.target_key,
+                        path,
+                        action_key,
+                        demand_group,
+                        binding.target_key,
+                    )
+
+            special_requirements = requirement.get("special_requirements")
+            if not isinstance(special_requirements, (list, tuple)):
                 continue
-            for resource_key, required_amount in cost.items():
-                if (
-                    not isinstance(resource_key, str)
-                    or isinstance(required_amount, bool)
-                    or not isinstance(required_amount, int)
-                    or required_amount <= 0
-                ):
+            for special in special_requirements:
+                if not isinstance(special, dict):
                     continue
-                _queue_resource_dependency(
-                    resource_key,
-                    required_amount,
-                    binding.target_key,
-                    path,
-                    action_key,
-                    demand_group,
-                    binding.target_key,
+                node_key = special.get("node_key")
+                fact_key = special.get("fact_key")
+                operator = special.get("operator")
+                value = special.get("value")
+                if not isinstance(node_key, str) or not isinstance(fact_key, str):
+                    continue
+                identity = f"{node_key}.{fact_key}"
+                current = known_facts.get(identity)
+                if operator == "EQ":
+                    accepted_values = (value,)
+                    satisfied = identity in known_facts and current == value
+                elif operator == "IN" and isinstance(value, (list, tuple)):
+                    accepted_values = tuple(value)
+                    satisfied = identity in known_facts and current in value
+                else:
+                    continue
+                if satisfied:
+                    continue
+                queue.append(
+                    (
+                        TypedDependency(
+                            "FACT",
+                            node_key,
+                            fact_key,
+                            repr(accepted_values),
+                        ),
+                        (*path, f"binding_precondition:{node_key}.{fact_key}"),
+                        action_key,
+                    )
                 )
 
         for effect in binding.deterministic_effects:
@@ -808,6 +871,38 @@ def build_dependency_closure(
         state_changed = True
         if dependency.dimension == "FACT":
             fact_identity = f"{dependency.subject}.{dependency.key}"
+            # A canonical producer can intentionally hide its planning relevance
+            # until a public discovery Fact is known.  Preserve the enabling
+            # chain without exposing the gated Action itself: the gate becomes
+            # an ordinary FACT dependency and re-enters the same fixed point.
+            for action in getattr(definition, "actions", ()):
+                gate = getattr(getattr(action, "planning", None), "knowledge_gate", None)
+                if gate is None or known_facts.get(f"{gate.node_key}.{gate.fact_key}") in (
+                    gate.accepted_values
+                ):
+                    continue
+                effects = (
+                    *getattr(action.planning, "terminal_effects", ()),
+                    *getattr(action.planning, "supporting_effects", ()),
+                )
+                if not any(
+                    effect.node_key == dependency.subject and effect.fact_key == dependency.key
+                    for effect in effects
+                ):
+                    continue
+                relevant_nodes.add(gate.node_key)
+                queue.append(
+                    (
+                        TypedDependency(
+                            "FACT",
+                            gate.node_key,
+                            gate.fact_key,
+                            repr(tuple(gate.accepted_values)),
+                        ),
+                        (*path, "gated_producer_discovery"),
+                        consumer_action,
+                    )
+                )
             if fact_identity not in planner_input.known_world.facts:
                 objective_unknown: dict[str, object] = {
                     "dimension": "OBJECTIVE_FACT_KNOWLEDGE",
@@ -903,6 +998,9 @@ def build_dependency_closure(
                         demand_group=demand_group,
                     )
         elif dependency.dimension == "RESOURCE_SOURCE":
+            relevant_resources.add(dependency.subject)
+            if dependency.key:
+                relevant_nodes.add(dependency.key)
             known_resource = planner_input.known_world.resources.get(dependency.subject)
             required_amount = int(dependency.required or 0)
             known_available_amount = _known_available_resource_amount(known_resource)

@@ -5,6 +5,7 @@ import {
   ActionExecutionControls,
   GoalComposer,
   KnownWorldAccordions,
+  MissionRoadmap,
   MissionLogPanel,
   PlanHistory,
   TaskTabs,
@@ -177,6 +178,36 @@ describe("Formal Play player projections", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+  });
+
+  it("renders projected roadmap resource progress without inventing hidden requirements", () => {
+    render(
+      <MissionRoadmap
+        stages={[
+          {
+            key: "objective:relief",
+            name: "建立持续保障",
+            description: "公开目标",
+            status: "CURRENT",
+            objective_key: "relief",
+            requirements: [
+              {
+                key: "central_relief",
+                kind: "RESOURCE_AT_LEAST",
+                description: "中央应急救援物资",
+                region_key: "central",
+                resource_key: "relief",
+                minimum: 30,
+                current_known_available: 20,
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("建立持续保障")).toBeInTheDocument();
+    expect(screen.getByText("中央应急救援物资（当前：20，要求：≥30）")).toBeInTheDocument();
   });
 
   it("renders a standalone GameInstance goal composer", () => {

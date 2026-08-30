@@ -25,6 +25,7 @@ import type {
   PublicPlanningAttempt,
   PublicPlanningCycle,
   PublicResourceUsage,
+  MissionRoadmapStage,
   PublicTargetActionContract,
   ResourceIntelligence,
   PublicTask,
@@ -139,6 +140,31 @@ function interruptionMarkerSequence(plan: PublicPlanHistory): number | null {
     .sort((left, right) => left.sequence - right.sequence)
     .at(-1);
   return trigger?.sequence ?? null;
+}
+
+export function MissionRoadmap({ stages }: { stages: MissionRoadmapStage[] }) {
+  if (stages.length === 0) return null;
+  return (
+    <ol className="mission-roadmap" aria-label="任务路线图">
+      {stages.map((stage) => (
+        <li key={stage.key} className={stage.status.toLowerCase()}>
+          <b aria-hidden="true">
+            {stage.status === "COMPLETED" ? "✓" : stage.status === "CURRENT" ? "→" : "·"}
+          </b>
+          <div>
+            <strong>{stage.name}</strong>
+            {stage.requirements.map((requirement) => (
+              <small key={requirement.key}>
+                {requirement.kind === "RESOURCE_AT_LEAST"
+                  ? `${requirement.description}（当前：${requirement.current_known_available ?? 0}，要求：≥${requirement.minimum ?? 0}）`
+                  : requirement.description}
+              </small>
+            ))}
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
 }
 
 function planningHeadline(
@@ -1855,6 +1881,7 @@ export function GamePage() {
           {!task && !selectedTaskLoading && <p className="console-empty">等待下达第一个目标。</p>}
           {selectedTaskLoading && <p className="plan-waiting-message">正在加载所选任务记录……</p>}
           {task && <div className="task-brief"><small>当前目标</small><strong>{task.goal}</strong><span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span><p>{task.objective_names.join(" · ")}</p>{task.explanation && <code>{uiLabel(task.explanation)}</code>}</div>}
+          {task && <MissionRoadmap stages={task.roadmap.stages} />}
           {task && !planningForTask && <PlanHistory task={task} />}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>

@@ -1,0 +1,98 @@
+"""Generic Objective requirement evaluation across Truth and public Knowledge."""
+
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.domain.enums import ResourcePoolAvailability
+from app.domain.runtime_scope import RuntimeScope
+from app.domain.scenario_v2 import (
+    ObjectiveRequirementKind,
+    ObjectiveRequirementV2,
+    ScenarioDefinitionV2,
+)
+from app.domain.world import Visibility
+from app.infrastructure.db.models import GameInstanceFactState, GameInstanceResourceState
+from app.services.knowledge_projection import SharedKnowledgeProjection
+
+
+def requirement_gate_is_public(
+    db: Session, scope: RuntimeScope, requirement: ObjectiveRequirementV2
+) -> bool:
+    gate = requirement.knowledge_gate
+    if gate is None:
+        return True
+    row = db.get(GameInstanceFactState, (scope.game_instance_id, gate.node_key, gate.fact_key))
+    return bool(
+        row and row.visibility == Visibility.KNOWN and row.truth_value in gate.accepted_values
+    )
+
+
+def truth_requirement_value(
+    db: Session, scope: RuntimeScope, requirement: ObjectiveRequirementV2
+) -> object:
+    if requirement.kind == ObjectiveRequirementKind.FACT:
+        assert requirement.node_key is not None and requirement.fact_key is not None
+        row = db.get(
+            GameInstanceFactState,
+            (scope.game_instance_id, requirement.node_key, requirement.fact_key),
+        )
+        if row is None:
+            raise LookupError("Objective Truth is missing from this Instance")
+        return row.truth_value
+    assert requirement.region_key is not None and requirement.resource_key is not None
+    rows = db.scalars(
+        select(GameInstanceResourceState).where(
+            GameInstanceResourceState.game_instance_id == scope.game_instance_id,
+            GameInstanceResourceState.scope_node_key == requirement.region_key,
+            GameInstanceResourceState.resource_key == requirement.resource_key,
+            GameInstanceResourceState.availability == ResourcePoolAvailability.AVAILABLE,
+        )
+    )
+    return sum(max(0, row.value - row.reserved_value) for row in rows)
+
+
+def truth_requirement_satisfied(
+    db: Session, scope: RuntimeScope, requirement: ObjectiveRequirementV2
+) -> tuple[object, bool]:
+    value = truth_requirement_value(db, scope, requirement)
+    if requirement.kind == ObjectiveRequirementKind.FACT:
+        return value, value in requirement.accepted_values
+    assert requirement.minimum is not None
+    return value, isinstance(value, int) and value >= requirement.minimum
+
+
+def known_requirement_satisfied(
+    db: Session,
+    scope: RuntimeScope,
+    definition: ScenarioDefinitionV2,
+    requirement: ObjectiveRequirementV2,
+) -> bool:
+    if not requirement_gate_is_public(db, scope, requirement):
+        return False
+    if requirement.kind == ObjectiveRequirementKind.FACT:
+        assert requirement.node_key is not None and requirement.fact_key is not None
+        row = db.get(
+            GameInstanceFactState,
+            (scope.game_instance_id, requirement.node_key, requirement.fact_key),
+        )
+        return bool(
+            row
+            and row.visibility == Visibility.KNOWN
+            and row.truth_value in requirement.accepted_values
+        )
+    assert requirement.region_key is not None and requirement.resource_key is not None
+    assert requirement.minimum is not None
+    projection = SharedKnowledgeProjection(db, scope, definition).planner_resources()
+    resource = projection["resources"].get(requirement.resource_key, {})
+    region = resource.get("regions", {}).get(requirement.region_key, {})
+    return int(region.get("known_available", 0)) >= requirement.minimum
+
+
+__all__ = [
+    "known_requirement_satisfied",
+    "requirement_gate_is_public",
+    "truth_requirement_satisfied",
+    "truth_requirement_value",
+]

@@ -76,7 +76,16 @@ export type PublicPlanDisplayStatus = "EXECUTING" | "ADJUSTED" | "STAGE_COMPLETE
 export type PublicPlanHistory = { id: string; ordinal: number; status: "EXECUTING" | "ADJUSTED" | "COMPLETED" | "BLOCKED"; display_status?: PublicPlanDisplayStatus | null; display_reason?: string | null; duration_ms?: number | null; planning_cycle_id?: string | null; completed_steps: number; total_steps: number; failed_step_name: string | null; interruption?: PlanInterruption | null; steps: PublicPlanHistoryStep[] };
 export type PublicPlanningAttempt = { attempt_index: number; call_type: "INITIAL_PLAN" | "REPLAN" | "REPAIR"; status: "RUNNING" | "ACCEPTED" | "REJECTED" | "ERROR" | "TIMEOUT"; started_at: string | null; finished_at: string | null; duration_ms: number | null; provider_outcome: string | null; provider_latency_ms: number | null; validator_summary: Array<Record<string, unknown>>; provider_error_category: string | null; provider_error_code: string | null; accepted_step_count: number };
 export type PublicPlanningCycle = { id: string; cycle_type: "INITIAL" | "REPLAN"; status: string; started_at: string | null; finished_at: string | null; wall_clock_duration_ms: number | null; attempt_count: number; final_outcome: string; attempts: PublicPlanningAttempt[] };
-export type MissionRoadmapStage = { key: string; name: string; description: string; status: "COMPLETED" | "CURRENT" | "PENDING"; objective_key: string | null };
+export type MissionRoadmapRequirement = {
+  key: string;
+  kind?: "RESOURCE_AT_LEAST";
+  description: string;
+  region_key?: string;
+  resource_key?: string;
+  minimum?: number;
+  current_known_available?: number;
+};
+export type MissionRoadmapStage = { key: string; name: string; description: string; status: "COMPLETED" | "CURRENT" | "PENDING"; objective_key: string | null; requirements: MissionRoadmapRequirement[] };
 export type TimelineEventKind = "GOAL_ACCEPTED" | "PLAN_CREATED" | "TASK_STARTED" | "ACTION_BRIEFING" | "ACTION_RESULT" | "PLAN_UPDATED" | "APPROVAL_REQUIRED" | "APPROVAL_APPROVED" | "APPROVAL_REJECTED" | "TASK_COMPLETED" | "TASK_BLOCKED" | "TASK_ABORTED";
 export type KnowledgeChange = { kind: "NODE_REVEALED" | "FACT_REVEALED" | "RESOURCE_DISCOVERED" | "RESOURCE_INVENTORY_REVEALED" | "RESOURCE_SURVEY_COMPLETED" | "RELATION_REVEALED"; key: string; name: string; value: string | number | boolean | null };
 export type PublicTimelineEvent = { id: string; kind: TimelineEventKind; planning_cycle_id?: string | null; title: string; detail: string | null; actor_name: string | null; result_summary: string | null; success: boolean | null; knowledge_changes: KnowledgeChange[]; occurred_at: string | null; duration_ms?: number | null; location?: ActionLocation | null; resource_usage?: PublicResourceUsage[]; resource_usage_kind?: PublicResourceUsageKind | null };

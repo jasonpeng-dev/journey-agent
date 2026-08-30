@@ -543,12 +543,23 @@ class ExpectedOutcomeV2(FrozenDefinitionModel):
     success: bool
 
 
+class ObjectiveRequirementKnowledgeGateV2(FrozenDefinitionModel):
+    """Public-Knowledge gate shared by objectives and Action planning projections."""
+
+    node_key: StableKey
+    fact_key: StableKey
+    accepted_values: tuple[StrictScalar, ...] = Field(min_length=1)
+
+
 class ActionPlanningProjectionV2(FrozenDefinitionModel):
     terminal_effects: tuple[FactReferenceV2, ...] = ()
     supporting_effects: tuple[FactReferenceV2, ...] = ()
     success_outcome_codes: tuple[SymbolicCode, ...] = ()
     wait_success_outcome_codes: tuple[SymbolicCode, ...] = ()
     hints: tuple[str, ...] = ()
+    knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ActionDefinitionV2(FrozenDefinitionModel):
@@ -864,12 +875,54 @@ class RuleDefinitionV2(FrozenDefinitionModel):
         return self
 
 
+class ObjectiveRequirementKind(StrEnum):
+    FACT = "FACT"
+    RESOURCE_AT_LEAST = "RESOURCE_AT_LEAST"
+
+
 class ObjectiveRequirementV2(FrozenDefinitionModel):
     key: StableKey
-    node_key: StableKey
-    fact_key: StableKey
-    accepted_values: tuple[StrictScalar, ...] = Field(min_length=1)
+    kind: ObjectiveRequirementKind = Field(
+        default=ObjectiveRequirementKind.FACT,
+        exclude_if=lambda value: value == ObjectiveRequirementKind.FACT,
+    )
+    node_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    fact_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    accepted_values: tuple[StrictScalar, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    region_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    resource_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    minimum: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     description: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_requirement_shape(self) -> ObjectiveRequirementV2:
+        if self.kind == ObjectiveRequirementKind.FACT:
+            if self.node_key is None or self.fact_key is None or not self.accepted_values:
+                raise ValueError("FACT Objective requirement needs node/fact/accepted_values")
+            if (
+                self.region_key is not None
+                or self.resource_key is not None
+                or self.minimum is not None
+            ):
+                raise ValueError("FACT Objective requirement cannot declare resource fields")
+        else:
+            if self.region_key is None or self.resource_key is None or self.minimum is None:
+                raise ValueError("RESOURCE_AT_LEAST needs region/resource/minimum")
+            if self.node_key is not None or self.fact_key is not None or self.accepted_values:
+                raise ValueError("RESOURCE_AT_LEAST cannot declare Fact fields")
+        return self
+
+    @property
+    def fact_ref(self) -> tuple[str, str] | None:
+        if self.kind != ObjectiveRequirementKind.FACT:
+            return None
+        assert self.node_key is not None and self.fact_key is not None
+        return self.node_key, self.fact_key
 
 
 class ObjectivePrerequisiteV2(FrozenDefinitionModel):
@@ -1219,6 +1272,8 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
             *action.planning.supporting_effects,
         ):
             _require_fact(nodes, fact_ref.node_key, fact_ref.fact_key, "Action planning Effect")
+        if action.planning.knowledge_gate is not None:
+            _validate_gate(action.planning.knowledge_gate, nodes)
 
     for rule in definition.rules:
         action = _require_key(actions, rule.action_key, f"Rule {rule.key} Action")
@@ -1248,10 +1303,14 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     subsumption_graph: dict[str, tuple[str, ...]] = {}
     for objective in definition.objectives:
         for requirement in objective.completion_requirements:
-            _validate_objective_requirement(requirement, nodes)
+            _validate_objective_requirement(
+                requirement, nodes, resources, definition.metadata.locality
+            )
         for prerequisite in objective.prerequisites:
             for requirement in prerequisite.requirements:
-                _validate_objective_requirement(requirement, nodes)
+                _validate_objective_requirement(
+                    requirement, nodes, resources, definition.metadata.locality
+                )
         for key in objective.subsumes:
             if key == objective.key:
                 raise ValueError("An Objective cannot subsume itself")
@@ -1389,7 +1448,19 @@ def _validate_selector_fact(
 def _validate_objective_requirement(
     requirement: ObjectiveRequirementV2,
     nodes: dict[str, NodeDefinitionV2],
+    resources: dict[str, ResourceDefinitionV2],
+    locality: LocalityContractV2,
 ) -> None:
+    if requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+        assert requirement.region_key is not None and requirement.resource_key is not None
+        region = _require_key(nodes, requirement.region_key, "Objective resource Region")
+        if not locality.enabled or region.node_type_key != locality.region_node_type_key:
+            raise ValueError("Objective resource requirement must reference a Region")
+        _require_key(resources, requirement.resource_key, "Objective Resource")
+        if requirement.knowledge_gate is not None:
+            _validate_gate(requirement.knowledge_gate, nodes)
+        return
+    assert requirement.node_key is not None and requirement.fact_key is not None
     fact = _require_fact(
         nodes,
         requirement.node_key,
@@ -1407,6 +1478,18 @@ def _validate_objective_requirement(
             raise ValueError("Objective value does not match INTEGER Fact")
         if fact.value_type == FactValueType.BOOLEAN and not isinstance(value, bool):
             raise ValueError("Objective value does not match BOOLEAN Fact")
+    if requirement.knowledge_gate is not None:
+        _validate_gate(requirement.knowledge_gate, nodes)
+
+
+def _validate_gate(
+    gate: ObjectiveRequirementKnowledgeGateV2,
+    nodes: dict[str, NodeDefinitionV2],
+) -> None:
+    fact = _require_fact(nodes, gate.node_key, gate.fact_key, "Objective requirement gate")
+    for value in gate.accepted_values:
+        if fact.value_type == FactValueType.ENUM and value not in fact.allowed_values:
+            raise ValueError("Objective gate value is outside the ENUM Fact domain")
 
 
 def _validate_locality_contract(

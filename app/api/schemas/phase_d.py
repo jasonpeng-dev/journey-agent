@@ -435,6 +435,7 @@ class MissionRoadmapStageResponse(ApiModel):
     description: str
     status: MissionRoadmapStageStatus
     objective_key: str | None = None
+    requirements: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MissionRoadmapResponse(ApiModel):

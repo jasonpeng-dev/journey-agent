@@ -343,6 +343,7 @@ class PlayerProjectionService:
                     known_facts={
                         (item.node_key, item.fact_key): item.truth_value for item in known_facts
                     },
+                    known_resources=knowledge_projection.planner_resources()["resources"],
                 )
                 if task is not None
                 else None
@@ -485,6 +486,7 @@ class PlayerProjectionService:
         definition: ScenarioDefinitionV2,
         *,
         known_facts: dict[tuple[str, str], str | int | bool],
+        known_resources: dict[str, object] | None = None,
     ) -> PublicTaskResponse:
         plans = tuple(
             self.db.scalars(
@@ -597,6 +599,7 @@ class PlayerProjectionService:
             definition,
             tuple(task.objective_scope_keys or ()),
             known_facts,
+            known_resources,
         )
         current_step = _next_tool_step(latest, steps_by_plan)
         if checkpoint is not None and checkpoint.last_action_step_id is not None:
@@ -623,6 +626,7 @@ class PlayerProjectionService:
                         description=stage.description,
                         status=stage.status.value,
                         objective_key=stage.objective_key,
+                        requirements=list(stage.requirements),
                     )
                     for stage in roadmap.stages
                 ]

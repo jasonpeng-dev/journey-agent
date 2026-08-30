@@ -224,6 +224,11 @@ def planner_known_preconditions(
             RulePhase.RESOLVE,
         }:
             continue
+        # Target-qualified requirements belong to PlannerTargetBinding.  If
+        # projected here they contaminate every binding of a generic Action
+        # with prerequisites authored for one specific target profile.
+        if _has_current_target_condition(rule.condition):
+            continue
         if rule.phase == RulePhase.RESOLVE and not any(
             effect.failure_code for effect in rule.effects
         ):

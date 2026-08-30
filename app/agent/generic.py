@@ -20,6 +20,7 @@ from app.agent.planner_contract import action_planner_effects
 from app.agent.planning_context import (
     PlanningActionCatalogBuilder,
     PlanningContextBuilder,
+    _known_world_facts,
     objective_context,
 )
 from app.agent.provider import (
@@ -110,6 +111,11 @@ from app.services.generic_actions import (
     GenericApprovalRequired,
 )
 from app.services.knowledge_projection import SharedKnowledgeProjection, resource_knowledge_status
+from app.services.objective_requirements import (
+    known_requirement_satisfied,
+    requirement_gate_is_public,
+    truth_requirement_satisfied,
+)
 
 ObjectiveSelector = Callable[[str, tuple[ObjectiveDefinitionV2, ...]], str | None]
 
@@ -1123,19 +1129,17 @@ class GenericAgentService:
         evaluations: list[tuple[str, StrictScalar, bool]] = []
         for objective in objectives:
             for requirement in objective.completion_requirements:
-                row = self.db.get(
-                    GameInstanceFactState,
-                    (self.scope.game_instance_id, requirement.node_key, requirement.fact_key),
-                )
-                if row is None:
+                try:
+                    value, satisfied = truth_requirement_satisfied(self.db, self.scope, requirement)
+                except LookupError:
                     raise GenericAgentError(
                         "OBJECTIVE_TRUTH_MISSING", "Objective Truth is missing from this Instance"
-                    )
+                    ) from None
                 evaluations.append(
                     (
                         f"{objective.key}:{requirement.key}",
-                        row.truth_value,
-                        row.truth_value in requirement.accepted_values,
+                        cast(StrictScalar, value),
+                        satisfied,
                     )
                 )
         return GenericObjectiveEvaluation(
@@ -1173,16 +1177,18 @@ class GenericAgentService:
         plan_version: int,
     ) -> list[dict[str, object]]:
         objective_needed = [
-            (requirement.node_key, requirement.fact_key)
+            requirement.fact_ref
             for objective in objectives
             for prerequisite in objective.prerequisites
             for requirement in prerequisite.requirements
-            if not self._known_requirement_satisfied(requirement)
+            if requirement.fact_ref is not None
+            and not self._known_requirement_satisfied(requirement)
         ] + [
-            (requirement.node_key, requirement.fact_key)
+            requirement.fact_ref
             for objective in objectives
             for requirement in objective.completion_requirements
-            if not self._known_requirement_satisfied(requirement)
+            if requirement.fact_ref is not None
+            and not self._known_requirement_satisfied(requirement)
         ]
         needed = list(objective_needed)
         recovery_refs = {
@@ -1428,6 +1434,7 @@ class GenericAgentService:
                 objective_scope=objective_context(
                     objectives,
                     known_fact_refs=catalog_builder.known_fact_refs(),
+                    known_facts=_known_world_facts(planning_context.current_knowledge),
                 ),
                 replan_reason=reason,
                 known_world=planning_context.current_knowledge,
@@ -1976,16 +1983,18 @@ class GenericAgentService:
         for index, effects in enumerate(step_effects, start=1):
             for objective in objectives:
                 completion_refs = {
-                    (requirement.node_key, requirement.fact_key)
+                    requirement.fact_ref
                     for requirement in objective.completion_requirements
                     if self._known_requirement_public(requirement)
+                    and requirement.fact_ref is not None
                     and not self._known_requirement_satisfied(requirement)
                 }
                 prerequisite_refs = {
-                    (requirement.node_key, requirement.fact_key)
+                    requirement.fact_ref
                     for prerequisite in objective.prerequisites
                     for requirement in prerequisite.requirements
                     if self._known_requirement_public(requirement)
+                    and requirement.fact_ref is not None
                     and not self._known_requirement_satisfied(requirement)
                 }
                 missing_before = prerequisite_refs - covered_before
@@ -2009,17 +2018,19 @@ class GenericAgentService:
                     )
             covered_before.update(effects)
         objective_needed = {
-            (requirement.node_key, requirement.fact_key)
+            requirement.fact_ref
             for objective in objectives
             for prerequisite in objective.prerequisites
             for requirement in prerequisite.requirements
             if self._known_requirement_public(requirement)
+            and requirement.fact_ref is not None
             and not self._known_requirement_satisfied(requirement)
         } | {
-            (requirement.node_key, requirement.fact_key)
+            requirement.fact_ref
             for objective in objectives
             for requirement in objective.completion_requirements
             if self._known_requirement_public(requirement)
+            and requirement.fact_ref is not None
             and not self._known_requirement_satisfied(requirement)
         }
         missing_refs = objective_needed - set().union(*step_effects)
@@ -2168,12 +2179,13 @@ class GenericAgentService:
             else None
         )
         objective_refs = {
-            (requirement.node_key, requirement.fact_key)
+            requirement.fact_ref
             for objective in objectives
             for requirement in (
                 *objective.completion_requirements,
                 *(item for group in objective.prerequisites for item in group.requirements),
             )
+            if requirement.fact_ref is not None
         }
         bindings: list[_StaticProposalBinding] = []
         diagnostics: list[dict[str, object]] = []
@@ -4167,12 +4179,13 @@ class GenericAgentService:
         if not self._validate_planning_action(definition, action, actor, candidate.target_key):
             raise GenericAgentError("GENERIC_PROVIDER_PLAN_INVALID", "Action assignment is invalid")
         objective_refs = {
-            (requirement.node_key, requirement.fact_key)
+            requirement.fact_ref
             for objective in objectives
             for requirement in (
                 *objective.completion_requirements,
                 *(item for group in objective.prerequisites for item in group.requirements),
             )
+            if requirement.fact_ref is not None
         }
         projected_refs = {
             (item.node_key, item.fact_key)
@@ -4315,17 +4328,18 @@ class GenericAgentService:
             raise GenericAgentError("GENERIC_PLAN_PARAMETER_REQUIRED", str(exc)) from exc
 
     def _known_requirement_satisfied(self, requirement) -> bool:  # type: ignore[no-untyped-def]
-        row = self.db.get(
-            GameInstanceFactState,
-            (self.scope.game_instance_id, requirement.node_key, requirement.fact_key),
-        )
-        return bool(
-            row
-            and row.visibility == Visibility.KNOWN
-            and row.truth_value in requirement.accepted_values
+        return known_requirement_satisfied(
+            self.db,
+            self.scope,
+            self._definition(),
+            requirement,
         )
 
     def _known_requirement_public(self, requirement) -> bool:  # type: ignore[no-untyped-def]
+        if not requirement_gate_is_public(self.db, self.scope, requirement):
+            return False
+        if requirement.fact_ref is None:
+            return True
         row = self.db.get(
             GameInstanceFactState,
             (self.scope.game_instance_id, requirement.node_key, requirement.fact_key),

@@ -14,7 +14,7 @@ from app.agent.provider import (
 
 
 def _definition() -> Any:
-    keys = ("goal_node", "unlock_facility_a", "unlock_facility_b")
+    keys = ("goal_node", "unlock_facility_a", "unlock_facility_b", "synthetic_region")
     nodes = tuple(SimpleNamespace(key=key, node_type_key="synthetic_node") for key in keys)
     node_by_key = {node.key: node for node in nodes}
     return SimpleNamespace(
@@ -34,6 +34,31 @@ def _objective() -> Any:
                 node_key="goal_node",
                 fact_key="complete",
                 accepted_values=(True,),
+            ),
+        ),
+        prerequisites=(),
+    )
+
+
+def _resource_objective(*, gated: bool = False) -> Any:
+    return SimpleNamespace(
+        key="resource_objective",
+        completion_requirements=(
+            SimpleNamespace(
+                key="keep_stock",
+                kind="RESOURCE_AT_LEAST",
+                region_key="synthetic_region",
+                resource_key="support_material",
+                minimum=5,
+                knowledge_gate=(
+                    SimpleNamespace(
+                        node_key="goal_node",
+                        fact_key="complete",
+                        accepted_values=(True,),
+                    )
+                    if gated
+                    else None
+                ),
             ),
         ),
         prerequisites=(),
@@ -207,6 +232,11 @@ def _planner_input(
                     "access": "AVAILABLE",
                     "interactions": ["repairable"],
                 },
+                {
+                    "key": "synthetic_region",
+                    "access": "AVAILABLE",
+                    "interactions": [],
+                },
             ),
             facts=known_facts,
             resources={
@@ -278,6 +308,27 @@ def test_known_unavailable_pool_expands_public_unlock_fact_and_producer() -> Non
     assert ("unlock_facility", "unlock_facility_a") in {
         (item.action_key, item.target_key) for item in result.planner_input.target_bindings
     }
+
+
+def test_resource_objective_enters_closure_without_selecting_a_source() -> None:
+    result = build_dependency_closure(
+        _definition(),
+        (_resource_objective(),),
+        _planner_input(available_amount=5),
+    )
+
+    assert "support_material" in result.planner_input.known_world.resources
+    assert "synthetic_region" in _node_keys(result)
+
+
+def test_gated_resource_objective_is_absent_before_public_gate_reveal() -> None:
+    result = build_dependency_closure(
+        _definition(),
+        (_resource_objective(gated=True),),
+        _planner_input(available_amount=5),
+    )
+
+    assert "support_material" not in result.planner_input.known_world.resources
 
 
 def test_unlock_fact_expansion_reaches_actor_and_resource_prerequisites() -> None:

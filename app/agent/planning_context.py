@@ -41,6 +41,7 @@ from app.domain.scenario_v2 import (
     ActionLocality,
     ActionTargetKind,
     ObjectiveDefinitionV2,
+    ObjectiveRequirementV2,
     ScenarioDefinitionV2,
 )
 from app.domain.world import Visibility
@@ -515,7 +516,12 @@ class PlanningContextBuilder:
         knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
         planner_action_requirements = knowledge_projection.planner_action_requirements()
         known_pool_keys = {item.pool_key for item in knowledge_projection.visible_resource_pools()}
-        relevant_action_keys = self._retrieve_action_keys(definition, objectives, known_refs)
+        relevant_action_keys = self._retrieve_action_keys(
+            definition,
+            objectives,
+            known_refs,
+            _known_world_facts(known_world),
+        )
         relevant_targets = self._targets(definition, relevant_action_keys, known_world)
         relevant_actions = self._actions(
             definition,
@@ -540,7 +546,7 @@ class PlanningContextBuilder:
         )
         relevant_actors = self._actors(definition, relevant_action_keys)
         return PlanningContext(
-            goal=self._goal(definition, objectives, known_refs),
+            goal=self._goal(definition, objectives, known_refs, known_world),
             current_knowledge={
                 **known_world,
                 "known_action_requirements": list(planner_action_requirements),
@@ -619,6 +625,7 @@ class PlanningContextBuilder:
         definition: ScenarioDefinitionV2,
         objectives: tuple[ObjectiveDefinitionV2, ...],
         known_refs: set[tuple[str, str]],
+        known_facts: dict[tuple[str, str], object],
     ) -> set[str]:
         """Retrieve a bounded, high-recall action set from public projections.
 
@@ -652,6 +659,8 @@ class PlanningContextBuilder:
         for _hop in range(self.retrieval_hops):
             changed = False
             for action in definition.actions:
+                if not _action_planning_is_public(action, known_facts):
+                    continue
                 visible_effects = {
                     (item.node_key, item.fact_key)
                     for item in (
@@ -685,6 +694,8 @@ class PlanningContextBuilder:
         # every additional action with a visible public effect and a known
         # target affordance, including actions that are currently locked.
         for action in definition.actions:
+            if not _action_planning_is_public(action, known_facts):
+                continue
             known_target = any(
                 node.key in known_nodes and action.required_interaction_key in node.interaction_keys
                 for node in definition.world.nodes
@@ -708,12 +719,14 @@ class PlanningContextBuilder:
         definition: ScenarioDefinitionV2,
         objectives: tuple[ObjectiveDefinitionV2, ...],
         known_refs: set[tuple[str, str]],
+        known_world: dict[str, object],
     ) -> dict[str, object]:
+        known_facts = _known_world_facts(known_world)
         completion = [
             item.model_dump(mode="json")
             for objective in objectives
             for item in objective.completion_requirements
-            if (item.node_key, item.fact_key) in known_refs
+            if _requirement_is_public(item, known_refs, known_facts)
         ]
         prerequisites = [
             {
@@ -723,12 +736,14 @@ class PlanningContextBuilder:
                 "requirements": [
                     item.model_dump(mode="json")
                     for item in group.requirements
-                    if (item.node_key, item.fact_key) in known_refs
+                    if _requirement_is_public(item, known_refs, known_facts)
                 ],
             }
             for objective in objectives
             for group in objective.prerequisites
-            if any((item.node_key, item.fact_key) in known_refs for item in group.requirements)
+            if any(
+                _requirement_is_public(item, known_refs, known_facts) for item in group.requirements
+            )
         ]
         return {
             "exact_scenario_version": str(self.scope.scenario_version_id),
@@ -790,6 +805,8 @@ class PlanningContextBuilder:
         result: list[dict[str, object]] = []
         for action in sorted(definition.actions, key=lambda item: item.key):
             if action.key not in action_keys:
+                continue
+            if not _action_planning_is_public(action, known_facts):
                 continue
             terminal = [
                 item.model_dump(mode="json")
@@ -1550,7 +1567,9 @@ def objective_context(
     objectives: tuple[ObjectiveDefinitionV2, ...],
     *,
     known_fact_refs: set[tuple[str, str]],
+    known_facts: dict[tuple[str, str], object] | None = None,
 ) -> tuple[dict[str, object], ...]:
+    facts = known_facts or {}
     return tuple(
         {
             "key": objective.key,
@@ -1564,7 +1583,7 @@ def objective_context(
             "completion_requirements": [
                 item.model_dump(mode="json")
                 for item in objective.completion_requirements
-                if (item.node_key, item.fact_key) in known_fact_refs
+                if _requirement_is_public(item, known_fact_refs, facts)
             ],
             "prerequisites": [
                 {
@@ -1572,12 +1591,12 @@ def objective_context(
                     "requirements": [
                         requirement.model_dump(mode="json")
                         for requirement in item.requirements
-                        if (requirement.node_key, requirement.fact_key) in known_fact_refs
+                        if _requirement_is_public(requirement, known_fact_refs, facts)
                     ],
                 }
                 for item in objective.prerequisites
                 if any(
-                    (requirement.node_key, requirement.fact_key) in known_fact_refs
+                    _requirement_is_public(requirement, known_fact_refs, facts)
                     for requirement in item.requirements
                 )
             ],
@@ -1590,7 +1609,7 @@ def _objective_refs(
     objectives: tuple[ObjectiveDefinitionV2, ...],
 ) -> set[tuple[str, str]]:
     return {
-        (item.node_key, item.fact_key)
+        item.fact_ref
         for objective in objectives
         for item in (
             *objective.completion_requirements,
@@ -1600,7 +1619,32 @@ def _objective_refs(
                 for requirement in group.requirements
             ),
         )
+        if item.fact_ref is not None
     }
+
+
+def _requirement_is_public(
+    requirement: ObjectiveRequirementV2,
+    known_fact_refs: set[tuple[str, str]],
+    known_facts: dict[tuple[str, str], object],
+) -> bool:
+    gate = requirement.knowledge_gate
+    if (
+        gate is not None
+        and known_facts.get((gate.node_key, gate.fact_key)) not in gate.accepted_values
+    ):
+        return False
+    return requirement.fact_ref is None or requirement.fact_ref in known_fact_refs
+
+
+def _action_planning_is_public(
+    action: ActionDefinitionV2,
+    known_facts: dict[tuple[str, str], object],
+) -> bool:
+    """Keep gated Action relevance out of Planner projections until discovered."""
+
+    gate = action.planning.knowledge_gate
+    return gate is None or known_facts.get((gate.node_key, gate.fact_key)) in gate.accepted_values
 
 
 def _known_world_facts(known_world: dict[str, object]) -> dict[tuple[str, str], object]:
@@ -1628,6 +1672,8 @@ def _unsatisfied_objective_refs(
             *(item for group in objective.prerequisites for item in group.requirements),
         )
         for requirement in requirements:
+            if requirement.fact_ref is None:
+                continue
             state = db.get(
                 GameInstanceFactState,
                 (scope.game_instance_id, requirement.node_key, requirement.fact_key),
@@ -1637,7 +1683,7 @@ def _unsatisfied_objective_refs(
                 or state.visibility != Visibility.KNOWN
                 or state.truth_value not in requirement.accepted_values
             ):
-                needed.add((requirement.node_key, requirement.fact_key))
+                needed.add(requirement.fact_ref)
     return needed
 
 
