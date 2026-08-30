@@ -585,14 +585,13 @@ def build_dependency_closure(
                     action_key,
                 )
             )
-        # A selected Action may have a public, known preflight contradiction
-        # (for example, a route is still ACTIVE when the next Action requires
-        # it to be DISRUPTED).  Expose deterministic public producers for that
-        # contradiction without choosing a target/actor or synthesizing a
-        # recovery step.  This is deliberately limited to concrete FACT
-        # mutations already present in canonical Action contracts.
+        # A selected Action may have a public FACT precondition that is either
+        # contradicted or still UNKNOWN (for example, a route must be
+        # passable). Expose the required FACT to the same fixed-point producer
+        # expansion in both cases. UNKNOWN remains a knowledge dependency; it
+        # never becomes a guessed value and does not select a recovery step.
         for precondition in contract.known_preconditions:
-            if not _known_precondition_is_true(precondition):
+            if _known_precondition_status(precondition) is False:
                 continue
             node_key = precondition.get("node_key")
             fact_key = precondition.get("fact_key")
@@ -1612,13 +1611,15 @@ def _known_linked_pool_unlock_dependencies(
     )
 
 
-def _known_precondition_is_true(precondition: dict[str, object]) -> bool:
-    """Return whether a public projected preflight failure is currently true."""
+def _known_precondition_status(precondition: dict[str, object]) -> bool | None:
+    """Evaluate a projected failure condition using only public state."""
 
     condition = precondition.get("failure_condition")
+    if precondition.get("knowledge_status") == "UNKNOWN":
+        return None
     current = precondition.get("current_value")
     if not isinstance(condition, dict):
-        return False
+        return None
     kind = condition.get("kind")
     if kind == "FACT_EQUALS":
         return current == condition.get("value")
@@ -1627,7 +1628,13 @@ def _known_precondition_is_true(precondition: dict[str, object]) -> bool:
     if kind == "FACT_IN":
         values = condition.get("values")
         return isinstance(values, list) and current in values
-    return False
+    return None
+
+
+def _known_precondition_is_true(precondition: dict[str, object]) -> bool:
+    """Return whether a public projected preflight failure is currently true."""
+
+    return _known_precondition_status(precondition) is True
 
 
 def _resource_inventory_status(

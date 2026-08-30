@@ -65,6 +65,7 @@ from app.domain.scenario_v2 import (
     ActionParameters,
     ActionTargetKind,
     ComparisonOperator,
+    ConditionKind,
     ConditionV2,
     EffectKind,
     EffectV2,
@@ -153,6 +154,8 @@ class _ProjectedFact:
 class _KnownPreflightFailure:
     failure_code: str
     known_predicate: dict[str, object]
+    condition_status: str = "CONTRADICTION"
+    fact_precondition: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -2707,27 +2710,33 @@ class GenericAgentService:
             }
             or action.required_actor_role_key is not None
         )
-        if validates_known_preflight:
-            known_failure = self._known_preflight_failure(
-                definition,
-                action,
-                target_key,
-                parameters,
-                projected_known_facts,
-                projected_known_nodes,
-                projected_known_relations,
+        known_failure = self._known_preflight_failure(
+            definition,
+            action,
+            target_key,
+            parameters,
+            projected_known_facts,
+            projected_known_nodes,
+            projected_known_relations,
+        )
+        if known_failure is not None and (
+            validates_known_preflight or known_failure.fact_precondition
+        ):
+            is_unknown = known_failure.condition_status == "UNKNOWN"
+            raise GenericAgentError(
+                known_failure.failure_code,
+                "A known Action requirement is not satisfied",
+                details={
+                    "dimension": "ACTION_PRECONDITION",
+                    "known_predicate": known_failure.known_predicate,
+                    "required": (
+                        "KNOWN_SATISFIED_PRECONDITION"
+                        if is_unknown
+                        else "PREFLIGHT_CONDITION_NOT_MATCHED"
+                    ),
+                    "actual": ("UNKNOWN" if is_unknown else "KNOWN_FAILURE_CONDITION_MATCHED"),
+                },
             )
-            if known_failure is not None:
-                raise GenericAgentError(
-                    known_failure.failure_code,
-                    "A known Action requirement is not satisfied",
-                    details={
-                        "dimension": "ACTION_PRECONDITION",
-                        "known_predicate": known_failure.known_predicate,
-                        "required": "PREFLIGHT_CONDITION_NOT_MATCHED",
-                        "actual": "KNOWN_FAILURE_CONDITION_MATCHED",
-                    },
-                )
         if action.behavior == ActionBehavior.SUPPLY_POWER:
             self._validate_projected_supply_power(
                 definition,
@@ -2894,13 +2903,13 @@ class GenericAgentService:
                 projected_known_nodes,
                 projected_known_relations,
             )
-            if status is not True:
-                continue
             failure = next(
                 (effect.failure_code for effect in rule.effects if effect.failure_code),
                 None,
             )
-            if failure is not None:
+            if failure is None:
+                continue
+            if status is True:
                 witness = cls._known_condition_witness(
                     definition,
                     rule.condition,
@@ -2917,12 +2926,139 @@ class GenericAgentService:
                         _KnownPreflightFailure(
                             failure,
                             witness or {"condition": "KNOWN_TRUE"},
+                            fact_precondition=cls._condition_contains_fact(rule.condition),
                         ),
                     )
                 )
+            elif status is None:
+                witness = cls._unknown_fact_condition_witness(
+                    definition,
+                    rule.condition,
+                    target_key,
+                    parameters,
+                    projected_known_facts,
+                    projected_known_nodes,
+                    projected_known_relations,
+                )
+                if witness is not None:
+                    matches.append(
+                        (
+                            rule.priority,
+                            _KnownPreflightFailure(
+                                "ACTION_PRECONDITION_UNKNOWN",
+                                witness,
+                                condition_status="UNKNOWN",
+                                fact_precondition=True,
+                            ),
+                        )
+                    )
         if not matches:
             return None
         return max(matches, key=lambda item: item[0])[1]
+
+    @classmethod
+    def _unknown_fact_condition_witness(
+        cls,
+        definition: ScenarioDefinitionV2,
+        condition: ConditionV2 | None,
+        target_key: str,
+        parameters: ActionParameters,
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_known_nodes: set[str],
+        projected_known_relations: set[str],
+    ) -> dict[str, object] | None:
+        """Return one public FACT predicate whose value is still UNKNOWN."""
+
+        if condition is None:
+            return None
+        kind = condition.kind.value
+        if kind in {"ALL", "ANY"}:
+            for child in condition.conditions:
+                if (
+                    cls._known_condition_status(
+                        definition,
+                        child,
+                        target_key,
+                        parameters,
+                        projected_known_facts,
+                        projected_known_nodes,
+                        projected_known_relations,
+                    )
+                    is not None
+                ):
+                    continue
+                witness = cls._unknown_fact_condition_witness(
+                    definition,
+                    child,
+                    target_key,
+                    parameters,
+                    projected_known_facts,
+                    projected_known_nodes,
+                    projected_known_relations,
+                )
+                if witness is not None:
+                    return {"parent_operator": kind, **witness}
+            return None
+        if kind == "NOT":
+            witness = cls._unknown_fact_condition_witness(
+                definition,
+                condition.condition,
+                target_key,
+                parameters,
+                projected_known_facts,
+                projected_known_nodes,
+                projected_known_relations,
+            )
+            return {"negated": True, **witness} if witness is not None else None
+
+        if kind not in {"FACT_EQUALS", "FACT_NOT_EQUALS", "FACT_IN", "FACT_COMPARE"}:
+            return None
+        node_key = cls._projected_selector_key(
+            definition,
+            condition.node,
+            target_key,
+            parameters,
+            projected_known_facts,
+            projected_known_nodes,
+            projected_known_relations,
+        )
+        if node_key is None or not isinstance(condition.fact_key, str):
+            return None
+        fact = projected_known_facts.get((node_key, condition.fact_key))
+        if fact is not None and fact.visibility == Visibility.KNOWN:
+            return None
+        operator: object = {
+            "FACT_EQUALS": "EQ",
+            "FACT_NOT_EQUALS": "NE",
+            "FACT_IN": "IN",
+        }.get(kind, condition.operator.value if condition.operator is not None else None)
+        expected: object = condition.values if kind == "FACT_IN" else condition.value
+        return {
+            "kind": kind,
+            "node_key": node_key,
+            "fact_key": condition.fact_key,
+            "operator": operator,
+            "expected": expected,
+            "actual": "UNKNOWN",
+        }
+
+    @staticmethod
+    def _condition_contains_fact(condition: ConditionV2 | None) -> bool:
+        if condition is None:
+            return False
+        if condition.kind in {ConditionKind.ALL, ConditionKind.ANY}:
+            return any(
+                GenericAgentService._condition_contains_fact(child)
+                for child in condition.conditions
+            )
+        if condition.kind == ConditionKind.NOT:
+            return GenericAgentService._condition_contains_fact(condition.condition)
+        return condition.kind.value in {
+            "FACT_EQUALS",
+            "FACT_NOT_EQUALS",
+            "FACT_IN",
+            "FACT_COMPARE",
+        }
 
     @classmethod
     def _known_condition_witness(

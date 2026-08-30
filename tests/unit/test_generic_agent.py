@@ -20,7 +20,7 @@ from app.agent.provider import (
 )
 from app.domain.enums import AgentPlanStatus, AgentStepStatus, AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import ActionDefinitionV2, ScenarioDefinitionV2
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     AgentPlan,
@@ -71,6 +71,59 @@ def _definition(*, preflight: bool = False) -> ScenarioDefinitionV2:
             },
         )
     return ScenarioDefinitionV2.model_validate(document)
+
+
+def _fact_precondition_definition() -> ScenarioDefinitionV2:
+    document = deepcopy(_contract_scenario_document())
+    document["world"]["nodes"][1]["facts"] = [
+        {
+            "key": "ready",
+            "name": "Ready",
+            "value_type": "BOOLEAN",
+            "initial_value": True,
+            "initial_visibility": "KNOWN",
+        }
+    ]
+    document["rules"].insert(
+        0,
+        {
+            "key": "ready_required",
+            "phase": "PREFLIGHT",
+            "action_key": "treat_patient",
+            "priority": 100,
+            "condition": {
+                "kind": "FACT_NOT_EQUALS",
+                "node": {"kind": "EXPLICIT", "node_key": "triage_room"},
+                "fact_key": "ready",
+                "value": True,
+            },
+            "effects": [
+                {
+                    "kind": "EMIT_FAILURE",
+                    "failure_code": "READY_REQUIRED",
+                    "message": "The treatment room must be ready.",
+                    "retryable": True,
+                }
+            ],
+        },
+    )
+    return ScenarioDefinitionV2.model_validate(document)
+
+
+def _travel_action() -> ActionDefinitionV2:
+    return ActionDefinitionV2.model_validate(
+        {
+            "key": "travel",
+            "name": "Travel",
+            "required_interaction_key": "treatable",
+            "execution_mode": "IMMEDIATE",
+            "parameters": [],
+            "allowed_actor_capabilities": ["EXECUTE_ACTION"],
+            "expected_outcomes": [{"code": "MOVED", "name": "Moved", "success": True}],
+            "behavior": "TRAVEL",
+            "locality": "TRANSPORT_ENDPOINT",
+        }
+    )
 
 
 class _RecordingProvider:
@@ -217,6 +270,94 @@ def test_planner_uses_knowledge_projection_not_hidden_truth(session: Session) ->
 
     assert len(steps) == 1
     assert steps[0].action_intent == "treat_patient"
+
+
+@pytest.mark.parametrize(
+    ("truth_value", "visibility", "expected_failure"),
+    [
+        (True, Visibility.KNOWN, None),
+        (False, Visibility.KNOWN, "READY_REQUIRED"),
+        (True, Visibility.HIDDEN, "ACTION_PRECONDITION_UNKNOWN"),
+    ],
+)
+def test_generic_fact_precondition_uses_tristate_knowledge_semantics(
+    session: Session,
+    truth_value: bool,
+    visibility: Visibility,
+    expected_failure: str | None,
+) -> None:
+    definition = _fact_precondition_definition()
+    agent, runtime = _agent(session, definition=definition)
+    fact = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "triage_room", "ready"),
+    )
+    assert fact is not None
+    fact.truth_value = truth_value
+    fact.visibility = visibility
+    session.flush()
+    action = next(item for item in definition.actions if item.key == "treat_patient")
+
+    def validate() -> None:
+        agent._validate_projected_action_state(
+            definition,
+            action,
+            "doctor_lee",
+            "patient_one",
+            {"dosage": 2},
+            {"doctor_lee": "triage_room"},
+            {},
+            agent._known_fact_projection(),
+            agent._known_node_keys(),
+            agent._known_relation_keys(definition),
+        )
+
+    if expected_failure is None:
+        validate()
+        return
+    with pytest.raises(GenericAgentError) as caught:
+        validate()
+    assert caught.value.code == expected_failure
+    if expected_failure == "ACTION_PRECONDITION_UNKNOWN":
+        assert caught.value.details["actual"] == "UNKNOWN"
+
+
+def test_traversal_keeps_unknown_passability_as_may_attempt(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = _definition()
+    agent, runtime = _agent(session, definition=definition)
+    action = _travel_action()
+    monkeypatch.setattr(
+        GenericAgentService,
+        "_validate_projected_plan_locality",
+        lambda *_args, **_kwargs: "route_one",
+    )
+    monkeypatch.setattr("app.agent.generic.region_for_node", lambda *_args: "triage_region")
+    common = {
+        "definition": definition,
+        "action": action,
+        "actor_key": "doctor_lee",
+        "target_key": "patient_one",
+        "parameters": {},
+        "projected_actor_locations": {"doctor_lee": "triage_room"},
+        "projected_known_facts": agent._known_fact_projection(),
+        "projected_known_nodes": agent._known_node_keys(),
+        "projected_known_relations": agent._known_relation_keys(definition),
+    }
+
+    agent._validate_projected_action_state(
+        projected_known_passability={},
+        **common,
+    )
+    with pytest.raises(GenericAgentError) as caught:
+        agent._validate_projected_action_state(
+            projected_known_passability={"route_one": False},
+            **common,
+        )
+    assert caught.value.code == "KNOWN_TRANSPORT_BLOCKED"
+    assert runtime.instance.id is not None
 
 
 def test_retryable_rule_failure_creates_generic_replan_without_fixed_fallback(

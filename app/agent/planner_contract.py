@@ -209,14 +209,19 @@ def planner_known_preconditions(
     action: ActionDefinitionV2,
     *,
     known_facts: dict[tuple[str, str], StrictScalar],
+    known_node_keys: set[str] | None = None,
 ) -> tuple[dict[str, object], ...]:
-    """Project compact, known declarative source/explicit requirements.
+    """Project compact declarative source/explicit requirements.
 
     Current-target requirements are represented by ``target_contracts``.  A
     source/explicit requirement stays symbolic so it does not become an
-    Action-by-every-known-node Cartesian product.
+    Action-by-every-known-node Cartesian product.  An explicit requirement on
+    a known node remains public even when the fact value is UNKNOWN; that
+    preserves a blocking knowledge dependency without exposing Truth.
     """
 
+    if known_node_keys is None:
+        known_node_keys = {node_key for node_key, _fact_key in known_facts}
     result: list[dict[str, object]] = []
     for rule in definition.rules:
         if rule.action_key != action.key or rule.phase not in {
@@ -241,7 +246,7 @@ def planner_known_preconditions(
                 continue
             if selector == NodeSelectorKind.EXPLICIT:
                 node_key = condition.node.node_key
-                if node_key is None or (node_key, condition.fact_key) not in known_facts:
+                if node_key is None or node_key not in known_node_keys:
                     continue
             elif selector == NodeSelectorKind.ACTION_SOURCE:
                 if not any(fact_key == condition.fact_key for _, fact_key in known_facts):
@@ -256,7 +261,11 @@ def planner_known_preconditions(
             }
             if node_key is not None:
                 projection["node_key"] = node_key
-                projection["current_value"] = known_facts[(node_key, condition.fact_key)]
+                current_value = known_facts.get((node_key, condition.fact_key))
+                if current_value is None:
+                    projection["knowledge_status"] = "UNKNOWN"
+                else:
+                    projection["current_value"] = current_value
             if projection not in result:
                 result.append(projection)
     return tuple(result)

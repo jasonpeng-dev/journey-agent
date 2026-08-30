@@ -7748,6 +7748,9 @@ rules:
     value:
       source: LITERAL
       literal: true
+  - kind: SET_RESOURCE_POOL_AVAILABILITY
+    pool_key: north_emergency_fuel
+    availability: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
 - key: repair_industrial_facility_river_port_general_engineering_parts_required
@@ -7931,6 +7934,9 @@ rules:
     value:
       source: LITERAL
       literal: true
+  - kind: SET_RESOURCE_POOL_AVAILABILITY
+    pool_key: south_emergency_fuel
+    availability: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
 - key: repair_electrical_southeast_fuel_emergency_power_plant_gener_e78c3e23

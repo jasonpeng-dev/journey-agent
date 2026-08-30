@@ -523,6 +523,11 @@ class PlanningContextBuilder:
             _known_world_facts(known_world),
         )
         relevant_targets = self._targets(definition, relevant_action_keys, known_world)
+        known_node_keys = {
+            str(item["key"])
+            for item in cast(list[object], known_world.get("nodes", []))
+            if isinstance(item, dict) and isinstance(item.get("key"), str)
+        }
         relevant_actions = self._actions(
             definition,
             objectives,
@@ -540,6 +545,7 @@ class PlanningContextBuilder:
                         for identity, value in _known_world_facts(known_world).items()
                         if isinstance(value, (str, int, bool))
                     },
+                    known_node_keys=known_node_keys,
                 )
                 for action in definition.actions
             },
