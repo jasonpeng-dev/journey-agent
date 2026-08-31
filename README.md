@@ -1,323 +1,197 @@
-[English](README.md) · [中文](README.zh.md)
-
 # Journey Agent
 
-Journey Agent is a data-driven, generic LLM agent runtime for goal-directed interactive
-scenarios. A ScenarioVersion defines the world; the source code provides the reusable Agent,
-Action, Rule, persistence, and browser-product runtime. The project is intended to make model
-proposals auditable and safely executable, not to turn a chatbot into a collection of
-scenario-specific scripts.
+[English](README.md) · [中文](README.zh.md)
 
-## What is implemented
+Journey Agent is a generic, data-driven scenario runtime with an LLM Planner,
+deterministic validation, explicit Truth/Knowledge separation, and auditable
+Formal PLAY execution.
 
-- `ScenarioDefinitionV2`, one mutable Current Draft per Scenario, immutable published Versions,
-  and exact-Version GameInstance binding.
-- A React/TypeScript Scenario Library and structured Editor for world, actors, actions, rules,
-  objectives, planning metadata, initialization, validation, references, and version history.
-- Blank, Example, and Clone authoring flows; optimistic Draft revisions; publish gates; and an
-  isolated Draft Preview/Test sandbox that never creates a formal GameInstance row.
-- Formal Play with a natural-language Goal, persistent AgentTask, full Plan/Plan History,
-  player-safe Knowledge projection, action/debrief checkpoints, approval, Repair/Replan, blocked
-  states, archive, and recovery.
-- Generic Starfire and Medical V2 definitions running through the same engine and browser UI.
-- Separate Player and credential-gated Developer projections. Normal Play does not return hidden
-  Truth, Rule ASTs, or provider internals.
+The runtime is ScenarioVersion-driven: a published immutable Version supplies
+world content and declarative semantics, while reusable source code supplies
+Goal resolution, planning, validation, Action execution, persistence, and
+the browser product.
+
+## What is included
+
+* ScenarioDefinitionV2 Draft, validation, publication, immutable Versions, and
+  exact-Version GameInstances.
+* Scenario Library and structured Editor for world, Actors, Actions, Rules,
+  Objectives, planning metadata, initialization, references, and Version
+  history.
+* Generic Goal Resolver, frozen ObjectiveScope, canonical PlannerInput V2,
+  deterministic Validator, bounded internal REPAIR, and Knowledge-aware
+  REPLAN.
+* Declarative Action/Rule execution, Truth mutation, public Knowledge
+  projection, Player-safe Formal PLAY, approvals, immutable archived runtime
+  sources, Fork, and plan history.
+* Generic built-in scenarios running through the same runtime and browser
+  product. Scenario-specific gameplay branches are not part of the engine.
 
 ## Architecture at a glance
 
-```text
-Goal
-  -> Goal Resolver (exact Objective candidates)
-  -> frozen ObjectiveScope on AgentTask
-  -> PlanningContext V1
-  -> deterministic planner or structured provider proposal
-  -> deterministic backend validation / bounded Repair
-  -> Generic Action + declarative Rule execution
-  -> Truth mutation and Knowledge update
-  -> Objective verification, completion, approval, or bounded Replan
-```
+    ScenarioVersion
+      -> GameInstance
+           -> Goal -> frozen ObjectiveScope
+                -> Dependency Closure
+                     -> PlannerInput V2 -> Provider PlanSegment
+                          -> Validator -> formal AgentPlan
+                               -> Runtime -> Truth / Knowledge
+                                    -> REPLAN or Complete
 
-The application composition boundary constructs the configured provider and injects it into the
-generic Goal Resolver and Agent service. HTTP routers and React pages are adapters; they do not
-duplicate Rule evaluation, Action effects, Objective completion, authority, or Version semantics.
+Formal PLAY sends one planning HTTP request. The backend performs any bounded
+REPAIR attempts internally and returns one final state. Rejected proposals
+remain internal PlanningAttempt audit rows; they are not player-visible plans
+and do not create runtime operations.
 
-See [`docs/architecture.md`](docs/architecture.md) for the runtime boundaries and
-[`docs/planning-context-v1.md`](docs/planning-context-v1.md) for the provider contract.
+See [docs/architecture.md](docs/architecture.md) for high-level runtime
+boundaries, [docs/agent-planning-v2.md](docs/agent-planning-v2.md) for the
+detailed planning contract, [docs/scenario-authoring.md](docs/scenario-authoring.md)
+for Scenario publishing, and [docs/game-lifecycle.md](docs/game-lifecycle.md)
+for the detailed GameInstance lifecycle.
 
-## Core concepts
+An ACTIVE GameInstance can be archived only when it has no non-terminal Task,
+pending WorldOperation, pending ActionDecisionRequest, or reserved resource
+value. ARCHIVED instances are immutable, read-only runtime sources. A
+Checkpoint creates an independent ARCHIVED snapshot while its ACTIVE source
+remains unchanged. Fork materializes a new independent ACTIVE instance from an
+ARCHIVED source with the same exact ScenarioVersion, runtime state, inherited
+formal history, and an auditable source link. See
+[GameInstance lifecycle](docs/game-lifecycle.md) for the complete contract.
 
-### Scenarios and Versions
+## Provider configuration
 
-`ScenarioDefinitionV2` is a closed, declarative schema containing metadata, World Nodes/Facts/
-Relations/Resources, Actors/Roles, Interactions, Actions, Rules, Objectives, Goal Resolution,
-Planning, and Initialization. Authors supply content and supported structured primitives; they do
-not write arbitrary gameplay code or select a model provider in a Scenario.
+Mock mode is the safe default and makes no network request. Configure an
+OpenAI-compatible provider only in a local environment; never commit the
+secret key.
 
-A Draft may be incomplete while it is edited. Validation and publication construct the strict v2
-definition. Publishing creates an immutable snapshot. A formal Game can only start from a
-published `scenario_version_id`, and its runtime state remains bound to that exact snapshot.
+    MODEL_PROVIDER=mock
+    MODEL_BASE_URL=https://api.openai.com/v1
+    MODEL_NAME=gpt-4.1-mini
+    MODEL_API_KEY=
+    MODEL_THINKING_MODE=disabled
+    MODEL_REASONING_EFFORT=low
+    MODEL_TIMEOUT_SECONDS=20
+    MODEL_TOTAL_TIMEOUT_SECONDS=60
+    MODEL_MAX_OUTPUT_TOKENS=8192
 
-### Goal Resolver and ObjectiveScope
+For a compatible endpoint such as DeepSeek, set the provider endpoint,
+available model, local key, thinking/reasoning settings, and desired timeout
+or output limits. The ScenarioVersion remains provider-agnostic.
 
-The resolver first normalizes exact Version Objective keys, names, aliases, and examples. If the
-Scenario allows LLM fallback and a provider is configured, the provider receives only the exact
-Objective candidates and can select only those keys. A successful Goal creates a persistent
-`AgentTask` with a non-empty frozen `ObjectiveScope`; the scope is not expanded by later Replans.
+## Docker quick start
 
-### Planning, Repair, and Replan
+From a clean checkout:
 
-`PlanningContext V1` is the canonical model input: goal, current Knowledge, relevant Actions,
-Actors, Targets, previous execution context, and Scenario planning hints. The provider chooses
-the Action, Actor, Target, parameters, and order from this context. The former Actor × Action ×
-Target Candidate Catalog is compatibility-only and is not the canonical OpenAI-compatible
-payload.
+    git clone https://github.com/jasonpeng-dev/journey-agent.git
+    cd journey-agent
+    Copy-Item .env.example .env
+    docker compose up --build -d
 
-Initial Planning and Replan return proposals. The deterministic backend validates the proposal's
-bindings, parameter shapes, exact-Version references, objective relevance/coverage/order,
-authority, and rejected-proposal constraints before persisting executable steps. Provider mode
-may make a bounded Repair request with structured diagnostics. Provider failures and plans that
-remain invalid become explicit application errors or blocked states; they do not silently fall
-back to a different planner.
+On macOS/Linux, use cp .env.example .env. Open
+http://localhost:8000. Mock mode needs no API key.
 
-### Truth, Knowledge, and execution
+Useful lifecycle commands:
 
-Truth is authoritative instance state used by Rule evaluation and objective verification.
-Knowledge is the visibility-filtered projection used by planning and normal Player responses.
-`GenericActionService` performs generic Action checks, creates instance-scoped WorldOperations,
-and applies deterministic Rule outcomes/effects. Supported Conditions and Effects are structured
-V2 primitives; there is no Starfire-specific gameplay branch in the generic engine.
+    docker compose logs -f
+    docker compose stop
+    docker compose start
+    docker compose down
+    docker compose down -v
 
-### Formal Play
-
-Formal Play is an application orchestrator over the generic services. It keeps a persistent
-checkpoint for plan start, action acknowledgement, debrief, Replan, approval, completion,
-blocked, and aborted phases. The browser shows a selected Task's Mission Log and Plan History;
-one GameInstance may continue after a Goal completes, while only one Task is active at a time.
-Pending approvals and unsettled operations are cancelled on Abandon/Archive without rolling back
-mutations that already happened.
-
-## Provider support
-
-The provider is selected by `MODEL_PROVIDER` in the server environment:
-
-| Mode | Behavior |
-| --- | --- |
-| `mock` | No HTTP request. Uses deterministic exact matching and generic planning for tests/offline runs. |
-| `openai_compatible` | Uses the generic OpenAI-compatible JSON adapter for Goal selection and Plan/Repair/Replan proposals. |
-
-The adapter uses these settings from `.env` (keep the key local and never commit it):
-
-```dotenv
-MODEL_PROVIDER=mock
-MODEL_BASE_URL=https://api.openai.com/v1
-MODEL_NAME=gpt-4.1-mini
-MODEL_API_KEY=
-MODEL_TIMEOUT_SECONDS=20
-```
-
-For a DeepSeek-compatible run, set the same adapter to the provider endpoint and a model that is
-available to your account, for example:
-
-```dotenv
-MODEL_PROVIDER=openai_compatible
-MODEL_BASE_URL=https://api.deepseek.com
-MODEL_NAME=deepseek-v4-flash
-MODEL_API_KEY=<local secret>
-MODEL_TIMEOUT_SECONDS=60
-```
-
-The ScenarioVersion remains provider-agnostic. The backend records secret-safe call metadata
-(call type, latency, context bytes, and usage fields when supplied) and never logs the API key.
-
-## Docker Quick Start
-
-Docker is the shortest path for a first-time user. Docker Compose builds the React bundle, serves
-it from the existing FastAPI application, runs Alembic and the idempotent built-in seed on
-startup, and stores SQLite data in a named volume.
-
-### Stable Release (recommended)
-
-The stable release is fixed and reproducible. It is the recommended path for a first
-experience, and the same source is also available from the matching GitHub Release archive.
-
-```powershell
-git clone --branch v0.1.0 --depth 1 https://github.com/jasonpeng-dev/journey-agent.git
-cd journey-agent
-Copy-Item .env.example .env
-docker compose up --build -d
-```
-
-On macOS/Linux, use `cp .env.example .env` for the third line.
-
-### Latest Main
-
-Use this path when you want the newest development state. `main` changes as development
-continues, so it can differ from the stable release.
-
-```powershell
-git clone https://github.com/jasonpeng-dev/journey-agent.git
-cd journey-agent
-Copy-Item .env.example .env
-docker compose up --build -d
-```
-
-On macOS/Linux, use `cp .env.example .env` for the third line.
-
-Open `http://localhost:8000`. Mock mode is the default and does not need an API key. To use a
-real OpenAI-compatible provider, edit `.env` before starting and set `MODEL_PROVIDER`,
-`MODEL_BASE_URL`, `MODEL_NAME`, and your local `MODEL_API_KEY`; DeepSeek configuration is shown
-in the Provider section above. The key is read at runtime and is not copied into the image.
-
-Use `docker compose logs -f` when you need live logs, and `docker compose down` for a normal shutdown.
-
-The API container exposes:
-
-- `http://localhost:8000/` — the browser product
-- `http://localhost:8000/health` — process health
-- `http://localhost:8000/ready` — database readiness (also used by the Compose healthcheck)
-
-Normal lifecycle commands are:
-
-```powershell
-docker compose stop
-docker compose start
-docker compose down
-docker compose up
-docker compose down -v
-```
-
-The named `journey-data` volume preserves `GameInstance`, `AgentTask`, and Scenario data across
-stop/start and normal `down`/`up`. The lifecycle commands mean:
-
-- `stop` / `start`: stop and resume the existing containers.
-- normal `down` / `up`: recreate containers while preserving Journey Agent data in the named volume.
-- `down -v`: remove the current Journey Agent Compose volume for a complete local Journey Agent
-  data reset; run `docker compose up --build` again to initialize it.
-
-The `down -v` command only removes data owned by this Journey Agent Compose project.
+The named Compose volume preserves local Journey Agent data across normal
+stop/start and down/up. down -v removes only this Compose project's data.
 
 ## Manual local development
 
-The supported development toolchain is Python 3.12, Node 22, and `uv` for the Python environment.
+Supported toolchain: Python 3.12, Node 22, and uv.
 
-### Backend
+Backend, from the repository root:
 
-From the repository root:
+    uv sync --python 3.12 --extra dev
+    Copy-Item .env.example .env
+    uv run alembic upgrade head
+    uv run python -m app.seed
+    uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
-```powershell
-uv sync --python 3.12 --extra dev
-Copy-Item .env.example .env
-uv run alembic upgrade head
-uv run python -m app.seed
-uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
+Local development uses SQLite at ./journey_dev.db. Keep that database target
+in .env for backend, Editor, and Player UI. Do not point local commands at
+historical databases.
 
-Edit `.env` before starting if you need an OpenAI-compatible provider. The seed command publishes
-the built-in Starfire and Medical V2 definitions through the normal Scenario lifecycle. `/health`
-and `/ready` are available once the API is running.
+Frontend, in a second terminal:
 
-### Frontend
+    cd frontend
+    npm ci
+    npm run dev -- --host 127.0.0.1 --port 4173
 
-In a second terminal:
+Open http://127.0.0.1:4173. Vite proxies API requests to the backend.
 
-```powershell
-cd frontend
-npm ci
-npm run dev -- --host 127.0.0.1 --port 4173
-```
+The browser lifecycle surface is intentionally small: an active game can be
+archived from its detail or list card, and an archived game can be Forked from
+either location. A Fork request uses one creation key for retry-safe
+idempotency and navigates to the new target on success.
 
-Open `http://127.0.0.1:4173`. Vite proxies `/api` to the backend on port 8000. For a production
-bundle, run `npm run build`; when `frontend/dist` exists, the FastAPI app can serve that bundle.
+## Main HTTP surfaces
 
-## HTTP/API and pages
-
-| Area | Main routes/pages |
+| Area | Routes |
 | --- | --- |
-| Health | `/health`, `/ready` |
-| Scenario Library | `/scenarios`, `/scenarios/new`, `/scenarios/:id` |
-| Editor | `/scenarios/:id/edit/:section` and object inspectors |
-| Games | `/games`, `/games/new`, `/games/:id` |
-| Player API | `/api/v1/scenarios/*`, `/api/v1/games/*` |
-| Developer API | `/api/v1/developer/games/:id/snapshot` and `/history` |
-
-The Scenario authoring endpoints cover Draft revisions, validation, sandbox, publish, restore,
-references, stable-key renames, safe deletion, and immutable Version snapshots. The Game
-endpoints cover exact-Version creation, Knowledge-safe Play, Goal submission, pacing
-acknowledgements, approvals, Replan, history, abandon, archive, and deletion. Detailed current
-contracts are in [`docs/scenario-authoring.md`](docs/scenario-authoring.md) and
-[`docs/architecture.md`](docs/architecture.md).
+| Health | /health, /ready |
+| Scenario Library | /scenarios and /api/v1/scenarios |
+| Editor | /scenarios/:id/edit/:section |
+| Games | /games and /api/v1/games |
+| Developer | /api/v1/developer/games/:id/snapshot and history |
 
 ## Verification
 
-Backend checks:
+Backend:
 
-```powershell
-uv run pytest --cov=app --cov-report=term-missing
-uv run ruff check .
-uv run ruff format --check app evals tests
-uv run mypy app evals
-uv run alembic upgrade head
-```
+    uv run pytest --cov=app --cov-report=term-missing
+    uv run ruff check .
+    uv run ruff format --check app tests frontend/e2e/prepare_history_fixture.py
+    uv run mypy app
+    uv run alembic upgrade head
 
-Frontend checks (from `frontend`):
+Frontend, from frontend:
 
-```powershell
-npm run lint
-npm run typecheck
-npm test
-npm run build
-npx playwright install --with-deps chromium
-npm run e2e
-```
+    npm run lint
+    npm run typecheck
+    npm test
+    npm run build
+    npm run e2e
 
-CI runs the frontend checks, mock-provider browser E2E, backend lint/format/type checks,
-migrations, full pytest coverage, and a JavaScript syntax check. Real DeepSeek credentials are
-not used in CI; provider tests use deterministic fakes or mocked HTTP responses.
+Real provider calls are not part of CI. Provider tests use deterministic fakes
+or mocked HTTP responses. Real-model runs are bounded manual evaluations.
+
+The browser E2E suite contains three deterministic smokes: Basic Product,
+PLAY Presentation, and Checkpoint/Fork. These browser tests use the mock
+provider and do not call a real Provider.
 
 ## Repository map
 
-```text
-app/domain/       frozen V2 definitions, ObjectiveScope, world/runtime value objects
-app/agent/        generic resolver, PlanningContext, provider, planner, validator, agent loop
-app/services/     Scenario/Game lifecycle, Formal Play, projections, actions, sandbox
-app/scenarios/    V2 parsing/validation/persistence and built-in definitions
-app/api/          FastAPI adapters and Player/Developer DTOs
-frontend/src/     React/Vite browser product and Editor
-tests/            unit, contract, integration, lifecycle, provider, and E2E-support tests
-migrations/       Alembic schema history
-docs/             current architecture, authoring, and PlanningContext contracts
-```
+| Path | Responsibility |
+| --- | --- |
+| app/domain | ScenarioDefinitionV2, ObjectiveScope, world/runtime values |
+| app/agent | Goal resolver, PlannerInput, provider, Validator, Agent loop |
+| app/services | Scenario/Game lifecycle, Formal PLAY, actions, projections |
+| app/scenarios | V2 parsing, validation, persistence, built-in definitions |
+| app/api | FastAPI adapters and Player/Developer DTOs |
+| frontend/src | React/Vite browser product and Editor |
+| tests | Unit, contract, integration, lifecycle, provider, and E2E support |
+| migrations | Alembic schema history |
+| docs | Current architecture, planning, authoring, lifecycle, and archive |
 
-## Reliability and evaluation
+## Documentation
 
-Reliability is enforced in layers: strict Pydantic contracts, exact-Version lookup, frozen
-ObjectiveScope, deterministic Plan validation, generic Action/Rule checks, persistence guards,
-bounded Repair/Replan, and separate Player/Developer projections. Provider audit metadata makes
-latency, context size, token usage, proposals, and rejection diagnostics inspectable without
-exposing secrets or hidden Truth to players.
+Current authority:
 
-The repository includes deterministic unit/contract tests, integration tests for lifecycle,
-isolation, approvals, sandbox, provider wiring, and both built-in scenarios, plus Playwright
-browser tests. Real-model runs are bounded evaluations, not a claim of a large benchmark.
+* [docs/architecture.md](docs/architecture.md)
+* [docs/agent-planning-v2.md](docs/agent-planning-v2.md)
+* [docs/scenario-authoring.md](docs/scenario-authoring.md)
+* [docs/game-lifecycle.md](docs/game-lifecycle.md)
 
-## Roadmap
+Historical notes:
 
-Reasonable next steps are deeper Scenario Editor builders and authoring diagnostics, continued
-dual-scenario validation, provider/evaluation dashboards, richer observability, and a fuller
-human-in-the-loop product boundary. These are follow-ups, not promises that are already in the
-runtime.
+* [docs/archive](docs/archive/) is for archaeology only and is not current
+  implementation authority.
 
-## Current documentation
-
-- [`docs/architecture.md`](docs/architecture.md) — current runtime, API boundary, persistence,
-  Formal Play, and provider architecture.
-- [`docs/planning-context-v1.md`](docs/planning-context-v1.md) — canonical planning payload and
-  validation contract.
-- [`docs/scenario-authoring.md`](docs/scenario-authoring.md) — Draft, Editor, validation,
-  sandbox, publication, and Version lifecycle.
-- [`docs/archive/`](docs/archive/) — historical design and migration notes, not current source
-  of truth.
-
-## License
-
-See [`LICENSE`](LICENSE).
+Setup and run instructions are intentionally kept here; architecture and
+planning semantics belong in the canonical docs above.

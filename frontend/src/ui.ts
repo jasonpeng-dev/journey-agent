@@ -10,7 +10,10 @@ const labels: Record<string, string> = {
   NEEDS_PLAYER_INPUT: "等待玩家决定",
   BLOCKED_BY_PLAYER_DECISION: "因玩家决定受阻",
   UNREACHABLE_IN_CURRENT_STATE: "当前状态无法达成",
+  ACTION_EXECUTION_FAILED: "行动执行失败",
   MODEL_PLAN_REJECTED: "模型方案未通过验证",
+  MODEL_PROVIDER_TIMEOUT: "模型调用超时",
+  MODEL_PROVIDER_FAILURE: "模型调用失败",
   PENDING: "待执行",
   CURRENT: "执行中",
   BLOCKED: "受阻",
@@ -207,6 +210,12 @@ const fieldLabels: Record<string, string> = {
 export function uiLabel(value: string | null | undefined): string {
   if (!value) return "—";
   return labels[value] ?? value.replaceAll("_", " ");
+}
+
+export function taskExplanationLabel(status: string, explanation: string | null): string | null {
+  if (!explanation) return null;
+  const explanationLabel = uiLabel(explanation);
+  return explanationLabel === uiLabel(status) ? null : explanationLabel;
 }
 
 export function fieldLabel(value: string): string {

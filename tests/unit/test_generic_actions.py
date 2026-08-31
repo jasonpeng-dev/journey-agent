@@ -14,7 +14,7 @@ from app.services.generic_actions import GenericActionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
 from app.tools.generic import ExecuteActionArgs, GenericActionToolContext, execute_action
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def _game(
@@ -22,7 +22,7 @@ def _game(
     *,
     async_action: bool,
 ) -> tuple[GenericActionService, GenericActionToolContext, object]:
-    document = deepcopy(_medical_scenario_document())
+    document = deepcopy(_contract_scenario_document())
     document["actions"][0]["execution_mode"] = "ASYNC" if async_action else "IMMEDIATE"
     definition = ScenarioDefinitionV2.model_validate(document)
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)

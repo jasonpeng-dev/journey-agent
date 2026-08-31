@@ -1,9 +1,9 @@
-from app.domain.scenario_v2 import ScenarioDefinitionV2
-from app.scenarios.builtin import MEDICAL_EMERGENCY_V2, STARFIRE_V2
+from app.domain.scenario_v2 import ObjectiveRequirementV2, ScenarioDefinitionV2
 from app.services.mission_roadmap import (
     MissionRoadmapProjector,
     MissionRoadmapStageStatus,
 )
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _initial_knowledge(
@@ -17,53 +17,11 @@ def _initial_knowledge(
     }
 
 
-def test_starfire_high_level_objective_has_future_non_executable_stages() -> None:
-    scope = ("open_northern_trade_route",)
+def test_generic_scenario_uses_the_same_generic_roadmap_projection() -> None:
     roadmap = MissionRoadmapProjector().project(
-        STARFIRE_V2,
-        scope,
-        _initial_knowledge(STARFIRE_V2),
-    )
-
-    assert scope == ("open_northern_trade_route",)
-    assert [stage.objective_key for stage in roadmap.stages] == [
-        "secure_northern_valley",
-        "restore_starfire_outpost",
-        None,
-        "open_northern_trade_route",
-    ]
-    assert roadmap.stages[0].status == MissionRoadmapStageStatus.CURRENT
-    assert all(stage.status != MissionRoadmapStageStatus.COMPLETED for stage in roadmap.stages)
-    assert "ambush" not in " ".join(stage.name.lower() for stage in roadmap.stages)
-
-
-def test_roadmap_updates_from_knowledge_without_changing_objective_scope() -> None:
-    scope = ("open_northern_trade_route",)
-    knowledge = _initial_knowledge(STARFIRE_V2)
-    knowledge.update(
-        {
-            ("northern_valley", "valley_security"): "SAFE",
-            ("starfire_outpost", "outpost_status"): "RESTORED",
-            ("north_village", "village_support"): "GUIDE",
-        }
-    )
-
-    roadmap = MissionRoadmapProjector().project(STARFIRE_V2, scope, knowledge)
-
-    assert scope == ("open_northern_trade_route",)
-    assert [stage.status for stage in roadmap.stages] == [
-        MissionRoadmapStageStatus.COMPLETED,
-        MissionRoadmapStageStatus.COMPLETED,
-        MissionRoadmapStageStatus.COMPLETED,
-        MissionRoadmapStageStatus.CURRENT,
-    ]
-
-
-def test_medical_uses_the_same_generic_roadmap_projection() -> None:
-    roadmap = MissionRoadmapProjector().project(
-        MEDICAL_EMERGENCY_V2,
+        GENERIC_TEST,
         ("stabilize_patient",),
-        _initial_knowledge(MEDICAL_EMERGENCY_V2),
+        _initial_knowledge(GENERIC_TEST),
     )
 
     assert [stage.objective_key for stage in roadmap.stages] == [
@@ -72,3 +30,36 @@ def test_medical_uses_the_same_generic_roadmap_projection() -> None:
     ]
     assert roadmap.stages[0].status == MissionRoadmapStageStatus.CURRENT
     assert roadmap.stages[1].status == MissionRoadmapStageStatus.PENDING
+
+
+def test_resource_requirement_is_hidden_until_its_public_gate_opens() -> None:
+    requirement = ObjectiveRequirementV2.model_validate(
+        {
+            "key": "reserve",
+            "kind": "RESOURCE_AT_LEAST",
+            "region_key": "triage_room",
+            "resource_key": "medicine",
+            "minimum": 10,
+            "description": "Keep a medicine reserve.",
+            "knowledge_gate": {
+                "node_key": "patient_one",
+                "fact_key": "stable",
+                "accepted_values": [True],
+            },
+        }
+    )
+    objective = GENERIC_TEST.objectives[0].model_copy(
+        update={"completion_requirements": (requirement,)}
+    )
+    scenario = GENERIC_TEST.model_copy(update={"objectives": (objective,)})
+    hidden = MissionRoadmapProjector().project(scenario, (objective.key,), {})
+    assert hidden.stages[0].requirements == ()
+
+    revealed = MissionRoadmapProjector().project(
+        scenario,
+        (objective.key,),
+        {("patient_one", "stable"): True},
+        {"medicine": {"regions": {"triage_room": {"known_available": 7}}}},
+    )
+    assert revealed.stages[0].requirements[0]["current_known_available"] == 7
+    assert revealed.stages[0].status == MissionRoadmapStageStatus.CURRENT

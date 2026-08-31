@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from time import perf_counter
 from typing import cast
 from uuid import UUID
@@ -17,7 +18,8 @@ from app.agent.generic import (
     GenericGoalResolver,
     proposal_signature,
 )
-from app.agent.provider import GenericModelProvider
+from app.agent.planning_context import PlanningContinuityBuilder
+from app.agent.provider import GenericModelProvider, GenericProviderError, PlanRequest
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
@@ -27,7 +29,7 @@ from app.domain.enums import (
     WorldOperationStatus,
 )
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import StrictScalar
+from app.domain.scenario_v2 import ActionParameters
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentPlan,
@@ -69,6 +71,7 @@ class PlayOrchestrator:
         game_instance_id: GameInstanceId,
         *,
         provider: GenericModelProvider | None = None,
+        model_max_repair_attempts_per_cycle: int = 2,
     ) -> None:
         self.db = db
         self.scope = GameInstanceService(db).load(game_instance_id)
@@ -78,7 +81,67 @@ class PlayOrchestrator:
             self.scope,
             goal_resolver=self.goal_resolver,
             provider=provider,
+            provider_call_observer=self._provider_call_event,
+            model_max_repair_attempts_per_cycle=model_max_repair_attempts_per_cycle,
         )
+
+    def _provider_call_event(
+        self,
+        event: str,
+        task: AgentTask,
+        request: PlanRequest,
+        details: dict[str, object],
+    ) -> None:
+        """Persist provider-call audit state across the external I/O boundary."""
+
+        if event == "STARTED":
+            metadata = dict(task.objective_resolution_metadata or {})
+            calls = list(metadata.get("provider_calls", []))
+            calls.append(dict(details))
+            task.objective_resolution_metadata = {**metadata, "provider_calls": calls}
+            self.db.flush()
+            # The provider request must never run inside the uncommitted task
+            # transaction.  This commit is the durable STARTED checkpoint.
+            self.db.commit()
+            return
+        if event != "FINISHED":
+            return
+        audit_id = details.get("audit_id")
+        metadata = dict(task.objective_resolution_metadata or {})
+        calls = list(metadata.get("provider_calls", []))
+        for index, call in enumerate(calls):
+            if isinstance(call, dict) and call.get("audit_id") == audit_id:
+                calls[index] = {**call, **details}
+                break
+        task.objective_resolution_metadata = {**metadata, "provider_calls": calls}
+        self.db.flush()
+
+    def _persist_provider_failure(
+        self,
+        task: AgentTask,
+        checkpoint: PlayerExecutionCheckpoint,
+        error: GenericProviderError,
+        *,
+        operation_kind: str,
+        duration_ms: int,
+    ) -> None:
+        task.status = AgentTaskStatus.FAILED
+        task.last_error_code = error.code
+        task.last_error_detail = _provider_failure_detail(error.code)
+        task.completed_at = datetime.now(UTC)
+        task.version += 1
+        checkpoint.phase = PlayerExecutionPhase.BLOCKED
+        checkpoint.version += 1
+        self._record_operation_duration(
+            task,
+            kind=operation_kind,
+            duration_ms=duration_ms,
+        )
+        self.db.flush()
+        # The API boundary rolls back after re-raising the provider error.  A
+        # separate commit here makes the failure and its audit irreversible to
+        # that rollback while leaving the error response unchanged.
+        self.db.commit()
 
     def submit_goal(self, goal: str, *, idempotency_key: str) -> GoalSubmission:
         require_scope_writable(self.db, self.scope.game_instance_id)
@@ -171,9 +234,23 @@ class PlayOrchestrator:
         planning_started = perf_counter()
         try:
             plan = self.agent.plan(task)
+        except GenericProviderError as exc:
+            self._persist_provider_failure(
+                task,
+                checkpoint,
+                exc,
+                operation_kind="INITIAL_PLANNING_FAILURE",
+                duration_ms=_duration_ms(planning_started),
+            )
+            raise
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                 raise
+            self._record_operation_duration(
+                task,
+                kind="INITIAL_PLANNING",
+                duration_ms=_duration_ms(planning_started),
+            )
             task.status = AgentTaskStatus.BLOCKED
             task.last_error_code = (
                 "MODEL_PLAN_REJECTED"
@@ -224,6 +301,104 @@ class PlayOrchestrator:
         self.db.flush()
         return task
 
+    def run_until_boundary(self, *, expected_pacing_version: int) -> AgentTask:
+        """Execute the current accepted Plan until its next player boundary.
+
+        This orchestration deliberately stays at the Formal Play boundary.  A
+        single Action still goes through ``GenericAgentService.execute_next``
+        and the existing operation settlement path; this method only repeats
+        the already-supported action acknowledgement/debrief transition while
+        the same accepted Plan remains active.  Every Action result is
+        committed before another Action is considered, so a later failure
+        cannot roll back earlier successful work.
+        """
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        task = self._current_task()
+        if task is None:
+            raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Game has no active Task")
+        checkpoint = self._checkpoint(task, expected_pacing_version=expected_pacing_version)
+        if checkpoint.phase != PlayerExecutionPhase.AWAITING_ACTION_ACK:
+            raise PlayError(
+                "PLAYER_PACING_PHASE_INVALID",
+                "The Task is not waiting for action acknowledgement",
+            )
+
+        first_step = self._next_action_step(task)
+        if first_step is None:
+            self._block_unreachable(task, checkpoint)
+            self.db.commit()
+            return task
+        accepted_plan = self.db.get(AgentPlan, first_step.plan_id)
+        if accepted_plan is None or accepted_plan.status != AgentPlanStatus.ACTIVE:
+            self._block_unreachable(task, checkpoint)
+            self.db.commit()
+            return task
+        accepted_plan_id = accepted_plan.id
+        accepted_plan_version = accepted_plan.version
+        task_id = task.id
+
+        for _transition in range(self.MAX_TRANSITIONS):
+            active_plan = self._active_plan_for_task(task)
+            if (
+                active_plan is None
+                or active_plan.id != accepted_plan_id
+                or active_plan.version != accepted_plan_version
+            ):
+                # A concurrent/newly accepted Plan is a hard boundary.  The
+                # continuous request must never start executing that Plan.
+                return task
+
+            action_step = self._next_action_step(task)
+            if action_step is None:
+                self._block_unreachable(task, checkpoint)
+                self.db.commit()
+                return task
+
+            self._execute_action_cycle(task, action_step)
+            checkpoint.last_action_step_id = action_step.id
+            checkpoint.phase = self._phase_after_cycle(task, action_step=action_step)
+            checkpoint.version += 1
+            self.db.flush()
+            # Keep each Action's state durable and independently visible.  A
+            # later exception therefore cannot roll back earlier Actions.
+            self.db.commit()
+
+            task = self.db.get(AgentTask, task_id)
+            next_checkpoint = self.db.get(PlayerExecutionCheckpoint, task_id)
+            if task is None or next_checkpoint is None:
+                raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Task disappeared during execution")
+            checkpoint = next_checkpoint
+            phase = PlayerExecutionPhase(checkpoint.phase)
+            if phase in _PRODUCT_TERMINAL or phase in (
+                PlayerExecutionPhase.APPROVAL_REQUIRED,
+                PlayerExecutionPhase.AWAITING_REPLAN_ACK,
+            ):
+                return task
+            if not self._plan_matches(
+                task,
+                plan_id=accepted_plan_id,
+                plan_version=accepted_plan_version,
+            ):
+                return task
+            if phase != PlayerExecutionPhase.AWAITING_DEBRIEF_ACK:
+                return task
+
+            # Reuse the existing player-facing Continue transition internally;
+            # it only advances the pacing checkpoint and never calls a
+            # Provider.  Persist the transition before the next Action.
+            self.acknowledge_debrief(expected_pacing_version=checkpoint.version)
+            self.db.commit()
+            task = self.db.get(AgentTask, task_id)
+            next_checkpoint = self.db.get(PlayerExecutionCheckpoint, task_id)
+            if task is None or next_checkpoint is None:
+                raise PlayError("AGENT_TASK_NOT_ACTIVE", "The Task disappeared during execution")
+            checkpoint = next_checkpoint
+            if checkpoint.phase != PlayerExecutionPhase.AWAITING_ACTION_ACK:
+                return task
+
+        raise PlayError("PLAY_TRANSITION_LIMIT", "Formal Play reached its safety bound")
+
     def acknowledge_debrief(self, *, expected_pacing_version: int) -> AgentTask:
         require_scope_writable(self.db, self.scope.game_instance_id)
         task = self._current_task()
@@ -244,7 +419,7 @@ class PlayOrchestrator:
         return task
 
     def replan(self, *, expected_pacing_version: int) -> AgentTask:
-        """Build the next Plan after a visible Action failure.
+        """Build the next Plan after a visible failure or completed segment.
 
         This is a small application boundary split: the Generic Agent still
         owns planning and validation, while Formal Play controls when the
@@ -267,11 +442,7 @@ class PlayOrchestrator:
             if checkpoint.last_action_step_id is not None
             else None
         )
-        if failed_step is None or not self._action_cycle_failed(failed_step):
-            raise PlayError(
-                "PLAY_REPLAN_NOT_REQUIRED",
-                "The current Action did not produce a retryable failure",
-            )
+        plan_invalidated = self.agent.has_pending_plan_invalidation(task)
         latest_plan = self.db.scalar(
             select(AgentPlan)
             .where(
@@ -280,13 +451,70 @@ class PlayOrchestrator:
             )
             .order_by(AgentPlan.version.desc())
         )
+        segment_complete = bool(
+            not plan_invalidated
+            and failed_step is not None
+            and failed_step.status == AgentStepStatus.SUCCEEDED
+            and latest_plan is not None
+            and latest_plan.id == failed_step.plan_id
+            and task.status == AgentTaskStatus.ACTIVE
+            and self._next_action_step(task) is None
+            and not self._action_cycle_failed(failed_step)
+            and not self.agent.evaluate(task).completed
+        )
+        if plan_invalidated:
+            if failed_step is None or failed_step.status != AgentStepStatus.SUCCEEDED:
+                raise PlayError(
+                    "PLAY_REPLAN_NOT_REQUIRED",
+                    "The current Plan was not invalidated after a successful Action",
+                )
+        elif not segment_complete and (
+            failed_step is None or not self._action_cycle_failed(failed_step)
+        ):
+            raise PlayError(
+                "PLAY_REPLAN_NOT_REQUIRED",
+                "The current Action did not require a replan",
+            )
+        assert failed_step is not None
         if latest_plan is None or latest_plan.id == failed_step.plan_id:
             replan_started = perf_counter()
             try:
-                plan = self.agent.plan(task, reason=task.last_error_code or "ACTION_FAILED")
+                if segment_complete:
+                    assert latest_plan is not None
+                    replan_reason = (
+                        "INFORMATION_BOUNDARY"
+                        if latest_plan.stop_reason == "INFORMATION_BOUNDARY"
+                        else "PLAN_EXHAUSTED"
+                    )
+                else:
+                    replan_reason = task.last_error_code or "ACTION_FAILED"
+                planning_continuity = PlanningContinuityBuilder(self.db, self.scope).build(
+                    task,
+                    replan_reason=replan_reason,
+                    trigger_step_id=failed_step.id,
+                )
+                plan = self.agent.plan(
+                    task,
+                    reason=replan_reason,
+                    planning_continuity=planning_continuity,
+                )
+            except GenericProviderError as exc:
+                self._persist_provider_failure(
+                    task,
+                    checkpoint,
+                    exc,
+                    operation_kind="REPLANNING_FAILURE",
+                    duration_ms=_duration_ms(replan_started),
+                )
+                raise
             except GenericAgentError as exc:
                 if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                     raise
+                self._record_operation_duration(
+                    task,
+                    kind="REPLANNING",
+                    duration_ms=_duration_ms(replan_started),
+                )
                 task.status = AgentTaskStatus.BLOCKED
                 task.last_error_code = (
                     "MODEL_PLAN_REJECTED"
@@ -373,7 +601,7 @@ class PlayOrchestrator:
             decision.actor_key,
             decision.action_key,
             decision.target_key,
-            cast(dict[str, StrictScalar], decision.parameters),
+            cast(ActionParameters, decision.parameters),
         )
         task.rejected_proposal_signatures = [
             *task.rejected_proposal_signatures,
@@ -386,6 +614,15 @@ class PlayOrchestrator:
         replan_started = perf_counter()
         try:
             plan = self.agent.plan(task, reason="PLAYER_REJECTED")
+        except GenericProviderError as exc:
+            self._persist_provider_failure(
+                task,
+                checkpoint,
+                exc,
+                operation_kind="REPLANNING_FAILURE",
+                duration_ms=_duration_ms(replan_started),
+            )
+            raise
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                 raise
@@ -415,7 +652,11 @@ class PlayOrchestrator:
         return task
 
     def _execute_action_cycle(self, task: AgentTask, action_step: AgentStep) -> None:
-        """Run one TOOL action plus its internal async settlement and replan."""
+        """Run one TOOL action plus its internal async settlement.
+
+        Formal Play owns the player acknowledgement boundary; it never starts
+        a new Provider cycle from this action request.
+        """
 
         try:
             self.agent.execute_next(task, replan_on_failure=False)
@@ -443,7 +684,20 @@ class PlayOrchestrator:
                 self.agent.execute_next(task, replan_on_failure=False)
             if self._action_cycle_failed(action_step):
                 return
-            self._ensure_next_plan(task)
+            # Formal Play deliberately pauses after the final successful step
+            # of an incomplete segment. The player must acknowledge the
+            # completed segment before a new Provider planning cycle starts.
+        except GenericProviderError as exc:
+            checkpoint = self._ensure_checkpoint(task)
+            checkpoint.last_action_step_id = action_step.id
+            self._persist_provider_failure(
+                task,
+                checkpoint,
+                exc,
+                operation_kind="REPLANNING_FAILURE",
+                duration_ms=0,
+            )
+            raise
         except GenericAgentError as exc:
             if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
                 raise
@@ -456,6 +710,8 @@ class PlayOrchestrator:
             self.db.flush()
 
     def _ensure_next_plan(self, task: AgentTask) -> None:
+        if self.agent.has_pending_plan_invalidation(task):
+            return
         if task.status != AgentTaskStatus.ACTIVE or self._next_action_step(task) is not None:
             return
         if self.agent.evaluate(task).completed:
@@ -464,12 +720,7 @@ class PlayOrchestrator:
         self.agent.plan(task, reason="PLAN_EXHAUSTED")
 
     def _next_action_step(self, task: AgentTask) -> AgentStep | None:
-        plan = self.db.scalar(
-            select(AgentPlan).where(
-                AgentPlan.task_id == task.id,
-                AgentPlan.status == AgentPlanStatus.ACTIVE,
-            )
-        )
+        plan = self._active_plan_for_task(task)
         if plan is None:
             return None
         return self.db.scalar(
@@ -483,6 +734,24 @@ class PlayOrchestrator:
             )
             .order_by(AgentStep.sequence)
         )
+
+    def _active_plan_for_task(self, task: AgentTask) -> AgentPlan | None:
+        return self.db.scalar(
+            select(AgentPlan).where(
+                AgentPlan.task_id == task.id,
+                AgentPlan.status == AgentPlanStatus.ACTIVE,
+            )
+        )
+
+    def _plan_matches(
+        self,
+        task: AgentTask,
+        *,
+        plan_id: UUID,
+        plan_version: int,
+    ) -> bool:
+        plan = self._active_plan_for_task(task)
+        return bool(plan is not None and plan.id == plan_id and plan.version == plan_version)
 
     def _ensure_checkpoint(self, task: AgentTask) -> PlayerExecutionCheckpoint:
         checkpoint = self.db.get(PlayerExecutionCheckpoint, task.id)
@@ -568,6 +837,13 @@ class PlayOrchestrator:
             return PlayerExecutionPhase.ABORTED
         if action_step is not None and self._action_cycle_failed(action_step):
             return PlayerExecutionPhase.AWAITING_REPLAN_ACK
+        if self.agent.has_pending_plan_invalidation(task):
+            return PlayerExecutionPhase.AWAITING_REPLAN_ACK
+        if action_step is not None and self._next_action_step(task) is None:
+            # A segment can end before the frozen objective is complete (for
+            # example at an INFORMATION_BOUNDARY). Do not silently call the
+            # Provider from the action acknowledgement request.
+            return PlayerExecutionPhase.AWAITING_REPLAN_ACK
         return PlayerExecutionPhase.AWAITING_DEBRIEF_ACK
 
     def _block_unreachable(self, task: AgentTask, checkpoint: PlayerExecutionCheckpoint) -> None:
@@ -639,7 +915,7 @@ class PlayOrchestrator:
                 AgentTask.game_instance_id == self.scope.game_instance_id,
                 AgentTask.status.in_(_ACTIVE_STATUSES),
             )
-            .order_by(AgentTask.created_at.desc())
+            .order_by(AgentTask.created_at.desc(), AgentTask.id.desc())
         )
 
 
@@ -672,6 +948,15 @@ _PRODUCT_TERMINAL = (
 
 def _duration_ms(started_at: float) -> int:
     return max(0, round((perf_counter() - started_at) * 1000))
+
+
+def _provider_failure_detail(code: str) -> str:
+    return {
+        "MODEL_PROVIDER_TIMEOUT": "模型调用超时",
+        "MODEL_PROVIDER_HTTP_ERROR": "模型服务返回错误",
+        "MODEL_PROVIDER_RESPONSE_INVALID": "模型返回无效",
+        "MODEL_PROVIDER_CONFIGURATION_INVALID": "模型服务配置无效",
+    }.get(code, "模型调用失败")
 
 
 __all__ = ["GoalSubmission", "PlayError", "PlayOrchestrator"]

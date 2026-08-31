@@ -17,11 +17,11 @@ from app.services.game_instances import GameInstanceService
 from app.services.generic_game import GenericGameError, GenericGameService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def _definition() -> ScenarioDefinitionV2:
-    document: dict[str, Any] = _medical_scenario_document()
+    document: dict[str, Any] = _contract_scenario_document()
     effects = document["rules"][0]["effects"]
     effects.insert(
         1,
@@ -114,7 +114,8 @@ def test_generic_service_rejects_complete_invalid_outcome_before_mutation(
             parameters={"dosage": 3},
         )
 
-    assert caught.value.code == "RULE_OUTCOME_RESOURCE_INVALID"
+    assert caught.value.code == "KNOWN_RESOURCE_INSUFFICIENT"
+    assert caught.value.retryable is True
     fact = session.get(
         GameInstanceFactState,
         (runtime.instance.id, "patient_one", "stable"),

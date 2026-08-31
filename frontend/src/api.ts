@@ -1,4 +1,4 @@
-import type { DeveloperSnapshot, Draft, DraftSandboxResult, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ValidationResult } from "./types";
+import type { DeveloperSnapshot, Draft, DraftSandboxResult, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -41,6 +41,7 @@ export const api = {
   testDraft: (id: string, revision: number, goal: string | null) => request<DraftSandboxResult>(`/api/v1/scenarios/${id}/draft/sandbox`, { method: "POST", body: JSON.stringify({ expected_revision: revision, goal: goal || null }) }),
   publishDraft: (id: string, revision: number, contentHash: string | null) => request<{ scenario: ScenarioSummary; version: ScenarioVersion }>(`/api/v1/scenarios/${id}/draft/publish`, { method: "POST", body: JSON.stringify({ expected_revision: revision, expected_content_hash: contentHash }) }),
   versions: (id: string) => request<ScenarioVersion[]>(`/api/v1/scenarios/${id}/versions`),
+  scenarioVersion: (scenarioId: string, versionId: string) => request<ScenarioVersionDetail>(`/api/v1/scenarios/${scenarioId}/versions/${versionId}`),
   restoreVersion: (id: string, revision: number, versionId: string) => request<Draft>(`/api/v1/scenarios/${id}/draft/restore`, { method: "POST", body: JSON.stringify({ expected_revision: revision, version_id: versionId }) }),
   saveDraft: (id: string, revision: number, document: Record<string, unknown>) =>
     request<Draft>(`/api/v1/scenarios/${id}/draft`, {
@@ -72,11 +73,23 @@ export const api = {
   createGame: (versionId: string, idempotencyKey: string) => request<GameSummary>("/api/v1/games", {
     method: "POST", body: JSON.stringify({ scenario_version_id: versionId, idempotency_key: idempotencyKey }),
   }),
-  archiveGame: (id: string) => request<GameSummary>(`/api/v1/games/${id}/archive`, { method: "POST" }),
+  archiveGame: (id: string, expectedRuntimeRevision: number) => request<GameSummary>(`/api/v1/games/${id}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ expected_runtime_revision: expectedRuntimeRevision }),
+  }),
+  checkpointGame: (id: string, expectedRuntimeRevision: number, creationKey: string) => request<GameSummary>(`/api/v1/games/${id}/checkpoint`, {
+    method: "POST",
+    body: JSON.stringify({ expected_runtime_revision: expectedRuntimeRevision, creation_key: creationKey }),
+  }),
+  forkGame: (id: string, creationKey: string) => request<GameSummary>(`/api/v1/games/${id}/fork`, {
+    method: "POST",
+    body: JSON.stringify({ creation_key: creationKey }),
+  }),
   deleteGame: (id: string) => request<void>(`/api/v1/games/${id}`, { method: "DELETE" }),
   playState: (id: string, taskId?: string | null) => request<PlayerGameState>(`/api/v1/games/${id}/play${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
   submitGoal: (id: string, goal: string, idempotencyKey: string) => request<GoalSubmission>(`/api/v1/games/${id}/goals`, { method: "POST", body: JSON.stringify({ goal, idempotency_key: idempotencyKey }) }),
   acknowledgeAction: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/acknowledge-action`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
+  runUntilBoundary: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/run-until-boundary`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   startInitialPlanning: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/start-planning`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   acknowledgeDebrief: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/acknowledge-debrief`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),
   replan: (id: string, pacingVersion: number) => request<PlayerGameState>(`/api/v1/games/${id}/play/replan`, { method: "POST", body: JSON.stringify({ expected_pacing_version: pacingVersion }) }),

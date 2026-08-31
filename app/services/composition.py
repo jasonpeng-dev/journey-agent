@@ -14,7 +14,12 @@ def configured_play_orchestrator(
     settings: Settings,
 ) -> PlayOrchestrator:
     provider = build_generic_provider(settings)
-    return PlayOrchestrator(db, game_instance_id, provider=provider)
+    return PlayOrchestrator(
+        db,
+        game_instance_id,
+        provider=provider,
+        model_max_repair_attempts_per_cycle=(settings.model_max_repair_attempts_per_cycle),
+    )
 
 
 __all__ = ["configured_play_orchestrator"]

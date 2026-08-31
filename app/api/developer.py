@@ -109,6 +109,7 @@ def developer_snapshot(
             "replans": item.replan_count,
             "rejected_proposals": item.rejected_proposal_signatures,
             "last_error_code": item.last_error_code,
+            "last_error_detail": item.last_error_detail,
             "provider_calls": (item.objective_resolution_metadata or {}).get("provider_calls", []),
         }
         for item in tasks
@@ -167,12 +168,29 @@ def developer_snapshot(
         }
         for item in memories
     ]
+    resource_truth: dict[str, dict[str, object]] = {}
+    grouped_resources: dict[str, list[GameInstanceResourceState]] = {}
+    for item in resources:
+        grouped_resources.setdefault(item.resource_key, []).append(item)
+    for resource_key, rows in grouped_resources.items():
+        if len(rows) == 1 and rows[0].scope_node_key is None:
+            resource_truth[resource_key] = {
+                "value": rows[0].value,
+                "reserved": rows[0].reserved_value,
+            }
+        else:
+            resource_truth[resource_key] = {
+                "scopes": {
+                    row.scope_node_key or "global": {
+                        "value": row.value,
+                        "reserved": row.reserved_value,
+                    }
+                    for row in rows
+                }
+            }
     truth = {
         "facts": {f"{item.node_key}.{item.fact_key}": item.truth_value for item in facts},
-        "resources": {
-            item.resource_key: {"value": item.value, "reserved": item.reserved_value}
-            for item in resources
-        },
+        "resources": resource_truth,
     }
     knowledge = {
         "facts": {

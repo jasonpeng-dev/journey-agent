@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from uuid import UUID
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
-from app.domain.enums import GameInstanceStatus, NodeStatus
+from app.domain.enums import GameInstanceStatus, NodeStatus, RelationVisibility
+from app.domain.resources import (
+    resource_identity,
+    resource_pool_initial_states,
+    valid_resource_state_identity,
+)
+from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2, relation_identity
 from app.domain.world import AccessState
 from app.infrastructure.db.models import (
     ConversationSession,
@@ -17,6 +25,8 @@ from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
+    GameInstanceRegionResourceKnowledge,
+    GameInstanceRelationKnowledge,
     GameInstanceResourceState,
     Player,
 )
@@ -87,16 +97,61 @@ class RuntimeInitializationService:
             )
         definition = ScenarioVersionRepository(self.db).load(scenario_version_id).definition
         start_key = definition.initialization.start_node_key
-        instance = GameInstance(
-            player_id=player_id,
-            scenario_version_id=scenario_version_id,
-            status=GameInstanceStatus.PENDING_INITIALIZATION,
-            current_node_key=start_key,
-            creation_key=creation_key,
-            runtime_revision=0,
-        )
-        self.db.add(instance)
-        self.db.flush()
+        if self._supports_fork_provenance_schema():
+            instance = GameInstance(
+                player_id=player_id,
+                scenario_version_id=scenario_version_id,
+                status=GameInstanceStatus.PENDING_INITIALIZATION,
+                current_node_key=start_key,
+                creation_key=creation_key,
+                runtime_revision=0,
+            )
+            self.db.add(instance)
+            self.db.flush()
+        else:
+            instance_id = uuid4()
+            now = datetime.now(UTC)
+            self.db.execute(
+                text(
+                    """
+                    INSERT INTO game_instances (
+                        player_id, scenario_version_id, status, current_node_key,
+                        creation_key, runtime_revision, id, created_at, updated_at
+                    ) VALUES (
+                        :player_id, :scenario_version_id, :status, :current_node_key,
+                        :creation_key, :runtime_revision, :id, :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "player_id": player_id.hex,
+                    "scenario_version_id": scenario_version_id.hex,
+                    "status": GameInstanceStatus.PENDING_INITIALIZATION.value,
+                    "current_node_key": start_key,
+                    "creation_key": creation_key,
+                    "runtime_revision": 0,
+                    "id": instance_id.hex,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            loaded_instance = self.db.scalar(
+                select(GameInstance)
+                .options(
+                    load_only(
+                        GameInstance.id,
+                        GameInstance.player_id,
+                        GameInstance.scenario_version_id,
+                        GameInstance.status,
+                        GameInstance.current_node_key,
+                        GameInstance.creation_key,
+                        GameInstance.runtime_revision,
+                    )
+                )
+                .where(GameInstance.id == instance_id)
+            )
+            assert loaded_instance is not None
+            instance = loaded_instance
         for node in definition.world.nodes:
             status = (
                 NodeStatus.ENTERED
@@ -125,34 +180,167 @@ class RuntimeInitializationService:
                         visibility=fact.initial_visibility,
                     )
                 )
-        for resource in definition.world.resources:
-            self.db.add(
-                GameInstanceResourceState(
-                    game_instance_id=instance.id,
-                    resource_key=resource.key,
-                    value=resource.initial_value,
-                    reserved_value=0,
+        resource_pools = resource_pool_initial_states(definition)
+        supports_scoped_resources = self._supports_scoped_resource_schema()
+        supports_resource_pools = self._supports_resource_pool_schema()
+        if supports_scoped_resources and supports_resource_pools:
+            for pool in resource_pools:
+                self.db.add(
+                    GameInstanceResourceState(
+                        game_instance_id=instance.id,
+                        resource_identity=resource_identity(
+                            pool.resource_key,
+                            pool.region_key,
+                            pool.pool_key,
+                        ),
+                        resource_key=pool.resource_key,
+                        scope_node_key=pool.region_key,
+                        pool_key=pool.pool_key,
+                        facility_key=pool.facility_key,
+                        value=pool.quantity,
+                        reserved_value=pool.reserved_value,
+                        visibility=pool.visibility,
+                        availability=pool.availability,
+                        survey_discoverable=pool.survey_discoverable,
+                        availability_requirement=(
+                            pool.availability_requirement.model_dump(mode="json")
+                            if pool.availability_requirement is not None
+                            else None
+                        ),
+                    )
                 )
+        else:
+            if any(
+                item.region_key is not None
+                or item.pool_key != "default"
+                or item.facility_key is not None
+                or item.visibility.value != "VISIBLE"
+                or item.availability.value != "AVAILABLE"
+                for item in resource_pools
+            ):
+                raise RuntimeInitializationError(
+                    "RUNTIME_RESOURCE_POOL_SCHEMA_REQUIRED",
+                    "This database must be upgraded before a Resource Pool Scenario can start",
+                )
+            now = datetime.now(UTC)
+            for pool in resource_pools:
+                self.db.execute(
+                    text(
+                        """
+                        INSERT INTO game_instance_resource_states
+                            (game_instance_id, resource_key, value, reserved_value,
+                             version, created_at, updated_at)
+                        VALUES (:game_instance_id, :resource_key, :value, :reserved_value,
+                                :version, :created_at, :updated_at)
+                        """
+                    ),
+                    {
+                        "game_instance_id": instance.id.hex,
+                        "resource_key": pool.resource_key,
+                        "value": pool.quantity,
+                        "reserved_value": pool.reserved_value,
+                        "version": 1,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+        if self._supports_region_resource_knowledge_schema():
+            configured_knowledge = {
+                item.region_key: item
+                for item in definition.initialization.region_resource_knowledge
+            }
+            for region in self._region_nodes(definition):
+                initial = configured_knowledge.get(region.key)
+                self.db.add(
+                    GameInstanceRegionResourceKnowledge(
+                        game_instance_id=instance.id,
+                        region_key=region.key,
+                        resource_inventory_visibility=(
+                            initial.resource_inventory_visibility.value
+                            if initial is not None
+                            else "VISIBLE"
+                        ),
+                        resource_survey_completed=(
+                            initial.resource_survey_completed if initial is not None else True
+                        ),
+                    )
+                )
+        supports_relation_knowledge = self._supports_relation_knowledge_schema()
+        if supports_relation_knowledge:
+            for relation in definition.world.relations:
+                self.db.add(
+                    GameInstanceRelationKnowledge(
+                        game_instance_id=instance.id,
+                        relation_key=relation_identity(relation),
+                        visibility=relation.initial_visibility.value,
+                    )
+                )
+        elif any(
+            relation.initial_visibility != RelationVisibility.VISIBLE
+            for relation in definition.world.relations
+        ):
+            raise RuntimeInitializationError(
+                "RUNTIME_RELATION_KNOWLEDGE_SCHEMA_REQUIRED",
+                "This database must be upgraded before a hidden Relation Scenario can start",
             )
         roles = {role.key: role for role in definition.actors.roles}
         primary_key = definition.initialization.primary_actor_key
+        supports_actor_reachability = self._supports_actor_reachability_schema()
+        now = datetime.now(UTC)
         for actor in definition.actors.actor_profiles:
             role = roles[actor.role_key]
-            self.db.add(
-                GameInstanceActor(
-                    game_instance_id=instance.id,
-                    actor_key=actor.key,
-                    role_key=actor.role_key,
-                    name=actor.name,
-                    persona=actor.persona,
-                    doctrine={item.key: item.value for item in actor.doctrine},
-                    current_node_key=actor.initial_node_key,
-                    allowed_action_keys=list(actor.allowed_action_keys),
-                    authority_policy=actor.authority_policy.model_dump(mode="json"),
-                    capabilities=[capability.value for capability in role.capabilities],
-                    is_primary=actor.key == primary_key,
+            doctrine = {item.key: item.value for item in actor.doctrine}
+            authority_policy = actor.authority_policy.model_dump(mode="json")
+            capabilities = [capability.value for capability in role.capabilities]
+            if supports_actor_reachability:
+                self.db.add(
+                    GameInstanceActor(
+                        game_instance_id=instance.id,
+                        actor_key=actor.key,
+                        role_key=actor.role_key,
+                        name=actor.name,
+                        persona=actor.persona,
+                        doctrine=doctrine,
+                        current_node_key=actor.initial_node_key,
+                        allowed_action_keys=list(actor.allowed_action_keys),
+                        authority_policy=authority_policy,
+                        capabilities=capabilities,
+                        command_reachability=actor.command_reachability.value,
+                        is_primary=actor.key == primary_key,
+                    )
                 )
-            )
+            else:
+                self.db.execute(
+                    text(
+                        """
+                        INSERT INTO game_instance_actors
+                            (game_instance_id, actor_key, role_key, name, persona, doctrine,
+                             current_node_key, allowed_action_keys, authority_policy,
+                             capabilities, is_primary, status, version, created_at, updated_at)
+                        VALUES (:game_instance_id, :actor_key, :role_key, :name, :persona,
+                                :doctrine, :current_node_key, :allowed_action_keys,
+                                :authority_policy, :capabilities, :is_primary, :status,
+                                :version, :created_at, :updated_at)
+                        """
+                    ),
+                    {
+                        "game_instance_id": instance.id.hex,
+                        "actor_key": actor.key,
+                        "role_key": actor.role_key,
+                        "name": actor.name,
+                        "persona": actor.persona,
+                        "doctrine": json.dumps(doctrine, ensure_ascii=False),
+                        "current_node_key": actor.initial_node_key,
+                        "allowed_action_keys": json.dumps(list(actor.allowed_action_keys)),
+                        "authority_policy": json.dumps(authority_policy, ensure_ascii=False),
+                        "capabilities": json.dumps(capabilities),
+                        "is_primary": actor.key == primary_key,
+                        "status": "ACTIVE",
+                        "version": 1,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
         session = ConversationSession(
             player_id=player_id,
             game_instance_id=instance.id,
@@ -165,12 +353,73 @@ class RuntimeInitializationService:
         return InitializedRuntime(instance=instance, session=session, created=True)
 
     def _existing(self, player_id: UUID, creation_key: str) -> GameInstance | None:
+        # Keep the idempotency probe compatible with databases at the r8
+        # migration boundary.  Provenance is introduced later, but replay
+        # only needs the stable initialization columns below.
         return self.db.scalar(
-            select(GameInstance).where(
+            select(GameInstance)
+            .options(
+                load_only(
+                    GameInstance.id,
+                    GameInstance.player_id,
+                    GameInstance.scenario_version_id,
+                    GameInstance.status,
+                    GameInstance.current_node_key,
+                    GameInstance.creation_key,
+                    GameInstance.runtime_revision,
+                )
+            )
+            .where(
                 GameInstance.player_id == player_id,
                 GameInstance.creation_key == creation_key,
             )
         )
+
+    def _supports_fork_provenance_schema(self) -> bool:
+        columns = inspect(self.db.connection()).get_columns("game_instances")
+        return "forked_from_game_instance_id" in {str(item["name"]) for item in columns}
+
+    def _supports_scoped_resource_schema(self) -> bool:
+        # Use the Session's active connection.  Inspecting the Engine would
+        # borrow a second SQLite connection; with StaticPool that connection
+        # is the same handle and its inspector rollback can invalidate the
+        # initialization savepoint.
+        columns = inspect(self.db.connection()).get_columns("game_instance_resource_states")
+        return "resource_identity" in {str(item["name"]) for item in columns}
+
+    def _supports_resource_pool_schema(self) -> bool:
+        columns = inspect(self.db.connection()).get_columns("game_instance_resource_states")
+        names = {str(item["name"]) for item in columns}
+        return {"pool_key", "visibility", "availability"}.issubset(names)
+
+    def _supports_region_resource_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns("game_instance_region_resource_knowledge")
+        except Exception:
+            return False
+        return True
+
+    def _supports_relation_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns("game_instance_relation_knowledge")
+        except Exception:
+            return False
+        return True
+
+    @staticmethod
+    def _region_nodes(definition: ScenarioDefinitionV2) -> tuple[NodeDefinitionV2, ...]:
+        locality = definition.metadata.locality
+        if not locality.enabled or locality.region_node_type_key is None:
+            return ()
+        return tuple(
+            node
+            for node in definition.world.nodes
+            if node.node_type_key == locality.region_node_type_key
+        )
+
+    def _supports_actor_reachability_schema(self) -> bool:
+        columns = inspect(self.db.connection()).get_columns("game_instance_actors")
+        return "command_reachability" in {str(item["name"]) for item in columns}
 
     def _replay(self, instance: GameInstance, requested_version_id: UUID) -> InitializedRuntime:
         if instance.scenario_version_id != requested_version_id:
@@ -189,6 +438,29 @@ class RuntimeInitializationService:
         sessions = self.db.scalars(
             select(ConversationSession).where(ConversationSession.game_instance_id == instance.id)
         ).all()
+        resource_rows = self.db.scalars(
+            select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == instance.id
+            )
+        ).all()
+        region_knowledge_rows = (
+            self.db.scalars(
+                select(GameInstanceRegionResourceKnowledge).where(
+                    GameInstanceRegionResourceKnowledge.game_instance_id == instance.id
+                )
+            ).all()
+            if self._supports_region_resource_knowledge_schema()
+            else []
+        )
+        relation_knowledge_rows = (
+            self.db.scalars(
+                select(GameInstanceRelationKnowledge).where(
+                    GameInstanceRelationKnowledge.game_instance_id == instance.id
+                )
+            ).all()
+            if self._supports_relation_knowledge_schema()
+            else []
+        )
         counts = tuple(
             int(value or 0)
             for value in (
@@ -204,11 +476,6 @@ class RuntimeInitializationService:
                 ),
                 self.db.scalar(
                     select(func.count())
-                    .select_from(GameInstanceResourceState)
-                    .where(GameInstanceResourceState.game_instance_id == instance.id)
-                ),
-                self.db.scalar(
-                    select(func.count())
                     .select_from(GameInstanceActor)
                     .where(GameInstanceActor.game_instance_id == instance.id)
                 ),
@@ -217,10 +484,54 @@ class RuntimeInitializationService:
         expected = (
             len(definition.world.nodes),
             sum(len(node.facts) for node in definition.world.nodes),
-            len(definition.world.resources),
             len(definition.actors.actor_profiles),
         )
-        if len(sessions) != 1 or counts != expected:
+        expected_resources = {
+            (item.resource_key, item.region_key, item.pool_key)
+            for item in resource_pool_initial_states(definition)
+        }
+        actual_resources = {
+            (row.resource_key, row.scope_node_key, row.pool_key) for row in resource_rows
+        }
+        expected_regions = {
+            node.key
+            for node in definition.world.nodes
+            if definition.metadata.locality.enabled
+            and node.node_type_key == definition.metadata.locality.region_node_type_key
+        }
+        expected_relations = {
+            relation_identity(relation) for relation in definition.world.relations
+        }
+        resources_valid = expected_resources.issubset(actual_resources) and all(
+            valid_resource_state_identity(
+                definition,
+                row.resource_key,
+                row.scope_node_key,
+                row.pool_key,
+            )
+            for row in resource_rows
+        )
+        knowledge_valid = {row.region_key for row in region_knowledge_rows} == expected_regions
+        relation_knowledge_valid = (
+            not self._supports_relation_knowledge_schema()
+            and all(
+                relation.initial_visibility == RelationVisibility.VISIBLE
+                for relation in definition.world.relations
+            )
+        ) or (
+            {row.relation_key for row in relation_knowledge_rows} == expected_relations
+            and all(
+                row.visibility in {item.value for item in RelationVisibility}
+                for row in relation_knowledge_rows
+            )
+        )
+        if (
+            len(sessions) != 1
+            or counts != expected
+            or not resources_valid
+            or not knowledge_valid
+            or not relation_knowledge_valid
+        ):
             raise RuntimeInitializationError(
                 "RUNTIME_INITIALIZATION_INCOMPLETE",
                 "The idempotent GameInstance runtime graph is incomplete",

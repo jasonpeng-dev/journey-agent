@@ -20,7 +20,7 @@ from sqlalchemy import (
     inspect,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from app.domain.enums import (
     AgentPlanStatus,
@@ -31,6 +31,10 @@ from app.domain.enums import (
     MessageRole,
     NodeStatus,
     PlayerStatus,
+    RelationVisibility,
+    ResourceInventoryVisibility,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
     SessionStatus,
     StepExecutionType,
     WorldOperationStatus,
@@ -137,11 +141,55 @@ class GameInstance(UUIDPrimaryKey, TimestampMixin, Base):
             sqlite_where=text("creation_key IS NOT NULL"),
             postgresql_where=text("creation_key IS NOT NULL"),
         ),
+        CheckConstraint(
+            "checkpoint_source_runtime_revision IS NULL OR checkpoint_source_runtime_revision >= 0",
+            name="ck_game_instance_checkpoint_source_revision",
+        ),
+        CheckConstraint(
+            "inherited_task_count >= 0",
+            name="ck_game_instance_inherited_task_count",
+        ),
+        Index(
+            "uq_game_instances_checkpoint_source_revision",
+            "checkpointed_from_game_instance_id",
+            "checkpoint_source_runtime_revision",
+            unique=True,
+            sqlite_where=text(
+                "checkpointed_from_game_instance_id IS NOT NULL "
+                "AND checkpoint_source_runtime_revision IS NOT NULL"
+            ),
+            postgresql_where=text(
+                "checkpointed_from_game_instance_id IS NOT NULL "
+                "AND checkpoint_source_runtime_revision IS NOT NULL"
+            ),
+        ),
     )
 
     player_id: Mapped[UUID] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"))
     scenario_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("scenario_versions.id", ondelete="RESTRICT")
+    )
+    forked_from_game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "game_instances.id",
+            name="fk_game_instances_forked_from_game_instance",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    checkpointed_from_game_instance_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey(
+            "game_instances.id",
+            name="fk_game_instances_checkpointed_from_game_instance",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    checkpoint_source_runtime_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inherited_task_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
     )
     status: Mapped[GameInstanceStatus] = mapped_column(
         Enum(GameInstanceStatus, native_enum=False, length=30),
@@ -210,10 +258,22 @@ class GameInstanceFactState(TimestampMixin, Base):
 
 
 class GameInstanceResourceState(TimestampMixin, Base):
-    """Generic Instance-owned balance initialized from ScenarioVersion resources."""
+    """Generic Instance-owned balance, optionally scoped to a Region Node.
+
+    ``resource_identity`` is deliberately non-null because SQLite does not
+    enforce NULL-containing composite primary keys.  Global rows retain the
+    legacy identity ``resource_key``; scoped rows use the deterministic
+    ``resource_key@scope_node_key`` identity.
+    """
 
     __tablename__ = "game_instance_resource_states"
     __table_args__ = (
+        Index(
+            "ix_instance_resource_scope",
+            "game_instance_id",
+            "resource_key",
+            "scope_node_key",
+        ),
         CheckConstraint("value >= 0", name="ck_instance_resource_value"),
         CheckConstraint(
             "reserved_value >= 0 AND reserved_value <= value",
@@ -224,9 +284,75 @@ class GameInstanceResourceState(TimestampMixin, Base):
     game_instance_id: Mapped[UUID] = mapped_column(
         ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
     )
-    resource_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    resource_identity: Mapped[str] = mapped_column(String(161), primary_key=True)
+    resource_key: Mapped[str] = mapped_column(String(80), index=True)
+    scope_node_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    region_key = synonym("scope_node_key")
+    pool_key: Mapped[str] = mapped_column(String(80), default="default", server_default="default")
+    facility_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     value: Mapped[int] = mapped_column(Integer)
     reserved_value: Mapped[int] = mapped_column(Integer, default=0)
+    visibility: Mapped[ResourcePoolVisibility] = mapped_column(
+        Enum(ResourcePoolVisibility, native_enum=False),
+        default=ResourcePoolVisibility.VISIBLE,
+        server_default=ResourcePoolVisibility.VISIBLE.value,
+        nullable=False,
+    )
+    availability: Mapped[ResourcePoolAvailability] = mapped_column(
+        Enum(ResourcePoolAvailability, native_enum=False),
+        default=ResourcePoolAvailability.AVAILABLE,
+        server_default=ResourcePoolAvailability.AVAILABLE.value,
+        nullable=False,
+    )
+    survey_discoverable: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+    availability_requirement: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceRegionResourceKnowledge(TimestampMixin, Base):
+    """Instance-owned Region resource intelligence, separate from Pool state."""
+
+    __tablename__ = "game_instance_region_resource_knowledge"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    region_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    resource_inventory_visibility: Mapped[ResourceInventoryVisibility] = mapped_column(
+        Enum(ResourceInventoryVisibility, native_enum=False),
+        default=ResourceInventoryVisibility.VISIBLE,
+        server_default=ResourceInventoryVisibility.VISIBLE.value,
+        nullable=False,
+    )
+    resource_survey_completed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="1",
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceRelationKnowledge(TimestampMixin, Base):
+    """Instance-owned visibility for immutable Scenario Relations."""
+
+    __tablename__ = "game_instance_relation_knowledge"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    relation_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    visibility: Mapped[RelationVisibility] = mapped_column(
+        Enum(RelationVisibility, native_enum=False),
+        default=RelationVisibility.VISIBLE,
+        server_default=RelationVisibility.VISIBLE.value,
+        nullable=False,
+    )
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -256,6 +382,9 @@ class GameInstanceActor(TimestampMixin, Base):
     allowed_action_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
     authority_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     capabilities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    command_reachability: Mapped[str] = mapped_column(
+        String(20), default="ONLINE", server_default="ONLINE", nullable=False
+    )
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
     version: Mapped[int] = mapped_column(Integer, default=1)
@@ -365,8 +494,63 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     current_plan_version: Mapped[int] = mapped_column(Integer, default=0)
     replan_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error_code: Mapped[str | None] = mapped_column(String(100))
+    last_error_detail: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, default=1)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PlanningCycle(UUIDPrimaryKey, TimestampMixin, Base):
+    """Durable boundary for one INITIAL/REPLAN attempt sequence."""
+
+    __tablename__ = "planning_cycles"
+    __table_args__ = (
+        Index("ix_planning_cycles_task_status", "task_id", "status"),
+        Index("ix_planning_cycles_task_created", "task_id", "created_at"),
+    )
+
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE")
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    base_call_type: Mapped[str] = mapped_column(String(20))
+    replan_reason: Mapped[str | None] = mapped_column(String(160))
+    frozen_objective_scope: Mapped[list[str]] = mapped_column(JSON, default=list)
+    planner_input: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    planner_input_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(30), default="RUNNING")
+    current_attempt: Mapped[int] = mapped_column(Integer, default=0)
+    rejected_segment: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    current_violations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    anti_regression_memory: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+
+
+class PlanningAttempt(UUIDPrimaryKey, TimestampMixin, Base):
+    """Durable audit record for one Provider proposal attempt."""
+
+    __tablename__ = "planning_attempts"
+    __table_args__ = (
+        UniqueConstraint("cycle_id", "attempt_index"),
+        Index("ix_planning_attempts_cycle_attempt", "cycle_id", "attempt_index"),
+    )
+
+    cycle_id: Mapped[UUID] = mapped_column(ForeignKey("planning_cycles.id", ondelete="CASCADE"))
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
+    attempt_index: Mapped[int] = mapped_column(Integer)
+    call_type: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="RUNNING")
+    provider_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    proposal: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    rejected_segment: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    validator_violations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    anti_regression_memory: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    stop_reason: Mapped[str | None] = mapped_column(String(40))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    finish_reason: Mapped[str | None] = mapped_column(String(80))
 
 
 class PlayerExecutionCheckpoint(TimestampMixin, Base):
@@ -409,6 +593,7 @@ class AgentPlan(UUIDPrimaryKey, Base):
     __table_args__ = (
         UniqueConstraint("task_id", "version"),
         Index("ix_agent_plans_task_version", "task_id", "version"),
+        Index("ix_agent_plans_planning_cycle", "planning_cycle_id"),
     )
 
     task_id: Mapped[UUID] = mapped_column(ForeignKey("agent_tasks.id", ondelete="CASCADE"))
@@ -418,6 +603,10 @@ class AgentPlan(UUIDPrimaryKey, Base):
     )
     strategy_summary: Mapped[str] = mapped_column(Text)
     replan_reason: Mapped[str | None] = mapped_column(String(160))
+    # A stable projection boundary for the planning cycle that produced this
+    # accepted Plan. It is nullable for legacy plans created before cycle
+    # identity was persisted.
+    planning_cycle_id: Mapped[UUID | None] = mapped_column()
     supersedes_plan_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("agent_plans.id", ondelete="SET NULL")
     )
@@ -429,6 +618,7 @@ class AgentPlan(UUIDPrimaryKey, Base):
     planner_model: Mapped[str | None] = mapped_column(String(100))
     validation_status: Mapped[str] = mapped_column(String(30), default="PASSED")
     validation_errors: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    stop_reason: Mapped[str] = mapped_column(String(40), default="OBJECTIVE_COMPLETION")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -441,6 +631,7 @@ class AgentStep(UUIDPrimaryKey, Base):
 
     plan_id: Mapped[UUID] = mapped_column(ForeignKey("agent_plans.id", ondelete="CASCADE"))
     sequence: Mapped[int] = mapped_column(Integer)
+    planner_step_id: Mapped[str | None] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(Text)
     execution_type: Mapped[StepExecutionType] = mapped_column(
         Enum(StepExecutionType, native_enum=False, length=30)

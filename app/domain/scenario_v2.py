@@ -7,6 +7,7 @@ decoder; later Phase R stages interpret its rules without generating code.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Literal
@@ -21,6 +22,13 @@ from pydantic import (
     model_validator,
 )
 
+from app.domain.enums import (
+    CommandReachability,
+    RelationVisibility,
+    ResourceInventoryVisibility,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
+)
 from app.domain.world import AccessState, FactValueType, Visibility
 
 type StableKey = Annotated[
@@ -48,6 +56,7 @@ type SymbolicCode = Annotated[
     ),
 ]
 type StrictScalar = StrictStr | StrictInt | StrictBool
+type ActionParameters = dict[str, object]
 
 
 class FrozenDefinitionModel(BaseModel):
@@ -58,6 +67,42 @@ class EngineCapability(StrEnum):
     PLAN = "PLAN"
     EXECUTE_ACTION = "EXECUTE_ACTION"
     INSPECT_STATE = "INSPECT_STATE"
+    LOGISTICS = "LOGISTICS"
+
+
+class ActionBehavior(StrEnum):
+    """Generic runtime behavior layered on top of declarative Rules."""
+
+    RULE = "RULE"
+    TRAVEL = "TRAVEL"
+    INSPECT = "INSPECT"
+    REPAIR_COMMUNICATIONS = "REPAIR_COMMUNICATIONS"
+    CLEAR_TRANSPORT = "CLEAR_TRANSPORT"
+    TRANSPORT_RESOURCE = "TRANSPORT_RESOURCE"
+    RELAY_MESSAGE = "RELAY_MESSAGE"
+    SURVEY_RESOURCES = "SURVEY_RESOURCES"
+    SUPPLY_POWER = "SUPPLY_POWER"
+    DEPLOY_HEAVY_ENGINEERING_SUPPORT = "DEPLOY_HEAVY_ENGINEERING_SUPPORT"
+
+
+class ActionLocality(StrEnum):
+    NONE = "NONE"
+    LOCAL_TARGET = "LOCAL_TARGET"
+    FACILITY_REGION = "FACILITY_REGION"
+    TRANSPORT_ENDPOINT = "TRANSPORT_ENDPOINT"
+    ACTOR_REGION = "ACTOR_REGION"
+    REGION = "REGION"
+
+
+class ActionTargetKind(StrEnum):
+    NODE = "NODE"
+    ACTOR = "ACTOR"
+
+
+class ResourceScopeKind(StrEnum):
+    EXPLICIT = "EXPLICIT"
+    ACTOR_CURRENT_REGION = "ACTOR_CURRENT_REGION"
+    CURRENT_TARGET_REGION = "CURRENT_TARGET_REGION"
 
 
 class ActionExecutionMode(StrEnum):
@@ -88,6 +133,7 @@ class ComparisonOperator(StrEnum):
 
 class NodeSelectorKind(StrEnum):
     CURRENT_TARGET = "CURRENT_TARGET"
+    ACTION_SOURCE = "ACTION_SOURCE"
     EXPLICIT = "EXPLICIT"
     RELATED = "RELATED"
 
@@ -130,12 +176,119 @@ class EffectKind(StrEnum):
     EMIT_OUTCOME = "EMIT_OUTCOME"
     EMIT_FAILURE = "EMIT_FAILURE"
     WRITE_MEMORY_EVENT = "WRITE_MEMORY_EVENT"
+    SET_ACTOR_COMMAND_REACHABILITY = "SET_ACTOR_COMMAND_REACHABILITY"
+    SET_RELATION_VISIBILITY = "SET_RELATION_VISIBILITY"
+    SET_REGION_RESOURCE_VISIBILITY = "SET_REGION_RESOURCE_VISIBILITY"
+    SET_RESOURCE_POOL_VISIBILITY = "SET_RESOURCE_POOL_VISIBILITY"
+    SET_RESOURCE_POOL_AVAILABILITY = "SET_RESOURCE_POOL_AVAILABILITY"
+
+
+class ResourceInitialStateV2(FrozenDefinitionModel):
+    """One initialized balance, optionally scoped to a Region Node."""
+
+    resource_key: StableKey
+    scope_node_key: StableKey | None = None
+    value: int = Field(ge=0)
+    reserved_value: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_reservation(self) -> ResourceInitialStateV2:
+        if self.reserved_value > self.value:
+            raise ValueError("Resource initial reserved_value cannot exceed value")
+        return self
+
+
+class ResourceAvailabilityRequirementV2(FrozenDefinitionModel):
+    """Known Fact that can unlock a currently unavailable Resource Pool."""
+
+    node_key: StableKey
+    fact_key: StableKey
+    value: StrictScalar
+
+
+class ResourcePoolDefinitionV2(FrozenDefinitionModel):
+    """One author-declared initial Resource Pool."""
+
+    pool_key: StableKey
+    resource_key: StableKey
+    region_key: StableKey | None = None
+    facility_key: StableKey | None = None
+    quantity: int = Field(ge=0)
+    reserved_value: int = Field(default=0, ge=0)
+    visibility: ResourcePoolVisibility = ResourcePoolVisibility.VISIBLE
+    availability: ResourcePoolAvailability = ResourcePoolAvailability.AVAILABLE
+    survey_discoverable: bool = False
+    availability_requirement: ResourceAvailabilityRequirementV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def validate_reservation(self) -> ResourcePoolDefinitionV2:
+        if self.reserved_value > self.quantity:
+            raise ValueError("Resource Pool reserved_value cannot exceed quantity")
+        return self
+
+
+class RegionResourceKnowledgeInitialStateV2(FrozenDefinitionModel):
+    """Optional initial Region resource intelligence state."""
+
+    region_key: StableKey
+    resource_inventory_visibility: ResourceInventoryVisibility = ResourceInventoryVisibility.VISIBLE
+    resource_survey_completed: bool = True
+
+
+class LocalityContractV2(FrozenDefinitionModel):
+    """Explicit opt-in contract for Region/Facility/Transport semantics."""
+
+    enabled: bool = False
+    scoped_resources: bool = False
+    region_node_type_key: StableKey | None = None
+    facility_node_type_key: StableKey | None = None
+    transport_node_type_key: StableKey | None = None
+    located_in_relation_type_key: StableKey | None = None
+    transport_endpoint_relation_type_key: StableKey | None = None
+    passability_fact_key: StableKey | None = None
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> LocalityContractV2:
+        keys = (
+            self.region_node_type_key,
+            self.facility_node_type_key,
+            self.transport_node_type_key,
+            self.located_in_relation_type_key,
+            self.transport_endpoint_relation_type_key,
+        )
+        if not self.enabled:
+            if self.scoped_resources or any(
+                key is not None for key in (*keys, self.passability_fact_key)
+            ):
+                raise ValueError("Locality fields require explicit enabled opt-in")
+        elif any(key is None for key in keys):
+            raise ValueError(
+                "Enabled locality requires Region/Facility/Transport type and relation keys"
+            )
+        return self
+
+
+class ResourceScopeV2(FrozenDefinitionModel):
+    kind: ResourceScopeKind
+    node_key: StableKey | None = None
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> ResourceScopeV2:
+        if self.kind == ResourceScopeKind.EXPLICIT and self.node_key is None:
+            raise ValueError("EXPLICIT Resource scope requires node_key")
+        if self.kind != ResourceScopeKind.EXPLICIT and self.node_key is not None:
+            raise ValueError("Actor/target Resource scope cannot define node_key")
+        return self
 
 
 class ScenarioMetadataV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)
+    locality: LocalityContractV2 = Field(default_factory=LocalityContractV2)
 
 
 class EngineContractV2(FrozenDefinitionModel):
@@ -146,6 +299,15 @@ class EngineContractV2(FrozenDefinitionModel):
 class InitializationV2(FrozenDefinitionModel):
     start_node_key: StableKey
     primary_actor_key: StableKey
+    resource_initial_states: tuple[ResourceInitialStateV2, ...] = ()
+    resource_pools: tuple[ResourcePoolDefinitionV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+    region_resource_knowledge: tuple[RegionResourceKnowledgeInitialStateV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
 
 
 class NodeTypeDefinitionV2(FrozenDefinitionModel):
@@ -213,9 +375,24 @@ class NodeDefinitionV2(FrozenDefinitionModel):
 
 
 class RelationDefinitionV2(FrozenDefinitionModel):
+    # Legacy relation documents omit both fields.  The defaults are excluded
+    # from canonical serialization so old Scenario hashes remain unchanged.
+    key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
     source_node_key: StableKey
     relation_type_key: StableKey
     target_node_key: StableKey
+    initial_visibility: RelationVisibility = Field(
+        default=RelationVisibility.VISIBLE,
+        exclude_if=lambda value: value == RelationVisibility.VISIBLE,
+    )
+
+
+def relation_identity(relation: RelationDefinitionV2) -> str:
+    """Return the stable runtime identity of one immutable Relation Truth."""
+
+    return relation.key or (
+        f"{relation.source_node_key}__{relation.relation_type_key}__{relation.target_node_key}"
+    )
 
 
 class ResourceDefinitionV2(FrozenDefinitionModel):
@@ -305,6 +482,10 @@ class ActorProfileV2(FrozenDefinitionModel):
     initial_node_key: StableKey
     allowed_action_keys: tuple[StableKey, ...]
     authority_policy: AuthorityPolicyV2 = Field(default_factory=AuthorityPolicyV2)
+    command_reachability: CommandReachability = Field(
+        default=CommandReachability.ONLINE,
+        exclude_if=lambda value: value == CommandReachability.ONLINE,
+    )
 
     @model_validator(mode="after")
     def validate_actor_keys(self) -> ActorProfileV2:
@@ -362,12 +543,23 @@ class ExpectedOutcomeV2(FrozenDefinitionModel):
     success: bool
 
 
+class ObjectiveRequirementKnowledgeGateV2(FrozenDefinitionModel):
+    """Public-Knowledge gate shared by objectives and Action planning projections."""
+
+    node_key: StableKey
+    fact_key: StableKey
+    accepted_values: tuple[StrictScalar, ...] = Field(min_length=1)
+
+
 class ActionPlanningProjectionV2(FrozenDefinitionModel):
     terminal_effects: tuple[FactReferenceV2, ...] = ()
     supporting_effects: tuple[FactReferenceV2, ...] = ()
     success_outcome_codes: tuple[SymbolicCode, ...] = ()
     wait_success_outcome_codes: tuple[SymbolicCode, ...] = ()
     hints: tuple[str, ...] = ()
+    knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ActionDefinitionV2(FrozenDefinitionModel):
@@ -378,9 +570,23 @@ class ActionDefinitionV2(FrozenDefinitionModel):
     execution_mode: ActionExecutionMode
     parameters: tuple[ActionParameterV2, ...] = ()
     allowed_actor_capabilities: tuple[EngineCapability, ...]
+    required_actor_role_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    source_relation_type_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     authority_policy: AuthorityPolicyV2 = Field(default_factory=AuthorityPolicyV2)
     expected_outcomes: tuple[ExpectedOutcomeV2, ...]
     planning: ActionPlanningProjectionV2 = Field(default_factory=ActionPlanningProjectionV2)
+    behavior: ActionBehavior = ActionBehavior.RULE
+    locality: ActionLocality = ActionLocality.NONE
+    target_kind: ActionTargetKind = Field(
+        default=ActionTargetKind.NODE,
+        exclude_if=lambda value: value == ActionTargetKind.NODE,
+    )
 
     @model_validator(mode="after")
     def validate_action(self) -> ActionDefinitionV2:
@@ -398,6 +604,42 @@ class ActionDefinitionV2(FrozenDefinitionModel):
             self.planning.wait_success_outcome_codes
         ):
             raise ValueError("An IMMEDIATE Action cannot define WAIT success outcomes")
+        if (
+            self.target_kind == ActionTargetKind.ACTOR
+            and self.locality != ActionLocality.ACTOR_REGION
+        ):
+            raise ValueError("ACTOR Actions require ACTOR_REGION locality")
+        if (
+            self.behavior == ActionBehavior.RELAY_MESSAGE
+            and self.target_kind != ActionTargetKind.ACTOR
+        ):
+            raise ValueError("RELAY_MESSAGE Actions require an ACTOR target")
+        if (
+            self.behavior == ActionBehavior.SURVEY_RESOURCES
+            and self.locality != ActionLocality.REGION
+        ):
+            raise ValueError("SURVEY_RESOURCES Actions require REGION locality")
+        parameters = {item.key: item for item in self.parameters}
+        if self.behavior == ActionBehavior.SUPPLY_POWER:
+            source = parameters.get("source_key")
+            if (
+                source is None
+                or source.value_type != ActionParameterType.STRING
+                or not source.required
+            ):
+                raise ValueError(
+                    "SUPPLY_POWER Actions require a required STRING source_key parameter"
+                )
+            if self.target_kind != ActionTargetKind.NODE or self.locality == ActionLocality.NONE:
+                raise ValueError("SUPPLY_POWER Actions require a localized Node target")
+            if self.source_relation_type_key is None:
+                raise ValueError("SUPPLY_POWER Actions require a source_relation_type_key")
+        if self.behavior == ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT and (
+            self.target_kind != ActionTargetKind.NODE or self.locality == ActionLocality.NONE
+        ):
+            raise ValueError(
+                "DEPLOY_HEAVY_ENGINEERING_SUPPORT Actions require a localized Node target"
+            )
         return self
 
 
@@ -420,6 +662,9 @@ class NodeSelectorV2(FrozenDefinitionModel):
         if self.kind == NodeSelectorKind.CURRENT_TARGET:
             if self.node_key is not None or any(value is not None for value in related_fields):
                 raise ValueError("CURRENT_TARGET selector cannot define reference fields")
+        elif self.kind == NodeSelectorKind.ACTION_SOURCE:
+            if self.node_key is not None or any(value is not None for value in related_fields):
+                raise ValueError("ACTION_SOURCE selector cannot define reference fields")
         elif self.kind == NodeSelectorKind.EXPLICIT:
             if self.node_key is None or any(value is not None for value in related_fields):
                 raise ValueError("EXPLICIT selector requires only node_key")
@@ -468,6 +713,7 @@ class ConditionV2(FrozenDefinitionModel):
     node: NodeSelectorV2 | None = None
     fact_key: StableKey | None = None
     resource_key: StableKey | None = None
+    resource_scope: ResourceScopeV2 | None = None
     parameter_key: StableKey | None = None
     operator: ComparisonOperator | None = None
     value: StrictScalar | None = None
@@ -526,6 +772,7 @@ class EffectV2(FrozenDefinitionModel):
     value: ValueExpressionV2 | None = None
     access: AccessState | None = None
     resource_key: StableKey | None = None
+    resource_scope: ResourceScopeV2 | None = None
     amount: IntegerExpressionV2 | None = None
     outcome_code: SymbolicCode | None = None
     failure_code: SymbolicCode | None = None
@@ -533,6 +780,22 @@ class EffectV2(FrozenDefinitionModel):
     retryable: bool = False
     memory_key: StableKey | None = None
     memory_content: str | None = Field(default=None, max_length=4000)
+    actor_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    relation_key: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    command_reachability: CommandReachability | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    region_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    pool_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    visibility: ResourceInventoryVisibility | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    availability: ResourcePoolAvailability | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_shape(self) -> EffectV2:
@@ -565,6 +828,27 @@ class EffectV2(FrozenDefinitionModel):
             self.memory_key is None or not self.memory_content
         ):
             raise ValueError("WRITE_MEMORY_EVENT requires memory_key/content")
+        elif (
+            self.kind == EffectKind.SET_ACTOR_COMMAND_REACHABILITY
+            and self.command_reachability is None
+        ):
+            raise ValueError("SET_ACTOR_COMMAND_REACHABILITY requires command_reachability")
+        elif self.kind == EffectKind.SET_RELATION_VISIBILITY and (
+            self.relation_key is None or self.visibility is None
+        ):
+            raise ValueError("SET_RELATION_VISIBILITY requires relation_key/visibility")
+        elif self.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY and (
+            self.region_key is None or self.visibility is None
+        ):
+            raise ValueError("SET_REGION_RESOURCE_VISIBILITY requires region_key/visibility")
+        elif self.kind == EffectKind.SET_RESOURCE_POOL_VISIBILITY and (
+            self.pool_key is None or self.visibility is None
+        ):
+            raise ValueError("SET_RESOURCE_POOL_VISIBILITY requires pool_key/visibility")
+        elif self.kind == EffectKind.SET_RESOURCE_POOL_AVAILABILITY and (
+            self.pool_key is None or self.availability is None
+        ):
+            raise ValueError("SET_RESOURCE_POOL_AVAILABILITY requires pool_key/availability")
         return self
 
 
@@ -591,12 +875,54 @@ class RuleDefinitionV2(FrozenDefinitionModel):
         return self
 
 
+class ObjectiveRequirementKind(StrEnum):
+    FACT = "FACT"
+    RESOURCE_AT_LEAST = "RESOURCE_AT_LEAST"
+
+
 class ObjectiveRequirementV2(FrozenDefinitionModel):
     key: StableKey
-    node_key: StableKey
-    fact_key: StableKey
-    accepted_values: tuple[StrictScalar, ...] = Field(min_length=1)
+    kind: ObjectiveRequirementKind = Field(
+        default=ObjectiveRequirementKind.FACT,
+        exclude_if=lambda value: value == ObjectiveRequirementKind.FACT,
+    )
+    node_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    fact_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    accepted_values: tuple[StrictScalar, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    region_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    resource_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    minimum: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     description: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_requirement_shape(self) -> ObjectiveRequirementV2:
+        if self.kind == ObjectiveRequirementKind.FACT:
+            if self.node_key is None or self.fact_key is None or not self.accepted_values:
+                raise ValueError("FACT Objective requirement needs node/fact/accepted_values")
+            if (
+                self.region_key is not None
+                or self.resource_key is not None
+                or self.minimum is not None
+            ):
+                raise ValueError("FACT Objective requirement cannot declare resource fields")
+        else:
+            if self.region_key is None or self.resource_key is None or self.minimum is None:
+                raise ValueError("RESOURCE_AT_LEAST needs region/resource/minimum")
+            if self.node_key is not None or self.fact_key is not None or self.accepted_values:
+                raise ValueError("RESOURCE_AT_LEAST cannot declare Fact fields")
+        return self
+
+    @property
+    def fact_ref(self) -> tuple[str, str] | None:
+        if self.kind != ObjectiveRequirementKind.FACT:
+            return None
+        assert self.node_key is not None and self.fact_key is not None
+        return self.node_key, self.fact_key
 
 
 class ObjectivePrerequisiteV2(FrozenDefinitionModel):
@@ -614,6 +940,11 @@ class ObjectiveDefinitionV2(FrozenDefinitionModel):
     subsumes: tuple[StableKey, ...] = ()
     goal_aliases: tuple[str, ...] = ()
     goal_examples: tuple[str, ...] = ()
+    planning_guidance: str | None = Field(
+        default=None,
+        max_length=4000,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_objective_keys(self) -> ObjectiveDefinitionV2:
@@ -688,7 +1019,7 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
 
 def _validate_parameter_value(
     definition: ActionParameterV2,
-    value: StrictScalar,
+    value: object,
     *,
     field: str,
 ) -> None:
@@ -710,7 +1041,7 @@ def _validate_parameter_value(
 
 
 def validate_action_parameters(
-    action: ActionDefinitionV2, parameters: dict[str, StrictScalar]
+    action: ActionDefinitionV2, parameters: Mapping[str, object]
 ) -> None:
     """Validate one Action input without reading runtime state.
 
@@ -723,8 +1054,8 @@ def validate_action_parameters(
 
 
 def normalize_action_parameters(
-    action: ActionDefinitionV2, parameters: dict[str, StrictScalar]
-) -> dict[str, StrictScalar]:
+    action: ActionDefinitionV2, parameters: Mapping[str, object]
+) -> ActionParameters:
     """Merge Action defaults and strictly validate one canonical input.
 
     Scenario authors declare the parameter schema, including defaults.  A
@@ -733,11 +1064,14 @@ def normalize_action_parameters(
     function never mutates the caller's dictionary.
     """
 
+    if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+        return _normalize_transport_resource_parameters(action, parameters)
+
     definitions = {item.key: item for item in action.parameters}
     unknown = set(parameters) - set(definitions)
     if unknown:
         raise ValueError("Action input contains unknown parameters")
-    normalized: dict[str, StrictScalar] = dict(parameters)
+    normalized: ActionParameters = dict(parameters)
     for key, definition in definitions.items():
         if key not in parameters:
             if definition.required and definition.default is None:
@@ -747,6 +1081,91 @@ def normalize_action_parameters(
         if key in normalized:
             _validate_parameter_value(definition, normalized[key], field=key)
     return normalized
+
+
+def transport_resource_entries(
+    parameters: Mapping[str, object],
+) -> tuple[tuple[str, int], ...]:
+    """Return one canonical cargo list from new or legacy transport input.
+
+    The helper deliberately owns only shape validation.  Resource existence,
+    knowledge, locality, and quantity authority remain Runtime/Validator
+    concerns.  It is shared by those layers and by Player-facing projections
+    so old persisted ``resource_key``/``amount`` inputs remain readable.
+    """
+
+    if "resources" in parameters:
+        if "resource_key" in parameters or "amount" in parameters:
+            raise ValueError("Transport input cannot mix resources with legacy parameters")
+        raw_resources = parameters["resources"]
+        if not isinstance(raw_resources, (list, tuple)):
+            raise ValueError("Transport resources must be a list")
+    else:
+        raw_resources = [
+            {
+                "resource_key": parameters.get("resource_key"),
+                "amount": parameters.get("amount"),
+            }
+        ]
+
+    entries: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for item in raw_resources:
+        if not isinstance(item, Mapping):
+            raise ValueError("Each transport resource must be an object")
+        if set(item) != {"resource_key", "amount"}:
+            raise ValueError("Each transport resource needs resource_key and amount only")
+        resource_key = item.get("resource_key")
+        amount = item.get("amount")
+        if not isinstance(resource_key, str) or not resource_key:
+            raise ValueError("Transport resource_key must be a non-empty string")
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise ValueError("Transport amount must be a positive integer")
+        if resource_key in seen:
+            raise ValueError("Transport resources cannot repeat a resource_key")
+        seen.add(resource_key)
+        entries.append((resource_key, amount))
+    if not entries:
+        raise ValueError("Transport requires at least one resource")
+    return tuple(entries)
+
+
+def _normalize_transport_resource_parameters(
+    action: ActionDefinitionV2,
+    parameters: Mapping[str, object],
+) -> ActionParameters:
+    definitions = {item.key: item for item in action.parameters}
+    if "resources" in parameters:
+        unknown = set(parameters) - {"resources"}
+        if unknown:
+            raise ValueError("Action input contains unknown transport parameters")
+        entries = transport_resource_entries(parameters)
+    else:
+        unknown = set(parameters) - set(definitions)
+        if unknown:
+            raise ValueError("Action input contains unknown parameters")
+        for key in ("resource_key", "amount"):
+            definition = definitions.get(key)
+            if definition is None or key not in parameters:
+                raise ValueError(f"Action input is missing required parameter {key}")
+            _validate_parameter_value(definition, parameters[key], field=key)
+        entries = transport_resource_entries(parameters)
+    resource_definition = definitions.get("resource_key")
+    amount_definition = definitions.get("amount")
+    for resource_key, amount in entries:
+        if resource_definition is not None:
+            _validate_parameter_value(
+                resource_definition,
+                resource_key,
+                field="resources[].resource_key",
+            )
+        if amount_definition is not None:
+            _validate_parameter_value(amount_definition, amount, field="resources[].amount")
+    return {
+        "resources": [
+            {"resource_key": resource_key, "amount": amount} for resource_key, amount in entries
+        ]
+    }
 
 
 def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
@@ -760,6 +1179,10 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     _require_unique((item.key for item in definition.actions), "Action keys")
     _require_unique((item.key for item in definition.rules), "Rule keys")
     _require_unique((item.key for item in definition.objectives), "Objective keys")
+    _require_unique(
+        (relation_identity(item) for item in world.relations),
+        "World Relation identities",
+    )
 
     node_types = {item.key for item in world.node_types}
     nodes = {item.key: item for item in world.nodes}
@@ -769,6 +1192,11 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     actors = {item.key: item for item in definition.actors.actor_profiles}
     actions = {item.key: item for item in definition.actions}
     objectives = {item.key: item for item in definition.objectives}
+
+    _validate_locality_contract(definition, nodes, node_types)
+    _validate_resource_initial_states(definition, nodes)
+    _validate_resource_pools(definition, nodes)
+    _validate_region_resource_knowledge(definition, nodes)
 
     _require_key(nodes, definition.initialization.start_node_key, "start Node")
     primary = _require_key(
@@ -789,6 +1217,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
         _require_key(nodes, relation.target_node_key, "Relation target Node")
     if len(set(world.relations)) != len(world.relations):
         raise ValueError("World Relations must be unique")
+    relation_keys = {relation_identity(item) for item in world.relations}
 
     for actor in definition.actors.actor_profiles:
         _require_key(roles, actor.role_key, f"Actor {actor.key} Role")
@@ -806,6 +1235,25 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 )
 
     for action in definition.actions:
+        if action.required_actor_role_key is not None:
+            _require_key(
+                roles,
+                action.required_actor_role_key,
+                f"Action {action.key} required Actor Role",
+            )
+        if (
+            action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
+        ) and not definition.metadata.locality.enabled:
+            raise ValueError(
+                f"Action {action.key} requires the Scenario locality contract to be enabled"
+            )
+        if (
+            action.behavior == ActionBehavior.TRANSPORT_RESOURCE
+            and not definition.metadata.locality.scoped_resources
+        ):
+            raise ValueError(
+                f"Action {action.key} requires scoped_resources in the locality contract"
+            )
         _require_key(
             interactions,
             action.required_interaction_key,
@@ -824,23 +1272,45 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
             *action.planning.supporting_effects,
         ):
             _require_fact(nodes, fact_ref.node_key, fact_ref.fact_key, "Action planning Effect")
+        if action.planning.knowledge_gate is not None:
+            _validate_gate(action.planning.knowledge_gate, nodes)
 
     for rule in definition.rules:
         action = _require_key(actions, rule.action_key, f"Rule {rule.key} Action")
         parameters = {parameter.key: parameter for parameter in action.parameters}
         if rule.condition is not None:
-            _validate_condition_refs(rule.condition, nodes, resources, parameters)
+            _validate_condition_refs(
+                rule.condition,
+                nodes,
+                resources,
+                parameters,
+                definition.metadata.locality,
+            )
         for effect in rule.effects:
-            _validate_effect_refs(effect, nodes, resources, parameters, action)
+            _validate_effect_refs(
+                effect,
+                nodes,
+                resources,
+                actors,
+                parameters,
+                action,
+                definition.metadata.locality,
+                {item.pool_key for item in definition.initialization.resource_pools},
+                relation_keys,
+            )
 
     aliases: set[str] = set()
     subsumption_graph: dict[str, tuple[str, ...]] = {}
     for objective in definition.objectives:
         for requirement in objective.completion_requirements:
-            _validate_objective_requirement(requirement, nodes)
+            _validate_objective_requirement(
+                requirement, nodes, resources, definition.metadata.locality
+            )
         for prerequisite in objective.prerequisites:
             for requirement in prerequisite.requirements:
-                _validate_objective_requirement(requirement, nodes)
+                _validate_objective_requirement(
+                    requirement, nodes, resources, definition.metadata.locality
+                )
         for key in objective.subsumes:
             if key == objective.key:
                 raise ValueError("An Objective cannot subsume itself")
@@ -882,16 +1352,18 @@ def _validate_condition_refs(
     nodes: dict[str, NodeDefinitionV2],
     resources: dict[str, ResourceDefinitionV2],
     parameters: dict[str, ActionParameterV2],
+    locality: LocalityContractV2,
 ) -> None:
     for child in condition.conditions:
-        _validate_condition_refs(child, nodes, resources, parameters)
+        _validate_condition_refs(child, nodes, resources, parameters, locality)
     if condition.condition is not None:
-        _validate_condition_refs(condition.condition, nodes, resources, parameters)
+        _validate_condition_refs(condition.condition, nodes, resources, parameters, locality)
     _validate_selector(condition.node, nodes)
     if condition.node is not None and condition.fact_key is not None:
         _validate_selector_fact(condition.node, condition.fact_key, nodes)
     if condition.resource_key is not None:
         _require_key(resources, condition.resource_key, "Condition Resource")
+        _validate_resource_scope(condition.resource_scope, nodes, locality, "Condition")
     if condition.parameter_key is not None:
         parameter = _require_key(parameters, condition.parameter_key, "Condition parameter")
         if condition.value is not None:
@@ -902,18 +1374,44 @@ def _validate_effect_refs(
     effect: EffectV2,
     nodes: dict[str, NodeDefinitionV2],
     resources: dict[str, ResourceDefinitionV2],
+    actors: dict[str, ActorProfileV2],
     parameters: dict[str, ActionParameterV2],
     action: ActionDefinitionV2,
+    locality: LocalityContractV2,
+    pool_keys: set[str],
+    relation_keys: set[str],
 ) -> None:
+    if effect.actor_key is not None:
+        _require_key(actors, effect.actor_key, "Effect Actor")
+    if effect.kind == EffectKind.SET_RELATION_VISIBILITY:
+        assert effect.relation_key is not None
+        _require_key(relation_keys, effect.relation_key, "Relation Visibility Relation")
     _validate_selector(effect.node, nodes)
     if effect.node is not None and effect.fact_key is not None:
         _validate_selector_fact(effect.node, effect.fact_key, nodes)
     if effect.resource_key is not None:
         resource = _require_key(resources, effect.resource_key, "Effect Resource")
+        _validate_resource_scope(effect.resource_scope, nodes, locality, "Effect")
         if effect.kind in {EffectKind.RESERVE_RESOURCE, EffectKind.RELEASE_RESOURCE} and not (
             resource.reservation_supported
         ):
             raise ValueError("Resource reservation Effect requires reservation_supported")
+    if effect.kind == EffectKind.SET_REGION_RESOURCE_VISIBILITY:
+        assert effect.region_key is not None
+        if not locality.enabled or not locality.scoped_resources:
+            raise ValueError("Region Resource Visibility requires scoped locality")
+        region = _require_key(nodes, effect.region_key, "Region Resource Visibility Region")
+        if region.node_type_key != locality.region_node_type_key:
+            raise ValueError("Region Resource Visibility must target a Region Node")
+    if effect.kind in {
+        EffectKind.SET_RESOURCE_POOL_VISIBILITY,
+        EffectKind.SET_RESOURCE_POOL_AVAILABILITY,
+    }:
+        assert effect.pool_key is not None
+        if not locality.enabled or not locality.scoped_resources:
+            raise ValueError("Resource Pool Effects require scoped locality")
+        if effect.pool_key != "default" and effect.pool_key not in pool_keys:
+            raise ValueError(f"Resource Pool Effect references unknown Pool {effect.pool_key}")
     expressions = [effect.value, effect.amount]
     for expression in expressions:
         if expression is not None and expression.parameter_key is not None:
@@ -950,7 +1448,19 @@ def _validate_selector_fact(
 def _validate_objective_requirement(
     requirement: ObjectiveRequirementV2,
     nodes: dict[str, NodeDefinitionV2],
+    resources: dict[str, ResourceDefinitionV2],
+    locality: LocalityContractV2,
 ) -> None:
+    if requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+        assert requirement.region_key is not None and requirement.resource_key is not None
+        region = _require_key(nodes, requirement.region_key, "Objective resource Region")
+        if not locality.enabled or region.node_type_key != locality.region_node_type_key:
+            raise ValueError("Objective resource requirement must reference a Region")
+        _require_key(resources, requirement.resource_key, "Objective Resource")
+        if requirement.knowledge_gate is not None:
+            _validate_gate(requirement.knowledge_gate, nodes)
+        return
+    assert requirement.node_key is not None and requirement.fact_key is not None
     fact = _require_fact(
         nodes,
         requirement.node_key,
@@ -968,6 +1478,186 @@ def _validate_objective_requirement(
             raise ValueError("Objective value does not match INTEGER Fact")
         if fact.value_type == FactValueType.BOOLEAN and not isinstance(value, bool):
             raise ValueError("Objective value does not match BOOLEAN Fact")
+    if requirement.knowledge_gate is not None:
+        _validate_gate(requirement.knowledge_gate, nodes)
+
+
+def _validate_gate(
+    gate: ObjectiveRequirementKnowledgeGateV2,
+    nodes: dict[str, NodeDefinitionV2],
+) -> None:
+    fact = _require_fact(nodes, gate.node_key, gate.fact_key, "Objective requirement gate")
+    for value in gate.accepted_values:
+        if fact.value_type == FactValueType.ENUM and value not in fact.allowed_values:
+            raise ValueError("Objective gate value is outside the ENUM Fact domain")
+
+
+def _validate_locality_contract(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+    node_types: set[str],
+) -> None:
+    locality = definition.metadata.locality
+    if not locality.enabled:
+        return
+    for key, label in (
+        (locality.region_node_type_key, "Region Node Type"),
+        (locality.facility_node_type_key, "Facility Node Type"),
+        (locality.transport_node_type_key, "Transport Node Type"),
+    ):
+        assert key is not None
+        _require_key(node_types, key, label)
+    relation_types = {item.relation_type_key for item in definition.world.relations}
+    for key, label in (
+        (locality.located_in_relation_type_key, "located_in Relation Type"),
+        (locality.transport_endpoint_relation_type_key, "endpoint Relation Type"),
+    ):
+        assert key is not None
+        _require_key(relation_types, key, label)
+    if locality.passability_fact_key is not None and not any(
+        node.fact(locality.passability_fact_key) is not None for node in nodes.values()
+    ):
+        raise ValueError("Locality passability_fact_key does not reference a Fact")
+
+
+def _validate_resource_initial_states(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+) -> None:
+    locality = definition.metadata.locality
+    resources = {item.key: item for item in definition.world.resources}
+    states = definition.initialization.resource_initial_states
+    if not states:
+        return
+    seen: set[tuple[str, str | None]] = set()
+    for state in states:
+        resource = _require_key(resources, state.resource_key, "Initial Resource state")
+        scope = state.scope_node_key
+        if scope is not None:
+            if not locality.enabled or not locality.scoped_resources:
+                raise ValueError("Scoped initial Resource state requires locality.scoped_resources")
+            node = _require_key(nodes, scope, "Initial Resource scope")
+            if node.node_type_key != locality.region_node_type_key:
+                raise ValueError("Scoped initial Resource state must target a Region Node")
+        identity = (state.resource_key, scope)
+        if identity in seen:
+            raise ValueError("Initial Resource state identities must be unique")
+        seen.add(identity)
+        if state.value < resource.minimum or (
+            resource.maximum is not None and state.value > resource.maximum
+        ):
+            raise ValueError("Initial Resource state value is outside its Resource bounds")
+        if state.reserved_value > state.value:
+            raise ValueError("Initial Resource reserved_value cannot exceed value")
+    # When Pool authoring is present, resources not listed in either section
+    # still receive the backward-compatible default Pool at runtime.  The
+    # legacy balance-only form retains its original "initialize every
+    # Resource" contract.
+    if not definition.initialization.resource_pools and {
+        item.resource_key for item in states
+    } != set(resources):
+        raise ValueError("Initial Resource states must initialize every Resource definition")
+
+
+def _validate_resource_pools(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+) -> None:
+    pools = definition.initialization.resource_pools
+    if not pools:
+        return
+    locality = definition.metadata.locality
+    resources = {item.key: item for item in definition.world.resources}
+    seen_pool_keys: set[str] = set()
+    seen_identities: set[tuple[str, str, str | None]] = set()
+    for pool in pools:
+        if pool.pool_key in seen_pool_keys:
+            raise ValueError("Resource Pool keys must be globally unique")
+        seen_pool_keys.add(pool.pool_key)
+        resource = _require_key(resources, pool.resource_key, "Resource Pool Resource")
+        if pool.quantity < resource.minimum or (
+            resource.maximum is not None and pool.quantity > resource.maximum
+        ):
+            raise ValueError("Resource Pool quantity is outside its Resource bounds")
+        if pool.reserved_value > pool.quantity:
+            raise ValueError("Resource Pool reserved_value cannot exceed quantity")
+        if pool.region_key is not None:
+            if not locality.enabled or not locality.scoped_resources:
+                raise ValueError("Region Resource Pools require locality.scoped_resources")
+            region = _require_key(nodes, pool.region_key, "Resource Pool Region")
+            if region.node_type_key != locality.region_node_type_key:
+                raise ValueError("Resource Pool region_key must target a Region Node")
+        if pool.facility_key is not None:
+            if not locality.enabled or pool.region_key is None:
+                raise ValueError("A Facility-bound Resource Pool requires a Region")
+            facility = _require_key(nodes, pool.facility_key, "Resource Pool Facility")
+            if facility.node_type_key != locality.facility_node_type_key:
+                raise ValueError("Resource Pool facility_key must target a Facility Node")
+            if (
+                region_for_node_key := _static_facility_region(definition, pool.facility_key)
+            ) and region_for_node_key != pool.region_key:
+                raise ValueError("Resource Pool Facility must belong to its Region")
+        identity = (pool.resource_key, pool.region_key or "", pool.pool_key)
+        if identity in seen_identities:
+            raise ValueError("Resource Pool identities must be unique")
+        seen_identities.add(identity)
+        if pool.availability_requirement is not None:
+            _require_fact(
+                nodes,
+                pool.availability_requirement.node_key,
+                pool.availability_requirement.fact_key,
+                "Resource Pool availability requirement",
+            )
+
+
+def _validate_region_resource_knowledge(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+) -> None:
+    states = definition.initialization.region_resource_knowledge
+    if not states:
+        return
+    locality = definition.metadata.locality
+    seen: set[str] = set()
+    for state in states:
+        if state.region_key in seen:
+            raise ValueError("Region Resource Knowledge keys must be unique")
+        seen.add(state.region_key)
+        if not locality.enabled or not locality.scoped_resources:
+            raise ValueError("Region Resource Knowledge requires locality.scoped_resources")
+        node = _require_key(nodes, state.region_key, "Region Resource Knowledge Region")
+        if node.node_type_key != locality.region_node_type_key:
+            raise ValueError("Region Resource Knowledge must target a Region Node")
+
+
+def _static_facility_region(definition: ScenarioDefinitionV2, facility_key: str) -> str | None:
+    locality = definition.metadata.locality
+    relation_key = locality.located_in_relation_type_key
+    if relation_key is None:
+        return None
+    matches = [
+        item.target_node_key
+        for item in definition.world.relations
+        if item.source_node_key == facility_key and item.relation_type_key == relation_key
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _validate_resource_scope(
+    scope: ResourceScopeV2 | None,
+    nodes: dict[str, NodeDefinitionV2],
+    locality: LocalityContractV2,
+    label: str,
+) -> None:
+    if scope is None:
+        return
+    if not locality.enabled or not locality.scoped_resources:
+        raise ValueError(f"{label} Resource scope requires locality.scoped_resources")
+    if scope.kind == ResourceScopeKind.EXPLICIT:
+        assert scope.node_key is not None
+        node = _require_key(nodes, scope.node_key, f"{label} Resource scope")
+        if node.node_type_key != locality.region_node_type_key:
+            raise ValueError(f"{label} Resource scope must target a Region Node")
 
 
 def _require_fact(
@@ -1020,12 +1710,23 @@ def _require_acyclic(graph: dict[str, tuple[str, ...]]) -> None:
 
 
 __all__ = [
+    "ActionBehavior",
     "ActionDefinitionV2",
     "ActionExecutionMode",
+    "ActionLocality",
     "ActionParameterType",
+    "ActionParameters",
     "ConditionKind",
     "EffectKind",
     "EngineCapability",
+    "LocalityContractV2",
+    "RegionResourceKnowledgeInitialStateV2",
+    "ResourceAvailabilityRequirementV2",
+    "ResourceInitialStateV2",
+    "ResourcePoolDefinitionV2",
+    "ResourceScopeKind",
+    "ResourceScopeV2",
     "RulePhase",
     "ScenarioDefinitionV2",
+    "transport_resource_entries",
 ]

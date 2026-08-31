@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,7 +14,7 @@ from app.api.developer import router as developer_router
 from app.api.games import router as games_router
 from app.api.health import router as health_router
 from app.api.scenarios import router as scenarios_router
-from app.core.config import get_settings
+from app.core.config import get_settings, resolved_database_target
 from app.core.errors import AppError
 from app.infrastructure.logging import configure_logging
 
@@ -21,7 +22,17 @@ configure_logging()
 log = structlog.get_logger()
 settings = get_settings()
 
-app = FastAPI(title=settings.app_name, version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
+    log.info(
+        "database_resolved",
+        target=resolved_database_target(settings.database_url),
+    )
+    yield
+
+
+app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 app.include_router(health_router)
 app.include_router(scenarios_router)
 app.include_router(games_router)

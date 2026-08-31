@@ -1,0 +1,423 @@
+schema_version: 2
+metadata:
+  key: generic_runtime
+  name: 医疗急救
+  description: 在小型诊所中诊断并稳定患者病情。
+  locality:
+    enabled: false
+    scoped_resources: false
+    region_node_type_key: null
+    facility_node_type_key: null
+    transport_node_type_key: null
+    located_in_relation_type_key: null
+    transport_endpoint_relation_type_key: null
+    passability_fact_key: null
+engine_contract:
+  key: declarative-rule-engine
+  version: '1'
+initialization:
+  start_node_key: triage_room
+  primary_actor_key: doctor_lee
+  resource_initial_states: []
+world:
+  key: generic_runtime
+  name: 医疗急救
+  node_types:
+  - key: cabinet
+    name: 药柜
+    description: ''
+  - key: patient
+    name: 患者
+    description: ''
+  - key: room
+    name: 房间
+    description: ''
+  nodes:
+  - key: medicine_cabinet
+    name: 药品柜
+    description: 诊所的药品储存处。
+    node_type_key: cabinet
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - restockable
+    facts: []
+  - key: patient_one
+    name: 一号患者
+    description: 一名需要治疗的患者。
+    node_type_key: patient
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys:
+    - diagnosable
+    - treatable
+    facts:
+    - key: diagnosis
+      name: 诊断结果
+      description: ''
+      value_type: ENUM
+      initial_value: UNKNOWN
+      initial_visibility: KNOWN
+      allowed_values:
+      - INFECTION
+      - UNKNOWN
+    - key: stable
+      name: 病情稳定
+      description: ''
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
+  - key: triage_room
+    name: 分诊室
+    description: 诊所的初始治疗室。
+    node_type_key: room
+    initial_access: AVAILABLE
+    initial_visibility: KNOWN
+    interaction_keys: []
+    facts: []
+  relations:
+  - source_node_key: triage_room
+    relation_type_key: contains
+    target_node_key: medicine_cabinet
+  - source_node_key: triage_room
+    relation_type_key: contains
+    target_node_key: patient_one
+  resources:
+  - key: medicine
+    name: 药品
+    description: ''
+    initial_value: 5
+    minimum: 0
+    maximum: 20
+    reservation_supported: true
+actors:
+  roles:
+  - key: nurse
+    name: 护士
+    description: ''
+    capabilities:
+    - EXECUTE_ACTION
+    - INSPECT_STATE
+  - key: physician
+    name: 医生
+    description: ''
+    capabilities:
+    - EXECUTE_ACTION
+    - INSPECT_STATE
+    - PLAN
+  actor_profiles:
+  - key: doctor_lee
+    name: 李医生
+    role_key: physician
+    persona: 一位谨慎细致的急诊医生。
+    doctrine:
+    - key: treatment_priority
+      value: SAFETY
+    initial_node_key: triage_room
+    allowed_action_keys:
+    - diagnose_patient
+    - treat_patient
+    authority_policy:
+      autonomous_limits: []
+      approval_required_values: []
+  - key: nurse_ana
+    name: 安娜护士
+    role_key: nurse
+    persona: 一位操作严谨的临床护士。
+    doctrine: []
+    initial_node_key: triage_room
+    allowed_action_keys:
+    - treat_patient
+    authority_policy:
+      autonomous_limits: []
+      approval_required_values: []
+interactions:
+- key: diagnosable
+  name: 可诊断
+  description: ''
+- key: restockable
+  name: 可补充库存
+  description: ''
+- key: treatable
+  name: 可治疗
+  description: ''
+actions:
+- key: diagnose_patient
+  name: 诊断患者
+  description: ''
+  required_interaction_key: diagnosable
+  execution_mode: IMMEDIATE
+  parameters: []
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: DIAGNOSED
+    name: 已诊断
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: patient_one
+      fact_key: diagnosis
+    supporting_effects: []
+    success_outcome_codes:
+    - DIAGNOSED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: RULE
+  locality: NONE
+- key: treat_patient
+  name: 治疗患者
+  description: ''
+  required_interaction_key: treatable
+  execution_mode: IMMEDIATE
+  parameters:
+  - key: dosage
+    name: 剂量
+    value_type: INTEGER
+    required: false
+    minimum: 1
+    maximum: 5
+    allowed_values: []
+    default: 2
+  allowed_actor_capabilities:
+  - EXECUTE_ACTION
+  authority_policy:
+    autonomous_limits: []
+    approval_required_values: []
+  expected_outcomes:
+  - code: DIAGNOSIS_REQUIRED
+    name: 需要诊断
+    success: false
+  - code: STABILIZED
+    name: 病情已稳定
+    success: true
+  planning:
+    terminal_effects:
+    - node_key: patient_one
+      fact_key: stable
+    supporting_effects: []
+    success_outcome_codes:
+    - STABILIZED
+    wait_success_outcome_codes: []
+    hints: []
+  behavior: RULE
+  locality: NONE
+rules:
+- key: diagnosis_complete
+  phase: RESOLVE
+  action_key: diagnose_patient
+  priority: 0
+  condition: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: diagnosis
+    value:
+      source: LITERAL
+      literal: INFECTION
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: DIAGNOSED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+- key: treatment_needs_diagnosis
+  phase: PREFLIGHT
+  action_key: treat_patient
+  priority: 100
+  condition:
+    kind: FACT_EQUALS
+    conditions: []
+    condition: null
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: diagnosis
+    resource_key: null
+    resource_scope: null
+    parameter_key: null
+    operator: null
+    value: UNKNOWN
+    values: []
+    visibility: null
+    access: null
+    relation_type_key: null
+    relation_direction: null
+  effects:
+  - kind: EMIT_FAILURE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: DIAGNOSIS_REQUIRED
+    message: 治疗前必须先诊断患者。
+    retryable: true
+    memory_key: null
+    memory_content: null
+- key: treatment_stabilizes
+  phase: RESOLVE
+  action_key: treat_patient
+  priority: 0
+  condition: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: stable
+    value:
+      source: LITERAL
+      literal: true
+      parameter_key: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: ADJUST_RESOURCE
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: medicine
+    resource_scope: null
+    amount:
+      source: PARAMETER
+      literal: null
+      parameter_key: dosage
+      multiplier: -1
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+  - kind: WRITE_MEMORY_EVENT
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: null
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: patient_stabilized
+    memory_content: 一号患者的病情已经稳定。
+  - kind: EMIT_OUTCOME
+    node: null
+    fact_key: null
+    value: null
+    access: null
+    resource_key: null
+    resource_scope: null
+    amount: null
+    outcome_code: STABILIZED
+    failure_code: null
+    message: null
+    retryable: false
+    memory_key: null
+    memory_content: null
+objectives:
+- key: diagnose_patient
+  name: 诊断患者
+  description: 确定一号患者的病情。
+  completion_requirements:
+  - key: diagnosis_known
+    node_key: patient_one
+    fact_key: diagnosis
+    accepted_values:
+    - INFECTION
+    description: 已经明确患者诊断。
+  prerequisites: []
+  subsumes: []
+  goal_aliases:
+  - diagnose the patient
+  - identify the illness
+  - 确定病情
+  - 诊断患者
+  goal_examples: []
+- key: stabilize_patient
+  name: 稳定患者病情
+  description: 使一号患者的病情稳定。
+  completion_requirements:
+  - key: patient_stable
+    node_key: patient_one
+    fact_key: stable
+    accepted_values:
+    - true
+    description: 一号患者的病情已经稳定。
+  prerequisites:
+  - key: diagnosis_required
+    description: 治疗前必须明确诊断。
+    requirements:
+    - key: diagnosis_known
+      node_key: patient_one
+      fact_key: diagnosis
+      accepted_values:
+      - INFECTION
+      description: 已经明确患者诊断。
+  subsumes: []
+  goal_aliases:
+  - stabilize the patient
+  - treat patient one
+  - 治疗一号患者
+  - 稳定患者病情
+  goal_examples: []
+goal_resolution:
+  allow_llm_fallback: true
+  clarification_prompt: 你希望诊断患者，还是稳定患者病情？
+planning:
+  instructions:
+  - 先诊断再治疗，并节约使用药品。
+  recovery_hints:
+  - failure_code: DIAGNOSIS_REQUIRED
+    hint: 再次治疗前先诊断目标患者。

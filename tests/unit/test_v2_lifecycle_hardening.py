@@ -19,25 +19,25 @@ from app.scenarios.versions import ScenarioVersionError, ScenarioVersionReposito
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def _scenario(session: Session):  # type: ignore[no-untyped-def]
-    definition = ScenarioDefinitionV2.model_validate(_medical_scenario_document())
+    definition = ScenarioDefinitionV2.model_validate(_contract_scenario_document())
     return ScenarioDefinitionRepository(session).persist_initial_draft(definition)
 
 
 def test_draft_revision_conflict_and_invalid_publish_diagnostics(session: Session) -> None:
     scenario = _scenario(session)
     service = ScenarioService(session)
-    invalid = _medical_scenario_document()
+    invalid = _contract_scenario_document()
     invalid["world"]["nodes"][0]["interaction_keys"].append("missing")
     draft = service.replace_draft(scenario.id, expected_revision=1, definition_document=invalid)
     with pytest.raises(ScenarioLifecycleError) as stale:
         service.replace_draft(
             scenario.id,
             expected_revision=1,
-            definition_document=_medical_scenario_document(),
+            definition_document=_contract_scenario_document(),
         )
     assert stale.value.code == "SCENARIO_DRAFT_CONFLICT"
     result = service.validate_draft(scenario.id)
@@ -66,8 +66,8 @@ def test_publish_increments_versions_and_semantic_no_change_is_rejected(session:
         service.publish_draft(scenario.id, expected_revision=2)
     assert unchanged.value.code == "SCENARIO_PUBLISH_NO_CHANGES"
     changed = deepcopy(first.version.snapshot_document)
-    changed["metadata"]["name"] = "Medical Emergency Revised"
-    changed["world"]["name"] = "Medical Emergency Revised"
+    changed["metadata"]["name"] = "Generic Contract Revised"
+    changed["world"]["name"] = "Generic Contract Revised"
     service.replace_draft(scenario.id, expected_revision=2, definition_document=changed)
     second = service.publish_draft(scenario.id, expected_revision=3)
     assert second.version.version_number == 2

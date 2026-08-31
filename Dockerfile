@@ -15,7 +15,6 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
-COPY evals ./evals
 COPY migrations ./migrations
 COPY alembic.ini ./
 COPY --from=browser-build /browser/dist ./frontend/dist

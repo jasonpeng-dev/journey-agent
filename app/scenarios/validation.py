@@ -100,9 +100,10 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
         rule.action_key for rule in definition.rules if rule.phase.value == "RESOLVE"
     }
     objective_facts = {
-        (requirement.node_key, requirement.fact_key)
+        requirement.fact_ref
         for objective in definition.objectives
         for requirement in objective.completion_requirements
+        if requirement.fact_ref is not None
     }
     projected_facts = {
         (reference.node_key, reference.fact_key)

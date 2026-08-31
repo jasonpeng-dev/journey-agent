@@ -31,9 +31,9 @@ def test_node_definition_composes_capabilities_facts_and_initial_boundaries() ->
     )
 
     valley = NodeDefinition(
-        key="northern_valley",
-        name="Northern Valley",
-        description="A strategic route to Starfire Outpost.",
+        key="service_region",
+        name="Service Region",
+        description="A strategic route to the service facility.",
         node_type=WorldNodeType.LOCATION,
         initial_access=AccessState.AVAILABLE,
         initial_visibility=Visibility.KNOWN,
@@ -52,14 +52,14 @@ def test_node_definition_composes_capabilities_facts_and_initial_boundaries() ->
 
 def test_world_definitions_are_immutable_value_objects() -> None:
     relation = RelationDefinition(
-        source_node_key="northern_valley",
+        source_node_key="service_region",
         relation_type=RelationType.UNLOCKS,
-        target_node_key="starfire_outpost",
+        target_node_key="service_facility",
     )
     same_relation = RelationDefinition(
-        source_node_key="northern_valley",
+        source_node_key="service_region",
         relation_type=RelationType.UNLOCKS,
-        target_node_key="starfire_outpost",
+        target_node_key="service_facility",
     )
 
     assert relation == same_relation
@@ -122,8 +122,8 @@ def test_node_definition_rejects_duplicate_capability_and_fact_keys() -> None:
 
     with pytest.raises(ValueError, match="interactions"):
         NodeDefinition(
-            key="starfire_outpost",
-            name="Starfire Outpost",
+            key="service_facility",
+            name="Service Facility",
             description="A damaged northern facility.",
             node_type=WorldNodeType.FACILITY,
             initial_access=AccessState.LOCKED,
@@ -132,8 +132,8 @@ def test_node_definition_rejects_duplicate_capability_and_fact_keys() -> None:
         )
     with pytest.raises(ValueError, match="facts"):
         NodeDefinition(
-            key="starfire_outpost",
-            name="Starfire Outpost",
+            key="service_facility",
+            name="Service Facility",
             description="A damaged northern facility.",
             node_type=WorldNodeType.FACILITY,
             initial_access=AccessState.LOCKED,
@@ -147,9 +147,9 @@ def test_domain_keys_are_stable_machine_identifiers() -> None:
         InteractionDefinition(key="Clear Threat", name="Clear Threat")
     with pytest.raises(ValueError, match="lowercase"):
         RelationDefinition(
-            source_node_key="NorthernValley",
+            source_node_key="ServiceRegion",
             relation_type=RelationType.SUPPORTS,
-            target_node_key="starfire_outpost",
+            target_node_key="service_facility",
         )
 
 

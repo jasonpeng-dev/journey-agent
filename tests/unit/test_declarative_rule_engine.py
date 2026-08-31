@@ -3,6 +3,12 @@ from typing import Any
 
 import pytest
 
+from app.domain.enums import (
+    ResourceInventoryVisibility,
+    ResourcePoolAvailability,
+    ResourcePoolVisibility,
+)
+from app.domain.resources import RUNTIME_KNOWN_INFLOW_POOL_KEY
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.domain.world import AccessState, Visibility
 from app.engine.rules import (
@@ -12,12 +18,14 @@ from app.engine.rules import (
     RuleEngineError,
     RuleFactState,
     RuleNodeState,
+    RuleRegionResourceKnowledgeState,
+    RuleResourcePoolState,
 )
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def _document() -> dict[str, Any]:
-    document = _medical_scenario_document()
+    document = _contract_scenario_document()
     document["rules"] = [
         {
             "key": "insufficient_medicine",
@@ -123,6 +131,57 @@ def test_preflight_failure_short_circuits_resolution() -> None:
     assert outcome.failure is not None
     assert outcome.failure.code == "INSUFFICIENT_MEDICINE"
     assert outcome.failure.retryable
+
+
+def test_unsurveyed_authored_pool_is_not_a_known_resource_compare_source() -> None:
+    knowledge = {
+        "region_a": RuleRegionResourceKnowledgeState(
+            resource_inventory_visibility=ResourceInventoryVisibility.HIDDEN,
+            resource_survey_completed=False,
+        )
+    }
+    authored_pool = RuleResourcePoolState(
+        pool_key="authored",
+        resource_key="medicine",
+        region_key="region_a",
+        facility_key=None,
+        quantity=20,
+        visibility=ResourcePoolVisibility.VISIBLE,
+        availability=ResourcePoolAvailability.AVAILABLE,
+        survey_discoverable=False,
+    )
+    inflow_pool = RuleResourcePoolState(
+        pool_key=RUNTIME_KNOWN_INFLOW_POOL_KEY,
+        resource_key="medicine",
+        region_key="region_a",
+        facility_key=None,
+        quantity=3,
+        visibility=ResourcePoolVisibility.VISIBLE,
+        availability=ResourcePoolAvailability.AVAILABLE,
+        survey_discoverable=False,
+    )
+    state = DeclarativeRuleState(
+        nodes={},
+        facts={},
+        resources={},
+        resource_reservations={},
+        resource_pools={"authored": authored_pool, "inflow": inflow_pool},
+        region_resource_knowledge=knowledge,
+    )
+
+    assert DeclarativeRuleEngine._resource_value(state, "medicine", "region_a") == 3
+
+    state_without_inflow = DeclarativeRuleState(
+        nodes=state.nodes,
+        facts=state.facts,
+        resources=state.resources,
+        resource_reservations=state.resource_reservations,
+        resource_pools={"authored": authored_pool},
+        region_resource_knowledge=knowledge,
+    )
+    with pytest.raises(RuleEngineError) as caught:
+        DeclarativeRuleEngine._resource_value(state_without_inflow, "medicine", "region_a")
+    assert caught.value.code == "RULE_RESOURCE_MISSING"
 
 
 def test_lower_priority_unconditional_rule_is_explicit_fallback() -> None:

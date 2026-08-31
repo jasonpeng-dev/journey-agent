@@ -10,29 +10,39 @@ from app.agent.generic import (
     GenericGoalResolver,
     normalize_objective_keys,
 )
+from app.agent.provider import (
+    GenericModelProvider,
+    GoalSelection,
+    GoalSelectionRequest,
+    PlanProposal,
+    PlanRequest,
+    PlanStepProposal,
+)
 from app.domain.enums import AgentPlanStatus, AgentStepStatus, AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import ActionDefinitionV2, ScenarioDefinitionV2
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     AgentPlan,
     AgentStep,
+    AgentTask,
     GameInstanceFactState,
     GameInstanceResourceState,
+    PlanningAttempt,
+    PlanningCycle,
     Player,
     PlayerExecutionCheckpoint,
 )
-from app.scenarios.builtin import STARFIRE_V2
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.play import PlayError, PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def _definition(*, preflight: bool = False) -> ScenarioDefinitionV2:
-    document = deepcopy(_medical_scenario_document())
+    document = deepcopy(_contract_scenario_document())
     parameter = document["actions"][0]["parameters"][0]
     parameter["required"] = False
     parameter["default"] = 2
@@ -63,13 +73,129 @@ def _definition(*, preflight: bool = False) -> ScenarioDefinitionV2:
     return ScenarioDefinitionV2.model_validate(document)
 
 
+def _fact_precondition_definition() -> ScenarioDefinitionV2:
+    document = deepcopy(_contract_scenario_document())
+    document["world"]["nodes"][1]["facts"] = [
+        {
+            "key": "ready",
+            "name": "Ready",
+            "value_type": "BOOLEAN",
+            "initial_value": True,
+            "initial_visibility": "KNOWN",
+        }
+    ]
+    document["rules"].insert(
+        0,
+        {
+            "key": "ready_required",
+            "phase": "PREFLIGHT",
+            "action_key": "treat_patient",
+            "priority": 100,
+            "condition": {
+                "kind": "FACT_NOT_EQUALS",
+                "node": {"kind": "EXPLICIT", "node_key": "triage_room"},
+                "fact_key": "ready",
+                "value": True,
+            },
+            "effects": [
+                {
+                    "kind": "EMIT_FAILURE",
+                    "failure_code": "READY_REQUIRED",
+                    "message": "The treatment room must be ready.",
+                    "retryable": True,
+                }
+            ],
+        },
+    )
+    return ScenarioDefinitionV2.model_validate(document)
+
+
+def _travel_action() -> ActionDefinitionV2:
+    return ActionDefinitionV2.model_validate(
+        {
+            "key": "travel",
+            "name": "Travel",
+            "required_interaction_key": "treatable",
+            "execution_mode": "IMMEDIATE",
+            "parameters": [],
+            "allowed_actor_capabilities": ["EXECUTE_ACTION"],
+            "expected_outcomes": [{"code": "MOVED", "name": "Moved", "success": True}],
+            "behavior": "TRAVEL",
+            "locality": "TRANSPORT_ENDPOINT",
+        }
+    )
+
+
+class _RecordingProvider:
+    def __init__(self, proposal: PlanProposal) -> None:
+        self.proposal = proposal
+        self.plan_requests: list[PlanRequest] = []
+
+    @property
+    def model_name(self) -> str:
+        return "synthetic-provider"
+
+    def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
+        raise AssertionError(f"Unexpected fuzzy goal selection: {request.goal}")
+
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        self.plan_requests.append(request)
+        return self.proposal
+
+
+def _accepted_proposal(parameters: dict[str, int] | None = None) -> PlanProposal:
+    return PlanProposal(
+        steps=(
+            PlanStepProposal(
+                action_key="treat_patient",
+                actor_key="doctor_lee",
+                target_key="patient_one",
+                parameters=parameters or {"dosage": 2},
+            ),
+        )
+    )
+
+
+def _planner_owned_definition() -> ScenarioDefinitionV2:
+    document = deepcopy(_contract_scenario_document())
+    parameter = document["actions"][0]["parameters"][0]
+    parameter["required"] = True
+    parameter.pop("default", None)
+    return ScenarioDefinitionV2.model_validate(document)
+
+
+def _known_impossible_definition() -> ScenarioDefinitionV2:
+    document = deepcopy(_contract_scenario_document())
+    document["world"]["nodes"][0]["interaction_keys"] = []
+    return ScenarioDefinitionV2.model_validate(document)
+
+
+def _subsumption_definition() -> ScenarioDefinitionV2:
+    document = deepcopy(_contract_scenario_document())
+    base_objective = document["objectives"][0]
+    document["objectives"].append(
+        {
+            **base_objective,
+            "key": "complete_contract",
+            "name": "Complete Contract",
+            "description": "Complete the generic contract.",
+            "subsumes": ["stabilize_patient"],
+            "goal_aliases": [],
+            "goal_examples": [],
+        }
+    )
+    return ScenarioDefinitionV2.model_validate(document)
+
+
 def _agent(
     session: Session,
     *,
     preflight: bool = False,
+    definition: ScenarioDefinitionV2 | None = None,
+    provider: GenericModelProvider | None = None,
 ) -> tuple[GenericAgentService, object]:
-    definition = _definition(preflight=preflight)
-    scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
+    actual_definition = definition if definition is not None else _definition(preflight=preflight)
+    scenario = ScenarioDefinitionRepository(session).persist_initial_draft(actual_definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
     player = Player(name="generic-agent")
     session.add(player)
@@ -80,7 +206,7 @@ def _agent(
         creation_key="generic-agent",
     )
     scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
-    return GenericAgentService(session, scope), runtime
+    return GenericAgentService(session, scope, provider=provider), runtime
 
 
 def test_goal_resolver_uses_only_exact_version_candidates() -> None:
@@ -96,10 +222,11 @@ def test_goal_resolver_uses_only_exact_version_candidates() -> None:
 
 
 def test_objective_subsumption_is_normalized_before_scope_freeze() -> None:
+    definition = _subsumption_definition()
     assert normalize_objective_keys(
-        STARFIRE_V2,
-        ("full_northern_recovery", "open_northern_trade_route"),
-    ) == ("full_northern_recovery",)
+        definition,
+        ("complete_contract", "stabilize_patient"),
+    ) == ("complete_contract",)
 
 
 def test_generic_agent_completes_goal_plan_action_and_backend_objective(
@@ -127,7 +254,7 @@ def test_planner_uses_knowledge_projection_not_hidden_truth(session: Session) ->
         (runtime.instance.id, "patient_one", "stable"),
     )
     assert fact is not None
-    fact.truth_value = True
+    fact.truth_value = False
     fact.visibility = Visibility.HIDDEN
     session.flush()
 
@@ -143,6 +270,94 @@ def test_planner_uses_knowledge_projection_not_hidden_truth(session: Session) ->
 
     assert len(steps) == 1
     assert steps[0].action_intent == "treat_patient"
+
+
+@pytest.mark.parametrize(
+    ("truth_value", "visibility", "expected_failure"),
+    [
+        (True, Visibility.KNOWN, None),
+        (False, Visibility.KNOWN, "READY_REQUIRED"),
+        (True, Visibility.HIDDEN, "ACTION_PRECONDITION_UNKNOWN"),
+    ],
+)
+def test_generic_fact_precondition_uses_tristate_knowledge_semantics(
+    session: Session,
+    truth_value: bool,
+    visibility: Visibility,
+    expected_failure: str | None,
+) -> None:
+    definition = _fact_precondition_definition()
+    agent, runtime = _agent(session, definition=definition)
+    fact = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "triage_room", "ready"),
+    )
+    assert fact is not None
+    fact.truth_value = truth_value
+    fact.visibility = visibility
+    session.flush()
+    action = next(item for item in definition.actions if item.key == "treat_patient")
+
+    def validate() -> None:
+        agent._validate_projected_action_state(
+            definition,
+            action,
+            "doctor_lee",
+            "patient_one",
+            {"dosage": 2},
+            {"doctor_lee": "triage_room"},
+            {},
+            agent._known_fact_projection(),
+            agent._known_node_keys(),
+            agent._known_relation_keys(definition),
+        )
+
+    if expected_failure is None:
+        validate()
+        return
+    with pytest.raises(GenericAgentError) as caught:
+        validate()
+    assert caught.value.code == expected_failure
+    if expected_failure == "ACTION_PRECONDITION_UNKNOWN":
+        assert caught.value.details["actual"] == "UNKNOWN"
+
+
+def test_traversal_keeps_unknown_passability_as_may_attempt(
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = _definition()
+    agent, runtime = _agent(session, definition=definition)
+    action = _travel_action()
+    monkeypatch.setattr(
+        GenericAgentService,
+        "_validate_projected_plan_locality",
+        lambda *_args, **_kwargs: "route_one",
+    )
+    monkeypatch.setattr("app.agent.generic.region_for_node", lambda *_args: "triage_region")
+    common = {
+        "definition": definition,
+        "action": action,
+        "actor_key": "doctor_lee",
+        "target_key": "patient_one",
+        "parameters": {},
+        "projected_actor_locations": {"doctor_lee": "triage_room"},
+        "projected_known_facts": agent._known_fact_projection(),
+        "projected_known_nodes": agent._known_node_keys(),
+        "projected_known_relations": agent._known_relation_keys(definition),
+    }
+
+    agent._validate_projected_action_state(
+        projected_known_passability={},
+        **common,
+    )
+    with pytest.raises(GenericAgentError) as caught:
+        agent._validate_projected_action_state(
+            projected_known_passability={"route_one": False},
+            **common,
+        )
+    assert caught.value.code == "KNOWN_TRANSPORT_BLOCKED"
+    assert runtime.instance.id is not None
 
 
 def test_retryable_rule_failure_creates_generic_replan_without_fixed_fallback(
@@ -276,3 +491,194 @@ def test_generic_agent_rejects_cross_instance_task(session: Session) -> None:
         agent.execute_next(task)
 
     assert caught.value.code == "GENERIC_TASK_SCOPE_INVALID"
+
+
+def test_planner_owned_required_parameter_reaches_provider_without_prefill(
+    session: Session,
+) -> None:
+    provider = _RecordingProvider(_accepted_proposal())
+    agent, runtime = _agent(
+        session,
+        definition=_planner_owned_definition(),
+        provider=provider,
+    )
+    task = agent.create_task(
+        runtime.session,
+        "stabilize the patient",
+        initialize_plan=False,
+    )
+
+    definition = agent._definition()
+    objectives = agent._objectives(task, definition)
+    frontier = agent._candidate_steps(
+        definition,
+        objectives,
+        task=task,
+        reason=None,
+        plan_version=1,
+    )
+    assert frontier == []
+
+    plan = agent.plan(task)
+
+    assert task.status == AgentTaskStatus.ACTIVE
+    assert task.last_error_code is None
+    assert len(provider.plan_requests) == 1
+    assert plan.version == 1
+    assert provider.plan_requests[0].planner_input is not None
+    planner_parameters = provider.plan_requests[0].planner_input.action_contracts[0].parameters
+    assert planner_parameters[0]["required"] is True
+    assert planner_parameters[0]["default"] is None
+    steps = session.scalars(select(AgentStep).where(AgentStep.plan_id == plan.id)).all()
+    assert len(steps) == 1
+    assert steps[0].tool_arguments["parameters"] == {"dosage": 2}
+
+
+def test_known_impossible_action_still_has_no_deterministic_plan(
+    session: Session,
+) -> None:
+    agent, runtime = _agent(session, definition=_known_impossible_definition())
+
+    with pytest.raises(GenericAgentError) as caught:
+        agent.create_task(runtime.session, "stabilize the patient")
+
+    assert caught.value.code == "GENERIC_PLAN_NOT_FOUND"
+
+
+def test_satisfied_objective_short_circuits_all_planning_and_execution(
+    session: Session,
+) -> None:
+    provider = _RecordingProvider(_accepted_proposal())
+    _agent_service, runtime = _agent(session, provider=provider)
+    fact = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "patient_one", "stable"),
+    )
+    resource = session.get(
+        GameInstanceResourceState,
+        (runtime.instance.id, "medicine"),
+    )
+    assert fact is not None and resource is not None
+    fact.truth_value = True
+    resource_before = resource.value
+    session.flush()
+
+    orchestrator = PlayOrchestrator(
+        session,
+        GameInstanceId(runtime.instance.id),
+        provider=provider,
+    )
+    submission = orchestrator.submit_goal(
+        "stabilize the patient",
+        idempotency_key="already-complete",
+    )
+    task = submission.task
+    assert task is not None
+
+    assert task.status == AgentTaskStatus.SUCCEEDED
+    checkpoint = session.get(PlayerExecutionCheckpoint, task.id)
+    assert checkpoint is not None
+    assert checkpoint.phase == "COMPLETED"
+    assert provider.plan_requests == []
+    assert session.scalar(select(PlanningCycle).where(PlanningCycle.task_id == task.id)) is None
+    assert (
+        session.scalar(select(PlanningAttempt).where(PlanningAttempt.cycle_id.is_not(None))) is None
+    )
+    assert session.scalar(select(AgentPlan).where(AgentPlan.task_id == task.id)) is None
+    assert session.scalar(select(AgentStep).where(AgentStep.plan_id.is_not(None))) is None
+    assert resource.value == resource_before
+
+
+def test_repeated_completed_objective_creates_new_terminal_task_without_planning(
+    session: Session,
+) -> None:
+    provider = _RecordingProvider(_accepted_proposal())
+    agent, runtime = _agent(session, provider=provider)
+    fact = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "patient_one", "stable"),
+    )
+    assert fact is not None
+    fact.truth_value = True
+    session.flush()
+
+    first = agent.create_task(runtime.session, "stabilize the patient")
+    second = agent.create_task(runtime.session, "stabilize the patient")
+
+    assert first.id != second.id
+    assert first.status == AgentTaskStatus.SUCCEEDED
+    assert second.status == AgentTaskStatus.SUCCEEDED
+    assert provider.plan_requests == []
+    tasks = session.scalars(
+        select(AgentTask).where(AgentTask.game_instance_id == runtime.instance.id)
+    ).all()
+    assert len(tasks) == 2
+
+
+def test_duplicate_active_objective_keeps_one_task_and_one_provider_plan(
+    session: Session,
+) -> None:
+    provider = _RecordingProvider(_accepted_proposal())
+    agent, runtime = _agent(session, provider=provider)
+
+    first = agent.create_task(runtime.session, "stabilize the patient")
+
+    assert first.status == AgentTaskStatus.ACTIVE
+    assert len(provider.plan_requests) == 1
+    with pytest.raises(GenericAgentError) as caught:
+        agent.create_task(runtime.session, "stabilize the patient")
+
+    assert caught.value.code == "AGENT_TASK_ALREADY_ACTIVE"
+    assert len(provider.plan_requests) == 1
+    tasks = session.scalars(
+        select(AgentTask).where(AgentTask.game_instance_id == runtime.instance.id)
+    ).all()
+    assert len(tasks) == 1
+
+
+def test_incomplete_objective_keeps_normal_provider_planning_path(
+    session: Session,
+) -> None:
+    provider = _RecordingProvider(_accepted_proposal())
+    agent, runtime = _agent(session, provider=provider)
+
+    task = agent.create_task(runtime.session, "stabilize the patient")
+
+    assert task.status == AgentTaskStatus.ACTIVE
+    assert len(provider.plan_requests) == 1
+    plan = session.scalar(select(AgentPlan).where(AgentPlan.task_id == task.id))
+    assert plan is not None
+    steps = session.scalars(select(AgentStep).where(AgentStep.plan_id == plan.id)).all()
+    assert len(steps) == 1
+
+
+def test_action_idempotency_keys_are_scoped_to_recreated_tasks(session: Session) -> None:
+    provider = _RecordingProvider(_accepted_proposal())
+    agent, runtime = _agent(session, provider=provider)
+
+    first = agent.create_task(
+        runtime.session,
+        "stabilize the patient",
+        initialize_plan=False,
+    )
+    first_plan = agent.plan(first)
+    first_step = session.scalar(select(AgentStep).where(AgentStep.plan_id == first_plan.id))
+    assert first_step is not None
+    first_key = str(first_step.tool_arguments["idempotency_key"])
+
+    first.status = AgentTaskStatus.ABORTED
+    session.flush()
+
+    second = agent.create_task(
+        runtime.session,
+        "stabilize the patient",
+        initialize_plan=False,
+    )
+    second_plan = agent.plan(second)
+    second_step = session.scalar(select(AgentStep).where(AgentStep.plan_id == second_plan.id))
+    assert second_step is not None
+    second_key = str(second_step.tool_arguments["idempotency_key"])
+
+    assert first_key != second_key
+    assert str(first.id) in first_key
+    assert str(second.id) in second_key

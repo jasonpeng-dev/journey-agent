@@ -13,6 +13,7 @@ const defaults: Record<string, JsonObject> = {
   action: {
     key: "new_action", name: "新行动", description: "", required_interaction_key: "interaction",
     execution_mode: "IMMEDIATE", parameters: [], allowed_actor_capabilities: ["EXECUTE_ACTION"],
+    behavior: "RULE", locality: "NONE",
     authority_policy: { autonomous_limits: [], approval_required_values: [] },
     expected_outcomes: [{ code: "Success", name: "成功", success: true }],
     planning: { terminal_effects: [], supporting_effects: [], success_outcome_codes: ["Success"], wait_success_outcome_codes: [], hints: [] },

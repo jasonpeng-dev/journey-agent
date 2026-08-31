@@ -52,6 +52,7 @@ _REFERENCE_FIELDS: dict[str, str] = {
     "required_interaction_key": "interaction",
     "action_key": "action",
     "resource_key": "resource",
+    "scope_node_key": "node",
 }
 
 _REFERENCE_LIST_FIELDS: dict[str, str] = {

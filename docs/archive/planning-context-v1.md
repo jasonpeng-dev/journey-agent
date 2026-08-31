@@ -1,4 +1,10 @@
-# PlanningContext V1
+# PlanningContext V1 (archived)
+
+> Historical design document.
+>
+> The current canonical planning design is documented in
+> [Agent Planning V2](../agent-planning-v2.md). This file is retained for
+> migration archaeology and does not define the current provider authority.
 
 `PlanningContext V1` is the canonical provider input for generic Goal planning. It is built from
 the exact `ScenarioVersion`, the Task's frozen `ObjectiveScope`, and the current Knowledge

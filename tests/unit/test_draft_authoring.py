@@ -1,11 +1,11 @@
 import pytest
 
 from app.scenarios.authoring import DraftAuthoringError, delete_object, reference_index, rename_key
-from app.scenarios.builtin import MEDICAL_EMERGENCY_V2
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _document():  # type: ignore[no-untyped-def]
-    return MEDICAL_EMERGENCY_V2.model_dump(mode="json")
+    return GENERIC_TEST.model_dump(mode="json")
 
 
 def test_reference_index_reports_used_by_edges() -> None:

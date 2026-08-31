@@ -9,13 +9,13 @@ from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
 from app.services.scenarios import ScenarioService
-from tests.unit.test_scenario_definition_v2 import _medical_scenario_document
+from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
 def test_v2_runtime_materializes_exact_version_actors_without_npc_seed(
     session: Session,
 ) -> None:
-    definition = ScenarioDefinitionV2.model_validate(_medical_scenario_document())
+    definition = ScenarioDefinitionV2.model_validate(_contract_scenario_document())
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
     player = Player(name="v2-runtime-player")
@@ -25,7 +25,7 @@ def test_v2_runtime_materializes_exact_version_actors_without_npc_seed(
     runtime = RuntimeInitializationService(session).create(
         player_id=player.id,
         scenario_version_id=version.id,
-        creation_key="medical-runtime",
+        creation_key="generic-runtime",
     )
 
     assert runtime.instance.status == GameInstanceStatus.ACTIVE
@@ -46,7 +46,7 @@ def test_v2_runtime_materializes_exact_version_actors_without_npc_seed(
 
 
 def test_v2_actor_runtime_is_idempotent_and_recoverable(session: Session) -> None:
-    definition = ScenarioDefinitionV2.model_validate(_medical_scenario_document())
+    definition = ScenarioDefinitionV2.model_validate(_contract_scenario_document())
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
     player = Player(name="recover-v2-actor")

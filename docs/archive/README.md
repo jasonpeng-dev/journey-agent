@@ -1,14 +1,16 @@
 # Archived design notes
 
-The files in this directory record earlier architecture, migration, and browser-product
-checkpoints. They are useful for historical context, but they are not the contract for the
-current runtime.
+This directory contains historical design, migration, and phase
+implementation documents. It is useful for historical reference, migration
+archaeology, and design evolution. It is not current implementation
+authority.
 
-For the maintained system description, start with:
+Current canonical documents are:
 
-- [`architecture.md`](../architecture.md)
-- [`planning-context-v1.md`](../planning-context-v1.md)
-- [`scenario-authoring.md`](../scenario-authoring.md)
+* [High-level architecture](../architecture.md)
+* [Agent Planning V2](../agent-planning-v2.md)
+* [Scenario authoring](../scenario-authoring.md)
 
-When an archived document conflicts with code or those current documents, the implementation
-and current documents win.
+Archived V1/V2/R0 and phase documents must not be read as a simultaneous
+current design. When an archive document conflicts with the current source or
+canonical documents, the current source and canonical documents win.

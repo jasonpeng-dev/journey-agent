@@ -15,8 +15,8 @@ from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
     ActionExecutionMode,
+    ActionParameters,
     ScenarioDefinitionV2,
-    StrictScalar,
     normalize_action_parameters,
 )
 from app.engine.rules import GenericRuleOutcome, RuleEngineError, RuleFailure
@@ -70,7 +70,7 @@ class GenericActionService:
         actor_key: str,
         action_key: str,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         idempotency_key: str,
         task_id: UUID | None = None,
         source_step_id: UUID | None = None,
@@ -300,7 +300,7 @@ class GenericActionService:
         actor_key: str,
         action_key: str,
         target_key: str,
-        parameters: dict[str, StrictScalar],
+        parameters: ActionParameters,
         idempotency_key: str,
         task_id: UUID | None,
         source_step_id: UUID | None,
@@ -358,6 +358,12 @@ class GenericActionService:
             "selected_rule_key": applied.outcome.selected_rule_key,
             "outcome_code": applied.outcome.outcome_code,
             "runtime_revision": applied.runtime_revision,
+            "actor_location_update": applied.outcome.actor_location_update,
+            # Keep the deterministic resource delta in the persisted
+            # operation snapshot so Player projections can describe what
+            # actually happened.  This is observational data only; Runtime
+            # mutation has already been applied by GenericGameService.
+            "resource_mutations": [asdict(item) for item in applied.outcome.resource_mutations],
             "failure": (
                 asdict(applied.outcome.failure) if applied.outcome.failure is not None else None
             ),

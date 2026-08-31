@@ -9,23 +9,26 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings, get_settings
 from app.infrastructure.db.base import Base
-from app.infrastructure.db.session import get_db
+from app.infrastructure.db.session import configure_sqlite_foreign_keys, get_db
 from app.main import app
-from app.services.seed import seed_demo_world
+from app.scenarios.builtin import require_builtin_v2_version
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 @pytest.fixture
-def session() -> Generator[Session, None, None]:
+def session(request: pytest.FixtureRequest) -> Generator[Session, None, None]:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+    configure_sqlite_foreign_keys(engine)
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as db:
         with db.begin():
-            seed_demo_world(db)
+            # Generic runtime tests use a disposable, scenario-neutral contract fixture.
+            require_builtin_v2_version(db, GENERIC_TEST)
         yield db
 
 

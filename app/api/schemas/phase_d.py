@@ -63,7 +63,10 @@ class PublicTaskStatus(StrEnum):
     NEEDS_PLAYER_INPUT = "NEEDS_PLAYER_INPUT"
     BLOCKED_BY_PLAYER_DECISION = "BLOCKED_BY_PLAYER_DECISION"
     UNREACHABLE_IN_CURRENT_STATE = "UNREACHABLE_IN_CURRENT_STATE"
+    ACTION_EXECUTION_FAILED = "ACTION_EXECUTION_FAILED"
     MODEL_PLAN_REJECTED = "MODEL_PLAN_REJECTED"
+    MODEL_PROVIDER_TIMEOUT = "MODEL_PROVIDER_TIMEOUT"
+    MODEL_PROVIDER_FAILURE = "MODEL_PROVIDER_FAILURE"
     COMPLETED = "COMPLETED"
     ABORTED = "ABORTED"
 
@@ -83,12 +86,38 @@ class PublicPlanHistoryStatus(StrEnum):
     BLOCKED = "BLOCKED"
 
 
+class PublicPlanDisplayStatus(StrEnum):
+    """Player-facing outcome of one accepted Plan segment."""
+
+    EXECUTING = "EXECUTING"
+    ADJUSTED = "ADJUSTED"
+    STAGE_COMPLETED = "STAGE_COMPLETED"
+    OBJECTIVE_COMPLETED = "OBJECTIVE_COMPLETED"
+    BLOCKED = "BLOCKED"
+
+
 class PublicPlanHistoryStepStatus(StrEnum):
     PLANNED = "PLANNED"
     CURRENT = "CURRENT"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class PublicResourceUsageKind(StrEnum):
+    CONSUME = "CONSUME"
+    TRANSPORT = "TRANSPORT"
+
+
+class PublicResourceUsageResponse(ApiModel):
+    resource_key: str
+    resource_name: str
+    amount: int = Field(gt=0)
+
+
+class PublicPlanInterruptionKind(StrEnum):
+    FAILURE = "FAILURE"
+    KNOWLEDGE_CONFLICT = "KNOWLEDGE_CONFLICT"
 
 
 class MissionRoadmapStageStatus(StrEnum):
@@ -99,6 +128,7 @@ class MissionRoadmapStageStatus(StrEnum):
 
 class PublicExecutionPhase(StrEnum):
     AWAITING_PLAN_START = "AWAITING_PLAN_START"
+    AWAITING_PLAN_ATTEMPT = "AWAITING_PLAN_ATTEMPT"
     AWAITING_ACTION_ACK = "AWAITING_ACTION_ACK"
     AWAITING_DEBRIEF_ACK = "AWAITING_DEBRIEF_ACK"
     AWAITING_REPLAN_ACK = "AWAITING_REPLAN_ACK"
@@ -272,14 +302,33 @@ class NewGameRequest(ApiModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class ArchiveGameRequest(ApiModel):
+    expected_runtime_revision: int = Field(ge=0)
+
+
+class ForkGameRequest(ApiModel):
+    creation_key: str = Field(min_length=1, max_length=160)
+
+
+class CheckpointGameRequest(ApiModel):
+    expected_runtime_revision: int = Field(ge=0)
+    creation_key: str = Field(min_length=1, max_length=160)
+
+
 class GameSummaryResponse(ApiModel):
     id: UUID
     scenario_id: UUID
+    scenario_name: str = Field(min_length=1, max_length=160)
     scenario_version_id: UUID
     scenario_version_number: int = Field(ge=1)
     scenario_content_hash: str = Field(min_length=64, max_length=64)
     status: PublicGameStatus
+    runtime_revision: int = Field(ge=0)
     active_task_id: UUID | None = None
+    is_checkpoint: bool = False
+    checkpointed_from_game_instance_id: UUID | None = None
+    checkpoint_source_runtime_revision: int | None = Field(default=None, ge=0)
+    inherited_task_count: int = Field(default=0, ge=0)
     created_at: datetime
     updated_at: datetime
 
@@ -289,13 +338,23 @@ class GoalSubmissionRequest(ApiModel):
     idempotency_key: str = Field(min_length=1, max_length=160)
 
 
+class PublicActionLocationResponse(ApiModel):
+    """One player-safe location projection shared by all action views."""
+
+    kind: str
+    summary: str
+    detail: str | None = None
+
+
 class PublicPlanStepResponse(ApiModel):
     id: UUID
     sequence: int = Field(ge=1)
     description: str
     assigned_actor_name: str
+    subtitle: str | None = None
     status: PublicStepStatus
     result_summary: str | None = None
+    location: PublicActionLocationResponse | None = None
 
 
 class PublicPlanResponse(ApiModel):
@@ -309,18 +368,65 @@ class PublicPlanHistoryStepResponse(ApiModel):
     sequence: int = Field(ge=1)
     action_name: str
     assigned_actor_name: str
+    subtitle: str | None = None
     status: PublicPlanHistoryStepStatus
     result_summary: str | None = None
+    location: PublicActionLocationResponse | None = None
+    resource_usage: list[PublicResourceUsageResponse] = Field(default_factory=list)
+    resource_usage_kind: PublicResourceUsageKind | None = None
+
+
+class PublicPlanInterruptionResponse(ApiModel):
+    kind: PublicPlanInterruptionKind
+    step_id: UUID
+    sequence: int = Field(ge=1)
+    step_name: str
 
 
 class PublicPlanHistoryResponse(ApiModel):
     id: UUID
     ordinal: int = Field(ge=1)
     status: PublicPlanHistoryStatus
+    display_status: PublicPlanDisplayStatus | None = None
+    display_reason: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    planning_cycle_id: UUID | None = None
     completed_steps: int = Field(ge=0)
     total_steps: int = Field(ge=0)
     failed_step_name: str | None = None
+    interruption: PublicPlanInterruptionResponse | None = None
     steps: list[PublicPlanHistoryStepResponse]
+
+
+class PublicPlanningAttemptResponse(ApiModel):
+    """Player-safe summary of one Provider/Validator planning attempt."""
+
+    attempt_index: int = Field(ge=0)
+    call_type: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    provider_outcome: str | None = None
+    provider_latency_ms: int | None = Field(default=None, ge=0)
+    validator_summary: list[dict[str, Any]] = Field(default_factory=list)
+    provider_error_category: str | None = None
+    provider_error_code: str | None = None
+    accepted_step_count: int = Field(default=0, ge=0)
+
+
+class PublicPlanningCycleResponse(ApiModel):
+    """Player-safe summary of one INITIAL/REPLAN planning cycle."""
+
+    id: UUID
+    cycle_type: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    wall_clock_duration_ms: int | None = Field(default=None, ge=0)
+    attempt_count: int = Field(ge=0)
+    final_outcome: str
+    attempts: list[PublicPlanningAttemptResponse] = Field(default_factory=list)
 
 
 class MissionRoadmapStageResponse(ApiModel):
@@ -329,6 +435,7 @@ class MissionRoadmapStageResponse(ApiModel):
     description: str
     status: MissionRoadmapStageStatus
     objective_key: str | None = None
+    requirements: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MissionRoadmapResponse(ApiModel):
@@ -336,7 +443,14 @@ class MissionRoadmapResponse(ApiModel):
 
 
 class PublicKnowledgeChangeResponse(ApiModel):
-    kind: Literal["NODE_REVEALED", "FACT_REVEALED"]
+    kind: Literal[
+        "NODE_REVEALED",
+        "FACT_REVEALED",
+        "RESOURCE_DISCOVERED",
+        "RESOURCE_INVENTORY_REVEALED",
+        "RESOURCE_SURVEY_COMPLETED",
+        "RELATION_REVEALED",
+    ]
     key: str
     name: str
     value: str | int | bool | None = None
@@ -348,6 +462,7 @@ class PublicActionBriefingResponse(ApiModel):
     actor_name: str
     target_name: str
     purpose: str
+    location: PublicActionLocationResponse | None = None
 
 
 class PublicActionDebriefResponse(ApiModel):
@@ -358,11 +473,15 @@ class PublicActionDebriefResponse(ApiModel):
     knowledge_changes: list[PublicKnowledgeChangeResponse] = Field(default_factory=list)
     plan_adjusted: bool = False
     plan_adjustment_summary: str | None = None
+    plan_invalidated: bool = False
+    plan_invalidation_reason: str | None = None
+    location: PublicActionLocationResponse | None = None
 
 
 class PublicTimelineEventResponse(ApiModel):
     id: str
     kind: PublicTimelineEventKind
+    planning_cycle_id: UUID | None = None
     title: str
     detail: str | None = None
     actor_name: str | None = None
@@ -370,6 +489,9 @@ class PublicTimelineEventResponse(ApiModel):
     success: bool | None = None
     knowledge_changes: list[PublicKnowledgeChangeResponse] = Field(default_factory=list)
     occurred_at: datetime | None = None
+    location: PublicActionLocationResponse | None = None
+    resource_usage: list[PublicResourceUsageResponse] = Field(default_factory=list)
+    resource_usage_kind: PublicResourceUsageKind | None = None
     # A persisted operation snapshot, never a live client timer.  This is
     # derived from the task's provider/application audit metadata so it stays
     # stable after a page refresh.
@@ -387,6 +509,7 @@ class PublicTaskResponse(ApiModel):
     roadmap: MissionRoadmapResponse
     plan: PublicPlanResponse | None = None
     plan_history: list[PublicPlanHistoryResponse] = Field(default_factory=list)
+    planning_process: list[PublicPlanningCycleResponse] = Field(default_factory=list)
     timeline: list[PublicTimelineEventResponse] = Field(default_factory=list)
     briefing: PublicActionBriefingResponse | None = None
     debrief: PublicActionDebriefResponse | None = None
@@ -399,6 +522,7 @@ class PublicTaskSummaryResponse(ApiModel):
     id: UUID
     sequence: int = Field(ge=1)
     goal: str
+    objective_names: list[str]
     status: PublicTaskStatus
     execution_phase: PublicExecutionPhase
     created_at: datetime
@@ -426,12 +550,54 @@ class PublicFactResponse(ApiModel):
     fact_key: str
     name: str
     value: str | int | bool
+    node_name: str | None = None
+    node_type_key: str | None = None
+    region_key: str | None = None
+    region_name: str | None = None
+    endpoint_region_keys: list[str] = Field(default_factory=list)
+    endpoint_region_names: list[str] = Field(default_factory=list)
 
 
 class PublicNodeResponse(ApiModel):
     key: str
     name: str
     accessible: bool
+    node_type_key: str | None = None
+    region_key: str | None = None
+    region_name: str | None = None
+    endpoint_region_keys: list[str] = Field(default_factory=list)
+    endpoint_region_names: list[str] = Field(default_factory=list)
+    associated_known_resources: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PublicRelationResponse(ApiModel):
+    relation_key: str | None = None
+    source_node_key: str
+    relation_type_key: str
+    target_node_key: str
+    source_node_name: str | None = None
+    target_node_name: str | None = None
+
+
+class PublicActionRequirementResponse(ApiModel):
+    action_key: str
+    action_name: str
+    required_actor_role_key: str | None = None
+    required_actor_role_name: str | None = None
+    source_relation_type_key: str | None = None
+    known_preconditions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PublicTargetActionContractResponse(ApiModel):
+    target_key: str
+    action_key: str
+    action_name: str
+    required_actor_role_key: str | None = None
+    required_actor_role_name: str | None = None
+    source_relation_type_key: str | None = None
+    cost: dict[str, int] = Field(default_factory=dict)
+    special_requirements: list[dict[str, Any]] = Field(default_factory=list)
+    effects: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PublicResourceResponse(ApiModel):
@@ -439,6 +605,15 @@ class PublicResourceResponse(ApiModel):
     name: str
     value: int
     reserved_value: int
+    pool_key: str = "default"
+    facility_key: str | None = None
+    availability: Literal["AVAILABLE", "UNAVAILABLE"] = "AVAILABLE"
+    availability_requirement: dict[str, Any] | None = None
+    availability_requirement_status: Literal["KNOWN", "UNKNOWN"] | None = None
+    scope_node_key: str | None = None
+    scope_node_name: str | None = None
+    scope_region_key: str | None = None
+    scope_region_name: str | None = None
 
 
 class PublicActorResponse(ApiModel):
@@ -446,13 +621,20 @@ class PublicActorResponse(ApiModel):
     name: str
     role_name: str
     current_node_name: str
+    command_reachability: Literal["ONLINE", "DISCONNECTED"] = "ONLINE"
 
 
 class PlayerGameStateResponse(ApiModel):
     game: GameSummaryResponse
     visible_nodes: list[PublicNodeResponse]
     known_facts: list[PublicFactResponse]
+    known_relations: list[PublicRelationResponse] = Field(default_factory=list)
+    known_action_requirements: list[PublicActionRequirementResponse] = Field(default_factory=list)
+    known_target_action_contracts: list[PublicTargetActionContractResponse] = Field(
+        default_factory=list
+    )
     resources: list[PublicResourceResponse]
+    resource_intelligence: dict[str, Any] = Field(default_factory=dict)
     actors: list[PublicActorResponse] = Field(default_factory=list)
     current_task: PublicTaskResponse | None
     task_history: list[PublicTaskSummaryResponse] = Field(default_factory=list)
@@ -469,6 +651,7 @@ class DraftSandboxResponse(ApiModel):
     visible_nodes: list[PublicNodeResponse] = Field(default_factory=list)
     known_facts: list[PublicFactResponse] = Field(default_factory=list)
     resources: list[PublicResourceResponse] = Field(default_factory=list)
+    resource_intelligence: dict[str, Any] = Field(default_factory=dict)
 
 
 class DeveloperGameSnapshotResponse(ApiModel):
@@ -497,6 +680,7 @@ class PlayerPacingRequest(ApiModel):
 
 __all__ = [
     "ApprovalDecisionRequest",
+    "CheckpointGameRequest",
     "DeveloperGameSnapshotResponse",
     "DraftDeleteObjectRequest",
     "DraftPublishRequest",
@@ -518,6 +702,7 @@ __all__ = [
     "PlayerPacingRequest",
     "PublicActionBriefingResponse",
     "PublicActionDebriefResponse",
+    "PublicActionRequirementResponse",
     "PublicExecutionPhase",
     "PublicGameStatus",
     "PublicPlanResponse",

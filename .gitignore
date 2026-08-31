@@ -45,6 +45,7 @@ eval-results/
 eval-results-*/
 
 # Logs and temporary files
+tmp/
 *.log
 logs/
 *.tmp

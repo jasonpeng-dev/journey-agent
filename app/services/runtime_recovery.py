@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
-from app.domain.enums import GameInstanceStatus, WorldOperationStatus
+from app.domain.enums import (
+    CommandReachability,
+    GameInstanceStatus,
+    RelationVisibility,
+    WorldOperationStatus,
+)
+from app.domain.resources import resource_pool_initial_states, valid_resource_state_identity
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
-from app.domain.scenario_v2 import NodeDefinitionV2, ResourceDefinitionV2
+from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2, relation_identity
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentTask,
@@ -19,6 +25,8 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceMemoryEvent,
     GameInstanceNodeState,
+    GameInstanceRegionResourceKnowledge,
+    GameInstanceRelationKnowledge,
     GameInstanceResourceState,
     WorldOperation,
 )
@@ -127,7 +135,7 @@ class RuntimeRecoveryService:
         self._verify_snapshot_state(
             instance,
             definition.world.nodes,
-            definition.world.resources,
+            definition,
             {actor.key for actor in definition.actors.actor_profiles},
         )
         return RecoveredRuntime(
@@ -149,7 +157,7 @@ class RuntimeRecoveryService:
         self,
         instance: GameInstance,
         nodes: tuple[NodeDefinitionV2, ...],
-        resources: tuple[ResourceDefinitionV2, ...],
+        definition: ScenarioDefinitionV2,
         actor_keys: set[str],
     ) -> None:
         node_rows = self.db.scalars(
@@ -167,16 +175,77 @@ class RuntimeRecoveryService:
                 GameInstanceResourceState.game_instance_id == instance.id
             )
         ).all()
+        region_knowledge_rows = self.db.scalars(
+            select(GameInstanceRegionResourceKnowledge).where(
+                GameInstanceRegionResourceKnowledge.game_instance_id == instance.id
+            )
+        ).all()
+        relation_knowledge_rows = (
+            self.db.scalars(
+                select(GameInstanceRelationKnowledge).where(
+                    GameInstanceRelationKnowledge.game_instance_id == instance.id
+                )
+            ).all()
+            if self._supports_relation_knowledge_schema()
+            else []
+        )
         actor_rows = self.db.scalars(
             select(GameInstanceActor).where(GameInstanceActor.game_instance_id == instance.id)
         ).all()
+        resource_identities = {
+            (row.resource_key, row.scope_node_key, row.pool_key) for row in resource_rows
+        }
+        initial_resource_identities = {
+            (item.resource_key, item.region_key, item.pool_key)
+            for item in resource_pool_initial_states(definition)
+        }
+        region_keys = {
+            node.key
+            for node in nodes
+            if definition.metadata.locality.enabled
+            and node.node_type_key == definition.metadata.locality.region_node_type_key
+        }
+        relation_keys = {relation_identity(item) for item in definition.world.relations}
         if (
             len(node_rows) != len(nodes)
             or len(fact_rows) != sum(len(node.facts) for node in nodes)
-            or len(resource_rows) != len(resources)
+            or not initial_resource_identities.issubset(resource_identities)
+            or any(
+                not valid_resource_state_identity(
+                    definition,
+                    row.resource_key,
+                    row.scope_node_key,
+                    row.pool_key,
+                )
+                for row in resource_rows
+            )
+            or region_keys != {row.region_key for row in region_knowledge_rows}
+            or any(
+                row.resource_inventory_visibility not in {"HIDDEN", "VISIBLE"}
+                for row in region_knowledge_rows
+            )
+            or (
+                self._supports_relation_knowledge_schema()
+                and {row.relation_key for row in relation_knowledge_rows} != relation_keys
+            )
+            or any(
+                row.visibility not in {item.value for item in RelationVisibility}
+                for row in relation_knowledge_rows
+            )
             or {actor.actor_key for actor in actor_rows} != actor_keys
+            or any(
+                row.command_reachability not in {item.value for item in CommandReachability}
+                for row in actor_rows
+            )
         ):
             self._corrupt("initialized state")
+
+    def _supports_relation_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns("game_instance_relation_knowledge")
+        except Exception:
+            return False
+        return True
 
     @staticmethod
     def _corrupt(component: str) -> None:

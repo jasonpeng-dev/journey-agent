@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from app.domain.enums import AuthorityOutcome
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
+    ActionParameters,
     AuthorityPolicyV2,
     ScenarioDefinitionV2,
-    StrictScalar,
     normalize_action_parameters,
 )
 from app.infrastructure.db.models import GameInstanceActor
@@ -46,7 +46,7 @@ def actor_binding_matches(definition: ScenarioDefinitionV2, actor: GameInstanceA
 def evaluate_authority(
     actor: GameInstanceActor,
     action: ActionDefinitionV2,
-    parameters: dict[str, StrictScalar],
+    parameters: ActionParameters,
 ) -> GenericAuthorityDecision:
     try:
         parameters = normalize_action_parameters(action, parameters)
@@ -60,6 +60,14 @@ def evaluate_authority(
     required = {capability.value for capability in action.allowed_actor_capabilities}
     if not required.issubset(actor_capabilities):
         return _deny("ACTOR_CAPABILITY_MISSING", required=sorted(required))
+    if (
+        action.required_actor_role_key is not None
+        and actor.role_key != action.required_actor_role_key
+    ):
+        return _deny(
+            "ACTOR_ROLE_MISSING",
+            required_role=action.required_actor_role_key,
+        )
 
     try:
         policies = [

@@ -1,221 +1,163 @@
-from copy import deepcopy
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
-from app.domain.enums import AgentTaskStatus, WorldOperationStatus
+from app.domain.enums import CommandReachability
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import (
     AgentTask,
-    GameInstanceFactState,
+    GameInstanceActor,
     GameInstanceResourceState,
     Player,
-    WorldOperation,
 )
-from app.scenarios.builtin import (
-    MEDICAL_EMERGENCY_V2,
-    STARFIRE_V2,
-    require_builtin_v2_version,
-)
+from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
-from app.services.generic_actions import GenericActionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
+from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
 
 
-def _drive(
-    db: Session,
-    agent: GenericAgentService,
-    actions: GenericActionService,
-    task: AgentTask,
-) -> None:
-    for index in range(30):
-        agent.execute_next(task)
-        pending = db.scalar(
-            select(WorldOperation)
-            .where(
-                WorldOperation.game_instance_id == agent.scope.game_instance_id,
-                WorldOperation.status == WorldOperationStatus.PENDING,
-            )
-            .order_by(WorldOperation.created_at.desc())
-        )
-        if pending is not None:
-            actions.resolve_operation(pending.id, resolution_key=f"e2e-event-{index}")
-        if task.status == AgentTaskStatus.SUCCEEDED:
-            return
-    raise AssertionError("Generic Agent did not complete within the deterministic bound")
-
-
-def test_two_different_v2_games_run_isolated_and_recover_exact_versions(
-    tmp_path: Path,
-) -> None:
+def test_dual_scenario_runtime_state_isolation_and_recovery(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{(tmp_path / 'dual-v2.db').as_posix()}"
     engine = create_engine(database_url)
     Base.metadata.create_all(engine)
+
     with Session(engine) as db:
-        starfire_version = require_builtin_v2_version(db, STARFIRE_V2)
-        medical_version = require_builtin_v2_version(db, MEDICAL_EMERGENCY_V2)
+        generic_version = require_builtin_v2_version(db, GENERIC_TEST)
+        linjiang_version = require_builtin_v2_version(db, LINJIANG_V2_TEST)
+        assert generic_version.id != linjiang_version.id
+
         player = Player(name="dual-scenario-player")
         db.add(player)
         db.flush()
+
         initializer = RuntimeInitializationService(db)
-        starfire_runtime = initializer.create(
+        generic_runtime = initializer.create(
             player_id=player.id,
-            scenario_version_id=starfire_version.id,
-            creation_key="dual-starfire",
+            scenario_version_id=generic_version.id,
+            creation_key="dual-generic",
         )
-        medical_runtime = initializer.create(
+        linjiang_runtime = initializer.create(
             player_id=player.id,
-            scenario_version_id=medical_version.id,
-            creation_key="dual-medical",
+            scenario_version_id=linjiang_version.id,
+            creation_key="dual-linjiang",
         )
+        assert (
+            generic_runtime.instance.player_id == linjiang_runtime.instance.player_id == player.id
+        )
+        assert generic_runtime.instance.id != linjiang_runtime.instance.id
+        player_id = player.id
+        generic_version_id = generic_version.id
+        linjiang_version_id = linjiang_version.id
+
         scopes = GameInstanceService(db)
-        starfire_scope = scopes.load(GameInstanceId(starfire_runtime.instance.id))
-        medical_scope = scopes.load(GameInstanceId(medical_runtime.instance.id))
-        starfire_agent = GenericAgentService(db, starfire_scope)
-        medical_agent = GenericAgentService(db, medical_scope)
-        starfire_task = starfire_agent.create_task(
-            starfire_runtime.session, "secure the northern valley"
-        )
-        medical_task = medical_agent.create_task(medical_runtime.session, "stabilize the patient")
+        generic_scope = scopes.load(GameInstanceId(generic_runtime.instance.id))
+        linjiang_scope = scopes.load(GameInstanceId(linjiang_runtime.instance.id))
+        assert generic_scope.scenario_version_id == generic_version.id
+        assert linjiang_scope.scenario_version_id == linjiang_version.id
 
-        _drive(
-            db,
-            starfire_agent,
-            GenericActionService(db, starfire_scope),
-            starfire_task,
+        generic_task = GenericAgentService(db, generic_scope).create_task(
+            generic_runtime.session,
+            "stabilize the patient",
+            initialize_plan=False,
         )
-        _drive(
-            db,
-            medical_agent,
-            GenericActionService(db, medical_scope),
-            medical_task,
+        linjiang_task = GenericAgentService(db, linjiang_scope).create_task(
+            linjiang_runtime.session,
+            "restore central communications",
+            initialize_plan=False,
         )
+        generic_actor = db.get(
+            GameInstanceActor,
+            (generic_runtime.instance.id, generic_runtime.session.actor_key),
+        )
+        linjiang_actor = db.get(
+            GameInstanceActor,
+            (linjiang_runtime.instance.id, linjiang_runtime.session.actor_key),
+        )
+        generic_resource = db.scalar(
+            select(GameInstanceResourceState)
+            .where(GameInstanceResourceState.game_instance_id == generic_runtime.instance.id)
+            .order_by(GameInstanceResourceState.resource_identity)
+        )
+        linjiang_resource = db.scalar(
+            select(GameInstanceResourceState)
+            .where(GameInstanceResourceState.game_instance_id == linjiang_runtime.instance.id)
+            .order_by(GameInstanceResourceState.resource_identity)
+        )
+        assert generic_actor is not None and linjiang_actor is not None
+        assert generic_resource is not None and linjiang_resource is not None
+        generic_resource_identity = generic_resource.resource_identity
+        linjiang_resource_identity = linjiang_resource.resource_identity
+        generic_resource_value = generic_resource.value
+        linjiang_resource_value = linjiang_resource.value
 
-        assert starfire_task.status == medical_task.status == AgentTaskStatus.SUCCEEDED
-        assert starfire_task.replan_count >= 1
-        assert medical_task.replan_count == 0
-        assert (
-            db.get(
-                GameInstanceFactState,
-                (starfire_runtime.instance.id, "northern_valley", "valley_security"),
-            ).truth_value
-            == "SAFE"
-        )
-        assert (
-            db.get(
-                GameInstanceFactState,
-                (medical_runtime.instance.id, "patient_one", "stable"),
-            ).truth_value
-            is True
-        )
-        assert (
-            db.get(
-                GameInstanceResourceState,
-                (starfire_runtime.instance.id, "soldiers"),
-            )
-            is not None
-        )
-        assert (
-            db.get(
-                GameInstanceResourceState,
-                (starfire_runtime.instance.id, "medicine"),
-            )
-            is None
-        )
-        assert (
-            db.get(
-                GameInstanceResourceState,
-                (medical_runtime.instance.id, "medicine"),
-            ).value
-            == 3
-        )
-        assert (
-            db.get(
-                GameInstanceResourceState,
-                (medical_runtime.instance.id, "soldiers"),
-            )
-            is None
-        )
+        generic_actor.command_reachability = CommandReachability.DISCONNECTED.value
+        generic_resource.value += 7
+        generic_task.replan_count = 2
+        db.flush()
+        assert linjiang_actor.command_reachability == CommandReachability.ONLINE.value
+        assert linjiang_resource.value == linjiang_resource_value
+        assert linjiang_task.replan_count == 0
 
-        changed_payload = deepcopy(STARFIRE_V2.model_dump(mode="json"))
-        changed_payload["metadata"]["name"] = "Starfire Later Version"
-        changed_payload["world"]["name"] = "Starfire Later Version"
-        later_version = require_builtin_v2_version(
-            db, ScenarioDefinitionV2.model_validate(changed_payload)
-        )
-        assert later_version.id != starfire_version.id
-        pending = (
-            GenericActionService(db, starfire_scope)
-            .execute_action(
-                actor_key="han_lie",
-                action_key="recon_valley",
-                target_key="northern_valley",
-                parameters={"troop_count": 30, "approach": "CAUTIOUS"},
-                idempotency_key="restart-pending-operation",
-            )
-            .operation
-        )
-        assert pending.status == WorldOperationStatus.PENDING
-        ids = {
-            "player": player.id,
-            "starfire_instance": starfire_runtime.instance.id,
-            "medical_instance": medical_runtime.instance.id,
-            "starfire_version": starfire_version.id,
-            "medical_version": medical_version.id,
-            "starfire_task": starfire_task.id,
-            "medical_task": medical_task.id,
-            "pending": pending.id,
-        }
+        linjiang_actor.command_reachability = CommandReachability.DISCONNECTED.value
+        linjiang_resource.value += 11
+        linjiang_task.replan_count = 3
+        db.flush()
+        assert generic_actor.command_reachability == CommandReachability.DISCONNECTED.value
+        assert generic_resource.value == generic_resource_value + 7
+        assert generic_task.replan_count == 2
         db.commit()
+
+        generic_id = generic_runtime.instance.id
+        linjiang_id = linjiang_runtime.instance.id
+        generic_task_id = generic_task.id
+        linjiang_task_id = linjiang_task.id
     engine.dispose()
 
     restarted = create_engine(database_url)
     with Session(restarted) as db:
         recovery = RuntimeRecoveryService(db)
-        starfire = recovery.recover(GameInstanceId(ids["starfire_instance"]))
-        medical = recovery.recover(GameInstanceId(ids["medical_instance"]))
+        generic_recovered = recovery.recover(GameInstanceId(generic_id))
+        linjiang_recovered = recovery.recover(GameInstanceId(linjiang_id))
 
-        assert starfire.scope.player_id == medical.scope.player_id == ids["player"]
-        assert starfire.scope.scenario_version_id == ids["starfire_version"]
-        assert medical.scope.scenario_version_id == ids["medical_version"]
-        assert {actor.actor_key for actor in starfire.actors} == {
-            "shen_ce",
-            "han_lie",
-            "lu_ning",
-        }
-        assert {actor.actor_key for actor in medical.actors} == {
-            "doctor_lee",
-            "nurse_ana",
-        }
-        assert {event.event_key for event in medical.generic_memories} == {"patient_stabilized"}
-        assert starfire.generic_memories == ()
-        assert {operation.id for operation in starfire.pending_operations} == {ids["pending"]}
-        assert medical.pending_operations == ()
-        assert db.get(AgentTask, ids["starfire_task"]).status == AgentTaskStatus.SUCCEEDED
-        assert db.get(AgentTask, ids["medical_task"]).status == AgentTaskStatus.SUCCEEDED
-        assert (
-            GenericAgentService(db, starfire.scope)
-            .evaluate(db.get(AgentTask, ids["starfire_task"]))
-            .completed
+        assert generic_recovered.scope.player_id == linjiang_recovered.scope.player_id == player_id
+        assert generic_recovered.scope.scenario_version_id == generic_version_id
+        assert linjiang_recovered.scope.scenario_version_id == linjiang_version_id
+        assert {task.id for task in generic_recovered.tasks} == {generic_task_id}
+        assert {task.id for task in linjiang_recovered.tasks} == {linjiang_task_id}
+        assert all(task.game_instance_id == generic_id for task in generic_recovered.tasks)
+        assert all(task.game_instance_id == linjiang_id for task in linjiang_recovered.tasks)
+
+        generic_actor = db.get(
+            GameInstanceActor,
+            (generic_id, generic_recovered.sessions[0].actor_key),
         )
-        GenericActionService(db, starfire.scope).resolve_operation(
-            ids["pending"], resolution_key="restart-recovery-event"
+        linjiang_actor = db.get(
+            GameInstanceActor,
+            (linjiang_id, linjiang_recovered.sessions[0].actor_key),
         )
-        db.commit()
-        assert (
-            RuntimeRecoveryService(db)
-            .recover(GameInstanceId(ids["starfire_instance"]))
-            .pending_operations
-            == ()
+        generic_resource = db.get(
+            GameInstanceResourceState,
+            (generic_id, generic_resource_identity),
         )
-        assert (
-            GenericAgentService(db, medical.scope)
-            .evaluate(db.get(AgentTask, ids["medical_task"]))
-            .completed
+        linjiang_resource = db.get(
+            GameInstanceResourceState,
+            (linjiang_id, linjiang_resource_identity),
         )
+        generic_task = db.get(AgentTask, generic_task_id)
+        linjiang_task = db.get(AgentTask, linjiang_task_id)
+        assert generic_actor is not None and linjiang_actor is not None
+        assert generic_resource is not None and linjiang_resource is not None
+        assert generic_task is not None and linjiang_task is not None
+        assert generic_actor.command_reachability == CommandReachability.DISCONNECTED.value
+        assert linjiang_actor.command_reachability == CommandReachability.DISCONNECTED.value
+        assert generic_resource.value == generic_resource_value + 7
+        assert linjiang_resource.value == linjiang_resource_value + 11
+        assert generic_task.replan_count == 2
+        assert linjiang_task.replan_count == 3
+        assert generic_task.game_instance_id == generic_id
+        assert linjiang_task.game_instance_id == linjiang_id
     restarted.dispose()
