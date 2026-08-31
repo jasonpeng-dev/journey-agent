@@ -366,18 +366,17 @@ def compile_ad_hoc_dynamic_goal(
         if isinstance(candidates, AdHocGoalCandidateSetV1)
         else AdHocGoalCandidateSetV1(requirements=candidates)
     )
-    requirements: list[FormalGoalRequirementV1] = []
-    seen: set[str] = set()
-    for candidate in candidate_set.requirements:
-        requirement = _candidate_to_requirement(candidate, snapshot.definition)
-        identity = canonical_requirement_identity(requirement)
-        if identity in seen:
-            raise FormalGoalError(
-                "FORMAL_GOAL_REQUIREMENT_DUPLICATE",
-                "Dynamic Goal requirements must have unique canonical semantics",
-            )
-        seen.add(identity)
-        requirements.append(FormalGoalRequirementV1(identity=identity, requirement=requirement))
+    typed_requirements = validate_ad_hoc_dynamic_candidates(
+        snapshot.definition,
+        candidate_set,
+    )
+    requirements = [
+        FormalGoalRequirementV1(
+            identity=canonical_requirement_identity(requirement),
+            requirement=requirement,
+        )
+        for requirement in typed_requirements
+    ]
     return FormalGoalContractV1(
         source_kind=FormalGoalSourceKind.AD_HOC_DYNAMIC,
         scenario=FormalGoalScenarioProofV1(
@@ -388,6 +387,37 @@ def compile_ad_hoc_dynamic_goal(
         completion_requirements=tuple(sorted(requirements, key=lambda item: item.identity)),
         compiler_version=compiler_version,
     )
+
+
+def validate_ad_hoc_dynamic_candidates(
+    definition: ScenarioDefinitionV2,
+    candidates: AdHocGoalCandidateSetV1 | tuple[AdHocGoalRequirementCandidateV1, ...],
+) -> tuple[ObjectiveRequirementV2, ...]:
+    """Validate provider candidates against one exact Scenario definition.
+
+    This is the reusable deterministic boundary used both while resolving a
+    provider response and while freezing a Task.  It never accepts provider
+    identities or authored planning semantics.
+    """
+
+    candidate_set = (
+        candidates
+        if isinstance(candidates, AdHocGoalCandidateSetV1)
+        else AdHocGoalCandidateSetV1(requirements=candidates)
+    )
+    requirements: list[ObjectiveRequirementV2] = []
+    seen: set[str] = set()
+    for candidate in candidate_set.requirements:
+        requirement = _candidate_to_requirement(candidate, definition)
+        identity = canonical_requirement_identity(requirement)
+        if identity in seen:
+            raise FormalGoalError(
+                "FORMAL_GOAL_REQUIREMENT_DUPLICATE",
+                "Dynamic Goal requirements must have unique canonical semantics",
+            )
+        seen.add(identity)
+        requirements.append(requirement)
+    return tuple(requirements)
 
 
 def canonical_requirement_identity(requirement: ObjectiveRequirementV2) -> str:
@@ -622,4 +652,5 @@ __all__ = [
     "canonical_requirement_identity",
     "compile_ad_hoc_dynamic_goal",
     "compile_predefined_formal_goal",
+    "validate_ad_hoc_dynamic_candidates",
 ]

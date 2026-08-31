@@ -75,7 +75,11 @@ class PlayOrchestrator:
     ) -> None:
         self.db = db
         self.scope = GameInstanceService(db).load(game_instance_id)
-        self.goal_resolver = GenericGoalResolver(provider=provider)
+        self.goal_resolver = GenericGoalResolver(
+            provider=provider,
+            db=db,
+            scope=self.scope,
+        )
         self.agent = GenericAgentService(
             db,
             self.scope,
@@ -160,10 +164,14 @@ class PlayOrchestrator:
                     "The idempotency key is bound to another Goal",
                 )
             self._ensure_checkpoint(existing)
+            source_kind = existing.formal_goal_source_kind or (
+                "PREDEFINED" if existing.objective_scope_keys else "AD_HOC_DYNAMIC"
+            )
             return GoalSubmission(
                 GenericGoalResolution(
                     "RESOLVED",
                     objective_keys=tuple(existing.objective_scope_keys or ()),
+                    source=source_kind,
                 ),
                 existing,
                 True,

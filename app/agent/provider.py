@@ -19,6 +19,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from app.core.config import Settings
+from app.domain.formal_goal import AdHocGoalRequirementCandidateV1
 
 log = structlog.get_logger(__name__)
 
@@ -36,6 +37,38 @@ class GoalSelection(ProviderModel):
     status: Literal["SELECTED", "NEEDS_CLARIFICATION", "UNSUPPORTED"] = "SELECTED"
     objective_keys: tuple[str, ...] = ()
     clarification_prompt: str | None = None
+
+
+class DynamicGoalInterpretationRequest(ProviderModel):
+    """Knowledge-safe input for the AD_HOC_DYNAMIC Goal interpreter."""
+
+    goal: str = Field(min_length=1, max_length=4000)
+    ontology: dict[str, object] = Field(default_factory=dict)
+
+
+class DynamicGoalInterpretation(ProviderModel):
+    """Strict provider output for a flat typed Dynamic Goal candidate set.
+
+    The nested candidate model is intentionally closed: the provider cannot
+    return a backend identity, authored prerequisite, knowledge gate, or
+    hidden completion semantic.
+    """
+
+    status: Literal["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"] = "RESOLVED"
+    requirements: tuple[AdHocGoalRequirementCandidateV1, ...] = ()
+    clarification_prompt: str | None = None
+
+    @model_validator(mode="after")
+    def validate_interpretation(self) -> DynamicGoalInterpretation:
+        if self.status == "RESOLVED" and not self.requirements:
+            raise ValueError("A resolved Dynamic Goal needs at least one requirement")
+        if self.status != "RESOLVED" and self.requirements:
+            raise ValueError("An unresolved Dynamic Goal cannot carry requirements")
+        if self.status == "NEEDS_CLARIFICATION" and not (
+            self.clarification_prompt and self.clarification_prompt.strip()
+        ):
+            raise ValueError("Dynamic Goal clarification needs a prompt")
+        return self
 
 
 class PlanningContext(ProviderModel):
@@ -399,6 +432,14 @@ class GenericModelProvider(Protocol):
     def propose_plan(self, request: PlanRequest) -> PlanProposal: ...
 
 
+class DynamicGoalInterpreter(Protocol):
+    """Optional provider capability used only after predefined resolution."""
+
+    def interpret_dynamic_goal(
+        self, request: DynamicGoalInterpretationRequest
+    ) -> DynamicGoalInterpretation: ...
+
+
 class GenericProviderError(ValueError):
     """Secret-safe provider failure surfaced at the application boundary."""
 
@@ -567,6 +608,19 @@ class OpenAICompatibleGenericProvider:
                 "The model provider returned an invalid Goal selection",
             ) from exc
 
+    def interpret_dynamic_goal(
+        self, request: DynamicGoalInterpretationRequest
+    ) -> DynamicGoalInterpretation:
+        try:
+            return DynamicGoalInterpretation.model_validate(
+                self._invoke("dynamic_goal", request.model_dump())
+            )
+        except ValidationError as exc:
+            raise GenericProviderError(
+                "MODEL_PROVIDER_RESPONSE_INVALID",
+                "The model provider returned an invalid Dynamic Goal interpretation",
+            ) from exc
+
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         try:
             return PlanProposal.model_validate(
@@ -581,12 +635,25 @@ class OpenAICompatibleGenericProvider:
     def _build_request_body(
         self, purpose: str, payload: dict[str, object]
     ) -> tuple[dict[str, object], int]:
-        response_contract = (
-            '{"status":"SELECTED|NEEDS_CLARIFICATION|UNSUPPORTED",'
-            '"objective_keys":["zero_or_more_candidate_keys"],'
-            '"clarification_prompt":null}'
-            if purpose == "goal_selection"
-            else (
+        if purpose == "goal_selection":
+            response_contract = (
+                '{"status":"SELECTED|NEEDS_CLARIFICATION|UNSUPPORTED",'
+                '"objective_keys":["zero_or_more_candidate_keys"],'
+                '"clarification_prompt":null}'
+            )
+        elif purpose == "dynamic_goal":
+            response_contract = (
+                '{"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
+                '"requirements":[{"kind":"FACT|RESOURCE_AT_LEAST",'
+                '"node_key":"known_public_node_key",'
+                '"fact_key":"known_public_fact_key",'
+                '"accepted_values":["requested_scalar"] ,'
+                '"region_key":"known_public_region_key",'
+                '"resource_key":"known_public_resource_key",'
+                '"minimum":0}],"clarification_prompt":null}'
+            )
+        else:
+            response_contract = (
                 '{"plan_summary":"short summary",'
                 '"stop_reason":"OBJECTIVE_COMPLETION|INFORMATION_BOUNDARY|BLOCKED",'
                 '"boundary_dependency_id":null,'
@@ -597,8 +664,20 @@ class OpenAICompatibleGenericProvider:
                 '"target_key":"existing_target_key",'
                 '"parameters":{},"short_actor_reason":"short reason"}]}'
             )
-        )
-        if purpose == "repair":
+        if purpose == "dynamic_goal":
+            planning_prompt = (
+                "Interpret the player's Goal only into the closed V1 typed requirement "
+                "vocabulary. Return one or more requirements with implicit AND semantics. "
+                "Use only FACT or RESOURCE_AT_LEAST. Use only node, fact, region, and "
+                "resource keys present in the public ontology supplied by the user payload. "
+                "Do not invent keys, values outside a supplied Fact domain, Action plans, "
+                "prerequisites, routes, knowledge gates, hidden requirements, completion "
+                "rules, or any other Scenario semantics. The backend assigns requirement "
+                "identity and performs the final exact-Version validation. If the Goal is "
+                "ambiguous or cannot be expressed in this vocabulary, return clarification "
+                "or unsupported with no requirements. Do not expose chain-of-thought."
+            )
+        elif purpose == "repair":
             planning_prompt = (
                 "You are repairing a rejected PlanSegment for the same frozen ObjectiveScope. "
                 "Return one complete corrected PlanSegment for exactly that scope. Use "
@@ -769,7 +848,10 @@ class OpenAICompatibleGenericProvider:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
         }
-        if purpose in {"initial_plan", "replan", "repair"} and self._max_output_tokens is not None:
+        if (
+            purpose in {"initial_plan", "replan", "repair", "dynamic_goal"}
+            and self._max_output_tokens is not None
+        ):
             request_body["max_tokens"] = self._max_output_tokens
         request_size_bytes = len(
             json.dumps(request_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1319,6 +1401,9 @@ def _safe_text(value: object, *, limit: int) -> str:
 
 __all__ = [
     "AntiRegressionMemoryItem",
+    "DynamicGoalInterpretation",
+    "DynamicGoalInterpretationRequest",
+    "DynamicGoalInterpreter",
     "GenericModelProvider",
     "GenericProviderError",
     "GoalSelection",
