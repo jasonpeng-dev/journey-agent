@@ -821,6 +821,13 @@ class GenericAgentService:
                 step.status = AgentStepStatus.SUCCEEDED
                 step.completed_at = datetime.now(UTC)
         if step.status == AgentStepStatus.SUCCEEDED:
+            # A successful public Knowledge acquisition is real progress.  The
+            # replan guard limits consecutive replans that make no progress;
+            # carrying that counter across a newly revealed Fact, Route, or
+            # Resource domain can incorrectly terminalize an otherwise
+            # solvable Task before the next PlannerInput is built.
+            if self._step_has_knowledge_changes(step):
+                task.replan_count = 0
             revalidation = self.revalidate_remaining_plan(task, completed_step=step)
             if revalidation.invalidated and replan_on_failure:
                 self.plan(task, reason=PLAN_INVALIDATED_BY_NEW_KNOWLEDGE)

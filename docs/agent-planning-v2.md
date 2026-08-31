@@ -488,14 +488,15 @@ mutate Truth. The current generic domains are deliberately separate:
   facts; it does not survey the Region inventory;
 * successful `repair_communications` derives the target Region through the
   generic locality contract and `located_in` relations, then reveals that
-  Region's Facility nodes and their current Runtime facts.
+  Region's eligible Facility Facts and their current Runtime values. Facility
+  Node identity remains governed by authored Node visibility.
 
-Communication recovery reads current Runtime Truth when visibility is
-changed; it does not replay initial cached values. Agent and Player share the
-same public Knowledge boundary, and communication recovery does not reveal
-Region Resource inventory. Linjiang is one data-defined instance of this
-generic behavior, not a Runtime scenario-key branch or a hard-coded Region
-reveal table.
+Communication recovery reads current Runtime Truth when Fact visibility is
+changed; it does not replay initial cached values or reveal Facility identity.
+Agent and Player share the same public Knowledge boundary, and communication
+recovery does not reveal Region Resource inventory. Linjiang is one data-defined
+instance of this generic behavior, not a Runtime scenario-key branch or a
+hard-coded Region reveal table.
 
 A Knowledge-acquisition step must match the declared dependency. When it is
 the final step of an `INFORMATION_BOUNDARY` segment, the lifecycle pauses for
@@ -549,6 +550,11 @@ next planning request. The new cycle rebuilds the current canonical
 PlannerInput from current public Knowledge. REPLAN is not REPAIR: REPAIR
 corrects a rejected proposal before execution, while REPLAN plans from a new
 runtime/Knowledge state.
+
+The replan safety counter limits consecutive replans without newly acquired
+public Knowledge. A successful Knowledge acquisition resets that consecutive
+budget, so an incomplete but still solvable Objective is not terminalized just
+because earlier information-boundary segments consumed the prior budget.
 
 The ObjectiveScope remains frozen. The new cycle may discard obsolete
 Actions, Actors, Targets, sources, routes, and ordering.

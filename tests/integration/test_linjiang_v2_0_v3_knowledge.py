@@ -4,6 +4,8 @@ from copy import deepcopy
 
 from sqlalchemy.orm import Session
 
+from app.agent.generic import GenericAgentService, GenericGoalResolution
+from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import (
     CommandReachability,
     ResourceInventoryVisibility,
@@ -18,6 +20,7 @@ from app.engine.locality import region_for_node
 from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
+    GameInstanceNodeState,
     GameInstanceRegionResourceKnowledge,
     GameInstanceResourceState,
     Player,
@@ -33,6 +36,78 @@ from tests.scenario_fixtures import LINJIANG_V2_TEST
 V2_0 = LINJIANG_V2_TEST
 
 
+class _KnowledgeReplanProvider:
+    model_name = "synthetic-knowledge-replan"
+
+    def __init__(self) -> None:
+        self.plan_requests: list[PlanRequest] = []
+
+    def select_objectives(self, _request: object) -> object:
+        raise AssertionError("The regression uses an exact ObjectiveScope")
+
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        self.plan_requests.append(request)
+        dependencies = request.planner_input.known_world.unknown_dependencies
+        if not self.plan_requests:
+            raise AssertionError("The request must be recorded before proposal selection")
+        if len(self.plan_requests) == 1:
+            objective_dependency = next(
+                item for item in dependencies if item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
+            )
+            return PlanProposal(
+                stop_reason="INFORMATION_BOUNDARY",
+                boundary_dependency_id=str(objective_dependency["dependency_id"]),
+                steps=(
+                    PlanStepProposal(
+                        action_key="inspect",
+                        actor_key="logistics_team_alpha",
+                        target_key="central_telecom_hub",
+                    ),
+                ),
+            )
+        if len(self.plan_requests) == 2:
+            resource_dependency = next(
+                item
+                for item in dependencies
+                if item.get("dimension") == "RESOURCE_SOURCE"
+                and item.get("resource_key") == "communication_equipment"
+            )
+            return PlanProposal(
+                stop_reason="INFORMATION_BOUNDARY",
+                boundary_dependency_id=str(resource_dependency["dependency_id"]),
+                steps=(
+                    PlanStepProposal(
+                        action_key="survey_resources",
+                        actor_key="logistics_team_alpha",
+                        target_key="central_district",
+                    ),
+                ),
+            )
+        resource_dependency = next(
+            item
+            for item in dependencies
+            if item.get("dimension") == "RESOURCE_SOURCE"
+            and item.get("resource_key") == "communication_equipment"
+            and item.get("destination_region") == "central_district"
+        )
+        return PlanProposal(
+            stop_reason="INFORMATION_BOUNDARY",
+            boundary_dependency_id=str(resource_dependency["dependency_id"]),
+            steps=(
+                PlanStepProposal(
+                    action_key="travel",
+                    actor_key="logistics_team_alpha",
+                    target_key="east_residential_district",
+                ),
+                PlanStepProposal(
+                    action_key="survey_resources",
+                    actor_key="logistics_team_alpha",
+                    target_key="east_residential_district",
+                ),
+            ),
+        )
+
+
 def _definition_with_pool(
     key: str,
     *,
@@ -41,6 +116,7 @@ def _definition_with_pool(
     region_key: str,
     quantity: int,
     public_facility_keys: tuple[str, ...] = (),
+    hidden_facility_keys: tuple[str, ...] = (),
 ) -> ScenarioDefinitionV2:
     document = deepcopy(V2_0.model_dump(mode="json"))
     document["metadata"]["key"] = key
@@ -50,6 +126,8 @@ def _definition_with_pool(
     for node in document["world"]["nodes"]:
         if node["key"] in public_facility_keys:
             node["initial_visibility"] = "KNOWN"
+        if node["key"] in hidden_facility_keys:
+            node["initial_visibility"] = "HIDDEN"
     document["initialization"]["resource_pools"].append(
         {
             "pool_key": pool_key,
@@ -108,7 +186,7 @@ def _fact(session: Session, instance_id, node_key: str, fact_key: str):
     return row
 
 
-def test_v3_initializes_facility_and_route_knowledge_boundaries(session: Session) -> None:
+def test_initializes_facility_identity_and_route_knowledge_boundaries(session: Session) -> None:
     definition = V2_0
     facilities = [
         node
@@ -141,21 +219,9 @@ def test_v3_initializes_facility_and_route_knowledge_boundaries(session: Session
             "operational",
             "power_supply",
         }
-        region = region_for_node(definition, facility.key)
-        expected_visibility = (
-            Visibility.KNOWN
-            if region
-            not in {
-                "central_district",
-                "north_industrial_district",
-                "south_waterfront_district",
-            }
-            or facility.key in {value[0] for value in expected_communication.values()}
-            else Visibility.HIDDEN
-        )
-        assert facility.initial_visibility == expected_visibility
-        if expected_visibility == Visibility.HIDDEN:
-            assert all(fact.initial_visibility == Visibility.HIDDEN for fact in facility.facts)
+        # Facility identity is public world topology.  Its Facts retain their
+        # authored visibility independently of the node itself.
+        assert facility.initial_visibility == Visibility.KNOWN
     for communication_key, _operational, expected_visibility in expected_communication.values():
         communication = definition.world.node(communication_key)
         assert communication is not None
@@ -163,6 +229,79 @@ def test_v3_initializes_facility_and_route_knowledge_boundaries(session: Session
     for transport in transports:
         passable = next(fact for fact in transport.facts if fact.key == "passable")
         assert passable.initial_visibility == Visibility.HIDDEN
+
+
+def test_facility_identity_is_known_while_authored_facts_stay_hidden(session: Session) -> None:
+    runtime, scope = _runtime(session, V2_0, "linjiang-v2_0-facility-identity")
+    for facility_key in ("central_hospital", "north_power_substation"):
+        node = session.get(GameInstanceNodeState, (runtime.instance.id, facility_key))
+        assert node is not None and node.visibility == Visibility.KNOWN
+        operational = _fact(session, runtime.instance.id, facility_key, "operational")
+        power = _fact(session, runtime.instance.id, facility_key, "power_supply")
+        assert operational.truth_value is True
+        assert power.truth_value == "AVAILABLE"
+        assert operational.visibility == Visibility.HIDDEN
+        assert power.visibility == Visibility.HIDDEN
+
+    _set_actor(session, runtime.instance.id, "logistics_team_alpha", "central_district")
+    inspected = GenericGameService(session, scope).execute(
+        actor_key="logistics_team_alpha",
+        action_key="inspect",
+        target_node_key="central_hospital",
+        parameters={},
+    )
+    assert inspected.outcome.failure is None
+    assert {item.key for item in inspected.knowledge_changes} == {
+        "central_hospital.operational",
+        "central_hospital.power_generation_capable",
+        "central_hospital.power_supply",
+    }
+    region_knowledge = session.get(
+        GameInstanceRegionResourceKnowledge,
+        (runtime.instance.id, "central_district"),
+    )
+    assert region_knowledge is not None
+    assert region_knowledge.resource_survey_completed is False
+
+
+def test_public_resource_knowledge_resets_replan_budget_and_rebuilds_input(
+    session: Session,
+) -> None:
+    provider = _KnowledgeReplanProvider()
+    runtime, scope = _runtime(session, V2_0, "linjiang-v2_0-knowledge-replan")
+    agent = GenericAgentService(session, scope, provider=provider)
+    task = agent.create_task(
+        runtime.session,
+        "restore_central_communication_capability",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            objective_keys=("restore_central_communication_capability",),
+            source="TEST",
+        ),
+        initialize_plan=False,
+    )
+
+    first_plan = agent.plan(task)
+    assert first_plan.stop_reason == "INFORMATION_BOUNDARY"
+    agent.execute_next(task)
+
+    second_plan = agent.plan(task, reason="INFORMATION_BOUNDARY")
+    assert second_plan.stop_reason == "INFORMATION_BOUNDARY"
+    task.replan_count = agent.MAX_REPLANS
+    agent.execute_next(task)
+    assert task.replan_count == 0
+
+    third_plan = agent.plan(task, reason="INFORMATION_BOUNDARY")
+    assert third_plan.stop_reason == "INFORMATION_BOUNDARY"
+    assert len(provider.plan_requests) == 3
+    latest_input = provider.plan_requests[-1].planner_input
+    central_knowledge = next(
+        item
+        for item in latest_input.known_world.resource_knowledge
+        if item.get("region_key") == "central_district"
+    )
+    assert central_knowledge["resource_inventory_visibility"] == "VISIBLE"
+    assert central_knowledge["resource_survey_completed"] is True
 
 
 def test_inspect_reveals_non_resource_facility_facts_only(session: Session) -> None:
@@ -319,6 +458,7 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
         resource_key="communication_equipment",
         region_key="north_industrial_district",
         quantity=10,
+        hidden_facility_keys=("heavy_equipment_yard",),
     )
     runtime, scope = _runtime(session, definition, "linjiang_v2_0_repair_communications")
     _set_actor(
@@ -376,6 +516,13 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
     )
     assert result.outcome.failure is None
     assert result.outcome.outcome_code == "COMMUNICATIONS_REPAIRED"
+    assert result.outcome.node_visibility_updates == ()
+    assert all(item.kind != "NODE_REVEALED" for item in result.knowledge_changes)
+    hidden_node = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "heavy_equipment_yard"),
+    )
+    assert hidden_node is not None and hidden_node.visibility == Visibility.HIDDEN
     for node in definition.world.nodes:
         if node.node_type_key != definition.metadata.locality.facility_node_type_key:
             continue

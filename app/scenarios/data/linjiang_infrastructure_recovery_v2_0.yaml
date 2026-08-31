@@ -223,7 +223,7 @@ world:
     description: 为中央城区提供综合医疗救治服务。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     - power_targetable
@@ -570,7 +570,7 @@ world:
     description: 负责统筹全市应急信息与资源调度。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     facts:
@@ -636,7 +636,7 @@ world:
     description: 停放和调配重型工程作业设备。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     - repairable
@@ -725,7 +725,7 @@ world:
     description: 储存并供应城市应急运行所需燃料。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     - repairable
@@ -769,7 +769,7 @@ world:
     description: 为北部工业区及周边区域提供电力变配服务。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     facts:
@@ -860,7 +860,7 @@ world:
     description: 承担沿江货物与应急运输的装卸作业。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     - repairable
@@ -999,7 +999,7 @@ world:
     description: 承担燃料水运接卸与转运组织。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     - repairable
@@ -1032,7 +1032,7 @@ world:
     description: 负责南部滨水区的水务输送与泵送调度。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     - power_targetable
@@ -1073,7 +1073,7 @@ world:
     description: 为南部水务系统供电的变电设施。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     - power_targetable
@@ -1256,7 +1256,7 @@ world:
     description: 集中存放并调度市政工程维修设备。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - inspectable
     - repairable
@@ -1338,7 +1338,7 @@ world:
     description: 负责城市原水处理与供水系统衔接。
     node_type_key: facility
     initial_access: AVAILABLE
-    initial_visibility: HIDDEN
+    initial_visibility: KNOWN
     interaction_keys:
     - heavy_support_target
     - inspectable

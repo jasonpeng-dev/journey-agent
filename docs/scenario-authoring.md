@@ -51,6 +51,10 @@ Truth while initially hidden, and a Fact can have an authoritative value while t
 UNKNOWN to the Player and Agent. Likewise, a Resource Pool can exist in a Region whose inventory
 has not been surveyed.
 
+Facility Node identity and Facility Fact Knowledge are separate contracts. A Facility may be
+authored as a Known Node while its operational or power Facts remain hidden; communication loss
+does not by itself hide that Facility's existence.
+
 `initialization.region_resource_knowledge` is the authority for initial Region inventory
 visibility and survey completion. Neither choosing a starting Region nor placing an Actor there
 automatically makes that Region's Resource inventory Known.
@@ -66,8 +70,9 @@ The generic Knowledge channels have separate authoring meanings:
 - public Rule Effects can reveal Node, Fact, Relation, Region Resource, or Pool visibility when
   the corresponding supported Effect is explicitly authored.
 - successful communication recovery uses generic locality and `located_in` relations to reveal
-  eligible Facility nodes and their current Runtime facts in the target Region. It does not reveal
-  that Region's Resource inventory.
+  eligible Facility Facts and their current Runtime values in the target Region. It does not
+  reveal Facility identity (Node visibility is authored separately) or that Region's Resource
+  inventory.
 
 One channel must not be treated as implicit permission to disclose another Knowledge domain.
 Reveal operations publish current Runtime state, not a cached copy of the Scenario's initial

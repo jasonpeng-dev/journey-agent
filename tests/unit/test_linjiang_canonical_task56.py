@@ -531,7 +531,7 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
     assert "south_emergency_fuel" not in initial_serialized
     for node_key in ("river_port", "south_fuel_terminal"):
         node = session.get(GameInstanceNodeState, (game_id, node_key))
-        assert node is not None and node.visibility == Visibility.HIDDEN
+        assert node is not None and node.visibility == Visibility.KNOWN
     initial_actions = {item["action_key"] for item in initial_payload["action_contracts"]}
     assert "generate_power" in initial_actions
     assert "commission_sustained_generation" not in initial_actions
@@ -580,7 +580,7 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
     assert gate is not None and gate.truth_value is True and gate.visibility == Visibility.KNOWN
     for node_key in ("river_port", "south_fuel_terminal"):
         node = session.get(GameInstanceNodeState, (game_id, node_key))
-        assert node is not None and node.visibility == Visibility.HIDDEN
+        assert node is not None and node.visibility == Visibility.KNOWN
     south_fuel = next(
         item
         for item in session.scalars(
@@ -611,12 +611,12 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
         == 100
     )
     revealed_nodes = {item["key"] for item in revealed_payload["known_world"]["nodes"]}
-    assert {"river_port", "south_fuel_terminal"}.isdisjoint(revealed_nodes)
+    assert {"river_port", "south_fuel_terminal"} <= revealed_nodes
     revealed_actions = {item["action_key"] for item in revealed_payload["action_contracts"]}
     assert "commission_sustained_generation" in revealed_actions
-    assert {"river_port", "south_fuel_terminal"}.isdisjoint(
-        {item["target_key"] for item in revealed_payload["target_bindings"]}
-    )
+    assert {"river_port", "south_fuel_terminal"} <= {
+        item["target_key"] for item in revealed_payload["target_bindings"]
+    }
 
 
 def test_task6_generate_power_requires_operational_power_and_startup_fuel() -> None:
