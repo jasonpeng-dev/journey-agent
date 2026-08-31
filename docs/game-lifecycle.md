@@ -17,6 +17,30 @@ the source player's ownership. The source and target have separate
 instance-scoped Truth, Knowledge, runtime rows, and formal history rows after
 materialization.
 
+## 1.1 Goal freeze and Formal PLAY
+
+Submitting a Goal to an ACTIVE GameInstance creates at most one non-terminal
+AgentTask for that instance. The exact-Version resolver either selects an
+authored `PREDEFINED` Objective or compiles an `AD_HOC_DYNAMIC`
+`FormalGoalContractV1` from public typed candidates. The frozen contract stores
+its canonical JSON, hash, source kind, compiler version, and exact
+ScenarioVersion/content-hash proof inside the AgentTask.
+
+The V1 contract is a flat implicit `AND` of `FACT` and
+`RESOURCE_AT_LEAST` requirements. Its deterministic Truth evaluator owns
+completion. A predefined requirement may be hidden behind an authored
+`knowledge_gate`; the requirement is already in the frozen contract, while the
+GameInstance Knowledge projection controls when it is visible to the Agent and
+Player. A Dynamic Goal cannot add a gate or hidden completion semantic, and it
+does not create a Scenario ObjectiveDefinition.
+
+`ObjectiveScope` remains a predefined/legacy compatibility projection. Dynamic
+Tasks do not have an authored ObjectiveScope. Neither planning, REPAIR, nor
+REPLAN may expand the frozen Formal Goal; REPAIR is pre-execution proposal
+correction, while REPLAN is post-execution planning from the new public
+Runtime/Knowledge projection. There is no persisted WorkingGoal or Milestone
+lifecycle in the current product.
+
 ## 2. States and the stable gate
 
 The lifecycle uses PENDING_INITIALIZATION during creation, ACTIVE for a
@@ -115,6 +139,14 @@ ScenarioVersion before copying it. It materializes:
 * region and relation Knowledge;
 * Actor dynamic state and locations.
 
+It also copies the stable AgentTask Formal Goal contract fields and the
+`PlanningCycle.formal_goal_contract_hash` linkage together with the existing
+formal history. Contract JSON/hash/source/version proof stays identical after
+materialization; the target receives new instance-scoped row identities. The
+copied GameInstance Knowledge state determines which previously hidden
+authored requirements are visible after the Fork, while the contract itself is
+not rewritten.
+
 Reservations are not carried as active reservations into the target. Static
 resource and Actor metadata is recomputed from the exact ScenarioVersion, and
 the target receives its own instance-scoped rows. Materialization fails closed
@@ -134,6 +166,11 @@ history_divider persistence field.
 
 The boundary is presentation metadata, not a second runtime authority. New
 runtime work after the boundary belongs only to the target GameInstance.
+
+Formal Goal is likewise not a presentation hierarchy: MissionRoadmap and
+Player responses project its currently visible typed requirements and stable
+identities. They do not persist Milestones or turn display stages into child
+Goals.
 Checkpoint history is visible in the archived snapshot, while the subsequent
 Fork marks all copied history as inherited for the new ACTIVE target.
 

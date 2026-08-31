@@ -111,6 +111,39 @@ All cross-entity references use stable machine keys. Display and localized names
 not identity; editing a display name must not change Rule, Objective, Relation, Pool, or Knowledge
 references.
 
+## Formal Goals and Dynamic Goals
+
+An authored `ObjectiveDefinitionV2` is a `PREDEFINED` Goal source. Its typed
+completion requirements, authored prerequisites, aliases, and planning
+metadata are compiled deterministically into the frozen
+`FormalGoalContractV1` when a Task is created. The contract is bound to the
+exact immutable ScenarioVersion; later Draft edits or publication do not alter
+an existing Task.
+
+The current runtime also accepts an `AD_HOC_DYNAMIC` Goal. The Dynamic Goal
+interpreter receives a Knowledge-safe public ontology and may return one or
+more `FACT` or `RESOURCE_AT_LEAST` candidates with implicit `AND` semantics.
+The backend validates those candidates against the exact ScenarioVersion,
+assigns their stable semantic identities, and compiles the same typed contract
+used by predefined Objectives. A dynamic submission does not create an
+ObjectiveDefinition, alter the Scenario Draft/Version, or add a new Scenario
+objective key.
+
+Dynamic interpretation cannot see hidden Truth, hidden Facts, authored
+Objective definitions, Actions, prerequisites, knowledge gates, or hidden
+completion semantics. It cannot invent ontology or attach a requirement
+`knowledge_gate`. If a player Goal needs authored hidden semantics, it must
+resolve to a predefined source or a future deterministic template source; it
+cannot be supplied by the interpreter itself. V1 has no parameterized template
+source, Goal AST, `OR`, generic `NOT`, Actor Goal, Milestone, or WorkingGoal.
+
+`FormalGoalContractV1` is a Task/runtime contract, not a replacement for
+Scenario authoring. Its flat requirement tuple is an implicit conjunction and
+its canonical hash excludes display-only descriptions. Requirement Knowledge
+and planning availability are runtime projections: revealing a gated authored
+requirement makes it public for Planner/Player projection without changing the
+frozen Goal or the authored Scenario.
+
 ## Editor behavior
 
 The browser Editor has Overview, World, Actors, Actions, Rules, Objectives, Planning,

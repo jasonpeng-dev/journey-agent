@@ -77,8 +77,9 @@ export type PublicPlanHistory = { id: string; ordinal: number; status: "EXECUTIN
 export type PublicPlanningAttempt = { attempt_index: number; call_type: "INITIAL_PLAN" | "REPLAN" | "REPAIR"; status: "RUNNING" | "ACCEPTED" | "REJECTED" | "ERROR" | "TIMEOUT"; started_at: string | null; finished_at: string | null; duration_ms: number | null; provider_outcome: string | null; provider_latency_ms: number | null; validator_summary: Array<Record<string, unknown>>; provider_error_category: string | null; provider_error_code: string | null; accepted_step_count: number };
 export type PublicPlanningCycle = { id: string; cycle_type: "INITIAL" | "REPLAN"; status: string; started_at: string | null; finished_at: string | null; wall_clock_duration_ms: number | null; attempt_count: number; final_outcome: string; attempts: PublicPlanningAttempt[] };
 export type MissionRoadmapRequirement = {
+  identity?: string;
   key: string;
-  kind?: "RESOURCE_AT_LEAST";
+  kind?: "FACT" | "RESOURCE_AT_LEAST";
   description: string;
   node_key?: string;
   fact_key?: string;
@@ -87,6 +88,7 @@ export type MissionRoadmapRequirement = {
   resource_key?: string;
   minimum?: number;
   current_known_available?: number;
+  knowledge_status?: "KNOWN" | "KNOWN_ZERO" | "UNKNOWN";
 };
 export type MissionRoadmapStage = { key: string; name: string; description: string; status: "COMPLETED" | "CURRENT" | "PENDING"; objective_key: string | null; requirements: MissionRoadmapRequirement[] };
 export type TimelineEventKind = "GOAL_ACCEPTED" | "PLAN_CREATED" | "TASK_STARTED" | "ACTION_BRIEFING" | "ACTION_RESULT" | "PLAN_UPDATED" | "APPROVAL_REQUIRED" | "APPROVAL_APPROVED" | "APPROVAL_REJECTED" | "TASK_COMPLETED" | "TASK_BLOCKED" | "TASK_ABORTED";
@@ -95,8 +97,8 @@ export type PublicTimelineEvent = { id: string; kind: TimelineEventKind; plannin
 export type ExecutionPhase = "AWAITING_PLAN_START" | "AWAITING_PLAN_ATTEMPT" | "AWAITING_ACTION_ACK" | "AWAITING_DEBRIEF_ACK" | "AWAITING_REPLAN_ACK" | "APPROVAL_REQUIRED" | "COMPLETED" | "BLOCKED" | "ABORTED";
 export type ActionBriefing = { step_id: string; action_name: string; actor_name: string; target_name: string; purpose: string; location?: ActionLocation | null };
 export type ActionDebrief = { step_id: string; action_name: string; success: boolean; result_summary: string; knowledge_changes: KnowledgeChange[]; plan_adjusted: boolean; plan_adjustment_summary: string | null; plan_invalidated?: boolean; plan_invalidation_reason?: string | null; location?: ActionLocation | null };
-export type PublicTask = { id: string; version: number; goal: string; status: string; execution_phase: ExecutionPhase; pacing_version: number; objective_names: string[]; roadmap: { stages: MissionRoadmapStage[] }; plan: PublicPlan | null; plan_history: PublicPlanHistory[]; planning_process?: PublicPlanningCycle[]; timeline: PublicTimelineEvent[]; briefing: ActionBriefing | null; debrief: ActionDebrief | null; explanation: string | null };
-export type PublicTaskSummary = { id: string; sequence: number; goal: string; objective_names: string[]; status: string; execution_phase: ExecutionPhase; created_at: string; completed_at: string | null };
+export type PublicTask = { id: string; version: number; goal: string; status: string; execution_phase: ExecutionPhase; pacing_version: number; goal_source_kind?: "PREDEFINED" | "PARAMETERIZED" | "AD_HOC_DYNAMIC"; goal_requirements?: MissionRoadmapRequirement[]; objective_names: string[]; roadmap: { stages: MissionRoadmapStage[] }; plan: PublicPlan | null; plan_history: PublicPlanHistory[]; planning_process?: PublicPlanningCycle[]; timeline: PublicTimelineEvent[]; briefing: ActionBriefing | null; debrief: ActionDebrief | null; explanation: string | null };
+export type PublicTaskSummary = { id: string; sequence: number; goal: string; goal_source_kind?: "PREDEFINED" | "PARAMETERIZED" | "AD_HOC_DYNAMIC"; objective_names: string[]; status: string; execution_phase: ExecutionPhase; created_at: string; completed_at: string | null };
 export type ResourceIntelligence = {
   total_regions: number;
   visible_region_count: number;

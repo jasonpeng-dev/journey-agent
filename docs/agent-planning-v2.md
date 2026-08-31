@@ -12,7 +12,7 @@ The current end-to-end lifecycle is:
 
     Natural-language Goal
       -> Goal Resolver
-      -> frozen ObjectiveScope on AgentTask
+      -> frozen FormalGoalContractV1 on AgentTask
       -> bounded Dependency Closure
       -> canonical PlannerInput V2
       -> LLM Provider or deterministic provider substitute
@@ -97,11 +97,21 @@ Objective.
 An accepted goal creates an AgentTask with:
 
 * the exact ScenarioVersion reference;
-* a non-empty frozen ObjectiveScope;
-* an ObjectiveScope hash and catalog/version metadata;
-* objective completion requirements from the ScenarioVersion.
+* a frozen `FormalGoalContractV1` and canonical contract hash;
+* exact ScenarioVersion/content-hash proof and compiler metadata;
+* typed completion requirements from the contract.
 
-INITIAL planning, REPAIR, and REPLAN all remain inside that frozen scope.
+For a `PREDEFINED` source, the Task also retains the authored ObjectiveScope
+compatibility fields used by existing planning helpers. For an
+`AD_HOC_DYNAMIC` source, those authored scope fields are empty; the legacy
+non-null scope hash stores only the Formal Goal hash as a compatibility
+fingerprint. In both cases the Formal Goal contract, not ObjectiveScope, is
+the completion authority.
+
+INITIAL planning, REPAIR, and REPLAN all remain inside that frozen contract
+and its exact ScenarioVersion. A newly revealed public requirement or planning
+dependency changes the projection available to the current cycle, not the
+contract itself.
 Neither the model nor the backend may add sibling objectives, broaden the
 scope, or replace a completion requirement with a model-declared one.
 Completion is determined by the formal Scenario completion requirements and
@@ -128,6 +138,24 @@ public Agent/Player projection only after that gate is Known and satisfied.
 This reveal does not broaden ObjectiveScope, create a later Objective, or
 delegate completion to the Provider. The deterministic evaluator remains the
 completion authority.
+
+### 3.2 Dynamic Goal boundary
+
+`AD_HOC_DYNAMIC` compilation reuses the same typed requirement and evaluator
+path. The interpreter may return only `FACT` and `RESOURCE_AT_LEAST` candidate
+semantics, with implicit `AND`; the backend validates every key, value domain,
+Region, and Resource against the exact Version and assigns the canonical
+identity. Dynamic candidates cannot carry authored Objective keys,
+descriptions, prerequisites, `knowledge_gate` fields, or hidden completion
+semantics.
+
+The interpreter payload is a public ontology projection. It excludes current
+Truth values, hidden Facts, Actions, authored Objective definitions, planning
+catalogs, and hidden requirement metadata. A broad or ambiguous Goal must be
+clarified or rejected; the interpreter cannot silently supplement it with
+Scenario-authored hidden obligations. Hidden completion requirements remain an
+authored `PREDEFINED` capability, or require a future deterministic template
+source outside the current V1.
 
 ## 4. Dependency Closure
 
@@ -250,8 +278,9 @@ command-reachability, and precondition requirements and compose legal
 supporting Actions itself.
 
 The current implementation has implicit backward prerequisite reasoning. It
-does not persist a formal working-goal, milestone, or goal-dependency-graph
-object. Those are future design possibilities, not current runtime fields.
+does not persist a formal WorkingGoal, Milestone, Goal AST, or goal-dependency
+graph object. Those are future design possibilities, not current runtime
+fields.
 
 The backend will not insert prerequisites, Travel, Relay, transport, recovery
 Actions, or routes. When they are required, the Planner must include them in
@@ -628,9 +657,9 @@ work:
 
 1. PlannerInput semantic compression: reduce repeated ActionContract and
    KnownWorld serialization without changing semantics or closure bounds.
-2. Explicit working goals and goal decomposition: introduce a separate
-   Objective -> Necessary Conditions -> Working Goals -> dependencies ->
-   PlanSegment model only after it is designed and implemented.
+2. Explicit WorkingGoal/Milestone decomposition: introduce a separate
+   projection or persisted entity only when a real runtime/UX requirement
+   needs child lifecycle, bounded progress, or user-addressable resumption.
 
 The current runtime uses implicit backward prerequisite reasoning. Working
 goals, milestones, and a persistent goal dependency graph are not current

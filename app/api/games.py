@@ -123,7 +123,10 @@ def submit_goal(
                 status=status_value,
                 clarification_prompt=submission.resolution.clarification_prompt,
                 candidate_objective_names=list(submission.resolution.candidate_keys),
-                explanation="Goal must map to an Objective in this exact ScenarioVersion",
+                explanation=(
+                    "Goal must be expressible in the exact ScenarioVersion's "
+                    "supported Goal vocabulary"
+                ),
             )
         db.commit()
         state = PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))

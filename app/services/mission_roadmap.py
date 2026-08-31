@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from app.domain.formal_goal import FormalGoalContractV1, FormalGoalSourceKind
 from app.domain.scenario_v2 import (
     ObjectiveDefinitionV2,
     ObjectiveRequirementKind,
@@ -46,6 +47,110 @@ class _StageDefinition:
 
 class MissionRoadmapProjector:
     """Build a non-executable roadmap without consulting hidden Truth or Action validation."""
+
+    def project_formal_goal(
+        self,
+        definition: ScenarioDefinitionV2,
+        contract: FormalGoalContractV1,
+        known_facts: dict[tuple[str, str], StrictScalar],
+        known_resources: dict[str, object] | None = None,
+        *,
+        goal_description: str = "",
+    ) -> MissionRoadmap:
+        """Project one frozen contract without making the roadmap authoritative.
+
+        PREDEFINED contracts retain the authored prerequisite/subsumption
+        presentation.  AD_HOC_DYNAMIC contracts receive one flat Goal stage;
+        their backend identities are preserved on each visible requirement.
+        Hidden gated requirements are omitted exactly as they are from the
+        ordinary Objective roadmap.
+        """
+
+        if contract.source_kind == FormalGoalSourceKind.PREDEFINED:
+            roadmap = self.project(
+                definition,
+                tuple(item.objective_key for item in contract.predefined_objectives),
+                known_facts,
+                known_resources,
+            )
+            identities = {
+                (item.source_objective_key, item.source_requirement_key): item.identity
+                for item in contract.completion_requirements
+            }
+            stages: list[MissionRoadmapStage] = []
+            for stage in roadmap.stages:
+                projected_requirements: list[dict[str, object]] = []
+                for requirement in stage.requirements:
+                    raw_key = requirement.get("key")
+                    requirement_key = raw_key if isinstance(raw_key, str) else None
+                    source_key = (
+                        stage.objective_key,
+                        requirement_key,
+                    )
+                    identity = identities.get(source_key)
+                    if identity is None:
+                        identity = f"planning/{stage.key}/{source_key[1] or 'requirement'}"
+                    projected = dict(requirement)
+                    projected["identity"] = identity
+                    projected["key"] = identity
+                    if "kind" not in projected:
+                        projected["kind"] = (
+                            "RESOURCE_AT_LEAST"
+                            if "resource_key" in projected
+                            else "FACT"
+                        )
+                    projected_requirements.append(projected)
+                stages.append(
+                    MissionRoadmapStage(
+                        key=stage.key,
+                        name=stage.name,
+                        description=stage.description,
+                        status=stage.status,
+                        objective_key=stage.objective_key,
+                        requirements=tuple(projected_requirements),
+                    )
+                )
+            return MissionRoadmap(stages=tuple(stages))
+
+        requirements = tuple(contract.completion_requirements)
+        visible = tuple(
+            item
+            for item in requirements
+            if item.requirement.knowledge_gate is None
+            or known_facts.get(
+                (
+                    item.requirement.knowledge_gate.node_key,
+                    item.requirement.knowledge_gate.fact_key,
+                )
+            )
+            in item.requirement.knowledge_gate.accepted_values
+        )
+        visible_requirements = tuple(item.requirement for item in visible)
+        resources = known_resources or {}
+        completed = self._satisfied(visible_requirements, known_facts, resources)
+        return MissionRoadmap(
+            stages=(
+                MissionRoadmapStage(
+                    key=f"goal:{contract.content_hash[:16]}",
+                    name=goal_description.strip() or "Custom Goal",
+                    description="Player-visible typed Goal requirements.",
+                    status=(
+                        MissionRoadmapStageStatus.COMPLETED
+                        if completed
+                        else MissionRoadmapStageStatus.CURRENT
+                    ),
+                    objective_key=None,
+                    requirements=tuple(
+                        self._project_requirement(
+                            item.requirement,
+                            resources,
+                            identity=item.identity,
+                        )
+                        for item in visible
+                    ),
+                ),
+            )
+        )
 
     def project(
         self,
@@ -179,6 +284,11 @@ class MissionRoadmapProjector:
                 continue
             current = MissionRoadmapProjector._known_resource_amount(requirement, known_resources)
             assert requirement.minimum is not None
+            if (
+                MissionRoadmapProjector._known_resource_status(requirement, known_resources)
+                == "UNKNOWN"
+            ):
+                return False
             if current < requirement.minimum:
                 return False
         return True
@@ -216,14 +326,53 @@ class MissionRoadmapProjector:
         return int(summary.get("known_available", 0)) if isinstance(summary, dict) else 0
 
     @staticmethod
+    def _known_resource_status(
+        requirement: ObjectiveRequirementV2,
+        known_resources: dict[str, object],
+    ) -> str:
+        assert requirement.resource_key is not None and requirement.region_key is not None
+        raw = known_resources.get(requirement.resource_key, {})
+        if not isinstance(raw, dict):
+            return "UNKNOWN"
+        regions = raw.get("regions", {})
+        if not isinstance(regions, dict):
+            return "UNKNOWN"
+        region = regions.get(requirement.region_key)
+        if not isinstance(region, dict):
+            return "UNKNOWN"
+        inventory_visibility = region.get("resource_inventory_visibility")
+        survey_completed = region.get("resource_survey_completed")
+        if inventory_visibility is not None and inventory_visibility != "VISIBLE":
+            return "UNKNOWN"
+        if survey_completed is not None and survey_completed is not True:
+            return "UNKNOWN"
+        if "known_available" not in region:
+            return "UNKNOWN"
+        return "KNOWN_ZERO" if int(region.get("known_available", 0)) == 0 else "KNOWN"
+
+    @staticmethod
     def _project_requirement(
-        requirement: ObjectiveRequirementV2, known_resources: dict[str, object]
+        requirement: ObjectiveRequirementV2,
+        known_resources: dict[str, object],
+        *,
+        identity: str | None = None,
     ) -> dict[str, object]:
         result = requirement.model_dump(mode="json", exclude={"knowledge_gate"})
+        if identity is not None:
+            result["identity"] = identity
+            result["key"] = identity
+            result["kind"] = requirement.kind.value
         if requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+            status = MissionRoadmapProjector._known_resource_status(
+                requirement,
+                known_resources,
+            )
             result["current_known_available"] = MissionRoadmapProjector._known_resource_amount(
                 requirement, known_resources
             )
+            result["knowledge_status"] = status
+            if status == "UNKNOWN":
+                result["current_known_available"] = None
         return result
 
 
