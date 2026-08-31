@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
+from app.agent.formal_goal_projection import formal_goal_planning_objectives
 from app.agent.objective_scope import ObjectiveScope
 from app.agent.planner_contract import action_planner_effects
 from app.agent.planning_context import (
@@ -472,7 +473,12 @@ class GenericAgentService:
             )
         definition = self._definition()
         self._task_scope(task)
-        objectives = self._objectives(task, definition)
+        formal_goal = self._formal_goal(task)
+        objectives = formal_goal_planning_objectives(
+            formal_goal,
+            definition,
+            goal_description=task.goal_description,
+        )
         next_version = task.current_plan_version + 1
         self._last_provider_stop_reason = None
         self._last_planning_cycle = None
@@ -484,6 +490,7 @@ class GenericAgentService:
                 reason,
                 next_version,
                 planning_continuity=planning_continuity,
+                formal_goal=formal_goal,
             )
             planning_cycle = self._last_planning_cycle
         else:
@@ -535,7 +542,12 @@ class GenericAgentService:
             )
         definition = self._definition()
         self._task_scope(task)
-        objectives = self._objectives(task, definition)
+        formal_goal = self._formal_goal(task)
+        objectives = formal_goal_planning_objectives(
+            formal_goal,
+            definition,
+            goal_description=task.goal_description,
+        )
         call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
         cycle = self.db.scalar(
             select(PlanningCycle)
@@ -590,6 +602,7 @@ class GenericAgentService:
             initial_memory=memory,
             planning_cycle=cycle,
             planner_input_override=planner_input_override,
+            formal_goal=formal_goal,
         )
         # A fresh cycle is created inside _provider_steps for the first
         # attempt.  Resolve it here so the caller can persist the rejection
@@ -1375,6 +1388,7 @@ class GenericAgentService:
         planning_cycle: PlanningCycle | None = None,
         planner_input_override: PlannerInput | None = None,
         planning_continuity: PlanningContinuity | None = None,
+        formal_goal: FormalGoalContractV1 | None = None,
     ) -> list[dict[str, object]]:
         assert self.provider is not None
         call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
@@ -1396,12 +1410,14 @@ class GenericAgentService:
                 objectives,
                 task=task,
                 replan_reason=reason,
+                formal_goal=formal_goal,
             )
             planner_input = context_builder.build_v2(
                 definition,
                 objectives,
                 task=task,
                 replan_reason=reason,
+                formal_goal=formal_goal,
             )
             if planner_input_override is not None:
                 planner_input = planner_input_override
@@ -1793,6 +1809,7 @@ class GenericAgentService:
         successful_signatures = self._successful_proposal_signatures(task)
         result: list[dict[str, object]] = []
         step_effects: list[set[tuple[str, str]]] = []
+        step_resource_effects: list[set[tuple[str, str]]] = []
         if not proposed_steps and stop_reason != "BLOCKED":
             return [], (
                 {
@@ -1821,6 +1838,7 @@ class GenericAgentService:
         if diagnostics:
             return [], tuple(_diagnostic_with_step_id(item, proposed_steps) for item in diagnostics)
 
+        objective_resource_refs = _objective_resource_refs(objectives)
         for static_binding in static_bindings:
             index = static_binding.index
             raw_step = static_binding.raw_step
@@ -1910,6 +1928,13 @@ class GenericAgentService:
                 target_key,
                 planner_input=planner_input,
             )
+            resource_effects = _action_resource_goal_effects(
+                definition,
+                action,
+                target_key,
+                parameters,
+                objective_resource_refs,
+            )
             target_definition = definition.world.node(target_key)
             target_actor = (
                 actors.get(target_key) if action.target_kind == ActionTargetKind.ACTOR else None
@@ -1986,6 +2011,15 @@ class GenericAgentService:
                 generated[0]["planner_step_id"] = getattr(raw_step, "step_id", "")
             result.extend(generated)
             step_effects.append(effect_refs)
+            step_resource_effects.append(
+                _action_resource_goal_effects(
+                    definition,
+                    action,
+                    target_key,
+                    parameters,
+                    objective_resource_refs,
+                )
+            )
             self._advance_projected_action_state(
                 definition,
                 action,
@@ -2006,7 +2040,10 @@ class GenericAgentService:
             return [], tuple(_diagnostic_with_step_id(item, proposed_steps) for item in diagnostics)
 
         covered_before: set[tuple[str, str]] = set()
-        for index, effects in enumerate(step_effects, start=1):
+        covered_resource_before: set[tuple[str, str]] = set()
+        for index, (effects, resource_effects) in enumerate(
+            zip(step_effects, step_resource_effects, strict=True), start=1
+        ):
             for objective in objectives:
                 completion_refs = {
                     requirement.fact_ref
@@ -2042,7 +2079,38 @@ class GenericAgentService:
                             ],
                         },
                     )
+                completion_resource_refs = {
+                    (requirement.region_key, requirement.resource_key)
+                    for requirement in objective.completion_requirements
+                    if requirement.kind.value == "RESOURCE_AT_LEAST"
+                    and self._known_requirement_public(requirement)
+                    and not self._known_requirement_satisfied(requirement)
+                }
+                prerequisite_resource_refs = {
+                    (requirement.region_key, requirement.resource_key)
+                    for prerequisite in objective.prerequisites
+                    for requirement in prerequisite.requirements
+                    if requirement.kind.value == "RESOURCE_AT_LEAST"
+                    and self._known_requirement_public(requirement)
+                    and not self._known_requirement_satisfied(requirement)
+                }
+                missing_resource_before = prerequisite_resource_refs - covered_resource_before
+                if resource_effects & completion_resource_refs and missing_resource_before:
+                    return [], (
+                        {
+                            "code": "PLAN_ORDER_INVALID",
+                            "failure_code": "PLAN_ORDER_INVALID",
+                            "dimension": "PLAN_ORDER",
+                            "step_id": str(getattr(proposed_steps[index - 1], "step_id", "")),
+                            "required": "PUBLIC_RESOURCE_PREREQUISITES_BEFORE_TERMINAL_EFFECT",
+                            "actual": [
+                                {"region_key": region_key, "resource_key": resource_key}
+                                for region_key, resource_key in sorted(missing_resource_before)
+                            ],
+                        },
+                    )
             covered_before.update(effects)
+            covered_resource_before.update(resource_effects)
         objective_needed = {
             requirement.fact_ref
             for objective in objectives
@@ -2060,7 +2128,19 @@ class GenericAgentService:
             and not self._known_requirement_satisfied(requirement)
         }
         missing_refs = objective_needed - set().union(*step_effects)
-        if missing_refs and stop_reason == "OBJECTIVE_COMPLETION":
+        objective_resource_needed = {
+            (requirement.region_key, requirement.resource_key)
+            for objective in objectives
+            for requirement in (
+                *objective.completion_requirements,
+                *(item for group in objective.prerequisites for item in group.requirements),
+            )
+            if requirement.kind.value == "RESOURCE_AT_LEAST"
+            and self._known_requirement_public(requirement)
+            and not self._known_requirement_satisfied(requirement)
+        }
+        missing_resource_refs = objective_resource_needed - set().union(*step_resource_effects)
+        if (missing_refs or missing_resource_refs) and stop_reason == "OBJECTIVE_COMPLETION":
             return [], (
                 {
                     "code": "OBJECTIVE_COVERAGE_INCOMPLETE",
@@ -2074,6 +2154,10 @@ class GenericAgentService:
                     "missing_public_requirements": [
                         {"node_key": node_key, "fact_key": fact_key}
                         for node_key, fact_key in sorted(missing_refs)
+                    ],
+                    "missing_resource_requirements": [
+                        {"region_key": region_key, "resource_key": resource_key}
+                        for region_key, resource_key in sorted(missing_resource_refs)
                     ],
                 },
             )
@@ -2214,6 +2298,7 @@ class GenericAgentService:
             )
             if requirement.fact_ref is not None
         }
+        objective_resource_refs = _objective_resource_refs(objectives)
         bindings: list[_StaticProposalBinding] = []
         diagnostics: list[dict[str, object]] = []
         for index, raw_step in enumerate(proposed_steps, start=1):
@@ -2393,6 +2478,13 @@ class GenericAgentService:
                 target_key,
                 planner_input=planner_input,
             )
+            resource_effects = _action_resource_goal_effects(
+                definition,
+                action,
+                target_key,
+                parameters,
+                objective_resource_refs,
+            )
             if signature in set(task.rejected_proposal_signatures):
                 diagnostics.append(
                     {
@@ -2412,6 +2504,7 @@ class GenericAgentService:
             actual_relevance = (
                 "NO_DECLARED_RELEVANT_EFFECT"
                 if objective_refs.isdisjoint(projected_refs)
+                and not resource_effects
                 and not action.planning.supporting_effects
                 and action_key not in context_action_keys
                 else None
@@ -4369,6 +4462,13 @@ class GenericAgentService:
             )
             if requirement.fact_ref is not None
         }
+        resource_effects = _action_resource_goal_effects(
+            definition,
+            action,
+            candidate.target_key,
+            parameters,
+            _objective_resource_refs(objectives),
+        )
         projected_refs = {
             (item.node_key, item.fact_key)
             for item in (
@@ -4378,6 +4478,7 @@ class GenericAgentService:
         }
         if (
             objective_refs.isdisjoint(projected_refs)
+            and not resource_effects
             and not action.planning.supporting_effects
             and not allow_epistemic
         ):
@@ -5687,6 +5788,98 @@ def _safe_provider_diagnostic(code: str) -> str:
 def _provider_error_category(error: GenericProviderError) -> str:
     cause = error.__cause__
     return type(cause).__name__ if cause is not None else type(error).__name__
+
+
+def _objective_resource_refs(
+    objectives: tuple[ObjectiveDefinitionV2, ...],
+) -> set[tuple[str, str]]:
+    return {
+        (requirement.region_key, requirement.resource_key)
+        for objective in objectives
+        for requirement in (
+            *objective.completion_requirements,
+            *(item for group in objective.prerequisites for item in group.requirements),
+        )
+        if requirement.kind.value == "RESOURCE_AT_LEAST"
+        and requirement.region_key is not None
+        and requirement.resource_key is not None
+    }
+
+
+def _action_resource_goal_effects(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    target_key: str,
+    parameters: ActionParameters,
+    objective_resource_refs: set[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Return typed resource obligations an Action/Target can advance.
+
+    This is a coverage/relevance proof only.  It never evaluates the resulting
+    quantity; the Runtime Truth evaluator remains authoritative for completion.
+    """
+
+    if not objective_resource_refs:
+        return set()
+    try:
+        target_region = region_for_node(definition, target_key)
+    except LocalityEngineError:
+        target_region = target_key
+    if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+        try:
+            cargo = transport_resource_entries(parameters)
+        except ValueError:
+            cargo = ()
+        return {
+            (target_region, resource_key)
+            for resource_key, amount in cargo
+            if amount > 0 and (target_region, resource_key) in objective_resource_refs
+        }
+
+    result: set[tuple[str, str]] = set()
+    for rule in definition.rules:
+        if rule.action_key != action.key or getattr(rule.phase, "value", rule.phase) != "RESOLVE":
+            continue
+        for effect in rule.effects:
+            if getattr(effect.kind, "value", effect.kind) != "ADJUST_RESOURCE":
+                continue
+            resource_key = effect.resource_key
+            scope = effect.resource_scope
+            if resource_key is None or scope is None:
+                continue
+            scope_kind = getattr(scope.kind, "value", scope.kind)
+            if scope_kind == "CURRENT_TARGET_REGION":
+                region_key = target_region
+            elif scope_kind == "EXPLICIT" and scope.node_key is not None:
+                try:
+                    region_key = region_for_node(definition, scope.node_key)
+                except LocalityEngineError:
+                    region_key = scope.node_key
+            else:
+                continue
+            amount = _static_integer_effect_amount(effect.amount, parameters)
+            if (
+                amount is not None
+                and amount > 0
+                and (region_key, resource_key) in objective_resource_refs
+            ):
+                result.add((region_key, resource_key))
+    return result
+
+
+def _static_integer_effect_amount(expression: object, parameters: ActionParameters) -> int | None:
+    source = getattr(expression, "source", None)
+    multiplier = getattr(expression, "multiplier", 1)
+    if getattr(source, "value", source) == "LITERAL":
+        literal = getattr(expression, "literal", None)
+        return (
+            literal * multiplier
+            if isinstance(literal, int) and not isinstance(literal, bool)
+            else None
+        )
+    parameter_key = getattr(expression, "parameter_key", None)
+    value = parameters.get(parameter_key) if isinstance(parameter_key, str) else None
+    return value * multiplier if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _duration_ms(started_at: float) -> int:
