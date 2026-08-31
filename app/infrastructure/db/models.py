@@ -478,6 +478,17 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     objective_scope_keys: Mapped[list[str] | None] = mapped_column(JSON)
     objective_catalog_version: Mapped[str | None] = mapped_column(String(100))
     objective_scope_hash: Mapped[str] = mapped_column(String(64))
+    # Formal Goal V1 is staged independently from the legacy ObjectiveScope
+    # columns. These fields stay nullable so v0.2 historical Tasks can be
+    # read through the deterministic compatibility loader without a SQL
+    # backfill.
+    formal_goal_contract_schema_version: Mapped[int | None] = mapped_column(Integer)
+    formal_goal_source_kind: Mapped[str | None] = mapped_column(String(30))
+    formal_goal_contract_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    formal_goal_contract_hash: Mapped[str | None] = mapped_column(String(64))
+    formal_goal_scenario_version_id: Mapped[UUID | None] = mapped_column()
+    formal_goal_scenario_content_hash: Mapped[str | None] = mapped_column(String(64))
+    formal_goal_compiler_version: Mapped[str | None] = mapped_column(String(100))
     objective_resolver_source: Mapped[str | None] = mapped_column(String(100))
     objective_resolver_version: Mapped[str | None] = mapped_column(String(100))
     objective_resolution_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -517,6 +528,7 @@ class PlanningCycle(UUIDPrimaryKey, TimestampMixin, Base):
     base_call_type: Mapped[str] = mapped_column(String(20))
     replan_reason: Mapped[str | None] = mapped_column(String(160))
     frozen_objective_scope: Mapped[list[str]] = mapped_column(JSON, default=list)
+    formal_goal_contract_hash: Mapped[str | None] = mapped_column(String(64))
     planner_input: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     planner_input_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(30), default="RUNNING")
@@ -575,6 +587,10 @@ class ObjectiveScopeImmutableError(RuntimeError):
     """Raised if persisted code attempts to drift a frozen Task objective scope."""
 
 
+class FormalGoalImmutableError(RuntimeError):
+    """Raised if persisted code attempts to drift a frozen Formal Goal."""
+
+
 @event.listens_for(AgentTask, "before_update")
 def _reject_frozen_objective_scope_drift(
     _mapper: object, _connection: object, target: AgentTask
@@ -586,6 +602,19 @@ def _reject_frozen_objective_scope_drift(
         for name in ("objective_scope_keys", "objective_catalog_version", "objective_scope_hash")
     ):
         raise ObjectiveScopeImmutableError("A frozen Task ObjectiveScope is immutable")
+    if target.objective_frozen_at is not None and any(
+        state.attrs[name].history.has_changes()
+        for name in (
+            "formal_goal_contract_schema_version",
+            "formal_goal_source_kind",
+            "formal_goal_contract_json",
+            "formal_goal_contract_hash",
+            "formal_goal_scenario_version_id",
+            "formal_goal_scenario_content_hash",
+            "formal_goal_compiler_version",
+        )
+    ):
+        raise FormalGoalImmutableError("A frozen Task Formal Goal is immutable")
 
 
 class AgentPlan(UUIDPrimaryKey, Base):
