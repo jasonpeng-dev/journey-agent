@@ -23,6 +23,7 @@ from app.api.schemas.phase_d import (
     PublicExecutionPhase,
     PublicFactResponse,
     PublicGameStatus,
+    PublicGoalRequirementResponse,
     PublicKnowledgeChangeResponse,
     PublicNodeResponse,
     PublicPlanDisplayStatus,
@@ -80,6 +81,7 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.formal_goal import load_formal_goal_for_task
 from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
 from app.services.knowledge_projection import SharedKnowledgeProjection
@@ -441,6 +443,8 @@ class PlayerProjectionService:
             id=task.id,
             sequence=sequence,
             goal=task.goal_description,
+            goal_source_kind=task.formal_goal_source_kind
+            or ("PREDEFINED" if task.objective_scope_keys else "AD_HOC_DYNAMIC"),
             objective_names=[
                 objective_names_by_key[key]
                 for key in task.objective_scope_keys or ()
@@ -595,12 +599,24 @@ class PlayerProjectionService:
             else None
         )
         objective_names = {item.key: item.name for item in definition.objectives}
-        roadmap = MissionRoadmapProjector().project(
+        task_scope = GameInstanceService(self.db).load(GameInstanceId(task.game_instance_id))
+        formal_goal = load_formal_goal_for_task(self.db, task_scope, task)
+        roadmap = MissionRoadmapProjector().project_formal_goal(
             definition,
-            tuple(task.objective_scope_keys or ()),
+            formal_goal,
             known_facts,
             known_resources,
+            goal_description=task.goal_description,
         )
+        formal_requirement_ids = {
+            item.identity for item in formal_goal.completion_requirements
+        }
+        goal_requirements = [
+            requirement
+            for stage in roadmap.stages
+            for requirement in stage.requirements
+            if requirement.get("identity") in formal_requirement_ids
+        ]
         current_step = _next_tool_step(latest, steps_by_plan)
         if checkpoint is not None and checkpoint.last_action_step_id is not None:
             last_action_step = self.db.get(AgentStep, checkpoint.last_action_step_id)
@@ -613,6 +629,8 @@ class PlayerProjectionService:
             status=_task_status(task.status, task.last_error_code),
             execution_phase=PublicExecutionPhase(phase.value),
             pacing_version=checkpoint.version if checkpoint is not None else 1,
+            goal_source_kind=formal_goal.source_kind.value,
+            goal_requirements=[PublicGoalRequirementResponse(**item) for item in goal_requirements],
             objective_names=[
                 objective_names[key]
                 for key in task.objective_scope_keys or ()
@@ -626,7 +644,10 @@ class PlayerProjectionService:
                         description=stage.description,
                         status=stage.status.value,
                         objective_key=stage.objective_key,
-                        requirements=list(stage.requirements),
+                        requirements=[
+                            PublicGoalRequirementResponse(**item)
+                            for item in stage.requirements
+                        ],
                     )
                     for stage in roadmap.stages
                 ]

@@ -429,13 +429,30 @@ class PublicPlanningCycleResponse(ApiModel):
     attempts: list[PublicPlanningAttemptResponse] = Field(default_factory=list)
 
 
+class PublicGoalRequirementResponse(ApiModel):
+    """Player-visible typed projection of one Formal Goal obligation."""
+
+    identity: str
+    key: str
+    kind: Literal["FACT", "RESOURCE_AT_LEAST"]
+    description: str
+    node_key: str | None = None
+    fact_key: str | None = None
+    accepted_values: list[str | int | bool] = Field(default_factory=list)
+    region_key: str | None = None
+    resource_key: str | None = None
+    minimum: int | None = None
+    current_known_available: int | None = None
+    knowledge_status: Literal["KNOWN", "KNOWN_ZERO", "UNKNOWN"] | None = None
+
+
 class MissionRoadmapStageResponse(ApiModel):
     key: str
     name: str
     description: str
     status: MissionRoadmapStageStatus
     objective_key: str | None = None
-    requirements: list[dict[str, Any]] = Field(default_factory=list)
+    requirements: list[PublicGoalRequirementResponse] = Field(default_factory=list)
 
 
 class MissionRoadmapResponse(ApiModel):
@@ -505,6 +522,8 @@ class PublicTaskResponse(ApiModel):
     status: PublicTaskStatus
     execution_phase: PublicExecutionPhase
     pacing_version: int = Field(ge=1)
+    goal_source_kind: Literal["PREDEFINED", "PARAMETERIZED", "AD_HOC_DYNAMIC"] = "PREDEFINED"
+    goal_requirements: list[PublicGoalRequirementResponse] = Field(default_factory=list)
     objective_names: list[str]
     roadmap: MissionRoadmapResponse
     plan: PublicPlanResponse | None = None
@@ -522,6 +541,7 @@ class PublicTaskSummaryResponse(ApiModel):
     id: UUID
     sequence: int = Field(ge=1)
     goal: str
+    goal_source_kind: Literal["PREDEFINED", "PARAMETERIZED", "AD_HOC_DYNAMIC"] = "PREDEFINED"
     objective_names: list[str]
     status: PublicTaskStatus
     execution_phase: PublicExecutionPhase
@@ -696,6 +716,8 @@ __all__ = [
     "GoalSubmissionRequest",
     "GoalSubmissionResponse",
     "GoalSubmissionStatus",
+    "MissionRoadmapResponse",
+    "MissionRoadmapStageResponse",
     "NewGameRequest",
     "ObjectLocator",
     "PlayerGameStateResponse",
@@ -705,6 +727,7 @@ __all__ = [
     "PublicActionRequirementResponse",
     "PublicExecutionPhase",
     "PublicGameStatus",
+    "PublicGoalRequirementResponse",
     "PublicPlanResponse",
     "PublicPlanStepResponse",
     "PublicStepStatus",

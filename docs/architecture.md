@@ -33,7 +33,8 @@ The durable identity hierarchy is:
       -> GameInstance
            -> exact published ScenarioVersion
                 -> AgentTask
-                     -> ObjectiveScope
+                     -> frozen FormalGoalContractV1
+                          -> ObjectiveScope compatibility projection (predefined only)
                      -> AgentPlan / AgentStep
                           -> WorldOperation
 
@@ -41,8 +42,11 @@ A Scenario has one mutable Current Draft and immutable published Versions.
 Creating a GameInstance binds it to one exact Version and content hash. Editing
 or publishing a later Version never changes an existing GameInstance.
 
-ObjectiveScope is created when a Goal becomes an AgentTask. It is frozen for
-the Task lifetime and is not expanded by REPAIR or REPLAN.
+The FormalGoalContractV1 is frozen when a Goal becomes an AgentTask. It is
+bound to the exact ScenarioVersion and is not expanded by REPAIR or REPLAN.
+An authored PREDEFINED Goal may also retain an ObjectiveScope as a compatibility
+and planning projection. An AD_HOC_DYNAMIC Goal has no authored ObjectiveScope;
+its legacy non-null scope-hash column is only an integrity fingerprint.
 
 ## 3. Scenario authoring boundary
 
@@ -61,13 +65,42 @@ Authors provide stable machine keys, public names, descriptions, structured
 contracts, and data. They do not add executable gameplay code, a custom
 interpreter, a model-specific provider, or a scenario-specific runtime branch.
 
+### 3.1 Formal Goal V1
+
+The runtime has one frozen Goal authority: `FormalGoalContractV1`. Current
+product sources are `PREDEFINED` (compiled from exact authored Objectives) and
+`AD_HOC_DYNAMIC` (compiled from a provider candidate set validated against the
+current public ontology). `PARAMETERIZED` is reserved in the domain enum but
+has no V1 resolver or template implementation.
+
+The contract contains a flat, canonically ordered tuple of typed completion
+requirements. The tuple is an implicit `AND`; V1 has no Goal AST, `OR`, generic
+`NOT`, dynamic selector, quantifier, Actor Goal, WorkingGoal, or Milestone
+entity. The supported requirement kinds are the shared `FACT` and
+`RESOURCE_AT_LEAST` contracts already used by authored Objectives. The backend
+assigns stable requirement identity and computes the contract hash; a provider
+cannot supply either identity or completion semantics.
+
+An AD_HOC_DYNAMIC interpreter receives only the public Scenario ontology and
+currently public entity/fact/Region identities. It cannot see hidden Truth,
+authored Objective metadata, Actions, prerequisites, knowledge gates, or hidden
+completion requirements. It can therefore express only public `FACT` and
+`RESOURCE_AT_LEAST` requirements. Dynamic compilation does not create a
+Scenario ObjectiveDefinition or modify the immutable ScenarioVersion.
+
+The canonical contract is embedded in AgentTask with its schema version, source
+kind, exact ScenarioVersion proof, compiler version, canonical JSON, and hash.
+PlanningCycle stores the contract hash alongside its canonical PlannerInput.
+Legacy predefined Tasks are read through a deterministic compile-on-read
+compatibility path; no lazy write-back is required.
+
 ## 4. Agent runtime overview
 
 The request path is:
 
     Goal
       -> exact-Version Goal Resolver
-      -> frozen ObjectiveScope
+      -> frozen FormalGoalContractV1
       -> Dependency Closure
       -> canonical PlannerInput V2
       -> Provider PlanSegment
@@ -88,8 +121,10 @@ authority, or Version semantics.
 ## 5. Truth and Knowledge boundary
 
 Truth is the authoritative mutable instance state used by Rule evaluation
-and objective verification. Knowledge is the public projection used by
-Planner, Validator, and normal Player responses.
+and Formal Goal verification. Knowledge is the public projection used by
+Planner, Validator, and normal Player responses. Requirement Knowledge (for
+example, whether a gated authored requirement has been revealed) is a public
+Knowledge state, not a change to the frozen Formal Goal contract.
 
 Hidden Truth is never serialized into PlannerInput. UNKNOWN is not false,
 zero, unavailable, or blocked. Runtime may reveal new public Knowledge through
@@ -117,6 +152,11 @@ Runtime is the only layer that mutates Truth and settles WorldOperations.
 Knowledge projection and objective verification consume the resulting state.
 No layer inserts a missing prerequisite or computes a recovery route for the
 Planner.
+
+Goal planning relevance is another projection boundary. Closure and
+PlannerInput expose only the currently public obligations and their public
+producers. Revealing a requirement or Action relevance changes the public
+planning projection, never the frozen Formal Goal scope.
 
 See Agent Planning V2 for the detailed contract and invariants.
 
@@ -176,6 +216,13 @@ Provider audit metadata is secret-safe and may include model settings,
 timestamps, latency, token usage, request size, finish reason, parsed
 proposal, and Validator diagnostics. Raw chain-of-thought and API keys are
 not persisted.
+
+Formal Goal JSON, its canonical hash, exact-Version proof, source kind, and
+compiler version are copied with the stable AgentTask history during
+Checkpoint and Fork materialization. Hidden requirement Knowledge remains in
+the copied GameInstance-scoped public Knowledge state; it is not duplicated
+inside the contract. These lifecycle operations do not create a separate Goal
+lifecycle.
 
 All runtime rows are scoped by GameInstance and exact ScenarioVersion
 ownership. The detailed lifecycle implementation contract, including

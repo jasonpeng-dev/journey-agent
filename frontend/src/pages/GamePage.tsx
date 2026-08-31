@@ -150,6 +150,10 @@ type MissionRoadmapNames = {
   nodeNames?: Record<string, string>;
 };
 
+function taskObjectiveLabel(goal: string, objectiveNames: string[]): string {
+  return objectiveNames.length > 0 ? objectiveNames.join(" · ") : goal;
+}
+
 const FACT_GOAL_LABELS: Record<string, string> = {
   sustained_humanitarian_logistics: "建立持续人道物流能力",
   sustained_generation_capability: "建立持续发电能力",
@@ -182,7 +186,10 @@ function missionRoadmapRequirementText(
       requirement.resource_key,
       names.resourceNames?.[requirement.resource_key],
     );
-    return `${regionName}：${resourceName}储备 ${requirement.current_known_available ?? 0} / ${requirement.minimum}`;
+    const current = requirement.knowledge_status === "UNKNOWN"
+      ? "未知"
+      : String(requirement.current_known_available ?? 0);
+    return `${regionName}：${resourceName}储备 ${current} / ${requirement.minimum}`;
   }
 
   if (requirement.fact_key) {
@@ -1547,7 +1554,7 @@ export function TaskTabs({
           onClick={() => onSelect(item.id)}
         >
           <span>任务 {item.sequence}</span>
-          <strong>{item.objective_names.join(" · ")}</strong>
+          <strong>{taskObjectiveLabel(item.goal, item.objective_names)}</strong>
           <em className={taskTone[item.status] ?? "neutral"}>{uiLabel(item.status)}</em>
           </button>
         </Fragment>
@@ -2012,7 +2019,7 @@ export function GamePage() {
               <section className="player-checkpoint goal-accepted-card" data-testid="goal-accepted-card">
                 <small>目标已接受</small>
                 <h2>{task.goal}</h2>
-                <p>Agent 理解为：{task.objective_names.join("、")}</p>
+                <p>Agent 理解为：{taskObjectiveLabel(task.goal, task.objective_names)}</p>
                 <button
                   disabled={busy}
                   onClick={() => startPlanning.mutate({ version: task.pacing_version, taskId: task.id })}
@@ -2113,7 +2120,7 @@ export function GamePage() {
                 <MissionRoadmap
                   key={task.id}
                   stages={task.roadmap.stages}
-                  summary={task.objective_names.join(" · ")}
+                  summary={taskObjectiveLabel(task.goal, task.objective_names)}
                   regionNames={roadmapRegionNames}
                   resourceNames={roadmapResourceNames}
                   nodeNames={roadmapNodeNames}
