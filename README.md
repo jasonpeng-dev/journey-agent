@@ -60,23 +60,21 @@ formal history, and an auditable source link. See
 
 ## Provider configuration
 
-Mock mode is the safe default and makes no network request. Configure an
-OpenAI-compatible provider only in a local environment; never commit the
-secret key.
+Mock mode is the safe default and makes no network request.
+No API key is required for the default local or Docker setup.
 
     MODEL_PROVIDER=mock
-    MODEL_BASE_URL=https://api.openai.com/v1
-    MODEL_NAME=gpt-4.1-mini
-    MODEL_API_KEY=
-    MODEL_THINKING_MODE=disabled
-    MODEL_REASONING_EFFORT=low
-    MODEL_TIMEOUT_SECONDS=20
-    MODEL_TOTAL_TIMEOUT_SECONDS=60
-    MODEL_MAX_OUTPUT_TOKENS=8192
 
-For a compatible endpoint such as DeepSeek, set the provider endpoint,
-available model, local key, thinking/reasoning settings, and desired timeout
-or output limits. The ScenarioVersion remains provider-agnostic.
+To use a real OpenAI-compatible provider, configure the provider settings
+in your local `.env`.
+
+Journey Agent supports OpenAI-compatible endpoints, including OpenAI and
+compatible providers such as DeepSeek.
+
+See [`.env.example`](.env.example) for the available settings and example
+configuration.
+
+Never commit API keys.
 
 ## Docker quick start
 

@@ -55,24 +55,20 @@ inherited formal history。详见 [GameInstance lifecycle](docs/game-lifecycle.m
 
 ## Provider 配置
 
-Mock mode 是安全默认值，不会发起网络请求。只在本地环境配置
-OpenAI-compatible Provider；不要提交 secret key。
+Mock mode 是安全默认值，不会发起网络模型请求。
+默认本地开发和 Docker 启动都不需要 API key。
 
 ~~~text
 MODEL_PROVIDER=mock
-MODEL_BASE_URL=https://api.openai.com/v1
-MODEL_NAME=gpt-4.1-mini
-MODEL_API_KEY=
-MODEL_THINKING_MODE=disabled
-MODEL_REASONING_EFFORT=low
-MODEL_TIMEOUT_SECONDS=20
-MODEL_TOTAL_TIMEOUT_SECONDS=60
-MODEL_MAX_OUTPUT_TOKENS=8192
 ~~~
 
-如果使用 DeepSeek 等 compatible endpoint，请配置 endpoint、可用 model、
-本地 key、thinking/reasoning 设置和 timeout/output limits。ScenarioVersion
-与 Provider 无关。
+如需使用真实 OpenAI-compatible Provider，请只在本地 `.env` 中配置。
+Journey Agent 支持 OpenAI-compatible endpoint，包括 OpenAI 以及 DeepSeek
+等兼容服务。
+
+完整配置项和示例请参见 [`.env.example`](.env.example)。
+
+不要提交 API key。
 
 ## Docker 快速启动
 
@@ -86,7 +82,8 @@ docker compose up --build -d
 ~~~
 
 macOS/Linux 使用 cp .env.example .env。打开
-http://localhost:8000。Mock mode 不需要 API key。
+[http://localhost:8000](http://localhost:8000)
+Mock mode 不需要 API key。
 
 常用 lifecycle 命令：
 
@@ -126,7 +123,8 @@ npm ci
 npm run dev -- --host 127.0.0.1 --port 4173
 ~~~
 
-打开 http://127.0.0.1:4173。Vite 会把 API request proxy 到 backend。
+打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)
+Vite 会把 API request proxy 到 backend。
 
 浏览器 lifecycle surface 保持精简：active game 可以从 detail 或 list card
 Archive，archived game 可以从任一位置 Fork。Fork request 使用一个
