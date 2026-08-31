@@ -26,6 +26,8 @@ from app.agent.planning_context import (
 )
 from app.agent.provider import (
     AntiRegressionMemoryItem,
+    DynamicGoalInterpretation,
+    DynamicGoalInterpretationRequest,
     GenericModelProvider,
     GenericProviderError,
     GoalSelectionRequest,
@@ -58,9 +60,13 @@ from app.domain.enums import (
     WorldOperationStatus,
 )
 from app.domain.formal_goal import (
+    AdHocGoalCandidateSetV1,
+    AdHocGoalRequirementCandidateV1,
     FormalGoalContractV1,
     FormalGoalError,
+    compile_ad_hoc_dynamic_goal,
     compile_predefined_formal_goal,
+    validate_ad_hoc_dynamic_candidates,
 )
 from app.domain.resources import is_runtime_known_inflow_pool, resource_state_key
 from app.domain.runtime_scope import RuntimeScope
@@ -214,6 +220,7 @@ class GenericGoalResolution:
     clarification_prompt: str | None = None
     source: str = "DETERMINISTIC"
     provider_observation: dict[str, object] | None = None
+    dynamic_requirements: tuple[AdHocGoalRequirementCandidateV1, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,9 +242,16 @@ class GenericGoalResolver:
         self,
         selector: ObjectiveSelector | None = None,
         provider: GenericModelProvider | None = None,
+        *,
+        db: Session | None = None,
+        scope: RuntimeScope | None = None,
     ) -> None:
+        if (db is None) != (scope is None):
+            raise ValueError("Dynamic Goal resolution needs both db and runtime scope")
         self.selector = selector
         self.provider = provider
+        self.db = db
+        self.scope = scope
 
     def resolve(
         self,
@@ -299,6 +313,9 @@ class GenericGoalResolver:
                     provider_observation={**observation, "validation": "ACCEPTED"},
                 )
             if selection.status == "UNSUPPORTED":
+                dynamic = self._resolve_dynamic_goal(goal, definition, observation)
+                if dynamic is not None:
+                    return dynamic
                 return GenericGoalResolution(
                     "UNSUPPORTED",
                     source="MODEL_VALIDATED",
@@ -317,6 +334,9 @@ class GenericGoalResolver:
                         "validation": "ACCEPTED",
                     },
                 )
+            dynamic = self._resolve_dynamic_goal(goal, definition, observation)
+            if dynamic is not None:
+                return dynamic
             return GenericGoalResolution(
                 "UNSUPPORTED",
                 source="MODEL_VALIDATED",
@@ -332,7 +352,86 @@ class GenericGoalResolver:
                 return GenericGoalResolution(
                     "RESOLVED", selected, (selected,), source="MODEL_VALIDATED"
                 )
+        dynamic = self._resolve_dynamic_goal(goal, definition)
+        if dynamic is not None:
+            return dynamic
         return GenericGoalResolution("UNSUPPORTED")
+
+    def _resolve_dynamic_goal(
+        self,
+        goal: str,
+        definition: ScenarioDefinitionV2,
+        prior_observation: dict[str, object] | None = None,
+    ) -> GenericGoalResolution | None:
+        if not definition.goal_resolution.allow_llm_fallback or self.provider is None:
+            return None
+        interpreter = getattr(self.provider, "interpret_dynamic_goal", None)
+        if not callable(interpreter):
+            return None
+        request = DynamicGoalInterpretationRequest(
+            goal=goal,
+            ontology=_dynamic_goal_ontology(self.db, self.scope, definition),
+        )
+        raw_interpretation = interpreter(request)
+        try:
+            interpretation = DynamicGoalInterpretation.model_validate(raw_interpretation)
+        except (TypeError, ValueError) as exc:
+            raise GenericProviderError(
+                "MODEL_PROVIDER_RESPONSE_INVALID",
+                "The model provider returned an invalid Dynamic Goal interpretation",
+            ) from exc
+        observation: dict[str, object] = {
+            "call_type": "DYNAMIC_GOAL_INTERPRETATION",
+            "model": self.provider.model_name,
+            "status": interpretation.status,
+            **provider_call_metadata(self.provider),
+        }
+        if prior_observation is not None:
+            observation["predefined_selection"] = prior_observation
+        if interpretation.status == "NEEDS_CLARIFICATION":
+            return GenericGoalResolution(
+                "NEEDS_CLARIFICATION",
+                clarification_prompt=interpretation.clarification_prompt,
+                source="MODEL_VALIDATED",
+                provider_observation={**observation, "validation": "ACCEPTED"},
+            )
+        if interpretation.status == "UNSUPPORTED":
+            return GenericGoalResolution(
+                "UNSUPPORTED",
+                source="MODEL_VALIDATED",
+                provider_observation={**observation, "validation": "ACCEPTED"},
+            )
+        candidate_set = AdHocGoalCandidateSetV1(requirements=interpretation.requirements)
+        try:
+            if self.db is not None and self.scope is not None:
+                _validate_dynamic_goal_publicity(
+                    self.db,
+                    self.scope,
+                    definition,
+                    candidate_set,
+                )
+            else:
+                validate_ad_hoc_dynamic_candidates(definition, candidate_set)
+        except FormalGoalError as exc:
+            return GenericGoalResolution(
+                "UNSUPPORTED",
+                source="MODEL_VALIDATED",
+                provider_observation={
+                    **observation,
+                    "validation": "REJECTED",
+                    "rejection_code": exc.code,
+                },
+            )
+        return GenericGoalResolution(
+            "RESOLVED",
+            dynamic_requirements=interpretation.requirements,
+            source="MODEL_VALIDATED",
+            provider_observation={
+                **observation,
+                "validation": "ACCEPTED",
+                "requirement_count": len(interpretation.requirements),
+            },
+        )
 
 
 class GenericAgentService:
@@ -353,7 +452,11 @@ class GenericAgentService:
         self.db = db
         self.scope = scope
         self.provider = provider
-        self.goal_resolver = goal_resolver or GenericGoalResolver(provider=provider)
+        self.goal_resolver = goal_resolver or GenericGoalResolver(
+            provider=provider,
+            db=db,
+            scope=scope,
+        )
         self.provider_call_observer = provider_call_observer
         self.model_max_repair_attempts_per_cycle = model_max_repair_attempts_per_cycle
         self._provider_call_started_at: dict[str, float] = {}
@@ -390,26 +493,53 @@ class GenericAgentService:
                 "Generic task creation requires the Instance primary Actor session",
             )
         resolution = resolved_goal or self.goal_resolver.resolve(goal, definition)
-        if resolution.status != "RESOLVED" or not resolution.objective_keys:
+        if resolution.status != "RESOLVED":
             raise GenericAgentError(
                 f"GOAL_{resolution.status}",
                 resolution.clarification_prompt or "Goal does not resolve in the exact Version",
             )
-        valid_objectives = {objective.key for objective in definition.objectives}
-        if not set(resolution.objective_keys).issubset(valid_objectives):
-            raise GenericAgentError(
-                "GOAL_UNSUPPORTED",
-                "Goal does not resolve to Objectives in the exact Version",
-            )
-        objective_keys = normalize_objective_keys(definition, resolution.objective_keys)
-        objectives = tuple(definition.objective_definitions[key] for key in objective_keys)
+        objective_keys: tuple[str, ...] = ()
+        objective_scope: ObjectiveScope | None = None
         try:
-            formal_goal = compile_predefined_formal_goal(snapshot, objectives)
+            if resolution.objective_keys and resolution.dynamic_requirements:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_SOURCE_AMBIGUOUS",
+                    "A Goal resolution cannot contain both authored Objectives and "
+                    "dynamic requirements",
+                )
+            if resolution.objective_keys:
+                valid_objectives = {objective.key for objective in definition.objectives}
+                if not set(resolution.objective_keys).issubset(valid_objectives):
+                    raise FormalGoalError(
+                        "FORMAL_GOAL_OBJECTIVE_NOT_EXACT",
+                        "Goal does not resolve to Objectives in the exact Version",
+                    )
+                objective_keys = normalize_objective_keys(definition, resolution.objective_keys)
+                objectives = tuple(definition.objective_definitions[key] for key in objective_keys)
+                formal_goal = compile_predefined_formal_goal(snapshot, objectives)
+                objective_scope = ObjectiveScope.create(
+                    objective_keys,
+                    f"scenario-version:{self.scope.scenario_version_id}",
+                )
+            elif resolution.dynamic_requirements:
+                candidate_set = AdHocGoalCandidateSetV1(
+                    requirements=resolution.dynamic_requirements
+                )
+                _validate_dynamic_goal_publicity(
+                    self.db,
+                    self.scope,
+                    definition,
+                    candidate_set,
+                )
+                formal_goal = compile_ad_hoc_dynamic_goal(snapshot, candidate_set)
+            else:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_REQUIREMENTS_REQUIRED",
+                    "A resolved Goal needs authored Objectives or dynamic requirements",
+                )
         except FormalGoalError as exc:
             raise GenericAgentError(exc.code, exc.message) from exc
         now = datetime.now(UTC)
-        catalog_version = f"scenario-version:{self.scope.scenario_version_id}"
-        objective_scope = ObjectiveScope.create(objective_keys, catalog_version)
         task = AgentTask(
             player_id=self.scope.player_id,
             game_instance_id=self.scope.game_instance_id,
@@ -419,9 +549,20 @@ class GenericAgentService:
             goal_description=goal,
             scenario_key=definition.metadata.key,
             objective_resolution_status="CONFIRMED",
-            objective_scope_keys=list(objective_scope.objective_keys),
-            objective_catalog_version=objective_scope.catalog_version,
-            objective_scope_hash=objective_scope.content_hash,
+            objective_scope_keys=(
+                list(objective_scope.objective_keys) if objective_scope is not None else None
+            ),
+            objective_catalog_version=(
+                objective_scope.catalog_version if objective_scope is not None else None
+            ),
+            # The legacy column is non-null for v0.2 compatibility.  Dynamic
+            # Tasks do not have an ObjectiveScope; retain the Formal Goal hash
+            # only as an opaque integrity fingerprint in that column.
+            objective_scope_hash=(
+                objective_scope.content_hash
+                if objective_scope is not None
+                else formal_goal.content_hash
+            ),
             formal_goal_contract_schema_version=formal_goal.schema_version,
             formal_goal_source_kind=formal_goal.source_kind.value,
             formal_goal_contract_json=formal_goal.model_dump(mode="json"),
@@ -474,6 +615,14 @@ class GenericAgentService:
         definition = self._definition()
         self._task_scope(task)
         formal_goal = self._formal_goal(task)
+        if (
+            formal_goal.source_kind.value == "AD_HOC_DYNAMIC"
+            and self.provider is None
+        ):
+            raise GenericAgentError(
+                "DYNAMIC_GOAL_PROVIDER_REQUIRED",
+                "An AD_HOC_DYNAMIC Goal requires a planning Provider",
+            )
         objectives = formal_goal_planning_objectives(
             formal_goal,
             definition,
@@ -4716,6 +4865,148 @@ class GenericAgentService:
         task.status = AgentTaskStatus.SUCCEEDED
         task.last_error_code = None
         task.completed_at = datetime.now(UTC)
+
+
+def _dynamic_goal_public_keys(
+    db: Session | None,
+    scope: RuntimeScope | None,
+    definition: ScenarioDefinitionV2,
+) -> tuple[set[str], set[tuple[str, str]], set[str]]:
+    """Return public node, fact, and Region identities without Truth values."""
+
+    if db is not None and scope is not None:
+        projection = SharedKnowledgeProjection(db, scope, definition)
+        public_nodes = {row.node_key for row in projection.known_node_rows()}
+        public_facts = {(row.node_key, row.fact_key) for row in projection.known_fact_rows()}
+    else:
+        public_nodes = {
+            node.key
+            for node in definition.world.nodes
+            if node.initial_visibility == Visibility.KNOWN
+        }
+        public_facts = {
+            (node.key, fact.key)
+            for node in definition.world.nodes
+            if node.key in public_nodes
+            for fact in node.facts
+            if fact.initial_visibility == Visibility.KNOWN
+        }
+    locality = definition.metadata.locality
+    public_regions = {
+        node.key
+        for node in definition.world.nodes
+        if node.key in public_nodes
+        and locality.enabled
+        and node.node_type_key == locality.region_node_type_key
+    }
+    return public_nodes, public_facts, public_regions
+
+
+def _dynamic_goal_ontology(
+    db: Session | None,
+    scope: RuntimeScope | None,
+    definition: ScenarioDefinitionV2,
+) -> dict[str, object]:
+    """Build the interpreter's public ontology, excluding Truth and planning."""
+
+    public_nodes, public_facts, public_regions = _dynamic_goal_public_keys(
+        db,
+        scope,
+        definition,
+    )
+    nodes = [
+        {
+            "key": node.key,
+            "name": node.name,
+            "description": node.description,
+            "node_type_key": node.node_type_key,
+        }
+        for node in sorted(definition.world.nodes, key=lambda item: item.key)
+        if node.key in public_nodes
+    ]
+    facts = [
+        {
+            "node_key": node.key,
+            "fact_key": fact.key,
+            "name": fact.name,
+            "description": fact.description,
+            "value_type": fact.value_type.value,
+            **({"allowed_values": list(fact.allowed_values)} if fact.allowed_values else {}),
+        }
+        for node in sorted(definition.world.nodes, key=lambda item: item.key)
+        if node.key in public_nodes
+        for fact in sorted(node.facts, key=lambda item: item.key)
+        if (node.key, fact.key) in public_facts
+    ]
+    resources = [
+        {"key": resource.key, "name": resource.name, "description": resource.description}
+        for resource in sorted(definition.world.resources, key=lambda item: item.key)
+    ]
+    return {
+        "schema_version": 1,
+        "scenario": {
+            "key": definition.metadata.key,
+            "name": definition.metadata.name,
+            "description": definition.metadata.description,
+        },
+        "world": {
+            "nodes": nodes,
+            "regions": [
+                node_key
+                for node_key in sorted(public_regions)
+            ],
+            "facts": facts,
+            "resources": resources,
+        },
+        "goal_language": {
+            "requirement_kinds": ["FACT", "RESOURCE_AT_LEAST"],
+            "combination": "IMPLICIT_AND",
+            "comparison": "AT_LEAST_FOR_RESOURCE",
+        },
+    }
+
+
+def _validate_dynamic_goal_publicity(
+    db: Session,
+    scope: RuntimeScope,
+    definition: ScenarioDefinitionV2,
+    candidates: AdHocGoalCandidateSetV1,
+) -> None:
+    """Reject a candidate that names a currently non-public ontology item."""
+
+    validate_ad_hoc_dynamic_candidates(definition, candidates)
+    public_nodes, public_facts, public_regions = _dynamic_goal_public_keys(
+        db,
+        scope,
+        definition,
+    )
+    public_resources = {item.key for item in definition.world.resources}
+    for candidate in candidates.requirements:
+        if candidate.kind.value == "FACT":
+            assert candidate.node_key is not None and candidate.fact_key is not None
+            if candidate.node_key not in public_nodes:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_NODE_NOT_PUBLIC",
+                    f"Dynamic Goal references a non-public Node {candidate.node_key}",
+                )
+            if (candidate.node_key, candidate.fact_key) not in public_facts:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_FACT_NOT_PUBLIC",
+                    "Dynamic Goal references a non-public Fact "
+                    f"{candidate.node_key}.{candidate.fact_key}",
+                )
+            continue
+        assert candidate.region_key is not None and candidate.resource_key is not None
+        if candidate.region_key not in public_regions:
+            raise FormalGoalError(
+                "FORMAL_GOAL_DYNAMIC_REGION_NOT_PUBLIC",
+                f"Dynamic Goal references a non-public Region {candidate.region_key}",
+            )
+        if candidate.resource_key not in public_resources:
+            raise FormalGoalError(
+                "FORMAL_GOAL_DYNAMIC_RESOURCE_NOT_PUBLIC",
+                f"Dynamic Goal references a non-public Resource {candidate.resource_key}",
+            )
 
 
 def normalize_objective_keys(
