@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
-from app.agent.objective_scope import ObjectiveScope, ObjectiveScopeError
+from app.agent.objective_scope import ObjectiveScope
 from app.agent.planner_contract import action_planner_effects
 from app.agent.planning_context import (
     PlanningActionCatalogBuilder,
@@ -56,8 +56,14 @@ from app.domain.enums import (
     StepExecutionType,
     WorldOperationStatus,
 )
+from app.domain.formal_goal import (
+    FormalGoalContractV1,
+    FormalGoalError,
+    compile_predefined_formal_goal,
+)
 from app.domain.resources import is_runtime_known_inflow_pool, resource_state_key
 from app.domain.runtime_scope import RuntimeScope
+from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionDefinitionV2,
@@ -104,6 +110,11 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.formal_goal import (
+    FormalGoalCompletionEvaluator,
+    FormalGoalPersistenceError,
+    load_formal_goal_for_task,
+)
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import require_scope_writable
 from app.services.generic_actions import (
@@ -115,7 +126,6 @@ from app.services.knowledge_projection import SharedKnowledgeProjection, resourc
 from app.services.objective_requirements import (
     known_requirement_satisfied,
     requirement_gate_is_public,
-    truth_requirement_satisfied,
 )
 
 ObjectiveSelector = Callable[[str, tuple[ObjectiveDefinitionV2, ...]], str | None]
@@ -371,7 +381,8 @@ class GenericAgentService:
                 "AGENT_TASK_ALREADY_ACTIVE",
                 "A GameInstance may have only one active Task",
             )
-        definition = self._definition()
+        snapshot = self._snapshot()
+        definition = snapshot.definition
         if session.game_instance_id != self.scope.game_instance_id or not session.actor_key:
             raise GenericAgentError(
                 "GENERIC_SESSION_SCOPE_INVALID",
@@ -390,6 +401,11 @@ class GenericAgentService:
                 "Goal does not resolve to Objectives in the exact Version",
             )
         objective_keys = normalize_objective_keys(definition, resolution.objective_keys)
+        objectives = tuple(definition.objective_definitions[key] for key in objective_keys)
+        try:
+            formal_goal = compile_predefined_formal_goal(snapshot, objectives)
+        except FormalGoalError as exc:
+            raise GenericAgentError(exc.code, exc.message) from exc
         now = datetime.now(UTC)
         catalog_version = f"scenario-version:{self.scope.scenario_version_id}"
         objective_scope = ObjectiveScope.create(objective_keys, catalog_version)
@@ -405,6 +421,13 @@ class GenericAgentService:
             objective_scope_keys=list(objective_scope.objective_keys),
             objective_catalog_version=objective_scope.catalog_version,
             objective_scope_hash=objective_scope.content_hash,
+            formal_goal_contract_schema_version=formal_goal.schema_version,
+            formal_goal_source_kind=formal_goal.source_kind.value,
+            formal_goal_contract_json=formal_goal.model_dump(mode="json"),
+            formal_goal_contract_hash=formal_goal.content_hash,
+            formal_goal_scenario_version_id=formal_goal.scenario.scenario_version_id,
+            formal_goal_scenario_content_hash=formal_goal.scenario.scenario_content_hash,
+            formal_goal_compiler_version=formal_goal.compiler_version,
             objective_resolver_source=resolution.source,
             objective_resolver_version="generic-goal-resolver@1",
             objective_resolution_metadata={
@@ -1134,28 +1157,21 @@ class GenericAgentService:
         return marker if isinstance(marker, dict) else None
 
     def evaluate(self, task: AgentTask) -> GenericObjectiveEvaluation:
-        definition = self._definition()
-        objectives = self._objectives(task, definition)
-        evaluations: list[tuple[str, StrictScalar, bool]] = []
-        for objective in objectives:
-            for requirement in objective.completion_requirements:
-                try:
-                    value, satisfied = truth_requirement_satisfied(self.db, self.scope, requirement)
-                except LookupError:
-                    raise GenericAgentError(
-                        "OBJECTIVE_TRUTH_MISSING", "Objective Truth is missing from this Instance"
-                    ) from None
-                evaluations.append(
-                    (
-                        f"{objective.key}:{requirement.key}",
-                        cast(StrictScalar, value),
-                        satisfied,
-                    )
-                )
+        contract = self._formal_goal(task)
+        try:
+            result = FormalGoalCompletionEvaluator(self.db, self.scope).evaluate(contract)
+        except LookupError:
+            raise GenericAgentError(
+                "OBJECTIVE_TRUTH_MISSING", "Objective Truth is missing from this Instance"
+            ) from None
+        evaluations = tuple(
+            (item.identity, cast(StrictScalar, item.value), item.satisfied)
+            for item in result.requirements
+        )
         return GenericObjectiveEvaluation(
-            tuple(objective.key for objective in objectives),
-            bool(evaluations) and all(item[2] for item in evaluations),
-            tuple(evaluations),
+            tuple(item.objective_key for item in contract.predefined_objectives),
+            result.completed,
+            evaluations,
         )
 
     @staticmethod
@@ -2086,6 +2102,7 @@ class GenericAgentService:
             base_call_type=call_type,
             replan_reason=replan_reason,
             frozen_objective_scope=[item.key for item in objectives],
+            formal_goal_contract_hash=task.formal_goal_contract_hash,
             planner_input=payload,
             planner_input_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
             status="RUNNING",
@@ -4528,36 +4545,39 @@ class GenericAgentService:
         elif not retryable:
             task.status = AgentTaskStatus.BLOCKED
 
-    def _definition(self) -> ScenarioDefinitionV2:
+    def _snapshot(self) -> ScenarioVersionSnapshot:
         persisted = GameInstanceService(self.db).load(self.scope.game_instance_id)
         self.scope.assert_compatible(persisted)
-        definition = (
-            ScenarioVersionRepository(self.db).load(self.scope.scenario_version_id).definition
-        )
+        snapshot = ScenarioVersionRepository(self.db).load(self.scope.scenario_version_id)
+        definition = snapshot.definition
         if not isinstance(definition, ScenarioDefinitionV2):
             raise GenericAgentError(
                 "GENERIC_RUNTIME_SCHEMA_REQUIRED", "Generic Agent requires ScenarioDefinition v2"
             )
-        return definition
+        return snapshot
+
+    def _definition(self) -> ScenarioDefinitionV2:
+        return self._snapshot().definition
+
+    def _formal_goal(self, task: AgentTask) -> FormalGoalContractV1:
+        try:
+            return load_formal_goal_for_task(self.db, self.scope, task)
+        except FormalGoalPersistenceError as exc:
+            raise GenericAgentError(exc.code, exc.message) from exc
 
     def _task_scope(self, task: AgentTask) -> None:
-        try:
-            objective_scope = ObjectiveScope.create(
-                task.objective_scope_keys or [], task.objective_catalog_version or ""
-            )
-        except ObjectiveScopeError as exc:
-            raise GenericAgentError("GENERIC_OBJECTIVE_SCOPE_INVALID", str(exc)) from exc
         if (
             task.game_instance_id != self.scope.game_instance_id
             or task.player_id != self.scope.player_id
-            or task.objective_catalog_version
-            != f"scenario-version:{self.scope.scenario_version_id}"
-            or task.objective_frozen_at is None
-            or objective_scope.content_hash != task.objective_scope_hash
         ):
             raise GenericAgentError(
                 "GENERIC_TASK_SCOPE_INVALID", "Task does not belong to this exact Version scope"
             )
+        if task.objective_frozen_at is None:
+            raise GenericAgentError(
+                "GENERIC_TASK_SCOPE_INVALID", "Task does not have a frozen Formal Goal"
+            )
+        self._formal_goal(task)
 
     @staticmethod
     def _objectives(

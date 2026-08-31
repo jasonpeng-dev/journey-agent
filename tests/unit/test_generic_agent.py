@@ -243,6 +243,12 @@ def test_generic_agent_completes_goal_plan_action_and_backend_objective(
     assert (
         task.objective_catalog_version == f"scenario-version:{runtime.instance.scenario_version_id}"
     )
+    assert task.formal_goal_contract_schema_version == 1
+    assert task.formal_goal_source_kind == "PREDEFINED"
+    assert task.formal_goal_contract_json is not None
+    assert task.formal_goal_contract_hash
+    assert task.formal_goal_scenario_version_id == runtime.instance.scenario_version_id
+    assert task.formal_goal_scenario_content_hash
     assert task.owner_actor_key == "doctor_lee"
     assert task.owner_actor_key == "doctor_lee"
 

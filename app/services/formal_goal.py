@@ -81,12 +81,18 @@ def load_formal_goal_for_task(
     inspected.
     """
 
-    snapshot = ScenarioVersionRepository(db).load(scope.scenario_version_id)
     if task.game_instance_id != scope.game_instance_id or task.player_id != scope.player_id:
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_TASK_SCOPE_INVALID",
             "Formal Goal Task does not belong to the requested runtime scope",
         )
+    if task.objective_frozen_at is None:
+        raise FormalGoalPersistenceError(
+            "FORMAL_GOAL_TASK_NOT_FROZEN",
+            "A Task Formal Goal must be frozen before it can be evaluated",
+        )
+
+    snapshot = ScenarioVersionRepository(db).load(scope.scenario_version_id)
 
     if task.formal_goal_contract_json is not None:
         return _load_persisted_formal_goal(task, snapshot)
