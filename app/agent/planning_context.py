@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches
 from app.agent.dependency_closure import DependencyClosureResult, build_dependency_closure
+from app.agent.formal_goal_projection import formal_goal_planning_objectives
 from app.agent.planner_contract import (
     action_planner_constraints,
     action_planner_effects,
@@ -34,6 +35,7 @@ from app.agent.provider import (
     PlanningContinuity,
 )
 from app.domain.enums import NodeStatus, WorldOperationStatus
+from app.domain.formal_goal import FormalGoalContractV1
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
@@ -505,11 +507,20 @@ class PlanningContextBuilder:
     def build(
         self,
         definition: ScenarioDefinitionV2,
-        objectives: tuple[ObjectiveDefinitionV2, ...],
+        objectives: tuple[ObjectiveDefinitionV2, ...] | None = None,
         *,
         task: AgentTask,
         replan_reason: str | None,
+        formal_goal: FormalGoalContractV1 | None = None,
     ) -> PlanningContext:
+        if formal_goal is not None:
+            objectives = formal_goal_planning_objectives(
+                formal_goal,
+                definition,
+                goal_description=task.goal_description,
+            )
+        if objectives is None:
+            raise ValueError("PlanningContext needs a Formal Goal or Objective projection")
         legacy = PlanningActionCatalogBuilder(self.db, self.scope)
         known_refs = legacy.known_fact_refs()
         known_world = legacy.known_world(definition)
@@ -552,7 +563,13 @@ class PlanningContextBuilder:
         )
         relevant_actors = self._actors(definition, relevant_action_keys)
         return PlanningContext(
-            goal=self._goal(definition, objectives, known_refs, known_world),
+            goal=self._goal(
+                definition,
+                objectives,
+                known_refs,
+                known_world,
+                formal_goal=formal_goal,
+            ),
             current_knowledge={
                 **known_world,
                 "known_action_requirements": list(planner_action_requirements),
@@ -592,10 +609,11 @@ class PlanningContextBuilder:
     def build_v2(
         self,
         definition: ScenarioDefinitionV2,
-        objectives: tuple[ObjectiveDefinitionV2, ...],
+        objectives: tuple[ObjectiveDefinitionV2, ...] | None = None,
         *,
         task: AgentTask,
         replan_reason: str | None,
+        formal_goal: FormalGoalContractV1 | None = None,
     ) -> PlannerInput:
         """Build canonical V2 while V1 remains an internal Validator adapter."""
 
@@ -604,15 +622,17 @@ class PlanningContextBuilder:
             objectives,
             task=task,
             replan_reason=replan_reason,
+            formal_goal=formal_goal,
         ).planner_input
 
     def build_v2_closure(
         self,
         definition: ScenarioDefinitionV2,
-        objectives: tuple[ObjectiveDefinitionV2, ...],
+        objectives: tuple[ObjectiveDefinitionV2, ...] | None = None,
         *,
         task: AgentTask,
         replan_reason: str | None,
+        formal_goal: FormalGoalContractV1 | None = None,
     ) -> DependencyClosureResult:
         """Build the typed, bounded dependency closure and its internal audit."""
 
@@ -622,9 +642,15 @@ class PlanningContextBuilder:
                 objectives,
                 task=task,
                 replan_reason=replan_reason,
+                formal_goal=formal_goal,
             )
         )
-        return build_dependency_closure(definition, objectives, base)
+        return build_dependency_closure(
+            definition,
+            objectives,
+            base,
+            formal_goal=formal_goal,
+        )
 
     def _retrieve_action_keys(
         self,
@@ -726,6 +752,8 @@ class PlanningContextBuilder:
         objectives: tuple[ObjectiveDefinitionV2, ...],
         known_refs: set[tuple[str, str]],
         known_world: dict[str, object],
+        *,
+        formal_goal: FormalGoalContractV1 | None = None,
     ) -> dict[str, object]:
         known_facts = _known_world_facts(known_world)
         completion = [
@@ -751,7 +779,7 @@ class PlanningContextBuilder:
                 _requirement_is_public(item, known_refs, known_facts) for item in group.requirements
             )
         ]
-        return {
+        result: dict[str, object] = {
             "exact_scenario_version": str(self.scope.scenario_version_id),
             "objective_scope": [item.key for item in objectives],
             "objectives": [
@@ -770,6 +798,21 @@ class PlanningContextBuilder:
             "completion_requirements": completion,
             "public_prerequisites": prerequisites,
         }
+        if formal_goal is not None:
+            result["formal_goal"] = {
+                "schema_version": formal_goal.schema_version,
+                "source_kind": formal_goal.source_kind.value,
+                "contract_hash": formal_goal.content_hash,
+                "requirements": [
+                    {
+                        "identity": item.identity,
+                        **item.requirement.model_dump(mode="json"),
+                    }
+                    for item in formal_goal.completion_requirements
+                    if _requirement_is_public(item.requirement, known_refs, known_facts)
+                ],
+            }
+        return result
 
     def _actions(
         self,

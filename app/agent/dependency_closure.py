@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Any
 
+from app.agent.formal_goal_projection import formal_goal_planning_objectives
 from app.agent.provider import (
     PlannerActionContract,
     PlannerActorState,
@@ -18,6 +19,7 @@ from app.agent.provider import (
     PlannerTargetBinding,
 )
 from app.domain.enums import ResourceInventoryVisibility
+from app.domain.formal_goal import FormalGoalContractV1
 from app.domain.scenario_v2 import (
     ObjectiveDefinitionV2,
     ObjectiveRequirementKind,
@@ -359,13 +361,19 @@ def _source_precondition_dependencies(
 
 def build_dependency_closure(
     definition: ScenarioDefinitionV2,
-    objectives: tuple[ObjectiveDefinitionV2, ...],
+    objectives: tuple[ObjectiveDefinitionV2, ...] | None,
     planner_input: PlannerInput,
     *,
+    formal_goal: FormalGoalContractV1 | None = None,
     dependency_limit: int = 128,
     action_limit: int = 64,
 ) -> DependencyClosureResult:
     """Return a fixed-point slice; never choose bindings or order Plan steps."""
+
+    if formal_goal is not None:
+        objectives = formal_goal_planning_objectives(formal_goal, definition)
+    if objectives is None:
+        raise ValueError("Dependency closure needs a Formal Goal or Objective projection")
 
     contracts = {item.action_key: item for item in planner_input.action_contracts}
     bindings = {(item.action_key, item.target_key): item for item in planner_input.target_bindings}

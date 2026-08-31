@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from app.agent.formal_goal_projection import formal_goal_planning_objectives
 from app.domain.formal_goal import (
     AdHocGoalCandidateSetV1,
     AdHocGoalRequirementCandidateV1,
@@ -170,6 +171,38 @@ def test_dynamic_resource_reuses_typed_requirement_and_rejects_gate() -> None:
                 },
             }
         )
+
+
+def test_dynamic_planning_projection_keeps_typed_requirements_without_authored_objective() -> None:
+    snapshot = _snapshot(_resource_document())
+    contract = compile_ad_hoc_dynamic_goal(
+        snapshot,
+        (
+            AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.FACT,
+                node_key="patient_one",
+                fact_key="stable",
+                accepted_values=(True,),
+            ),
+            AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.RESOURCE_AT_LEAST,
+                region_key="triage_room",
+                resource_key="medicine",
+                minimum=10,
+            ),
+        ),
+    )
+
+    projected = formal_goal_planning_objectives(contract, snapshot.definition)
+
+    assert len(projected) == 1
+    assert projected[0].key == "dynamic_goal"
+    assert {item.kind for item in projected[0].completion_requirements} == {
+        ObjectiveRequirementKind.FACT,
+        ObjectiveRequirementKind.RESOURCE_AT_LEAST,
+    }
+    assert len({item.key for item in projected[0].completion_requirements}) == 2
+    assert projected[0].prerequisites == ()
 
 
 def test_dynamic_rejects_unknown_ontology_and_duplicate_semantics() -> None:

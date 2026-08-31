@@ -532,6 +532,10 @@ def test_planner_owned_required_parameter_reaches_provider_without_prefill(
     assert len(provider.plan_requests) == 1
     assert plan.version == 1
     assert provider.plan_requests[0].planner_input is not None
+    formal_goal_projection = provider.plan_requests[0].planner_input.objective["formal_goal"]
+    assert isinstance(formal_goal_projection, dict)
+    assert formal_goal_projection["contract_hash"] == task.formal_goal_contract_hash
+    assert formal_goal_projection["requirements"]
     planner_parameters = provider.plan_requests[0].planner_input.action_contracts[0].parameters
     assert planner_parameters[0]["required"] is True
     assert planner_parameters[0]["default"] is None
