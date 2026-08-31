@@ -107,6 +107,28 @@ scope, or replace a completion requirement with a model-declared one.
 Completion is determined by the formal Scenario completion requirements and
 projected deterministic effects, not by a free-form model assertion.
 
+### 3.1 Objective requirement kinds and gated publication
+
+The current objective evaluator supports both `FACT` and
+`RESOURCE_AT_LEAST` completion requirements. A `RESOURCE_AT_LEAST`
+requirement names a Resource, a Region, and a minimum quantity. Truth
+evaluation aggregates the actual free quantity in matching Runtime Resource
+Pools that are `AVAILABLE`; reserved quantity is excluded.
+
+Public planning and player projections apply a stricter Knowledge boundary.
+They aggregate only currently Known Resource Knowledge. A hidden Pool,
+quantity, or source cannot contribute to public satisfaction. No row in an
+incomplete or unsurveyed Region remains UNKNOWN, while a completed visible
+inventory with no matching Pool can represent known zero.
+
+A completion requirement may have a `knowledge_gate` containing
+`node_key`, `fact_key`, and `accepted_values`. The requirement already belongs
+to the frozen ObjectiveScope when the AgentTask is created, but it enters the
+public Agent/Player projection only after that gate is Known and satisfied.
+This reveal does not broaden ObjectiveScope, create a later Objective, or
+delegate completion to the Provider. The deterministic evaluator remains the
+completion authority.
+
 ## 4. Dependency Closure
 
 Dependency Closure is bounded relevance filtering for the current frozen
@@ -200,6 +222,15 @@ Resource Knowledge contract:
 * the Agent reads relevant Known Knowledge through canonical structured
   PlannerInput; hidden Truth is never included in PlannerInput.
 
+An authored Resource Pool `availability_requirement` is static dependency
+metadata, not a reactive derived-state engine. It can expose a public unlock
+condition to Closure, Planner, and Validator, but satisfying the referenced
+Fact does not by itself mutate a Pool from `UNAVAILABLE` to `AVAILABLE`.
+Runtime availability changes require an explicit successful Rule Effect such
+as `SET_RESOURCE_POOL_AVAILABILITY`. Facility repair and linked-Pool unlock
+are therefore equivalent only when the selected Rule explicitly performs
+that mutation.
+
 PlanningContext and PlanningActionCatalogBuilder remain current in-process and
 binding projections used by the runtime. PlanningContextV1 has been removed.
 The planning-context-only provider_payload branch has also been removed.
@@ -281,6 +312,24 @@ one-step progress Action nor a legal one-step Knowledge-acquisition Action
 provable from current public Known state. BLOCKED must have an empty steps
 array. If any legal progress or acquisition Action exists, the segment is not
 BLOCKED.
+
+### Ordinary FACT UNKNOWN and the traversal exception
+
+Ordinary public Fact prerequisites use tri-state semantics:
+
+* a Known matching value satisfies the prerequisite;
+* a Known conflicting value is a deterministic contradiction;
+* UNKNOWN satisfies neither branch and remains a blocking public Knowledge
+  dependency.
+
+Closure may retain the relevant legal Knowledge-acquisition producers for
+that dependency. The Validator must not assume that an UNKNOWN ordinary Fact
+is satisfied or convert it to false.
+
+Traversal passability is an explicit exception. Known passable is legal,
+Known blocked is a contradiction, and UNKNOWN passability is `MAY_ATTEMPT`.
+The attempt can fail at Runtime and reveal the route Truth. This route
+uncertainty is not, by itself, an `INFORMATION_BOUNDARY`.
 
 ## 9. Sequential projected validation
 
@@ -404,12 +453,21 @@ transport_resource is the Region-to-Region Resource transfer Action:
 
 * source is the projected executing Actor Region;
 * target is the destination Region;
-* parameters contain the Resource key and amount required by the contract;
-* the Resource moves only when this Action resolves successfully;
-* the executing Actor remains in its current Region.
+* canonical parameters contain a non-empty `resources` cargo list whose
+  entries have a unique Resource key and positive integer amount;
+* legacy single-cargo `resource_key` and `amount` input is normalized to that
+  canonical list;
+* all requested cargo is consumed from Known, visible, `AVAILABLE`,
+  unreserved source-Pool quantity and added to the destination only when the
+  one-hop Action resolves successfully;
+* multi-Resource cargo is atomic: a blocked route, unknown/insufficient
+  source, or invalid entry moves neither cargo nor Actor;
+* on success, the executing Actor location also changes to the destination
+  Region, and sequential validation uses that projected location for the next
+  step.
 
-It is a logistics transfer/dispatch operation, not an implicit travel
-operation.
+The deterministic destination inflow is Known without implying that the
+destination Region's hidden base inventory has been surveyed.
 
 ### relay_message
 
@@ -418,12 +476,32 @@ relay can connect a target Actor when the public locality and interaction
 requirements are met. The Validator projects the target's reachability for
 later steps.
 
-### survey_resources and other Knowledge acquisition
+### Knowledge acquisition domains
 
-Knowledge acquisition changes public Knowledge, not Truth. A survey or inspect
-step must match the declared dependency. When it is the final step of an
-INFORMATION_BOUNDARY segment, the lifecycle pauses for execution and Player
-acknowledgement before REPLAN.
+The Knowledge effects described here change public visibility, not their
+underlying Truth values; an Action's selected declarative Rule may separately
+mutate Truth. The current generic domains are deliberately separate:
+
+* `survey_resources` reveals Region Resource Knowledge and discoverable Pool
+  metadata; it does not reveal hidden Facility Truth;
+* `inspect` reveals the selected Facility or Transport target's non-Resource
+  facts; it does not survey the Region inventory;
+* successful `repair_communications` derives the target Region through the
+  generic locality contract and `located_in` relations, then reveals that
+  Region's Facility nodes and their current Runtime facts.
+
+Communication recovery reads current Runtime Truth when visibility is
+changed; it does not replay initial cached values. Agent and Player share the
+same public Knowledge boundary, and communication recovery does not reveal
+Region Resource inventory. Linjiang is one data-defined instance of this
+generic behavior, not a Runtime scenario-key branch or a hard-coded Region
+reveal table.
+
+A Knowledge-acquisition step must match the declared dependency. When it is
+the final step of an `INFORMATION_BOUNDARY` segment, the lifecycle pauses for
+execution and Player acknowledgement before REPLAN. The existence of a
+Knowledge-producing Action alone does not make a segment an information
+boundary.
 
 ### clear_transport and repair Actions
 
@@ -443,6 +521,13 @@ Public Knowledge can be produced by:
 * a deterministic Runtime failure that reveals a public fact;
 * a public Action effect;
 * public resource and relation state.
+
+Node visibility and Fact visibility are independent public effects. An
+explicit reveal publishes the current Runtime value; it neither arises from
+inference alone nor resets the value to the Scenario's initial value. Facility/Transport facts,
+Region Resource inventory, and individual Pool visibility remain separate
+Knowledge domains unless an explicit generic behavior or Rule Effect updates
+each one.
 
 Inference does not turn UNKNOWN into Known state. Hidden facts, hidden
 resource pools, and hidden Rule branches are never selected to help a plan.
