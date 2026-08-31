@@ -14,9 +14,13 @@ from app.domain.formal_goal import (
 )
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario import ScenarioVersionSnapshot
+from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import AgentTask
 from app.scenarios.versions import ScenarioVersionRepository
-from app.services.objective_requirements import truth_requirement_satisfied
+from app.services.objective_requirements import (
+    known_requirement_satisfied,
+    truth_requirement_satisfied,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,12 +28,23 @@ class FormalGoalRequirementEvaluation:
     identity: str
     value: object
     satisfied: bool
+    player_visible_satisfied: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FormalGoalEvaluation:
+    """Expose authoritative and player-visible completion separately.
+
+    ``completed`` is deliberately Truth-based: it answers whether the frozen
+    contract is satisfied in the authoritative Runtime.  A player-facing
+    lifecycle must use ``player_visible_completed`` when a Scenario
+    definition is available, because a hidden value cannot be used as an
+    observable completion signal.
+    """
+
     completed: bool
     requirements: tuple[FormalGoalRequirementEvaluation, ...]
+    player_visible_completed: bool | None = None
 
 
 class FormalGoalCompletionEvaluator:
@@ -39,7 +54,12 @@ class FormalGoalCompletionEvaluator:
         self.db = db
         self.scope = scope
 
-    def evaluate(self, contract: FormalGoalContractV1) -> FormalGoalEvaluation:
+    def evaluate(
+        self,
+        contract: FormalGoalContractV1,
+        *,
+        definition: ScenarioDefinitionV2 | None = None,
+    ) -> FormalGoalEvaluation:
         evaluations: list[FormalGoalRequirementEvaluation] = []
         for item in contract.completion_requirements:
             value, satisfied = truth_requirement_satisfied(
@@ -47,16 +67,37 @@ class FormalGoalCompletionEvaluator:
                 self.scope,
                 item.requirement,
             )
+            player_visible_satisfied = (
+                known_requirement_satisfied(
+                    self.db,
+                    self.scope,
+                    definition,
+                    item.requirement,
+                )
+                if definition is not None
+                else None
+            )
             evaluations.append(
                 FormalGoalRequirementEvaluation(
                     identity=item.identity,
                     value=value,
                     satisfied=satisfied,
+                    player_visible_satisfied=player_visible_satisfied,
                 )
             )
+        authoritative_completed = bool(evaluations) and all(
+            item.satisfied for item in evaluations
+        )
+        player_visible_completed = (
+            authoritative_completed
+            and all(item.player_visible_satisfied is True for item in evaluations)
+            if definition is not None
+            else None
+        )
         return FormalGoalEvaluation(
-            completed=bool(evaluations) and all(item.satisfied for item in evaluations),
+            completed=authoritative_completed,
             requirements=tuple(evaluations),
+            player_visible_completed=player_visible_completed,
         )
 
 

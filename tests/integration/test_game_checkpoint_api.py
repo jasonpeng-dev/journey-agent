@@ -107,6 +107,8 @@ def test_checkpoint_copies_runtime_and_stable_history_without_mutating_source(
     assert copied_task is not None
     assert copied_task.id != task.id
     assert copied_task.status == AgentTaskStatus.SUCCEEDED
+    assert copied_task.formal_goal_contract_hash == task.formal_goal_contract_hash
+    assert copied_task.formal_goal_contract_json == task.formal_goal_contract_json
 
     retry = client.post(
         f"/api/v1/games/{source_id}/checkpoint",

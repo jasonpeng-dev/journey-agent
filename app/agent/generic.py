@@ -226,6 +226,7 @@ class GenericObjectiveEvaluation:
     objective_keys: tuple[str, ...]
     completed: bool
     requirements: tuple[tuple[str, StrictScalar, bool], ...]
+    authoritative_completed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,20 +1247,31 @@ class GenericAgentService:
 
     def evaluate(self, task: AgentTask) -> GenericObjectiveEvaluation:
         contract = self._formal_goal(task)
+        definition = self._definition()
         try:
-            result = FormalGoalCompletionEvaluator(self.db, self.scope).evaluate(contract)
+            result = FormalGoalCompletionEvaluator(self.db, self.scope).evaluate(
+                contract,
+                definition=definition,
+            )
         except LookupError:
             raise GenericAgentError(
                 "OBJECTIVE_TRUTH_MISSING", "Objective Truth is missing from this Instance"
             ) from None
+        player_visible_completed = result.player_visible_completed
+        if player_visible_completed is None:
+            raise GenericAgentError(
+                "OBJECTIVE_KNOWLEDGE_UNAVAILABLE",
+                "Player-visible Goal completion requires the exact Scenario definition",
+            )
         evaluations = tuple(
             (item.identity, cast(StrictScalar, item.value), item.satisfied)
             for item in result.requirements
         )
         return GenericObjectiveEvaluation(
             tuple(item.objective_key for item in contract.predefined_objectives),
-            result.completed,
+            player_visible_completed,
             evaluations,
+            result.completed,
         )
 
     @staticmethod
@@ -4798,19 +4810,28 @@ def _dynamic_goal_public_keys(
     scope: RuntimeScope | None,
     definition: ScenarioDefinitionV2,
 ) -> tuple[set[str], set[tuple[str, str]], set[str]]:
-    """Return public node, fact, and Region identities without Truth values."""
+    """Return public nodes, goal-addressable Facts, and Regions.
+
+    Runtime Fact visibility is Knowledge about a Fact's current value.  It is
+    not, by itself, the allow-list for public semantic properties that a
+    player may choose as a Dynamic Goal.  The locality contract already owns
+    one such public semantic declaration: ``passability_fact_key`` identifies
+    the passability property of known Transport Nodes.  Include that Fact's
+    schema without reading its runtime value; all other hidden Facts remain
+    excluded.
+    """
 
     if db is not None and scope is not None:
         projection = SharedKnowledgeProjection(db, scope, definition)
         public_nodes = {row.node_key for row in projection.known_node_rows()}
-        public_facts = {(row.node_key, row.fact_key) for row in projection.known_fact_rows()}
+        known_facts = {(row.node_key, row.fact_key) for row in projection.known_fact_rows()}
     else:
         public_nodes = {
             node.key
             for node in definition.world.nodes
             if node.initial_visibility == Visibility.KNOWN
         }
-        public_facts = {
+        known_facts = {
             (node.key, fact.key)
             for node in definition.world.nodes
             if node.key in public_nodes
@@ -4818,6 +4839,22 @@ def _dynamic_goal_public_keys(
             if fact.initial_visibility == Visibility.KNOWN
         }
     locality = definition.metadata.locality
+    public_facts = set(known_facts)
+    if (
+        locality.enabled
+        and locality.transport_node_type_key is not None
+        and locality.passability_fact_key is not None
+    ):
+        public_facts.update(
+            (node.key, fact.key)
+            for node in definition.world.nodes
+            if (
+                node.key in public_nodes
+                and node.node_type_key == locality.transport_node_type_key
+            )
+            for fact in node.facts
+            if fact.key == locality.passability_fact_key
+        )
     public_regions = {
         node.key
         for node in definition.world.nodes
@@ -4835,7 +4872,7 @@ def _dynamic_goal_ontology(
 ) -> dict[str, object]:
     """Build the interpreter's public ontology, excluding Truth and planning."""
 
-    public_nodes, public_facts, public_regions = _dynamic_goal_public_keys(
+    public_nodes, goal_addressable_facts, public_regions = _dynamic_goal_public_keys(
         db,
         scope,
         definition,
@@ -4862,7 +4899,7 @@ def _dynamic_goal_ontology(
         for node in sorted(definition.world.nodes, key=lambda item: item.key)
         if node.key in public_nodes
         for fact in sorted(node.facts, key=lambda item: item.key)
-        if (node.key, fact.key) in public_facts
+        if (node.key, fact.key) in goal_addressable_facts
     ]
     resources = [
         {"key": resource.key, "name": resource.name, "description": resource.description}
@@ -4901,7 +4938,7 @@ def _validate_dynamic_goal_publicity(
     """Reject a candidate that names a currently non-public ontology item."""
 
     validate_ad_hoc_dynamic_candidates(definition, candidates)
-    public_nodes, public_facts, public_regions = _dynamic_goal_public_keys(
+    public_nodes, goal_addressable_facts, public_regions = _dynamic_goal_public_keys(
         db,
         scope,
         definition,
@@ -4915,7 +4952,7 @@ def _validate_dynamic_goal_publicity(
                     "FORMAL_GOAL_DYNAMIC_NODE_NOT_PUBLIC",
                     f"Dynamic Goal references a non-public Node {candidate.node_key}",
                 )
-            if (candidate.node_key, candidate.fact_key) not in public_facts:
+            if (candidate.node_key, candidate.fact_key) not in goal_addressable_facts:
                 raise FormalGoalError(
                     "FORMAL_GOAL_DYNAMIC_FACT_NOT_PUBLIC",
                     "Dynamic Goal references a non-public Fact "

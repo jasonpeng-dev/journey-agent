@@ -267,8 +267,13 @@ def test_formal_completion_evaluator_reuses_authoritative_truth_semantics() -> N
         def get(self, _model, _identity):  # type: ignore[no-untyped-def]
             return fact
 
-    evaluation = FormalGoalCompletionEvaluator(_FactSession(), scope).evaluate(contract)  # type: ignore[arg-type]
+    evaluation = FormalGoalCompletionEvaluator(_FactSession(), scope).evaluate(  # type: ignore[arg-type]
+        contract,
+        definition=snapshot.definition,
+    )
 
     assert evaluation.completed is True
+    assert evaluation.player_visible_completed is False
     assert evaluation.requirements[0].value is True
     assert evaluation.requirements[0].satisfied is True
+    assert evaluation.requirements[0].player_visible_satisfied is False
