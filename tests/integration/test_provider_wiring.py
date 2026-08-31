@@ -18,6 +18,8 @@ import app.agent.provider as provider_module
 from app.agent.generic import GenericAgentError, GenericAgentService, proposal_signature
 from app.agent.planning_context import PlanningContinuityBuilder, legal_candidate_id
 from app.agent.provider import (
+    DynamicGoalInterpretation,
+    DynamicGoalInterpretationRequest,
     GenericProviderError,
     GoalSelection,
     GoalSelectionRequest,
@@ -29,8 +31,9 @@ from app.agent.provider import (
 )
 from app.core.config import Settings
 from app.domain.enums import NodeStatus, WorldOperationStatus
+from app.domain.formal_goal import AdHocGoalRequirementCandidateV1
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
 from app.infrastructure.db.models import (
     AgentPlan,
     AgentStep,
@@ -57,15 +60,25 @@ class RecordingProvider:
         *,
         selected: tuple[str, ...] = (),
         proposals: Iterable[tuple[PlanStepProposal, ...]] = (),
+        dynamic_interpretation: DynamicGoalInterpretation | None = None,
     ) -> None:
         self.selected = selected
         self.proposals = deque(proposals)
+        self.dynamic_interpretation = dynamic_interpretation
         self.goal_requests: list[GoalSelectionRequest] = []
+        self.dynamic_requests: list[DynamicGoalInterpretationRequest] = []
         self.plan_requests: list[PlanRequest] = []
 
     def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
         self.goal_requests.append(request)
         return GoalSelection(objective_keys=self.selected)
+
+    def interpret_dynamic_goal(
+        self,
+        request: DynamicGoalInterpretationRequest,
+    ) -> DynamicGoalInterpretation:
+        self.dynamic_requests.append(request)
+        return self.dynamic_interpretation or DynamicGoalInterpretation(status="UNSUPPORTED")
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
@@ -314,12 +327,21 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     )
 
 
-def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
+def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime, _scope = _runtime(session)
+    dynamic_candidate = AdHocGoalRequirementCandidateV1(
+        kind=ObjectiveRequirementKind.FACT,
+        node_key="patient_one",
+        fact_key="stable",
+        accepted_values=(True,),
+    )
     provider = RecordingProvider(
         selected=("stabilize_patient",),
+        dynamic_interpretation=DynamicGoalInterpretation(
+            requirements=(dynamic_candidate,)
+        ),
         proposals=[_generic_plan()],
     )
     monkeypatch.setattr(
@@ -334,10 +356,12 @@ def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
     )
 
     assert accepted.task is not None
-    assert accepted.resolution.objective_keys == ("stabilize_patient",)
-    assert {item["key"] for item in provider.goal_requests[0].objective_candidates} == {
-        objective.key for objective in GENERIC_TEST.objectives
-    }
+    assert accepted.resolution.objective_keys == ()
+    assert accepted.resolution.dynamic_requirements == (dynamic_candidate,)
+    assert accepted.resolution.source == "AD_HOC_DYNAMIC"
+    assert provider.goal_requests == []
+    assert len(provider.dynamic_requests) == 1
+    assert accepted.task.formal_goal_source_kind == "AD_HOC_DYNAMIC"
 
     accepted.task.status = "SUCCEEDED"
     invented = RecordingProvider(selected=("invented_objective",))
@@ -349,6 +373,8 @@ def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
     ).submit_goal("do something the scenario never defined", idempotency_key=str(uuid4()))
     assert rejected.task is None
     assert rejected.resolution.status == "UNSUPPORTED"
+    assert invented.goal_requests == []
+    assert len(invented.dynamic_requests) == 1
 
 
 def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(

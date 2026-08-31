@@ -16,11 +16,13 @@ from app.agent.provider import (
 from app.domain.formal_goal import (
     AdHocGoalRequirementCandidateV1,
     FormalGoalSourceKind,
+    compile_predefined_formal_goal,
 )
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ObjectiveRequirementKind
 from app.infrastructure.db.models import Player
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0, require_builtin_v2_version
+from app.scenarios.versions import ScenarioVersionRepository
 from app.services.formal_goal import load_formal_goal_for_task
 from app.services.game_instances import GameInstanceService
 from app.services.play import PlayOrchestrator
@@ -35,13 +37,17 @@ class _DynamicProvider:
 
     def __post_init__(self) -> None:
         self.requests: list[DynamicGoalInterpretationRequest] = []
+        self.selection_requests: list[GoalSelectionRequest] = []
 
     @property
     def model_name(self) -> str:
         return "dynamic-test-provider"
 
-    def select_objectives(self, _request: GoalSelectionRequest) -> GoalSelection:
-        return GoalSelection(status="UNSUPPORTED")
+    def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
+        self.selection_requests.append(request)
+        return GoalSelection(
+            objective_keys=("establish_citywide_sustained_emergency_support",)
+        )
 
     def interpret_dynamic_goal(
         self,
@@ -74,6 +80,115 @@ def _runtime(session, definition=GENERIC_TEST, key="dynamic-goal"):
         scenario_version_id=version.id,
         creation_key=key,
     )
+
+
+def test_unmatched_linjiang_goal_routes_to_dynamic_fact_not_task5() -> None:
+    candidate = AdHocGoalRequirementCandidateV1(
+        kind=ObjectiveRequirementKind.FACT,
+        node_key="west_freight_corridor",
+        fact_key="passable",
+        accepted_values=(True,),
+    )
+    provider = _DynamicProvider(
+        DynamicGoalInterpretation(requirements=(candidate,))
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "\u4fee\u901a\u897f\u90e8\u8d27\u8fd0\u901a\u9053",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+    assert resolution.objective_keys == ()
+    assert resolution.dynamic_requirements == (candidate,)
+    assert provider.selection_requests == []
+    assert len(provider.requests) == 1
+
+
+def test_canonical_task5_goal_keeps_predefined_fast_path() -> None:
+    objective = next(
+        item
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives
+        if item.key == "establish_citywide_sustained_emergency_support"
+    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(status="UNSUPPORTED"))
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        objective.name,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.source == "DETERMINISTIC"
+    assert resolution.objective_keys == (objective.key,)
+    assert provider.selection_requests == []
+    assert provider.requests == []
+
+
+def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
+    session,
+) -> None:
+    objective = next(
+        item
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives
+        if item.key == "establish_sustained_emergency_generation"
+    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(status="UNSUPPORTED"))
+    resolver = GenericGoalResolver(provider=provider)
+
+    for goal in (objective.name, *objective.goal_aliases):
+        resolution = resolver.resolve(goal, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
+        assert resolution.status == "RESOLVED"
+        assert resolution.source == "DETERMINISTIC"
+        assert resolution.objective_keys == (objective.key,)
+
+    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
+    assert version is not None
+    contract = compile_predefined_formal_goal(
+        ScenarioVersionRepository(session).load(version.id),
+        (objective,),
+    )
+    assert any(
+        item.requirement.knowledge_gate is not None
+        for item in contract.completion_requirements
+    )
+    assert provider.selection_requests == []
+    assert provider.requests == []
+
+
+def test_unsupported_dynamic_goal_does_not_fallback_to_predefined() -> None:
+    provider = _DynamicProvider(DynamicGoalInterpretation(status="UNSUPPORTED"))
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "Invent an unsupported ontology requirement",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.objective_keys == ()
+    assert provider.selection_requests == []
+    assert len(provider.requests) == 1
+
+
+def test_ambiguous_dynamic_goal_does_not_fallback_to_predefined() -> None:
+    provider = _DynamicProvider(
+        DynamicGoalInterpretation(
+            status="NEEDS_CLARIFICATION",
+            clarification_prompt="Which corridor outcome do you want?",
+        )
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "Make the western corridor useful",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.objective_keys == ()
+    assert resolution.clarification_prompt == "Which corridor outcome do you want?"
+    assert provider.selection_requests == []
+    assert len(provider.requests) == 1
 
 
 def test_dynamic_interpreter_is_strict_and_knowledge_safe() -> None:

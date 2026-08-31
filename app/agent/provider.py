@@ -433,7 +433,7 @@ class GenericModelProvider(Protocol):
 
 
 class DynamicGoalInterpreter(Protocol):
-    """Optional provider capability used only after predefined resolution."""
+    """Provider capability used when no deterministic authored match exists."""
 
     def interpret_dynamic_goal(
         self, request: DynamicGoalInterpretationRequest

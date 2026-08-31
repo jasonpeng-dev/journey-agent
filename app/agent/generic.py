@@ -30,7 +30,6 @@ from app.agent.provider import (
     DynamicGoalInterpretationRequest,
     GenericModelProvider,
     GenericProviderError,
-    GoalSelectionRequest,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
@@ -64,6 +63,7 @@ from app.domain.formal_goal import (
     AdHocGoalRequirementCandidateV1,
     FormalGoalContractV1,
     FormalGoalError,
+    FormalGoalSourceKind,
     compile_ad_hoc_dynamic_goal,
     compile_predefined_formal_goal,
     validate_ad_hoc_dynamic_candidates,
@@ -134,8 +134,6 @@ from app.services.objective_requirements import (
     known_requirement_satisfied,
     requirement_gate_is_public,
 )
-
-ObjectiveSelector = Callable[[str, tuple[ObjectiveDefinitionV2, ...]], str | None]
 
 ProviderCallObserver = Callable[
     [str, AgentTask, PlanRequest, dict[str, object]],
@@ -238,9 +236,15 @@ class PlanRevalidationResult:
 
 
 class GenericGoalResolver:
+    """Route authored exact matches and otherwise invoke the Dynamic interpreter.
+
+    The legacy Objective-selection model is intentionally not part of this
+    routing path: an unmatched player Goal must never be converted into the
+    nearest authored Objective.
+    """
+
     def __init__(
         self,
-        selector: ObjectiveSelector | None = None,
         provider: GenericModelProvider | None = None,
         *,
         db: Session | None = None,
@@ -248,7 +252,6 @@ class GenericGoalResolver:
     ) -> None:
         if (db is None) != (scope is None):
             raise ValueError("Dynamic Goal resolution needs both db and runtime scope")
-        self.selector = selector
         self.provider = provider
         self.db = db
         self.scope = scope
@@ -278,80 +281,6 @@ class GenericGoalResolver:
                 candidate_keys=tuple(sorted(item.key for item in matches)),
                 clarification_prompt=definition.goal_resolution.clarification_prompt,
             )
-        if definition.goal_resolution.allow_llm_fallback and self.provider is not None:
-            selection = self.provider.select_objectives(
-                GoalSelectionRequest(
-                    goal=goal,
-                    objective_candidates=tuple(
-                        {
-                            "key": item.key,
-                            "name": item.name,
-                            "description": item.description,
-                            "aliases": item.goal_aliases,
-                        }
-                        for item in definition.objectives
-                    ),
-                )
-            )
-            valid = {objective.key for objective in definition.objectives}
-            keys = tuple(sorted(set(selection.objective_keys)))
-            observation = {
-                "call_type": "GOAL_RESOLUTION",
-                "model": self.provider.model_name,
-                "selected_objective_keys": list(keys),
-                **provider_call_metadata(self.provider),
-            }
-            if selection.status == "NEEDS_CLARIFICATION":
-                return GenericGoalResolution(
-                    "NEEDS_CLARIFICATION",
-                    candidate_keys=tuple(key for key in keys if key in valid),
-                    clarification_prompt=(
-                        selection.clarification_prompt
-                        or definition.goal_resolution.clarification_prompt
-                    ),
-                    source="MODEL_VALIDATED",
-                    provider_observation={**observation, "validation": "ACCEPTED"},
-                )
-            if selection.status == "UNSUPPORTED":
-                dynamic = self._resolve_dynamic_goal(goal, definition, observation)
-                if dynamic is not None:
-                    return dynamic
-                return GenericGoalResolution(
-                    "UNSUPPORTED",
-                    source="MODEL_VALIDATED",
-                    provider_observation={**observation, "validation": "ACCEPTED"},
-                )
-            if keys and set(keys).issubset(valid):
-                canonical_keys = normalize_objective_keys(definition, keys)
-                return GenericGoalResolution(
-                    "RESOLVED",
-                    canonical_keys[0] if len(canonical_keys) == 1 else None,
-                    canonical_keys,
-                    source="MODEL_VALIDATED",
-                    provider_observation={
-                        **observation,
-                        "normalized_objective_keys": list(canonical_keys),
-                        "validation": "ACCEPTED",
-                    },
-                )
-            dynamic = self._resolve_dynamic_goal(goal, definition, observation)
-            if dynamic is not None:
-                return dynamic
-            return GenericGoalResolution(
-                "UNSUPPORTED",
-                source="MODEL_VALIDATED",
-                provider_observation={
-                    **observation,
-                    "validation": "REJECTED",
-                    "rejection_code": "UNKNOWN_OBJECTIVE",
-                },
-            )
-        if definition.goal_resolution.allow_llm_fallback and self.selector is not None:
-            selected = self.selector(goal, definition.objectives)
-            if selected in {objective.key for objective in definition.objectives}:
-                return GenericGoalResolution(
-                    "RESOLVED", selected, (selected,), source="MODEL_VALIDATED"
-                )
         dynamic = self._resolve_dynamic_goal(goal, definition)
         if dynamic is not None:
             return dynamic
@@ -361,7 +290,6 @@ class GenericGoalResolver:
         self,
         goal: str,
         definition: ScenarioDefinitionV2,
-        prior_observation: dict[str, object] | None = None,
     ) -> GenericGoalResolution | None:
         if not definition.goal_resolution.allow_llm_fallback or self.provider is None:
             return None
@@ -386,8 +314,6 @@ class GenericGoalResolver:
             "status": interpretation.status,
             **provider_call_metadata(self.provider),
         }
-        if prior_observation is not None:
-            observation["predefined_selection"] = prior_observation
         if interpretation.status == "NEEDS_CLARIFICATION":
             return GenericGoalResolution(
                 "NEEDS_CLARIFICATION",
@@ -425,7 +351,7 @@ class GenericGoalResolver:
         return GenericGoalResolution(
             "RESOLVED",
             dynamic_requirements=interpretation.requirements,
-            source="MODEL_VALIDATED",
+            source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
             provider_observation={
                 **observation,
                 "validation": "ACCEPTED",
