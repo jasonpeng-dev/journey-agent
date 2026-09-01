@@ -54,6 +54,23 @@ def _resource_document() -> dict[str, object]:
     return document
 
 
+def _integer_fact_document() -> dict[str, object]:
+    document = deepcopy(_contract_scenario_document())
+    patient = next(
+        item for item in document["world"]["nodes"] if item["key"] == "patient_one"  # type: ignore[index]
+    )
+    patient["facts"].append(  # type: ignore[index]
+        {
+            "key": "treatment_count",
+            "name": "Treatment Count",
+            "value_type": "INTEGER",
+            "initial_value": 0,
+            "initial_visibility": "KNOWN",
+        }
+    )
+    return document
+
+
 def test_predefined_compiler_is_exact_and_multi_objective_identity_is_stable() -> None:
     snapshot = _snapshot()
     objective = snapshot.definition.objectives[0]
@@ -140,6 +157,52 @@ def test_dynamic_fact_identity_is_backend_owned_and_candidate_key_is_rejected() 
                 "key": "invented_key",
             }
         )
+
+
+def test_dynamic_fact_values_are_canonicalized_against_exact_fact_type() -> None:
+    boolean_contract = compile_ad_hoc_dynamic_goal(
+        _snapshot(),
+        (
+            AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.FACT,
+                node_key="patient_one",
+                fact_key="stable",
+                accepted_values=("true",),
+            ),
+        ),
+    )
+    assert boolean_contract.completion_requirements[0].requirement.accepted_values == (True,)
+
+    integer_contract = compile_ad_hoc_dynamic_goal(
+        _snapshot(_integer_fact_document()),
+        (
+            AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.FACT,
+                node_key="patient_one",
+                fact_key="treatment_count",
+                accepted_values=("20",),
+            ),
+        ),
+    )
+    assert integer_contract.completion_requirements[0].requirement.accepted_values == (20,)
+
+
+def test_dynamic_fact_value_type_error_exposes_only_safe_type_diagnostics() -> None:
+    candidate = AdHocGoalRequirementCandidateV1(
+        kind=ObjectiveRequirementKind.FACT,
+        node_key="patient_one",
+        fact_key="stable",
+        accepted_values=("yes",),
+    )
+
+    with pytest.raises(FormalGoalError) as error:
+        compile_ad_hoc_dynamic_goal(_snapshot(), (candidate,))
+
+    assert error.value.code == "FORMAL_GOAL_VALUE_TYPE_INVALID"
+    assert error.value.details == {
+        "expected_value_type": "BOOLEAN",
+        "actual_candidate_json_type": "string",
+    }
 
 
 def test_dynamic_resource_reuses_typed_requirement_and_rejects_gate() -> None:

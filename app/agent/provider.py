@@ -8,6 +8,7 @@ import re
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
 from time import perf_counter
@@ -39,11 +40,40 @@ class GoalSelection(ProviderModel):
     clarification_prompt: str | None = None
 
 
+class DynamicGoalEntityGroundingRequest(ProviderModel):
+    """Knowledge-safe input for the bounded public Entity Grounding call."""
+
+    goal: str = Field(min_length=1, max_length=4000)
+    public_catalog: dict[str, object] = Field(default_factory=dict)
+
+
+class DynamicGoalEntityGrounding(ProviderModel):
+    """Closed provider output containing public entity candidates only."""
+
+    status: Literal["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"] = "RESOLVED"
+    candidate_keys: tuple[str, ...] = ()
+    clarification_prompt: str | None = None
+
+    @model_validator(mode="after")
+    def validate_grounding(self) -> DynamicGoalEntityGrounding:
+        if self.status == "RESOLVED" and not self.candidate_keys:
+            raise ValueError("A resolved Entity Grounding needs at least one candidate key")
+        if self.status != "RESOLVED" and self.candidate_keys:
+            raise ValueError("An unresolved Entity Grounding cannot carry candidate keys")
+        if self.status == "NEEDS_CLARIFICATION" and not (
+            self.clarification_prompt and self.clarification_prompt.strip()
+        ):
+            raise ValueError("Entity Grounding clarification needs a prompt")
+        return self
+
+
 class DynamicGoalInterpretationRequest(ProviderModel):
     """Knowledge-safe input for the AD_HOC_DYNAMIC Goal interpreter."""
 
     goal: str = Field(min_length=1, max_length=4000)
     ontology: dict[str, object] = Field(default_factory=dict)
+    grounded_entity_keys: tuple[str, ...] = ()
+    recovery_attempt: int = Field(default=0, ge=0, le=1)
 
 
 class DynamicGoalInterpretation(ProviderModel):
@@ -392,6 +422,8 @@ class PlanProposal(PlanSegment):
 
 class ProviderCallMetadata(ProviderModel):
     call_type: str
+    call_sequence: int | None = None
+    profile: str | None = None
     latency_ms: int
     provider: str | None = None
     model: str | None = None
@@ -422,6 +454,7 @@ class ProviderCallMetadata(ProviderModel):
     total_tokens: int | None = None
     final_content_bytes: int | None = None
     finish_reason: str | None = None
+    validation_diagnostics: tuple[dict[str, object], ...] = ()
     network_calls: tuple[dict[str, object], ...] = ()
 
 
@@ -430,6 +463,14 @@ class GenericModelProvider(Protocol):
     def model_name(self) -> str: ...
     def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection: ...
     def propose_plan(self, request: PlanRequest) -> PlanProposal: ...
+
+
+class DynamicGoalEntityGrounder(Protocol):
+    """Optional provider capability for bounded public Entity Grounding."""
+
+    def ground_dynamic_goal_entities(
+        self, request: DynamicGoalEntityGroundingRequest
+    ) -> DynamicGoalEntityGrounding: ...
 
 
 class DynamicGoalInterpreter(Protocol):
@@ -443,10 +484,117 @@ class DynamicGoalInterpreter(Protocol):
 class GenericProviderError(ValueError):
     """Secret-safe provider failure surfaced at the application boundary."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        validation_diagnostics: tuple[dict[str, object], ...] = (),
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.validation_diagnostics = validation_diagnostics
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderProfile:
+    """Purpose-specific request settings for one logical provider call."""
+
+    name: str
+    model_name: str
+    thinking_mode: str
+    reasoning_effort: str
+    output_token_limit: int | None
+
+
+_FAST_SEMANTIC_OUTPUT_TOKEN_LIMIT = 2048
+
+
+_VALIDATION_EXPECTED_TYPES = {
+    "bool_type": "boolean",
+    "bool_parsing": "boolean",
+    "int_type": "integer",
+    "int_parsing": "integer",
+    "float_type": "number",
+    "float_parsing": "number",
+    "string_type": "string",
+    "list_type": "array",
+    "tuple_type": "array",
+    "set_type": "array",
+    "dict_type": "object",
+    "mapping_type": "object",
+    "model_type": "object",
+    "model_attributes_type": "object",
+    "missing": "required",
+    "literal_error": "literal",
+}
+
+
+def provider_validation_diagnostics(
+    error: ValidationError,
+) -> tuple[dict[str, object], ...]:
+    """Extract only schema/type metadata from a Pydantic validation error.
+
+    Pydantic's error entries contain the rejected input and sometimes context.
+    Those values are deliberately inspected only for their JSON type; neither
+    the input nor the error message/context is returned to telemetry.
+    """
+
+    diagnostics: list[dict[str, object]] = []
+    for item in error.errors():
+        error_type = item.get("type")
+        if not isinstance(error_type, str):
+            error_type = "unknown"
+        diagnostic: dict[str, object] = {
+            "validation_error_type": error_type[:80],
+            "field_path": _safe_validation_field_path(item.get("loc")),
+        }
+        expected_type = _VALIDATION_EXPECTED_TYPES.get(error_type)
+        if expected_type is not None:
+            diagnostic["expected_type"] = expected_type
+        if "input" in item:
+            actual_type = _safe_json_type(item.get("input"))
+            if actual_type is not None:
+                diagnostic["actual_json_type"] = actual_type
+        diagnostics.append(diagnostic)
+        if len(diagnostics) >= 20:
+            break
+    return tuple(diagnostics)
+
+
+def _safe_validation_field_path(location: object) -> str:
+    parts = location if isinstance(location, (tuple, list)) else (location,)
+    rendered: list[str] = []
+    for part in parts:
+        if isinstance(part, int) and part >= 0:
+            if rendered:
+                rendered[-1] = f"{rendered[-1]}[{part}]"
+            else:
+                rendered.append(f"[{part}]")
+        elif isinstance(part, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", part):
+            rendered.append(part)
+        else:
+            rendered.append("<field>")
+    return ".".join(rendered) or "<root>"
+
+
+def _safe_json_type(value: object) -> str | None:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return None
 
 
 class ProviderTotalTimeout(TimeoutError):
@@ -557,13 +705,45 @@ class OpenAICompatibleGenericProvider:
         self._base_url = settings.model_base_url.rstrip("/")
         self._api_key = settings.model_api_key.get_secret_value()
         self._model_name = settings.model_name
+        self._semantic_model_name = settings.semantic_model or self._model_name
         self._timeout = settings.model_timeout_seconds
         self._total_timeout = settings.model_total_timeout_seconds
         self._max_output_tokens = settings.model_max_output_tokens
         self._thinking_mode = settings.model_thinking_mode
         self._reasoning_effort = settings.model_reasoning_effort
+        self._default_profile = _ProviderProfile(
+            name="DEFAULT",
+            model_name=self._model_name,
+            thinking_mode=self._thinking_mode,
+            reasoning_effort=self._reasoning_effort,
+            output_token_limit=None,
+        )
+        self._planning_profile = _ProviderProfile(
+            name="PLANNING_REASONING",
+            model_name=self._model_name,
+            thinking_mode=self._thinking_mode,
+            reasoning_effort=self._reasoning_effort,
+            output_token_limit=self._max_output_tokens,
+        )
+        self._fast_semantic_profile = _ProviderProfile(
+            name="FAST_SEMANTIC",
+            model_name=self._semantic_model_name,
+            thinking_mode="disabled",
+            reasoning_effort="low",
+            output_token_limit=_FAST_SEMANTIC_OUTPUT_TOKEN_LIMIT,
+        )
+        self._purpose_profiles: dict[str, _ProviderProfile] = {
+            "goal_selection": self._default_profile,
+            "initial_plan": self._planning_profile,
+            "repair": self._planning_profile,
+            "replan": self._planning_profile,
+            "dynamic_goal_grounding": self._fast_semantic_profile,
+            "dynamic_goal": self._fast_semantic_profile,
+        }
         self._transport = transport
         self._last_call_metadata: ProviderCallMetadata | None = None
+        self._call_sequence = 0
+        self._call_metadata_history: list[ProviderCallMetadata] = []
 
     @property
     def provider_name(self) -> str:
@@ -597,6 +777,32 @@ class OpenAICompatibleGenericProvider:
     def last_call_metadata(self) -> ProviderCallMetadata | None:
         return self._last_call_metadata
 
+    @property
+    def call_metadata_history(self) -> tuple[ProviderCallMetadata, ...]:
+        return tuple(self._call_metadata_history)
+
+    def _record_call_metadata(self, metadata: ProviderCallMetadata) -> None:
+        self._last_call_metadata = metadata
+        self._call_metadata_history.append(metadata)
+
+    def _record_validation_diagnostics(
+        self, diagnostics: tuple[dict[str, object], ...]
+    ) -> None:
+        if not diagnostics or not self._call_metadata_history:
+            return
+        metadata = self._call_metadata_history[-1].model_copy(
+            update={"validation_diagnostics": diagnostics}
+        )
+        self._call_metadata_history[-1] = metadata
+        self._last_call_metadata = metadata
+
+    def _next_call_sequence(self) -> int:
+        self._call_sequence += 1
+        return self._call_sequence
+
+    def _profile_for_purpose(self, purpose: str) -> _ProviderProfile:
+        return self._purpose_profiles.get(purpose, self._default_profile)
+
     def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
         try:
             return GoalSelection.model_validate(
@@ -608,6 +814,19 @@ class OpenAICompatibleGenericProvider:
                 "The model provider returned an invalid Goal selection",
             ) from exc
 
+    def ground_dynamic_goal_entities(
+        self, request: DynamicGoalEntityGroundingRequest
+    ) -> DynamicGoalEntityGrounding:
+        try:
+            return DynamicGoalEntityGrounding.model_validate(
+                self._invoke("dynamic_goal_grounding", request.model_dump())
+            )
+        except ValidationError as exc:
+            raise GenericProviderError(
+                "MODEL_PROVIDER_RESPONSE_INVALID",
+                "The model provider returned an invalid Dynamic Goal Entity Grounding",
+            ) from exc
+
     def interpret_dynamic_goal(
         self, request: DynamicGoalInterpretationRequest
     ) -> DynamicGoalInterpretation:
@@ -616,9 +835,12 @@ class OpenAICompatibleGenericProvider:
                 self._invoke("dynamic_goal", request.model_dump())
             )
         except ValidationError as exc:
+            diagnostics = provider_validation_diagnostics(exc)
+            self._record_validation_diagnostics(diagnostics)
             raise GenericProviderError(
                 "MODEL_PROVIDER_RESPONSE_INVALID",
                 "The model provider returned an invalid Dynamic Goal interpretation",
+                validation_diagnostics=diagnostics,
             ) from exc
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
@@ -635,10 +857,17 @@ class OpenAICompatibleGenericProvider:
     def _build_request_body(
         self, purpose: str, payload: dict[str, object]
     ) -> tuple[dict[str, object], int]:
+        profile = self._profile_for_purpose(purpose)
         if purpose == "goal_selection":
             response_contract = (
                 '{"status":"SELECTED|NEEDS_CLARIFICATION|UNSUPPORTED",'
                 '"objective_keys":["zero_or_more_candidate_keys"],'
+                '"clarification_prompt":null}'
+            )
+        elif purpose == "dynamic_goal_grounding":
+            response_contract = (
+                '{"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
+                '"candidate_keys":["public_entity_key"],'
                 '"clarification_prompt":null}'
             )
         elif purpose == "dynamic_goal":
@@ -647,7 +876,7 @@ class OpenAICompatibleGenericProvider:
                 '"requirements":[{"kind":"FACT|RESOURCE_AT_LEAST",'
                 '"node_key":"known_public_node_key",'
                 '"fact_key":"known_public_fact_key",'
-                '"accepted_values":["requested_scalar"] ,'
+                '"accepted_values":["requested_scalar_matching_fact_value_type"] ,'
                 '"region_key":"known_public_region_key",'
                 '"resource_key":"known_public_resource_key",'
                 '"minimum":0}],"clarification_prompt":null}'
@@ -664,12 +893,32 @@ class OpenAICompatibleGenericProvider:
                 '"target_key":"existing_target_key",'
                 '"parameters":{},"short_actor_reason":"short reason"}]}'
             )
-        if purpose == "dynamic_goal":
+        if purpose == "dynamic_goal_grounding":
+            planning_prompt = (
+                "Ground only public entities mentioned by the player's Goal. Return only "
+                "candidate_keys from the supplied public_catalog, or clarification/unsupported "
+                "with no keys. Use canonical names, descriptions, aliases, and public topology "
+                "as semantic evidence, but never invent a key. Do not select an authored "
+                "Objective, generate a Goal requirement, inspect current Fact values, infer "
+                "hidden Truth, choose an Action, or perform planning. Do not expose "
+                "chain-of-thought."
+            )
+        elif purpose == "dynamic_goal":
             planning_prompt = (
                 "Interpret the player's Goal only into the closed V1 typed requirement "
                 "vocabulary. Return one or more requirements with implicit AND semantics. "
                 "Use only FACT or RESOURCE_AT_LEAST. Use only node, fact, region, and "
                 "resource keys present in the public ontology supplied by the user payload. "
+                "If grounded_entity_keys is non-empty, use only those public entities (or "
+                "their explicitly listed public endpoint Regions for a resource target). "
+                "Match every FACT accepted_values item to that Fact's declared value_type. "
+                "For BOOLEAN Facts, emit native JSON true or false, never quoted strings. "
+                "For INTEGER Facts, emit native JSON integers, never quoted numeric text. "
+                "A natural-language repair, restore, reopen, or make-usable request for a "
+                "public entity may map to a compatible terminal-state FACT such as passable=true; "
+                "do not require the player to say the machine key. Pure inspect, survey, or "
+                "view requests are information/action intent, not automatically a terminal "
+                "FACT goal. "
                 "Do not invent keys, values outside a supplied Fact domain, Action plans, "
                 "prerequisites, routes, knowledge gates, hidden requirements, completion "
                 "rules, or any other Scenario semantics. The backend assigns requirement "
@@ -677,6 +926,13 @@ class OpenAICompatibleGenericProvider:
                 "ambiguous or cannot be expressed in this vocabulary, return clarification "
                 "or unsupported with no requirements. Do not expose chain-of-thought."
             )
+            if payload.get("recovery_attempt"):
+                planning_prompt += (
+                    " This is the one bounded recovery attempt. Re-read the focused public "
+                    "ontology and return a legal terminal requirement when the player's "
+                    "wording supports one; do not broaden the ontology or fall back to an "
+                    "authored Objective."
+                )
         elif purpose == "repair":
             planning_prompt = (
                 "You are repairing a rejected PlanSegment for the same frozen ObjectiveScope. "
@@ -828,9 +1084,9 @@ class OpenAICompatibleGenericProvider:
             else ""
         )
         request_body: dict[str, object] = {
-            "model": self._model_name,
-            "thinking": {"type": self._thinking_mode},
-            "reasoning_effort": self._reasoning_effort,
+            "model": profile.model_name,
+            "thinking": {"type": profile.thinking_mode},
+            "reasoning_effort": profile.reasoning_effort,
             "response_format": {"type": "json_object"},
             "messages": [
                 {
@@ -848,11 +1104,8 @@ class OpenAICompatibleGenericProvider:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
         }
-        if (
-            purpose in {"initial_plan", "replan", "repair", "dynamic_goal"}
-            and self._max_output_tokens is not None
-        ):
-            request_body["max_tokens"] = self._max_output_tokens
+        if profile.output_token_limit is not None:
+            request_body["max_tokens"] = profile.output_token_limit
         request_size_bytes = len(
             json.dumps(request_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         )
@@ -936,6 +1189,7 @@ class OpenAICompatibleGenericProvider:
             raise
 
     def _invoke(self, purpose: str, payload: dict[str, object]) -> object:
+        profile = self._profile_for_purpose(purpose)
         request_body, request_size_bytes = self._build_request_body(purpose, payload)
         started_at = datetime.now(UTC)
         started = perf_counter()
@@ -1079,7 +1333,7 @@ class OpenAICompatibleGenericProvider:
             )
             _log_provider_failure(
                 purpose=purpose,
-                model=self._model_name,
+                model=profile.model_name,
                 request_size_bytes=request_size_bytes,
                 error=final_error,
                 response=final_response,
@@ -1125,16 +1379,16 @@ class OpenAICompatibleGenericProvider:
             if isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str)
             else None
         )
-        self._last_call_metadata = ProviderCallMetadata(
+        metadata = ProviderCallMetadata(
             call_type=purpose.upper(),
+            call_sequence=self._next_call_sequence(),
+            profile=profile.name,
             latency_ms=round((perf_counter() - started) * 1000),
             provider=self.provider_name,
-            model=self._model_name,
-            thinking_mode=self._thinking_mode,
-            reasoning_effort=self._reasoning_effort,
-            configured_output_token_limit=(
-                self._max_output_tokens if purpose in {"initial_plan", "replan", "repair"} else None
-            ),
+            model=profile.model_name,
+            thinking_mode=profile.thinking_mode,
+            reasoning_effort=profile.reasoning_effort,
+            configured_output_token_limit=profile.output_token_limit,
             http_timeout_seconds=self._timeout,
             total_deadline_seconds=self._total_timeout,
             started_at=started_at.isoformat(),
@@ -1158,6 +1412,7 @@ class OpenAICompatibleGenericProvider:
             finish_reason=finish_reason,
             network_calls=tuple(network_calls),
         )
+        self._record_call_metadata(metadata)
         return parsed
 
     @staticmethod
@@ -1206,16 +1461,16 @@ class OpenAICompatibleGenericProvider:
         telemetry: _ProviderPhaseTelemetry,
         network_calls: tuple[dict[str, object], ...] = (),
     ) -> None:
-        self._last_call_metadata = ProviderCallMetadata(
+        metadata = ProviderCallMetadata(
             call_type=purpose.upper(),
+            call_sequence=self._next_call_sequence(),
+            profile=self._profile_for_purpose(purpose).name,
             latency_ms=latency_ms,
             provider=self.provider_name,
-            model=self._model_name,
-            thinking_mode=self._thinking_mode,
-            reasoning_effort=self._reasoning_effort,
-            configured_output_token_limit=(
-                self._max_output_tokens if purpose in {"initial_plan", "replan", "repair"} else None
-            ),
+            model=self._profile_for_purpose(purpose).model_name,
+            thinking_mode=self._profile_for_purpose(purpose).thinking_mode,
+            reasoning_effort=self._profile_for_purpose(purpose).reasoning_effort,
+            configured_output_token_limit=self._profile_for_purpose(purpose).output_token_limit,
             http_timeout_seconds=self._timeout,
             total_deadline_seconds=self._total_timeout,
             started_at=started_at.isoformat(),
@@ -1228,6 +1483,7 @@ class OpenAICompatibleGenericProvider:
             request_size_bytes=request_size_bytes,
             network_calls=network_calls,
         )
+        self._record_call_metadata(metadata)
 
 
 def build_generic_provider(settings: Settings) -> GenericModelProvider | None:
@@ -1239,6 +1495,29 @@ def build_generic_provider(settings: Settings) -> GenericModelProvider | None:
 def provider_call_metadata(provider: GenericModelProvider) -> dict[str, object]:
     metadata = getattr(provider, "last_call_metadata", None)
     return metadata.model_dump(mode="json") if isinstance(metadata, ProviderCallMetadata) else {}
+
+
+def provider_call_history_metadata(
+    provider: GenericModelProvider | None,
+) -> tuple[dict[str, object], ...]:
+    """Return safe metadata for every logical provider call made by ``provider``.
+
+    ``last_call_metadata`` remains the compatibility view for existing
+    planning code.  Providers without the optional history capability retain
+    the old single-call fallback for diagnostics.
+    """
+
+    if provider is None:
+        return ()
+    history = getattr(provider, "call_metadata_history", None)
+    if isinstance(history, (list, tuple)):
+        return tuple(
+            item.model_dump(mode="json")
+            for item in history
+            if isinstance(item, ProviderCallMetadata)
+        )
+    latest = provider_call_metadata(provider)
+    return (latest,) if latest else ()
 
 
 def provider_call_start_metadata(
@@ -1424,6 +1703,8 @@ __all__ = [
     "ProviderCallMetadata",
     "ProviderTotalTimeout",
     "build_generic_provider",
+    "provider_call_history_metadata",
     "provider_call_metadata",
     "provider_call_start_metadata",
+    "provider_validation_diagnostics",
 ]

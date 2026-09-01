@@ -35,7 +35,7 @@ another edit.
   Effects.
 - **Objectives:** completion `ObjectiveRequirementV2` values, public prerequisites, aliases,
   examples, and optional subsumption metadata.
-- **Planning:** goal-resolution fallback/clarification metadata and recovery hints.
+- **Planning:** Dynamic Goal/clarification metadata and recovery hints.
 - **Initialization:** starting Node and primary Actor.
 
 Authors can define content and vocabulary, but cannot add executable code, edit the generic Rule
@@ -54,6 +54,15 @@ has not been surveyed.
 Facility Node identity and Facility Fact Knowledge are separate contracts. A Facility may be
 authored as a Known Node while its operational or power Facts remain hidden; communication loss
 does not by itself hide that Facility's existence.
+
+`FactDefinitionV2.goal_addressable` is an authored semantic boundary and
+defaults to `false`. It says whether the Fact schema is a public semantic that
+players may express as a Dynamic Goal; it is independent of both authoritative
+Truth and current Fact Knowledge. A public entity may therefore expose a
+goal-addressable Fact schema while its current value remains `UNKNOWN`. The
+schema can be included in Dynamic Goal ontology without revealing that value.
+Internal, control, and discovery Facts such as requirement-discovery markers
+should keep `goal_addressable=false`.
 
 `initialization.region_resource_knowledge` is the authority for initial Region inventory
 visibility and survey completion. Neither choosing a starting Region nor placing an Actor there
@@ -128,6 +137,14 @@ assigns their stable semantic identities, and compiles the same typed contract
 used by predefined Objectives. A dynamic submission does not create an
 ObjectiveDefinition, alter the Scenario Draft/Version, or add a new Scenario
 objective key.
+
+The Dynamic ontology is built from currently public entity identities plus
+goal-addressable Fact schemas (and public Resource/Region semantic metadata),
+not only from rows whose current Fact value is Known. It includes names,
+descriptions, types, and allowed public domains, but not current Truth values,
+hidden Fact values, hidden resource source/quantity, or internal discovery
+metadata. `KNOWN public entity + goal_addressable Fact schema + UNKNOWN current
+value` is therefore a valid Goal boundary.
 
 Dynamic interpretation cannot see hidden Truth, hidden Facts, authored
 Objective definitions, Actions, prerequisites, knowledge gates, or hidden

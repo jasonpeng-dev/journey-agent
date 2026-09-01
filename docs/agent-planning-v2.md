@@ -11,7 +11,12 @@ scenario-specific control flow.
 The current end-to-end lifecycle is:
 
     Natural-language Goal
-      -> Goal Resolver
+      -> exact authored Objective routing
+      -> deterministic public Entity Grounding when unmatched
+      -> bounded semantic Entity Grounding when deterministic grounding is not unique
+      -> focused public ontology
+      -> Dynamic Goal Interpretation
+      -> deterministic exact-Version candidate validation
       -> frozen FormalGoalContractV1 on AgentTask
       -> bounded Dependency Closure
       -> canonical PlannerInput V2
@@ -27,6 +32,10 @@ The current end-to-end lifecycle is:
       -> Player acknowledgement
       -> REPLAN when required
       -> objective verification
+
+An explicit authored Objective key, canonical name, alias, or example takes
+the `PREDEFINED` path and does not enter Dynamic interpretation. An unmatched
+Goal never falls back to selecting the nearest authored Objective.
 
 The runtime is generic because the same source code interprets every
 published ScenarioVersion through the declarative ScenarioDefinitionV2 and
@@ -88,11 +97,22 @@ planning remains the Planner's responsibility.
 
 ## 3. Goal Resolution and frozen ObjectiveScope
 
-The Goal Resolver first matches the submitted natural-language goal against
-the exact published Version's Objective keys, names, aliases, and examples.
-If configured fallback is enabled, a provider may select only among the
-exact objective candidates supplied by the resolver. It cannot invent an
-Objective.
+The Goal Resolver first matches the submitted natural-language Goal against
+the exact published Version's Objective keys, canonical names, explicit
+aliases, and examples. Only a unique explicit match enters the `PREDEFINED`
+source; an ambiguous authored match requires clarification. An unmatched Goal
+does not invoke the legacy Objective-selection model and is never converted
+into the nearest authored Objective. It enters the Dynamic path when the
+configured Dynamic provider capability is available.
+
+Dynamic resolution performs deterministic public entity or unique public
+topology grounding first. If the wording clearly refers to a public entity
+but deterministic grounding is not unique, bounded semantic Entity Grounding
+may return only public candidate keys, clarification, or unsupported. The
+backend validates returned keys against the exact ScenarioVersion, builds a
+focused public ontology, and only then calls Dynamic Goal Interpretation.
+Grounding answers which public entity the player named; interpretation answers
+which supported terminal Goal state is requested. Neither stage plans Actions.
 
 An accepted goal creates an AgentTask with:
 
@@ -142,12 +162,16 @@ completion authority.
 ### 3.2 Dynamic Goal boundary
 
 `AD_HOC_DYNAMIC` compilation reuses the same typed requirement and evaluator
-path. The interpreter may return only `FACT` and `RESOURCE_AT_LEAST` candidate
-semantics, with implicit `AND`; the backend validates every key, value domain,
-Region, and Resource against the exact Version and assigns the canonical
-identity. Dynamic candidates cannot carry authored Objective keys,
+path. The interpreter receives a focused public ontology made from currently
+public entity identities, goal-addressable Fact schemas, public Regions, and
+public Resource types. It may return only `FACT` and `RESOURCE_AT_LEAST`
+candidate semantics, with implicit `AND`; the backend validates every key,
+value domain, Region, and Resource against the exact Version and assigns the
+canonical identity. Dynamic candidates cannot carry authored Objective keys,
 descriptions, prerequisites, `knowledge_gate` fields, or hidden completion
-semantics.
+semantics. A goal-addressable Fact schema may be exposed even when its current
+Fact value is Knowledge `UNKNOWN`; its Truth value is not included in the
+interpreter payload.
 
 The interpreter payload is a public ontology projection. It excludes current
 Truth values, hidden Facts, Actions, authored Objective definitions, planning
@@ -156,6 +180,29 @@ clarified or rejected; the interpreter cannot silently supplement it with
 Scenario-authored hidden obligations. Hidden completion requirements remain an
 authored `PREDEFINED` capability, or require a future deterministic template
 source outside the current V1.
+
+Dynamic provider-format or transient failures use bounded retry, reusing the
+validated grounding and focused ontology for interpretation retries.
+`NEEDS_CLARIFICATION` is not retried until a random resolution is obtained.
+Provider/internal error codes are developer diagnostics, not Player wording;
+Goal submission feedback is rendered in the Goal input area.
+
+### 3.3 Provider profiles
+
+Provider request settings are selected by purpose through two independent
+profiles:
+
+* `FAST_SEMANTIC` handles `DYNAMIC_GOAL_GROUNDING` and
+  `DYNAMIC_GOAL_INTERPRETATION`. Its model comes from `SEMANTIC_MODEL`, with
+  fallback to `MODEL_NAME`; thinking is forcibly disabled and its fast output
+  budget is fixed by code.
+* `PLANNING_REASONING` handles `INITIAL`, `REPAIR`, and `REPLAN`. Its model,
+  thinking, reasoning effort, and output token budget come from `MODEL_NAME`,
+  `MODEL_THINKING_MODE`, `MODEL_REASONING_EFFORT`, and
+  `MODEL_MAX_OUTPUT_TOKENS`.
+
+Planning configuration does not flow into semantic calls. The two profiles
+may use different models without changing Goal resolution or Planner logic.
 
 ## 4. Dependency Closure
 
@@ -633,6 +680,11 @@ the final blocked/completed state.
 If the Objective is complete, the Task enters COMPLETED and does not replan.
 If no valid plan can be produced within the configured bounds, the Task enters
 a terminal blocked/model-rejected state with the persisted error code.
+Player-visible Goal submission feedback uses the existing clarification or
+unsupported wording when available and maps internal provider/validation
+failures to short human-readable messages in the Goal input area. Internal
+codes are not written into the player's Goal text or exposed as player
+wording.
 
 ## 18. Observability
 

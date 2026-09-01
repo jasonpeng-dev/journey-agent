@@ -145,6 +145,7 @@ class MissionRoadmapProjector:
                             item.requirement,
                             resources,
                             identity=item.identity,
+                            definition=definition,
                         )
                         for item in visible
                     ),
@@ -356,12 +357,18 @@ class MissionRoadmapProjector:
         known_resources: dict[str, object],
         *,
         identity: str | None = None,
+        definition: ScenarioDefinitionV2 | None = None,
     ) -> dict[str, object]:
         result = requirement.model_dump(mode="json", exclude={"knowledge_gate"})
         if identity is not None:
             result["identity"] = identity
             result["key"] = identity
             result["kind"] = requirement.kind.value
+        if definition is not None:
+            result["description"] = MissionRoadmapProjector._dynamic_requirement_description(
+                definition,
+                requirement,
+            )
         if requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
             status = MissionRoadmapProjector._known_resource_status(
                 requirement,
@@ -374,6 +381,35 @@ class MissionRoadmapProjector:
             if status == "UNKNOWN":
                 result["current_known_available"] = None
         return result
+
+    @staticmethod
+    def _dynamic_requirement_description(
+        definition: ScenarioDefinitionV2,
+        requirement: ObjectiveRequirementV2,
+    ) -> str:
+        """Render dynamic requirements from authored display metadata only."""
+
+        if requirement.kind == ObjectiveRequirementKind.FACT:
+            if requirement.node_key is not None and requirement.fact_key is not None:
+                node = definition.world.node(requirement.node_key)
+                fact = node.fact(requirement.fact_key) if node is not None else None
+                if node is not None and fact is not None:
+                    return f"{node.name}: {fact.name} reaches the requested state."
+            return "The requested Fact reaches the requested state."
+
+        if requirement.region_key is not None and requirement.resource_key is not None:
+            region = definition.world.node(requirement.region_key)
+            resource = next(
+                (
+                    item
+                    for item in definition.world.resources
+                    if item.key == requirement.resource_key
+                ),
+                None,
+            )
+            if region is not None and resource is not None and requirement.minimum is not None:
+                return f"{region.name}: {resource.name} reaches at least {requirement.minimum}."
+        return "The requested resource reserve reaches its target."
 
 
 __all__ = [

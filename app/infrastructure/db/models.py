@@ -224,6 +224,70 @@ def _reject_game_instance_binding_drift(
         )
 
 
+class GoalResolutionAttempt(UUIDPrimaryKey, TimestampMixin, Base):
+    """Safe, game-scoped audit data for one Goal resolution invocation.
+
+    This record deliberately does not store the submitted Goal text or any
+    provider payload.  It is committed before Task creation so an unresolved
+    submission remains diagnosable when the API rolls back its request.
+    """
+
+    __tablename__ = "goal_resolution_attempts"
+    __table_args__ = (
+        Index(
+            "ix_goal_resolution_attempts_instance_created",
+            "game_instance_id",
+            "created_at",
+        ),
+        Index(
+            "ix_goal_resolution_attempts_instance_goal",
+            "game_instance_id",
+            "goal_hash",
+            "created_at",
+        ),
+    )
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"),
+        index=True,
+    )
+    scenario_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("scenario_versions.id", ondelete="RESTRICT")
+    )
+    original_goal_text: Mapped[str | None] = mapped_column(String(4000))
+    normalized_goal_text: Mapped[str | None] = mapped_column(String(4000))
+    goal_hash: Mapped[str] = mapped_column(String(64))
+    resolution_status: Mapped[str] = mapped_column(String(30))
+    resolver_source: Mapped[str] = mapped_column(String(100))
+    grounding_source: Mapped[str | None] = mapped_column(String(100))
+    grounded_public_entity_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    resolution_candidate_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    public_catalog_hash: Mapped[str | None] = mapped_column(String(64))
+    focused_ontology_hash: Mapped[str | None] = mapped_column(String(64))
+    interpretation_status: Mapped[str | None] = mapped_column(String(30))
+    attempt_count: Mapped[int | None] = mapped_column(Integer)
+    interpretation_attempts: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        default=list,
+    )
+    recovery_used: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+    backend_validation_result: Mapped[str | None] = mapped_column(String(30))
+    rejection_code: Mapped[str | None] = mapped_column(String(100))
+    value_type_diagnostics: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        default=list,
+    )
+    provider_purpose: Mapped[str | None] = mapped_column(String(100))
+    provider_model: Mapped[str | None] = mapped_column(String(100))
+    provider_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    resolution_duration_ms: Mapped[int] = mapped_column(Integer)
+
+
 class GameInstanceNodeState(TimestampMixin, Base):
     """Instance-owned node access and knowledge state, keyed by snapshot Node key."""
 

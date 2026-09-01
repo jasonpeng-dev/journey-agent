@@ -24,6 +24,7 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceMemoryEvent,
     GameInstanceResourceState,
+    GoalResolutionAttempt,
     WorldOperation,
 )
 from app.infrastructure.db.session import get_db
@@ -99,6 +100,13 @@ def developer_snapshot(
             )
         )
     )
+    resolution_attempts = tuple(
+        db.scalars(
+            select(GoalResolutionAttempt)
+            .where(GoalResolutionAttempt.game_instance_id == game.id)
+            .order_by(GoalResolutionAttempt.created_at, GoalResolutionAttempt.id)
+        )
+    )
     task_rows = [
         {
             "id": str(item.id),
@@ -168,6 +176,35 @@ def developer_snapshot(
         }
         for item in memories
     ]
+    resolution_attempt_rows = [
+        {
+            "id": str(item.id),
+            "scenario_version_id": str(item.scenario_version_id),
+            "original_goal_text": item.original_goal_text,
+            "normalized_goal_text": item.normalized_goal_text,
+            "goal_hash": item.goal_hash,
+            "resolution_status": item.resolution_status,
+            "resolver_source": item.resolver_source,
+            "grounding_source": item.grounding_source,
+            "grounded_public_entity_keys": item.grounded_public_entity_keys,
+            "resolution_candidate_keys": item.resolution_candidate_keys,
+            "public_catalog_hash": item.public_catalog_hash,
+            "focused_ontology_hash": item.focused_ontology_hash,
+            "interpretation_status": item.interpretation_status,
+            "attempt_count": item.attempt_count,
+            "interpretation_attempts": item.interpretation_attempts,
+            "recovery_used": item.recovery_used,
+            "backend_validation_result": item.backend_validation_result,
+            "rejection_code": item.rejection_code,
+            "value_type_diagnostics": item.value_type_diagnostics,
+            "provider_purpose": item.provider_purpose,
+            "provider_model": item.provider_model,
+            "provider_metadata": item.provider_metadata,
+            "resolution_duration_ms": item.resolution_duration_ms,
+            "created_at": item.created_at,
+        }
+        for item in resolution_attempts
+    ]
     resource_truth: dict[str, dict[str, object]] = {}
     grouped_resources: dict[str, list[GameInstanceResourceState]] = {}
     for item in resources:
@@ -219,6 +256,7 @@ def developer_snapshot(
         rule_outcomes=[item["outcome"] for item in operation_rows if item["outcome"]],
         decisions=decision_rows,
         memory=memory_rows,
+        goal_resolution_attempts=resolution_attempt_rows,
         history=[*task_rows, *operation_rows, *decision_rows, *memory_rows],
     )
 

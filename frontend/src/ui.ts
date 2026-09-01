@@ -248,6 +248,34 @@ export function diagnosticMessage(code: string, fallback: string): string {
   return diagnosticLabels[code] ?? fallback;
 }
 
+export function goalSubmissionErrorText(
+  error: unknown,
+  fallback = "\u76ee\u6807\u6682\u65f6\u65e0\u6cd5\u7ee7\u7eed\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002",
+): string {
+  if (!error || typeof error !== "object") return fallback;
+  const code = "code" in error && typeof error.code === "string" ? error.code : null;
+  if (!code) return fallback;
+  if (code === "MODEL_PROVIDER_RESPONSE_INVALID" || code === "JSONDecodeError") {
+    return "\u76ee\u6807\u89e3\u6790\u6682\u65f6\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u63d0\u4ea4\u4e00\u6b21\u3002";
+  }
+  if (
+    code === "MODEL_PROVIDER_TIMEOUT" ||
+    code === "MODEL_PROVIDER_HTTP_ERROR" ||
+    code === "MODEL_PROVIDER_FAILURE" ||
+    code === "MODEL_PROVIDER_UNAVAILABLE"
+  ) {
+    return "\u76ee\u6807\u89e3\u6790\u670d\u52a1\u6682\u65f6\u6ca1\u6709\u54cd\u5e94\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002";
+  }
+  if (
+    code === "MODEL_PROVIDER_CONFIGURATION_INVALID" ||
+    code.startsWith("FORMAL_GOAL_") ||
+    code.startsWith("GOAL_RESOLUTION_")
+  ) {
+    return "\u76ee\u6807\u683c\u5f0f\u6682\u65f6\u65e0\u6cd5\u89e3\u6790\uff0c\u8bf7\u6362\u4e00\u79cd\u8bf4\u6cd5\u540e\u91cd\u8bd5\u3002";
+  }
+  return fallback;
+}
+
 export function errorText(error: unknown, fallback = "操作失败，请稍后重试。") {
   if (!error || typeof error !== "object") return fallback;
   const code = "code" in error && typeof error.code === "string" ? error.code : null;

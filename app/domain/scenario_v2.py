@@ -329,6 +329,9 @@ class FactDefinitionV2(FrozenDefinitionModel):
     value_type: FactValueType
     initial_value: StrictScalar
     initial_visibility: Visibility
+    # This is an authored semantic boundary, not runtime Knowledge.  A Fact
+    # may be goal-addressable even while its current Truth remains hidden.
+    goal_addressable: bool = Field(default=False, exclude_if=lambda value: not value)
     allowed_values: tuple[StrictScalar, ...] = ()
 
     @model_validator(mode="after")

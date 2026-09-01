@@ -21,7 +21,7 @@ import {
   segmentCompletionMessage,
   syncPlayStateCaches,
 } from "./playPresentation";
-import { taskExplanationLabel, uiLabel } from "./ui";
+import { goalSubmissionErrorText, taskExplanationLabel, uiLabel } from "./ui";
 import type {
   PlayerGameState,
   PublicPlanStep,
@@ -746,6 +746,37 @@ describe("Formal Play player projections", () => {
     act(() => vi.advanceTimersByTime(1250));
     expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("1s");
     vi.useRealTimers();
+  });
+
+  it("renders Goal submission feedback below the composer", () => {
+    render(
+      <GoalComposer
+        goal="repair the corridor"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        feedback="friendly goal failure"
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("goal-submission-feedback")).toHaveTextContent(
+      "friendly goal failure",
+    );
+    expect(screen.getByTestId("goal-composer")).toContainElement(
+      screen.getByTestId("goal-submission-feedback"),
+    );
+  });
+
+  it("maps internal Goal errors to player-safe feedback", () => {
+    const message = goalSubmissionErrorText({ code: "MODEL_PROVIDER_RESPONSE_INVALID" });
+    expect(message).toBe("\u76ee\u6807\u89e3\u6790\u6682\u65f6\u5931\u8d25，\u8bf7\u91cd\u65b0\u63d0\u4ea4\u4e00\u6b21\u3002");
+    expect(message).not.toContain("MODEL_PROVIDER_RESPONSE_INVALID");
+    expect(goalSubmissionErrorText({ code: "MODEL_PROVIDER_TIMEOUT" })).toBe(
+      "\u76ee\u6807\u89e3\u6790\u670d\u52a1\u6682\u65f6\u6ca1\u6709\u54cd\u5e94，\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002",
+    );
   });
 
   it("renders Knowledge sections with dynamic counts and controlled defaults", () => {

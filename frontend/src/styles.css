@@ -250,6 +250,7 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .command-composer-v2 button, .console-approval button, .developer-bar-v2 button, .console-button { padding: 10px 15px; border: 0; border-radius: 9px; color: white; background: var(--console-jade); cursor: pointer; }
 .command-composer-v2 button:disabled, .console-approval button:disabled, .developer-bar-v2 button:disabled { cursor: wait; opacity: .55; }
 .command-composer-v2 p, .command-running, .archived-notice { margin: 8px 0 0; color: var(--console-soft); font-size: 11px; }
+.goal-submission-feedback { margin: 10px 0 0; padding: 10px 12px; border: 1px solid #e7c1a0; border-radius: 9px; color: #80512f; background: #fff4e6; }
 .console-approval { margin: 14px 0; padding: 15px; border: 1px solid #d9a266; border-radius: 12px; background: #fff4e6; }
 .console-approval > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 9px; }
 .console-approval strong { display: block; margin-top: 4px; }
