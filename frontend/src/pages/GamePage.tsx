@@ -33,7 +33,7 @@ import type {
   PublicTimelineEvent,
   ScenarioVersionDetail,
 } from "../types";
-import { errorText, resultLabel, stepDescription, taskExplanationLabel, uiLabel } from "../ui";
+import { errorText, goalSubmissionErrorText, resultLabel, stepDescription, taskExplanationLabel, uiLabel } from "../ui";
 import {
   debriefButtonLabel,
   formatDuration,
@@ -1569,6 +1569,7 @@ export function GoalComposer({
   resolving,
   startedAt,
   busy,
+  feedback = null,
   objectives = [],
   objectivesLoaded = false,
   onGoalChange,
@@ -1579,6 +1580,7 @@ export function GoalComposer({
   resolving: boolean;
   startedAt: number | null;
   busy: boolean;
+  feedback?: string | null;
   objectives?: Array<{ key: string; name: string }>;
   objectivesLoaded?: boolean;
   onGoalChange: (value: string) => void;
@@ -1653,6 +1655,11 @@ export function GoalComposer({
             </button>
           </div>
         )}
+        {feedback && (
+          <p className="goal-submission-feedback" data-testid="goal-submission-feedback" role="status">
+            {feedback}
+          </p>
+        )}
         {resolving && startedAt !== null && (
           <WaitingStatus
             startedAt={startedAt}
@@ -1708,6 +1715,7 @@ export function GamePage() {
   const [developerOpen, setDeveloperOpen] = useState(false);
   const [developerToken, setDeveloperToken] = useState("");
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
+  const [goalFeedback, setGoalFeedback] = useState<string | null>(null);
   const play = useQuery({
     queryKey: ["play", gameId, selectedTaskId],
     queryFn: () => api.playState(gameId, selectedTaskId),
@@ -1752,12 +1760,14 @@ export function GamePage() {
   const submit = useMutation({
     mutationFn: () => api.submitGoal(gameId, goal, crypto.randomUUID()),
     onMutate: () => {
+      setGoalFeedback("");
       setPendingGoal(goal);
       setAcceptedTask(null);
       setActiveOperation({ kind: "goal", taskId: null, startedAt: Date.now() });
     },
     onSuccess: (result) => {
       if (result.status === "ACCEPTED") {
+        setGoalFeedback("");
         setGoal("");
         setAcceptedTask(result.task);
         if (result.task) setSelectedTaskId(result.task.id);
@@ -1766,10 +1776,15 @@ export function GamePage() {
             ? { ...operation, taskId: result.task?.id ?? null }
             : operation,
         );
+      } else {
+        setGoalFeedback(
+          result.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。",
+        );
       }
       void refresh();
     },
-    onError: () => {
+    onError: (error) => {
+      setGoalFeedback(goalSubmissionErrorText(error));
       setPendingGoal(null);
       setActiveOperation(null);
     },
@@ -1919,11 +1934,12 @@ export function GamePage() {
     continuousExecuting ||
     replan.isPending;
   const mutationError =
-    submit.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? checkpoint.error ?? fork.error ?? decision.error ?? pacing.error ?? continuous.error ?? replan.error;
+    startPlanning.error ?? abandon.error ?? archive.error ?? checkpoint.error ?? fork.error ?? decision.error ?? pacing.error ?? continuous.error ?? replan.error;
   const resolutionMessage =
     submit.data && submit.data.status !== "ACCEPTED"
       ? submit.data.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。"
       : null;
+  const goalSubmissionFeedback = goalFeedback !== null ? goalFeedback : resolutionMessage;
   const viewedTaskId =
     selectedTaskId ?? activeTaskId ?? task?.id ?? acceptedTask?.id ?? null;
   const operationSelected = Boolean(
@@ -1947,10 +1963,10 @@ export function GamePage() {
 
   return (
     <main className="game-console">
-      {(mutationError || resolutionMessage) && (
+      {mutationError && (
         <div className="console-error">
           <strong>命令无法继续</strong>
-          <span>{mutationError ? errorText(mutationError) : resolutionMessage}</span>
+          <span>{errorText(mutationError)}</span>
         </div>
       )}
       <section className="scenario-strip">
@@ -2096,6 +2112,7 @@ export function GamePage() {
               resolving={goalResolving}
               startedAt={goalResolving ? activeOperation?.startedAt ?? null : null}
               busy={busy}
+              feedback={goalSubmissionFeedback}
               objectives={objectiveOptions}
               objectivesLoaded={scenarioVersion.isFetched}
               onGoalChange={setGoal}

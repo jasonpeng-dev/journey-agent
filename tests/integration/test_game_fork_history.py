@@ -72,6 +72,8 @@ def test_ordinary_archive_fork_inherits_history_and_new_task_boundary(
     assert copied_task is not None
     assert copied_task.id != first_task.id
     assert copied_task.status == AgentTaskStatus.SUCCEEDED
+    assert copied_task.formal_goal_contract_hash == first_task.formal_goal_contract_hash
+    assert copied_task.formal_goal_contract_json == first_task.formal_goal_contract_json
 
     new_task_response = client.post(
         f"/api/v1/games/{target_id}/goals",

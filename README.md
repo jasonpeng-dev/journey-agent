@@ -18,8 +18,8 @@ the browser product.
 * Scenario Library and structured Editor for world, Actors, Actions, Rules,
   Objectives, planning metadata, initialization, references, and Version
   history.
-* Generic Goal Resolver, frozen ObjectiveScope, canonical PlannerInput V2,
-  deterministic Validator, bounded internal REPAIR, and Knowledge-aware
+* Generic Goal Resolver, frozen `FormalGoalContractV1`, canonical PlannerInput
+  V2, deterministic Validator, bounded internal REPAIR, and Knowledge-aware
   REPLAN.
 * Declarative Action/Rule execution, Truth mutation, public Knowledge
   projection, Player-safe Formal PLAY, approvals, immutable archived runtime
@@ -31,12 +31,15 @@ the browser product.
 
     ScenarioVersion
       -> GameInstance
-           -> Goal -> frozen ObjectiveScope
-                -> Dependency Closure
-                     -> PlannerInput V2 -> Provider PlanSegment
-                          -> Validator -> formal AgentPlan
-                               -> Runtime -> Truth / Knowledge
-                                    -> REPLAN or Complete
+           -> Goal
+                -> exact authored Objective routing, or Dynamic Goal
+                     -> public entity grounding -> focused ontology
+                          -> typed Goal interpretation -> exact-Version validation
+                               -> frozen FormalGoalContractV1
+                                    -> Closure -> PlannerInput V2
+                                         -> Provider PlanSegment -> Validator
+                                              -> AgentPlan -> Runtime -> Truth / Knowledge
+                                                   -> REPLAN or Complete
 
 Formal PLAY sends one planning HTTP request. The backend performs any bounded
 REPAIR attempts internally and returns one final state. Rejected proposals
@@ -73,6 +76,25 @@ compatible providers such as DeepSeek.
 
 See [`.env.example`](.env.example) for the available settings and example
 configuration.
+
+Dynamic Goal Entity Grounding and Goal Interpretation use the
+`FAST_SEMANTIC` profile. It uses `SEMANTIC_MODEL` (falling back to
+`MODEL_NAME` when unset), a bounded semantic output budget, and
+`thinking=disabled` enforced by code. `MODEL_THINKING_MODE` and
+`MODEL_REASONING_EFFORT` do not affect this profile.
+
+`INITIAL`, `REPAIR`, and `REPLAN` use `PLANNING_REASONING`. This profile uses
+`MODEL_NAME`, `MODEL_THINKING_MODE`, `MODEL_REASONING_EFFORT`, and
+`MODEL_MAX_OUTPUT_TOKENS`. Semantic and planning calls may use different
+models; changing either model is a configuration change and does not require
+changing Goal Resolver or Planner business logic.
+
+Dynamic Goal resolution grounds public entities before building a focused
+ontology and interpreting terminal `FACT` or `RESOURCE_AT_LEAST` requirements.
+Transient/provider-format failures use bounded retry, while
+`NEEDS_CLARIFICATION` is not retried into a random resolution. Internal
+provider or validation codes remain developer diagnostics; Goal submission
+feedback is shown below the Goal input rather than as a page-level error.
 
 Never commit API keys.
 

@@ -34,6 +34,13 @@ GameInstance Knowledge projection controls when it is visible to the Agent and
 Player. A Dynamic Goal cannot add a gate or hidden completion semantic, and it
 does not create a Scenario ObjectiveDefinition.
 
+Authoritative Truth satisfaction is not the same as player-visible completion.
+The completion evaluator keeps both results. If a Dynamic Goal requirement is
+still Knowledge `UNKNOWN`, satisfying it in hidden Truth cannot immediately
+publish `SUCCEEDED` to the Player; a legal public Knowledge projection must
+make the requirement confirmable first. This preserves deterministic Truth
+evaluation without turning hidden state into a completion oracle.
+
 `ObjectiveScope` remains a predefined/legacy compatibility projection. Dynamic
 Tasks do not have an authored ObjectiveScope. Neither planning, REPAIR, nor
 REPLAN may expand the frozen Formal Goal; REPAIR is pre-execution proposal

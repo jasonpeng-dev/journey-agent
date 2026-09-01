@@ -58,6 +58,7 @@ world:
       value_type: ENUM
       initial_value: UNKNOWN
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - INFECTION
       - UNKNOWN
@@ -67,6 +68,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
   - key: triage_room
     name: 分诊室

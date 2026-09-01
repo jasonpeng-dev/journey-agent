@@ -46,20 +46,16 @@ def test_linjiang_goal_aliases_resolve_declaratively() -> None:
         assert resolution.objective_keys == ("restore_central_communication_capability",)
 
 
-def test_linjiang_unmatched_goal_can_use_generic_provider_fallback() -> None:
-    resolver = GenericGoalResolver(
-        selector=lambda _goal, _objectives: "restore_central_communication_capability"
-    )
-
+def test_linjiang_unmatched_goal_does_not_use_authored_catalog_fallback() -> None:
+    resolver = GenericGoalResolver()
     resolution = resolver.resolve(
         "Please restore the central communication network.",
         LINJIANG_V2_TEST,
     )
 
     assert LINJIANG_V2_TEST.goal_resolution.allow_llm_fallback is True
-    assert resolution.status == "RESOLVED"
-    assert resolution.source == "MODEL_VALIDATED"
-    assert resolution.objective_keys == ("restore_central_communication_capability",)
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.objective_keys == ()
 
 
 def test_linjiang_unrelated_goal_remains_unsupported() -> None:

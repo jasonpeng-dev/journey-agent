@@ -12,8 +12,6 @@ from app.agent.generic import (
 )
 from app.agent.provider import (
     GenericModelProvider,
-    GoalSelection,
-    GoalSelectionRequest,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -135,9 +133,6 @@ class _RecordingProvider:
     def model_name(self) -> str:
         return "synthetic-provider"
 
-    def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
-        raise AssertionError(f"Unexpected fuzzy goal selection: {request.goal}")
-
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
         return self.proposal
@@ -211,7 +206,7 @@ def _agent(
 
 def test_goal_resolver_uses_only_exact_version_candidates() -> None:
     definition = _definition()
-    resolver = GenericGoalResolver(selector=lambda _goal, _items: "invented_objective")
+    resolver = GenericGoalResolver()
 
     exact = resolver.resolve("stabilize the patient", definition)
     invented = resolver.resolve("conquer the galaxy", definition)

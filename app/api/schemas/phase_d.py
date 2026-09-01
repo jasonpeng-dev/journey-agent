@@ -687,6 +687,7 @@ class DeveloperGameSnapshotResponse(ApiModel):
     rule_outcomes: list[dict[str, Any]]
     decisions: list[dict[str, Any]]
     memory: list[dict[str, Any]]
+    goal_resolution_attempts: list[dict[str, Any]] = Field(default_factory=list)
     history: list[dict[str, Any]]
 
 

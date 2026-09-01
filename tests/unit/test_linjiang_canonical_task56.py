@@ -503,7 +503,23 @@ def test_task5_then_task6_complete_sequentially_on_one_runtime(session: Session)
     assert not agent.evaluate(task6).completed
     fuel.value = 100
     session.flush()
-    assert agent.evaluate(task6).completed
+    evaluation = agent.evaluate(task6)
+    assert evaluation.authoritative_completed is True
+    assert evaluation.completed is False
+
+    gate = session.get(
+        GameInstanceFactState,
+        (
+            game_id,
+            "southeast_fuel_emergency_power_plant",
+            "sustained_requirements_discovered",
+        ),
+    )
+    assert gate is not None
+    gate.truth_value = True
+    gate.visibility = Visibility.KNOWN
+    session.flush()
+    assert agent.evaluate(task6).completed is True
 
 
 def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(

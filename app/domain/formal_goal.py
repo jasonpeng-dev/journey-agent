@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
@@ -31,6 +32,7 @@ from pydantic import (
 
 from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import (
+    FactDefinitionV2,
     ObjectiveDefinitionV2,
     ObjectivePrerequisiteV2,
     ObjectiveRequirementKind,
@@ -70,10 +72,17 @@ class FormalGoalSourceKind(StrEnum):
 class FormalGoalError(ValueError):
     """Fail-closed error raised while compiling or validating a Goal."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details = details or {}
 
 
 class FormalGoalScenarioProofV1(FormalGoalModel):
@@ -405,6 +414,7 @@ def validate_ad_hoc_dynamic_candidates(
         if isinstance(candidates, AdHocGoalCandidateSetV1)
         else AdHocGoalCandidateSetV1(requirements=candidates)
     )
+    candidate_set = canonicalize_ad_hoc_dynamic_candidates(definition, candidate_set)
     requirements: list[ObjectiveRequirementV2] = []
     seen: set[str] = set()
     for candidate in candidate_set.requirements:
@@ -418,6 +428,38 @@ def validate_ad_hoc_dynamic_candidates(
         seen.add(identity)
         requirements.append(requirement)
     return tuple(requirements)
+
+
+def canonicalize_ad_hoc_dynamic_candidates(
+    definition: ScenarioDefinitionV2,
+    candidates: AdHocGoalCandidateSetV1 | tuple[AdHocGoalRequirementCandidateV1, ...],
+) -> AdHocGoalCandidateSetV1:
+    """Apply only lossless, fact-schema-driven normalization to provider values.
+
+    The provider DTO intentionally accepts scalar JSON values without knowing
+    the referenced Fact schema.  This boundary adds the exact Fact type before
+    the existing deterministic Formal Goal validation runs.  It never chooses
+    a value or infers Goal semantics; it only converts unambiguous serialized
+    forms such as ``"true"`` for a BOOLEAN Fact or ``"20"`` for an INTEGER
+    Fact.
+    """
+
+    candidate_set = (
+        candidates
+        if isinstance(candidates, AdHocGoalCandidateSetV1)
+        else AdHocGoalCandidateSetV1(requirements=candidates)
+    )
+    normalized: list[AdHocGoalRequirementCandidateV1] = []
+    for candidate in candidate_set.requirements:
+        if candidate.kind != ObjectiveRequirementKind.FACT:
+            normalized.append(candidate)
+            continue
+        fact = _fact_for_dynamic_candidate(candidate, definition)
+        values = tuple(
+            _canonicalize_fact_value(fact, value) for value in candidate.accepted_values
+        )
+        normalized.append(candidate.model_copy(update={"accepted_values": values}))
+    return AdHocGoalCandidateSetV1(requirements=tuple(normalized))
 
 
 def canonical_requirement_identity(requirement: ObjectiveRequirementV2) -> str:
@@ -442,18 +484,7 @@ def _candidate_to_requirement(
 ) -> ObjectiveRequirementV2:
     if candidate.kind == ObjectiveRequirementKind.FACT:
         assert candidate.node_key is not None and candidate.fact_key is not None
-        node = definition.world.node(candidate.node_key)
-        if node is None:
-            raise FormalGoalError(
-                "FORMAL_GOAL_UNKNOWN_NODE",
-                f"Dynamic Goal references unknown Node {candidate.node_key}",
-            )
-        fact = node.fact(candidate.fact_key)
-        if fact is None:
-            raise FormalGoalError(
-                "FORMAL_GOAL_UNKNOWN_FACT",
-                f"Dynamic Goal references unknown Fact {candidate.node_key}.{candidate.fact_key}",
-            )
+        fact = _fact_for_dynamic_candidate(candidate, definition)
         accepted_values = _canonical_scalars(candidate.accepted_values)
         _validate_scalar_domain(fact, accepted_values)
         return ObjectiveRequirementV2(
@@ -496,6 +527,26 @@ def _candidate_to_requirement(
     )
 
 
+def _fact_for_dynamic_candidate(
+    candidate: AdHocGoalRequirementCandidateV1,
+    definition: ScenarioDefinitionV2,
+) -> FactDefinitionV2:
+    assert candidate.node_key is not None and candidate.fact_key is not None
+    node = definition.world.node(candidate.node_key)
+    if node is None:
+        raise FormalGoalError(
+            "FORMAL_GOAL_UNKNOWN_NODE",
+            f"Dynamic Goal references unknown Node {candidate.node_key}",
+        )
+    fact = node.fact(candidate.fact_key)
+    if fact is None:
+        raise FormalGoalError(
+            "FORMAL_GOAL_UNKNOWN_FACT",
+            f"Dynamic Goal references unknown Fact {candidate.node_key}.{candidate.fact_key}",
+        )
+    return fact
+
+
 def _validate_scenario_snapshot(snapshot: ScenarioVersionSnapshot) -> None:
     if snapshot.schema_version != 2 or snapshot.definition.schema_version != 2:
         raise FormalGoalError(
@@ -514,6 +565,77 @@ def _validate_scenario_snapshot(snapshot: ScenarioVersionSnapshot) -> None:
             "FORMAL_GOAL_SCENARIO_HASH_MISMATCH",
             "The exact ScenarioVersion proof does not match its immutable definition",
         )
+
+
+_STRICT_INTEGER_TEXT = re.compile(r"-?(?:0|[1-9][0-9]*)\Z")
+
+
+def _canonicalize_fact_value(
+    fact: FactDefinitionV2,
+    value: FormalGoalScalar,
+) -> FormalGoalScalar:
+    """Normalize one provider scalar only when its target type is unambiguous."""
+
+    if fact.value_type.value == "BOOLEAN":
+        if type(value) is bool:
+            return value
+        if type(value) is str and value in {"true", "false"}:
+            return value == "true"
+        raise _value_type_error(fact, value, "BOOLEAN")
+
+    if fact.value_type.value == "INTEGER":
+        if type(value) is int:
+            return value
+        if type(value) is str and _STRICT_INTEGER_TEXT.fullmatch(value):
+            try:
+                return int(value, 10)
+            except ValueError as exc:
+                raise _value_type_error(fact, value, "INTEGER") from exc
+        raise _value_type_error(fact, value, "INTEGER")
+
+    if fact.value_type.value == "STRING":
+        if type(value) is str:
+            return value
+        raise _value_type_error(fact, value, "STRING")
+
+    # ENUM values remain closed-domain values.  Do not coerce them because the
+    # allowed value itself is the semantic authority and may be any scalar.
+    if any(type(value) is type(allowed) for allowed in fact.allowed_values):
+        return value
+    raise _value_type_error(fact, value, "ENUM")
+
+
+def _value_type_error(
+    fact: FactDefinitionV2,
+    value: FormalGoalScalar,
+    expected_value_type: str,
+) -> FormalGoalError:
+    return FormalGoalError(
+        "FORMAL_GOAL_VALUE_TYPE_INVALID",
+        f"Dynamic Goal value does not match the {expected_value_type} Fact domain",
+        details={
+            "expected_value_type": fact.value_type.value,
+            "actual_candidate_json_type": _json_value_type(value),
+        },
+    )
+
+
+def _json_value_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "boolean"
+    if type(value) is int:
+        return "integer"
+    if type(value) is float:
+        return "number"
+    if type(value) is str:
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
 
 
 def _validate_scalar_domain(fact, values: tuple[FormalGoalScalar, ...]) -> None:  # type: ignore[no-untyped-def]
@@ -535,11 +657,14 @@ def _validate_scalar_domain(fact, values: tuple[FormalGoalScalar, ...]) -> None:
                 "FORMAL_GOAL_VALUE_TYPE_INVALID",
                 "Dynamic Goal value does not match the BOOLEAN Fact domain",
             )
-        if fact.value_type.value == "ENUM" and value not in fact.allowed_values:
-            raise FormalGoalError(
-                "FORMAL_GOAL_VALUE_OUTSIDE_DOMAIN",
-                "Dynamic Goal value is outside the ENUM Fact domain",
-            )
+        if fact.value_type.value == "ENUM":
+            if not any(type(value) is type(allowed) for allowed in fact.allowed_values):
+                raise _value_type_error(fact, value, "ENUM")
+            if value not in fact.allowed_values:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_VALUE_OUTSIDE_DOMAIN",
+                    "Dynamic Goal value is outside the ENUM Fact domain",
+                )
 
 
 def _formal_requirement_semantics(item: FormalGoalRequirementV1) -> dict[str, object]:
@@ -650,6 +775,7 @@ __all__ = [
     "FormalGoalScenarioProofV1",
     "FormalGoalSourceKind",
     "canonical_requirement_identity",
+    "canonicalize_ad_hoc_dynamic_candidates",
     "compile_ad_hoc_dynamic_goal",
     "compile_predefined_formal_goal",
     "validate_ad_hoc_dynamic_candidates",

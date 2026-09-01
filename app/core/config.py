@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     model_provider: Literal["mock", "openai_compatible"] = "mock"
     model_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4.1-mini"
+    semantic_model: str | None = None
     model_api_key: SecretStr | None = None
     developer_api_token: SecretStr | None = None
     model_thinking_mode: Literal["disabled", "enabled"] = "disabled"

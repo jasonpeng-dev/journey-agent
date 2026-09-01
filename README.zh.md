@@ -14,8 +14,9 @@ planning、validation、Action execution、persistence 和浏览器产品。
   精确绑定 Version 的 GameInstance。
 * Scenario Library 和结构化 Editor，覆盖 world、Actors、Actions、Rules、
   Objectives、planning metadata、initialization、references 和 Version history。
-* Generic Goal Resolver、冻结的 ObjectiveScope、canonical PlannerInput V2、
-  deterministic Validator、bounded 内部 REPAIR，以及 Knowledge-aware REPLAN。
+* Generic Goal Resolver、冻结的 `FormalGoalContractV1`、canonical
+  PlannerInput V2、deterministic Validator、bounded 内部 REPAIR，以及
+  Knowledge-aware REPLAN。
 * Declarative Action/Rule execution、Truth mutation、public Knowledge projection、
   Player-safe Formal PLAY、审批、不可变 archived runtime source、Fork 和 plan
   history。
@@ -27,12 +28,15 @@ planning、validation、Action execution、persistence 和浏览器产品。
 ~~~text
 ScenarioVersion
   -> GameInstance
-       -> Goal -> frozen ObjectiveScope
-            -> Dependency Closure
-                 -> PlannerInput V2 -> Provider PlanSegment
-                      -> Validator -> formal AgentPlan
-                           -> Runtime -> Truth / Knowledge
-                                -> REPLAN or Complete
+       -> Goal
+            -> exact authored Objective routing，或 Dynamic Goal
+                 -> public entity grounding -> focused ontology
+                      -> typed Goal interpretation -> exact-Version validation
+                           -> frozen FormalGoalContractV1
+                                -> Closure -> PlannerInput V2
+                                     -> Provider PlanSegment -> Validator
+                                          -> AgentPlan -> Runtime -> Truth / Knowledge
+                                               -> REPLAN or Complete
 ~~~
 
 Formal PLAY 用一次 planning HTTP request 完成一个 planning cycle。Backend
@@ -67,6 +71,22 @@ Journey Agent 支持 OpenAI-compatible endpoint，包括 OpenAI 以及 DeepSeek
 等兼容服务。
 
 完整配置项和示例请参见 [`.env.example`](.env.example)。
+
+Dynamic Goal Entity Grounding 和 Goal Interpretation 使用 `FAST_SEMANTIC`
+profile。它使用 `SEMANTIC_MODEL`（未设置时回退到 `MODEL_NAME`）、bounded
+semantic output budget，并由代码强制 `thinking=disabled`。
+`MODEL_THINKING_MODE` 和 `MODEL_REASONING_EFFORT` 不会影响这个 profile。
+
+`INITIAL`、`REPAIR` 和 `REPLAN` 使用 `PLANNING_REASONING` profile。它使用
+`MODEL_NAME`、`MODEL_THINKING_MODE`、`MODEL_REASONING_EFFORT` 和
+`MODEL_MAX_OUTPUT_TOKENS`。semantic 和 planning 可以使用不同模型；修改模型
+只需要改配置，不需要修改 Goal Resolver 或 Planner 业务逻辑。
+
+Dynamic Goal 会先 grounding public entity，再构造 focused ontology，最后解释
+terminal `FACT` 或 `RESOURCE_AT_LEAST` requirement。transient/provider-format
+failure 使用 bounded retry；`NEEDS_CLARIFICATION` 不会被随机 retry 成某个结果。
+provider 或 validation 内部错误码只保留给 developer diagnostics；Goal submission
+feedback 显示在 Goal input 下方，不作为页面级错误。
 
 不要提交 API key。
 

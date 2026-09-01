@@ -4,7 +4,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.generic import GenericAgentError, GenericAgentService, GenericGoalResolver
+from app.agent.generic import (
+    GenericAgentError,
+    GenericAgentService,
+    GenericGoalResolution,
+    GenericGoalResolver,
+)
 from app.agent.planning_context import legal_candidate_id
 from app.agent.provider import (
     GoalSelection,
@@ -129,7 +134,14 @@ def test_nonempty_multi_objective_scope_is_frozen_and_uses_and_completion(
     resolver = GenericGoalResolver(provider=provider)
     agent = GenericAgentService(session, scope, goal_resolver=resolver)
 
-    task = agent.create_task(runtime.session, "help this patient")
+    task = agent.create_task(
+        runtime.session,
+        "help this patient",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            objective_keys=("stabilize_patient", "restore_consciousness"),
+        ),
+    )
 
     assert task.objective_scope_keys == ["restore_consciousness", "stabilize_patient"]
     assert task.objective_scope_hash
@@ -250,12 +262,9 @@ def test_provider_goal_and_plan_are_structured_exact_version_and_validated(
         proposed=(_provider_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 2}),),
     )
     agent = GenericAgentService(session, scope, provider=provider)
-    task = agent.create_task(runtime.session, "work out what is wrong")
+    task = agent.create_task(runtime.session, "stabilize the patient")
 
-    assert provider.goal_request is not None
-    assert {item["key"] for item in provider.goal_request.objective_candidates} == {
-        "stabilize_patient",
-    }
+    assert provider.goal_request is None
     assert provider.plan_request is not None
     assert provider.plan_request.objective_keys == ("stabilize_patient",)
     assert "patient_one.stable" in provider.plan_request.known_world["facts"]
@@ -271,6 +280,6 @@ def test_provider_goal_and_plan_are_structured_exact_version_and_validated(
     )
     with pytest.raises(GenericAgentError) as caught:
         GenericAgentService(session, scope, provider=bad).create_task(
-            runtime.session, "another unclear diagnosis request"
+            runtime.session, "stabilize the patient"
         )
     assert caught.value.code == "MODEL_PLAN_REJECTED"

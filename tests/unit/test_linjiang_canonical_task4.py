@@ -11,6 +11,7 @@ from app.agent.generic import GenericAgentService
 from app.domain.enums import AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ObjectiveDefinitionV2, ScenarioDefinitionV2
+from app.domain.world import Visibility
 from app.infrastructure.db.models import AgentPlan, GameInstanceFactState, Player
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
@@ -65,6 +66,7 @@ def _set_requirements(
         )
         assert row is not None
         row.truth_value = requirement.accepted_values[0]
+        row.visibility = Visibility.KNOWN
     session.flush()
 
 

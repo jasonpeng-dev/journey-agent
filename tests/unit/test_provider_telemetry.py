@@ -11,11 +11,14 @@ import pytest
 from pydantic import SecretStr
 
 from app.agent.provider import (
+    DynamicGoalEntityGroundingRequest,
+    DynamicGoalInterpretationRequest,
     GenericProviderError,
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
     PlannerInput,
     PlanRequest,
+    provider_call_history_metadata,
 )
 from app.core.config import Settings
 
@@ -118,6 +121,306 @@ def test_fast_response_records_headers_first_byte_and_bytes() -> None:
     assert metadata.response_bytes_received > 0
     assert metadata.request_cancelled_at is None
     assert metadata.timeout_subtype is None
+
+
+def test_dynamic_goal_payloads_use_separate_public_grounding_and_interpretation_contracts() -> None:
+    captured: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert isinstance(body, dict)
+        captured.append(body)
+        user_payload = json.loads(body["messages"][1]["content"])
+        if "public_catalog" in user_payload:
+            content = '{"status":"RESOLVED","candidate_keys":["public_node"]}'
+        else:
+            content = (
+                '{"status":"RESOLVED","requirements":[{"kind":"FACT",'
+                '"node_key":"public_node","fact_key":"passable",'
+                '"accepted_values":[true]}]}'
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": content},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(complete)
+    )
+    grounding = provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="repair the public road",
+            public_catalog={
+                "entities": [{"key": "public_node", "name": "Public Road"}],
+                "public_topology": {"relations": []},
+            },
+        )
+    )
+    interpretation = provider.interpret_dynamic_goal(
+        DynamicGoalInterpretationRequest(
+            goal="repair the public road",
+            ontology={
+                "world": {
+                    "nodes": [{"key": "public_node", "name": "Public Road"}],
+                    "facts": [
+                        {
+                            "node_key": "public_node",
+                            "fact_key": "passable",
+                            "value_type": "BOOLEAN",
+                        }
+                    ],
+                }
+            },
+            grounded_entity_keys=("public_node",),
+            recovery_attempt=1,
+        )
+    )
+
+    assert grounding.candidate_keys == ("public_node",)
+    assert interpretation.requirements
+    assert json.loads(captured[0]["messages"][1]["content"])["public_catalog"]
+    assert "ontology" not in json.loads(captured[0]["messages"][1]["content"])
+    interpretation_payload = json.loads(captured[1]["messages"][1]["content"])
+    assert interpretation_payload["grounded_entity_keys"] == ["public_node"]
+    assert interpretation_payload["recovery_attempt"] == 1
+    assert "temperature" not in captured[0]
+    assert "seed" not in captured[0]
+    assert "temperature" not in captured[1]
+    assert "seed" not in captured[1]
+
+
+def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user_payload = json.loads(body["messages"][1]["content"])
+        is_grounding = "public_catalog" in user_payload
+        content = (
+            '{"status":"RESOLVED","candidate_keys":["public_node"]}'
+            if is_grounding
+            else (
+                '{"status":"RESOLVED","requirements":[{"kind":"FACT",'
+                '"node_key":"public_node","fact_key":"passable",'
+                '"accepted_values":[true]}]}'
+            )
+        )
+        prompt_tokens = 11 if is_grounding else 13
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "prompt_cache_hit_tokens": 3 if is_grounding else 4,
+                    "prompt_cache_miss_tokens": 8 if is_grounding else 9,
+                    "completion_tokens": 5 if is_grounding else 6,
+                    "completion_tokens_details": {
+                        "reasoning_tokens": 1 if is_grounding else 2,
+                    },
+                    "total_tokens": 16 if is_grounding else 19,
+                },
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(complete)
+    )
+    provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="repair the public road",
+            public_catalog={"entities": [{"key": "public_node"}]},
+        )
+    )
+    provider.interpret_dynamic_goal(
+        DynamicGoalInterpretationRequest(
+            goal="repair the public road",
+            ontology={
+                "world": {
+                    "nodes": [{"key": "public_node"}],
+                    "facts": [
+                        {
+                            "node_key": "public_node",
+                            "fact_key": "passable",
+                            "value_type": "BOOLEAN",
+                        }
+                    ],
+                }
+            },
+            grounded_entity_keys=("public_node",),
+        )
+    )
+
+    history = provider.call_metadata_history
+    assert len(history) == 2
+    assert [item.call_sequence for item in history] == [1, 2]
+    assert [item.call_type for item in history] == [
+        "DYNAMIC_GOAL_GROUNDING",
+        "DYNAMIC_GOAL",
+    ]
+    assert [item.prompt_tokens for item in history] == [11, 13]
+    assert [item.prompt_cache_hit_tokens for item in history] == [3, 4]
+    assert [item.prompt_cache_miss_tokens for item in history] == [8, 9]
+    assert [item.completion_tokens for item in history] == [5, 6]
+    assert [item.reasoning_tokens for item in history] == [1, 2]
+    assert all(item.latency_ms >= 0 for item in history)
+    assert [item["call_sequence"] for item in provider_call_history_metadata(provider)] == [1, 2]
+
+
+def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoning_profile(
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert isinstance(body, dict)
+        captured.append(body)
+        user_payload = json.loads(body["messages"][1]["content"])
+        if "public_catalog" in user_payload:
+            content = '{"status":"RESOLVED","candidate_keys":["public_node"]}'
+        elif "ontology" in user_payload:
+            content = (
+                '{"status":"RESOLVED","requirements":[{"kind":"FACT",'
+                '"node_key":"public_node","fact_key":"passable",'
+                '"accepted_values":[true]}]}'
+            )
+        else:
+            content = _plan_response(request).json()["choices"][0]["message"]["content"]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": content}, "finish_reason": "stop"}
+                ]
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings().model_copy(
+            update={
+                "model_name": "planning-model",
+                "semantic_model": "semantic-model",
+                "model_thinking_mode": "enabled",
+                "model_reasoning_effort": "high",
+                "model_max_output_tokens": 8192,
+            }
+        ),
+        transport=httpx.MockTransport(complete),
+    )
+    provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="repair the public road",
+            public_catalog={"entities": [{"key": "public_node"}]},
+        )
+    )
+    provider.interpret_dynamic_goal(
+        DynamicGoalInterpretationRequest(
+            goal="repair the public road",
+            ontology={"world": {"nodes": [{"key": "public_node"}]}},
+            grounded_entity_keys=("public_node",),
+        )
+    )
+    provider.propose_plan(
+        PlanRequest(
+            call_type="INITIAL_PLAN",
+            goal="known goal",
+            planner_input=PlannerInput(objective={"objective_keys": ["known"]}),
+        )
+    )
+
+    assert [body["thinking"] for body in captured] == [
+        {"type": "disabled"},
+        {"type": "disabled"},
+        {"type": "enabled"},
+    ]
+    assert [body["model"] for body in captured] == [
+        "semantic-model",
+        "semantic-model",
+        "planning-model",
+    ]
+    assert [body["reasoning_effort"] for body in captured] == ["low", "low", "high"]
+    assert [body.get("max_tokens") for body in captured] == [2048, 2048, 8192]
+    history = provider.call_metadata_history
+    assert [item.profile for item in history] == [
+        "FAST_SEMANTIC",
+        "FAST_SEMANTIC",
+        "PLANNING_REASONING",
+    ]
+    assert [item.thinking_mode for item in history] == ["disabled", "disabled", "enabled"]
+    assert [item.model for item in history] == [
+        "semantic-model",
+        "semantic-model",
+        "planning-model",
+    ]
+    assert [item.configured_output_token_limit for item in history] == [2048, 2048, 8192]
+
+
+def test_dynamic_interpretation_schema_failure_records_safe_type_diagnostics() -> None:
+    def invalid_response(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"status":"RESOLVED","requirements":[{"kind":"FACT",'
+                                '"node_key":"public_node","fact_key":"passable",'
+                                '"accepted_values":"true"}]}'
+                            )
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings().model_copy(
+            update={
+                "model_thinking_mode": "enabled",
+                "model_reasoning_effort": "high",
+            }
+        ),
+        transport=httpx.MockTransport(invalid_response),
+    )
+
+    with pytest.raises(GenericProviderError) as error:
+        provider.interpret_dynamic_goal(
+            DynamicGoalInterpretationRequest(
+                goal="repair the public road",
+                ontology={"world": {"nodes": [{"key": "public_node"}]}},
+                grounded_entity_keys=("public_node",),
+            )
+        )
+
+    expected = {
+        "validation_error_type": "tuple_type",
+        "field_path": "requirements[0].accepted_values",
+        "expected_type": "array",
+        "actual_json_type": "string",
+    }
+    assert error.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
+    assert error.value.validation_diagnostics == (expected,)
+    metadata = provider.last_call_metadata
+    assert metadata is not None
+    assert metadata.profile == "FAST_SEMANTIC"
+    assert metadata.validation_diagnostics == (expected,)
+    assert "true" not in str(error.value.validation_diagnostics)
 
 
 def test_retryable_transport_failure_retries_once_and_records_each_network_call() -> None:
@@ -314,6 +617,7 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
         "MODEL_TIMEOUT_SECONDS",
         "MODEL_TOTAL_TIMEOUT_SECONDS",
         "MODEL_MAX_OUTPUT_TOKENS",
+        "SEMANTIC_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -321,9 +625,20 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
 
     assert settings.model_thinking_mode == "disabled"
     assert settings.model_reasoning_effort == "low"
+    assert settings.semantic_model is None
     assert settings.model_timeout_seconds == 20
     assert settings.model_total_timeout_seconds == 60
     assert settings.model_max_output_tokens == 8192
+
+
+def test_provider_settings_parse_independent_semantic_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SEMANTIC_MODEL", "semantic-model")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.semantic_model == "semantic-model"
 
 
 def test_provider_settings_parse_explicit_null_as_unset(

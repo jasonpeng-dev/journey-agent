@@ -81,12 +81,22 @@ entity. The supported requirement kinds are the shared `FACT` and
 assigns stable requirement identity and computes the contract hash; a provider
 cannot supply either identity or completion semantics.
 
-An AD_HOC_DYNAMIC interpreter receives only the public Scenario ontology and
-currently public entity/fact/Region identities. It cannot see hidden Truth,
-authored Objective metadata, Actions, prerequisites, knowledge gates, or hidden
-completion requirements. It can therefore express only public `FACT` and
-`RESOURCE_AT_LEAST` requirements. Dynamic compilation does not create a
-Scenario ObjectiveDefinition or modify the immutable ScenarioVersion.
+Before the contract is frozen, the exact-Version resolver checks only an
+explicit authored Objective key, canonical name, alias, or example. A unique
+match is `PREDEFINED`; unmatched text is never sent to a nearest-Objective
+fallback. The Dynamic path first performs deterministic public entity or
+unique public-topology grounding. If that cannot uniquely identify a public
+entity, bounded Entity Grounding may return only validated public candidate
+keys, clarification, or unsupported. The backend then builds a focused public
+ontology for Goal Interpretation and validates the resulting typed candidate
+against the exact Version.
+
+The AD_HOC_DYNAMIC interpreter receives only that focused public Scenario
+ontology and currently public entity/fact/Region identities. It cannot see
+hidden Truth, authored Objective metadata, Actions, prerequisites, knowledge
+gates, or hidden completion requirements. It can therefore express only public
+`FACT` and `RESOURCE_AT_LEAST` requirements. Dynamic compilation does not create
+a Scenario ObjectiveDefinition or modify the immutable ScenarioVersion.
 
 The canonical contract is embedded in AgentTask with its schema version, source
 kind, exact ScenarioVersion proof, compiler version, canonical JSON, and hash.
@@ -94,12 +104,32 @@ PlanningCycle stores the contract hash alongside its canonical PlannerInput.
 Legacy predefined Tasks are read through a deterministic compile-on-read
 compatibility path; no lazy write-back is required.
 
+### 3.3 Provider profiles
+
+Provider configuration is routed by logical purpose rather than by Goal or
+Planner business code:
+
+| Profile | Purposes | Configuration boundary |
+| --- | --- | --- |
+| `FAST_SEMANTIC` | Dynamic Goal Entity Grounding and Goal Interpretation | `SEMANTIC_MODEL` (falling back to `MODEL_NAME`); `thinking=disabled` and the fast output budget are fixed by code |
+| `PLANNING_REASONING` | `INITIAL`, `REPAIR`, `REPLAN` | `MODEL_NAME`, `MODEL_THINKING_MODE`, `MODEL_REASONING_EFFORT`, and `MODEL_MAX_OUTPUT_TOKENS` |
+
+Planning settings do not change the semantic profile. Semantic and planning
+calls may use different models without changing Goal Resolver or Planner
+logic. Dynamic provider-format or transient failures are bounded;
+`NEEDS_CLARIFICATION` is returned rather than retried into an arbitrary
+resolution.
+
 ## 4. Agent runtime overview
 
 The request path is:
 
     Goal
-      -> exact-Version Goal Resolver
+      -> authored Objective deterministic routing
+      -> Dynamic public Entity Grounding when unmatched
+      -> focused public ontology
+      -> Dynamic Goal Interpretation when unmatched
+      -> deterministic exact-Version candidate validation
       -> frozen FormalGoalContractV1
       -> Dependency Closure
       -> canonical PlannerInput V2
@@ -113,6 +143,12 @@ The request path is:
       -> Player pacing / acknowledgement
       -> REPLAN or objective completion
 
+The Dynamic path is conditional: an explicit authored Objective match stops at
+the `PREDEFINED` source; only an unmatched Goal enters public grounding and
+interpretation. Grounding answers which public entity the player named.
+Interpretation answers which supported terminal Goal state is requested.
+Neither stage plans Actions.
+
 The application composes the configured provider once and injects it into
 the generic resolver and Agent service. API routes and React components are
 adapters; they do not duplicate Rule evaluation, objective completion,
@@ -125,6 +161,12 @@ and Formal Goal verification. Knowledge is the public projection used by
 Planner, Validator, and normal Player responses. Requirement Knowledge (for
 example, whether a gated authored requirement has been revealed) is a public
 Knowledge state, not a change to the frozen Formal Goal contract.
+
+Authoritative Truth satisfaction and player-visible completion are separate
+answers. If a Dynamic Goal requirement remains Knowledge `UNKNOWN`, a hidden
+Truth value satisfying it cannot by itself publish `SUCCEEDED` to the Player;
+the completion visibility path must first have a legal public Knowledge
+projection.
 
 Hidden Truth is never serialized into PlannerInput. UNKNOWN is not false,
 zero, unavailable, or blocked. Runtime may reveal new public Knowledge through

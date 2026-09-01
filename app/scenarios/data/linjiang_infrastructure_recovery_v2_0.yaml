@@ -234,6 +234,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -241,6 +242,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -248,6 +250,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -267,6 +270,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
   - key: central_telecom_hub
     name: 中央通信枢纽
@@ -284,6 +288,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -291,6 +296,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -298,6 +304,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -325,6 +332,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -332,6 +340,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -348,6 +357,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -367,6 +377,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -374,6 +385,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -381,6 +393,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -408,6 +421,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -415,6 +429,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -422,6 +437,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -449,6 +465,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -456,6 +473,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -463,6 +481,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -500,6 +519,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -507,6 +527,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -514,6 +535,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -541,6 +563,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -548,6 +571,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -555,6 +579,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -580,6 +605,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -587,6 +613,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -607,6 +634,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -614,6 +642,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -630,6 +659,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
   - key: heavy_equipment_yard
     name: 重型工程设备场
@@ -656,6 +686,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -663,6 +694,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -670,6 +702,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -696,6 +729,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -703,6 +737,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -710,6 +745,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -736,6 +772,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -743,6 +780,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -779,6 +817,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -786,6 +825,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -793,6 +833,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -812,6 +853,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
   - key: rail_freight_yard
     name: 铁路货运场
@@ -829,6 +871,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -836,6 +879,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -852,6 +896,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -871,6 +916,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -878,6 +924,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -905,6 +952,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -912,6 +960,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -919,6 +968,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -953,6 +1003,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
   - key: south_communication_core
     name: 南部通信核心
@@ -970,6 +1021,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -977,6 +1029,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -984,6 +1037,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1010,6 +1064,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1017,6 +1072,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1044,6 +1100,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -1051,6 +1108,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1058,6 +1116,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1085,6 +1144,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -1092,6 +1152,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1099,6 +1160,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1135,6 +1197,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
   - key: southeast_emergency_power_station
     name: 东南应急电源站
@@ -1152,6 +1215,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -1159,6 +1223,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1166,6 +1231,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1202,6 +1268,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1209,6 +1276,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1227,6 +1295,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -1234,6 +1303,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1241,6 +1311,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1267,6 +1338,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -1274,6 +1346,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1281,6 +1354,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1307,6 +1381,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1314,6 +1389,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1330,6 +1406,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1358,6 +1435,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -1365,6 +1443,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1372,6 +1451,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1397,6 +1477,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
   - key: west_communication_relay
     name: 西部通信中继站
@@ -1413,6 +1494,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -1420,6 +1502,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1427,6 +1510,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1453,6 +1537,7 @@ world:
       value_type: BOOLEAN
       initial_value: true
       initial_visibility: HIDDEN
+      goal_addressable: true
       allowed_values: []
   - key: west_logistics_district
     name: 西部物流区
@@ -1482,6 +1567,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -1489,6 +1575,7 @@ world:
       value_type: ENUM
       initial_value: AVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE
@@ -1505,6 +1592,7 @@ world:
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values: []
     - key: sustained_generation_capability
       name: 持续发电能力
@@ -1512,6 +1600,7 @@ world:
       value_type: ENUM
       initial_value: UNAVAILABLE
       initial_visibility: KNOWN
+      goal_addressable: true
       allowed_values:
       - AVAILABLE
       - UNAVAILABLE

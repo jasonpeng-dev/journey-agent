@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
@@ -9,7 +10,8 @@ from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.generic import (
     GenericAgentError,
@@ -19,7 +21,12 @@ from app.agent.generic import (
     proposal_signature,
 )
 from app.agent.planning_context import PlanningContinuityBuilder
-from app.agent.provider import GenericModelProvider, GenericProviderError, PlanRequest
+from app.agent.provider import (
+    GenericModelProvider,
+    GenericProviderError,
+    PlanRequest,
+    provider_call_history_metadata,
+)
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
@@ -43,6 +50,7 @@ from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import require_scope_writable
 from app.services.generic_actions import GenericActionService
+from app.services.goal_resolution_observability import persist_goal_resolution_attempt
 from app.services.player_pacing import PlayerExecutionPhase
 
 
@@ -71,9 +79,17 @@ class PlayOrchestrator:
         game_instance_id: GameInstanceId,
         *,
         provider: GenericModelProvider | None = None,
+        audit_session_factory: Callable[[], Session] | None = None,
         model_max_repair_attempts_per_cycle: int = 2,
     ) -> None:
         self.db = db
+        audit_bind = db.get_bind()
+        if isinstance(audit_bind, Connection):
+            audit_bind = audit_bind.engine
+        self.audit_session_factory: Callable[[], Session] = audit_session_factory or sessionmaker(
+            bind=audit_bind,
+            expire_on_commit=False,
+        )
         self.scope = GameInstanceService(db).load(game_instance_id)
         self.goal_resolver = GenericGoalResolver(
             provider=provider,
@@ -179,9 +195,39 @@ class PlayOrchestrator:
         definition = (
             ScenarioVersionRepository(self.db).load(self.scope.scenario_version_id).definition
         )
+        provider_history_start = len(provider_call_history_metadata(self.goal_resolver.provider))
         resolution_started = perf_counter()
-        resolution = self.goal_resolver.resolve(goal, definition)
+        try:
+            resolution = self.goal_resolver.resolve(goal, definition)
+        except GenericProviderError as exc:
+            persist_goal_resolution_attempt(
+                self.audit_session_factory,
+                game_instance_id=self.scope.game_instance_id,
+                scenario_version_id=self.scope.scenario_version_id,
+                goal=goal,
+                resolution=None,
+                resolution_duration_ms=_duration_ms(resolution_started),
+                provider=self.goal_resolver.provider,
+                error_code=exc.code,
+                validation_diagnostics=exc.validation_diagnostics,
+                provider_calls=provider_call_history_metadata(self.goal_resolver.provider)[
+                    provider_history_start:
+                ],
+            )
+            raise
         resolution_duration_ms = _duration_ms(resolution_started)
+        persist_goal_resolution_attempt(
+            self.audit_session_factory,
+            game_instance_id=self.scope.game_instance_id,
+            scenario_version_id=self.scope.scenario_version_id,
+            goal=goal,
+            resolution=resolution,
+            resolution_duration_ms=resolution_duration_ms,
+            provider=self.goal_resolver.provider,
+            provider_calls=provider_call_history_metadata(self.goal_resolver.provider)[
+                provider_history_start:
+            ],
+        )
         if resolution.status != "RESOLVED":
             return GoalSubmission(resolution, None)
         conversation = self.db.scalar(
