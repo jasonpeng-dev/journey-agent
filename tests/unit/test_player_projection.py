@@ -44,6 +44,7 @@ from app.services.game_lifecycle import GameLifecycleService
 from app.services.player_projection import PlayerProjectionService, _task_explanation, _task_status
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.spatial_projection import SpatialDisplayProjector
+from tests.scenario_fixtures import predefined_goal_resolution
 
 
 def _runtime_task(
@@ -66,6 +67,7 @@ def _runtime_task(
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         goal,
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     return runtime, task

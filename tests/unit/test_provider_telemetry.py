@@ -11,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 
 from app.agent.provider import (
+    DynamicGoalCandidateReference,
     DynamicGoalEntityGroundingRequest,
     DynamicGoalInterpretationRequest,
     GenericProviderError,
@@ -18,12 +19,14 @@ from app.agent.provider import (
     OpenAICompatibleGenericProvider,
     PlannerInput,
     PlanRequest,
+    goal_provider_request_snapshot,
+    goal_provider_response_snapshot,
     provider_call_history_metadata,
 )
 from app.core.config import Settings
 
 
-def _settings(*, total_timeout: float = 1.0) -> Settings:
+def _settings(*, total_timeout: float = 1.0, observability: str = "NORMAL") -> Settings:
     return Settings(
         _env_file=None,
         app_env="test",
@@ -33,6 +36,7 @@ def _settings(*, total_timeout: float = 1.0) -> Settings:
         model_api_key=SecretStr("not-a-real-key"),
         model_timeout_seconds=1.0,
         model_total_timeout_seconds=total_timeout,
+        goal_resolution_observability=observability,
     )
 
 
@@ -132,7 +136,9 @@ def test_dynamic_goal_payloads_use_separate_public_grounding_and_interpretation_
         captured.append(body)
         user_payload = json.loads(body["messages"][1]["content"])
         if "public_catalog" in user_payload:
-            content = '{"status":"RESOLVED","candidate_keys":["public_node"]}'
+            content = (
+                '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}'
+            )
         else:
             content = (
                 '{"status":"RESOLVED","requirements":[{"kind":"FACT",'
@@ -175,20 +181,40 @@ def test_dynamic_goal_payloads_use_separate_public_grounding_and_interpretation_
                             "value_type": "BOOLEAN",
                         }
                     ],
-                }
+                },
+                "grounding": {
+                    "projection": {
+                        "allowed_entity_keys": ["public_node"],
+                        "allowed_region_keys": [],
+                        "allowed_resource_keys": [],
+                        "allowed_derived_state_keys": [],
+                        "allowed_fact_keys": ["public_node.passable"],
+                    }
+                },
             },
             grounded_entity_keys=("public_node",),
             recovery_attempt=1,
         )
     )
 
-    assert grounding.candidate_keys == ("public_node",)
+    assert grounding.candidate_keys == ()
+    assert grounding.candidate_refs == (
+        DynamicGoalCandidateReference(ref_type="NODE", key="public_node"),
+    )
     assert interpretation.requirements
     assert json.loads(captured[0]["messages"][1]["content"])["public_catalog"]
     assert "ontology" not in json.loads(captured[0]["messages"][1]["content"])
     interpretation_payload = json.loads(captured[1]["messages"][1]["content"])
     assert interpretation_payload["grounded_entity_keys"] == ["public_node"]
     assert interpretation_payload["recovery_attempt"] == 1
+    assert isinstance(interpretation_payload["ontology"]["grounding"]["projection"], dict)
+    assert interpretation_payload["ontology"]["grounding"]["projection"] == {
+        "allowed_entity_keys": ["public_node"],
+        "allowed_region_keys": [],
+        "allowed_resource_keys": [],
+        "allowed_derived_state_keys": [],
+        "allowed_fact_keys": ["public_node.passable"],
+    }
     assert "temperature" not in captured[0]
     assert "seed" not in captured[0]
     assert "temperature" not in captured[1]
@@ -201,7 +227,7 @@ def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
         user_payload = json.loads(body["messages"][1]["content"])
         is_grounding = "public_catalog" in user_payload
         content = (
-            '{"status":"RESOLVED","candidate_keys":["public_node"]}'
+            '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}'
             if is_grounding
             else (
                 '{"status":"RESOLVED","requirements":[{"kind":"FACT",'
@@ -273,6 +299,79 @@ def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
     assert [item.reasoning_tokens for item in history] == [1, 2]
     assert all(item.latency_ms >= 0 for item in history)
     assert [item["call_sequence"] for item in provider_call_history_metadata(provider)] == [1, 2]
+    assert all(item.debug_snapshot is None for item in history)
+
+
+def test_debug_goal_calls_keep_safe_input_and_output_snapshots() -> None:
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user_payload = json.loads(body["messages"][1]["content"])
+        if "public_catalog" in user_payload:
+            content = (
+                '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}'
+            )
+        else:
+            content = (
+                '{"status":"RESOLVED","requirements":[{"kind":"FACT",'
+                '"node_key":"public_node","fact_key":"passable",'
+                '"accepted_values":[true]}]}'
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(observability="DEBUG"),
+        transport=httpx.MockTransport(complete),
+    )
+    provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="repair the public road",
+            public_catalog={"references": [{"ref_type": "NODE", "key": "public_node"}]},
+        )
+    )
+    provider.interpret_dynamic_goal(
+        DynamicGoalInterpretationRequest(
+            goal="repair the public road",
+            ontology={"world": {"nodes": [{"key": "public_node"}]}},
+            grounded_entity_keys=("public_node",),
+            recovery_attempt=1,
+        )
+    )
+
+    history = provider.call_metadata_history
+    assert len(history) == 2
+    assert history[0].debug_snapshot is not None
+    assert history[0].debug_snapshot["input"]["goal"] == "repair the public road"
+    assert history[0].debug_snapshot["input"]["public_catalog"]
+    assert history[0].debug_snapshot["output"]["status"] == "RESOLVED"
+    assert history[1].debug_snapshot is not None
+    assert history[1].debug_snapshot["input"]["recovery_attempt"] == 1
+    assert history[1].debug_snapshot["input"]["ontology"]
+    assert history[1].debug_snapshot["output"]["requirements"]
+
+
+def test_goal_snapshot_size_caps_record_truncation_without_raw_payload() -> None:
+    request_snapshot = goal_provider_request_snapshot(
+        "dynamic_goal_grounding",
+        {"goal": "x", "public_catalog": {"references": ["x" * 4000] * 200}},
+    )
+    response_snapshot = goal_provider_response_snapshot(
+        "dynamic_goal",
+        {
+            "status": "RESOLVED",
+            "requirements": [{"kind": "FACT", "accepted_values": ["x" * 4000]}] * 200,
+        },
+    )
+
+    assert request_snapshot["truncated"] is True
+    assert request_snapshot["original_size"] > request_snapshot["stored_size"]
+    assert response_snapshot["truncated"] is True
+    assert response_snapshot["original_size"] > response_snapshot["stored_size"]
+    assert "x" * 4000 not in str(request_snapshot)
+    assert "x" * 4000 not in str(response_snapshot)
 
 
 def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoning_profile() -> (
@@ -286,7 +385,9 @@ def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoni
         captured.append(body)
         user_payload = json.loads(body["messages"][1]["content"])
         if "public_catalog" in user_payload:
-            content = '{"status":"RESOLVED","candidate_keys":["public_node"]}'
+            content = (
+                '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}'
+            )
         elif "ontology" in user_payload:
             content = (
                 '{"status":"RESOLVED","requirements":[{"kind":"FACT",'
@@ -322,7 +423,12 @@ def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoni
     provider.interpret_dynamic_goal(
         DynamicGoalInterpretationRequest(
             goal="repair the public road",
-            ontology={"world": {"nodes": [{"key": "public_node"}]}},
+            ontology={
+                "world": {
+                    "nodes": [{"key": "public_node"}],
+                    "facts": [{"node_key": "public_node", "fact_key": "passable"}],
+                }
+            },
             grounded_entity_keys=("public_node",),
         )
     )
@@ -387,6 +493,7 @@ def test_dynamic_interpretation_schema_failure_records_safe_type_diagnostics() -
             update={
                 "model_thinking_mode": "enabled",
                 "model_reasoning_effort": "high",
+                "goal_resolution_observability": "DEBUG",
             }
         ),
         transport=httpx.MockTransport(invalid_response),
@@ -414,6 +521,12 @@ def test_dynamic_interpretation_schema_failure_records_safe_type_diagnostics() -
     assert metadata.profile == "FAST_SEMANTIC"
     assert metadata.validation_diagnostics == (expected,)
     assert "true" not in str(error.value.validation_diagnostics)
+    assert metadata.debug_snapshot is not None
+    output = metadata.debug_snapshot["output"]
+    assert output["requirements"][0]["accepted_values"] == {
+        "json_type": "string",
+        "value_omitted": True,
+    }
 
 
 def test_retryable_transport_failure_retries_once_and_records_each_network_call() -> None:
@@ -611,6 +724,7 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
         "MODEL_TOTAL_TIMEOUT_SECONDS",
         "MODEL_MAX_OUTPUT_TOKENS",
         "SEMANTIC_MODEL",
+        "GOAL_RESOLUTION_OBSERVABILITY",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -619,6 +733,7 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
     assert settings.model_thinking_mode == "disabled"
     assert settings.model_reasoning_effort == "low"
     assert settings.semantic_model is None
+    assert settings.goal_resolution_observability == "NORMAL"
     assert settings.model_timeout_seconds == 20
     assert settings.model_total_timeout_seconds == 60
     assert settings.model_max_output_tokens == 8192
@@ -632,6 +747,16 @@ def test_provider_settings_parse_independent_semantic_model(
     settings = Settings(_env_file=None)
 
     assert settings.semantic_model == "semantic-model"
+
+
+def test_provider_settings_parse_goal_resolution_debug_observability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GOAL_RESOLUTION_OBSERVABILITY", "DEBUG")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.goal_resolution_observability == "DEBUG"
 
 
 def test_provider_settings_parse_explicit_null_as_unset(

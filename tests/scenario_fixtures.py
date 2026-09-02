@@ -5,6 +5,7 @@ from typing import Any
 
 import yaml
 
+from app.agent.generic import GenericGoalResolution
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.services.scenarios import ScenarioService
 
@@ -42,9 +43,27 @@ def create_test_scenario(
     return scenario
 
 
+def predefined_goal_resolution(objective_key: str) -> GenericGoalResolution:
+    """Provide an explicit authored resolution for non-routing runtime tests.
+
+    Current catalog-enabled Scenarios intentionally require the Dynamic Goal
+    pipeline for natural-language input.  Tests that exercise the existing
+    Objective-backed planning/runtime behavior can still supply the already
+    resolved authored contract explicitly.
+    """
+
+    return GenericGoalResolution(
+        status="RESOLVED",
+        objective_key=objective_key,
+        objective_keys=(objective_key,),
+        source="DETERMINISTIC",
+    )
+
+
 __all__ = [
     "GENERIC_TEST",
     "LINJIANG_V2_TEST",
     "create_test_scenario",
     "load_test_scenario",
+    "predefined_goal_resolution",
 ]

@@ -22,7 +22,7 @@ from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import LINJIANG_V2_TEST
+from tests.scenario_fixtures import LINJIANG_V2_TEST, predefined_goal_resolution
 
 _CANONICAL = LINJIANG_V2_TEST
 _TASK4_KEY = "restore_east_emergency_water_supply"
@@ -146,6 +146,7 @@ def test_task4_requires_each_derived_dependency(
     task = agent.create_task(
         runtime.session,
         _TASK4_GOAL,
+        resolved_goal=predefined_goal_resolution(_TASK4_KEY),
         initialize_plan=False,
     )
 
@@ -159,7 +160,12 @@ def test_task4_completes_directly_when_all_derived_dependencies_are_satisfied(
     definition, runtime, agent = _canonical_runtime(session)
     _set_derived_dependencies(session, runtime.instance.id, definition)
 
-    task = agent.create_task(runtime.session, _TASK4_GOAL, initialize_plan=False)
+    task = agent.create_task(
+        runtime.session,
+        _TASK4_GOAL,
+        resolved_goal=predefined_goal_resolution(_TASK4_KEY),
+        initialize_plan=False,
+    )
 
     assert task.status == AgentTaskStatus.SUCCEEDED
     assert agent.evaluate(task).completed

@@ -17,7 +17,7 @@ from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
-from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
+from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST, predefined_goal_resolution
 
 
 def test_dual_scenario_runtime_state_isolation_and_recovery(tmp_path: Path) -> None:
@@ -67,6 +67,7 @@ def test_dual_scenario_runtime_state_isolation_and_recovery(tmp_path: Path) -> N
         linjiang_task = GenericAgentService(db, linjiang_scope).create_task(
             linjiang_runtime.session,
             "restore central communications",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
             initialize_plan=False,
         )
         generic_actor = db.get(

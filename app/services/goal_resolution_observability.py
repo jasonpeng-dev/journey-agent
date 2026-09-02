@@ -47,6 +47,33 @@ _SAFE_PROVIDER_METADATA_KEYS = frozenset(
         "profile",
         "http_timeout_seconds",
         "total_deadline_seconds",
+        "prompt_template_version",
+        "request_hash",
+        "public_catalog_hash",
+        "focused_ontology_hash",
+        "response_validation",
+        "rejection_code",
+    }
+)
+_SAFE_PROVIDER_SNAPSHOT_KEYS = frozenset({"debug_snapshot"})
+_SAFE_PROVIDER_CALL_KEYS = frozenset(
+    {
+        "call_sequence",
+        "logical_call_sequence",
+        "call_order",
+        "grounding_round",
+        "interpretation_attempt",
+        "request_hash",
+        "public_catalog_hash",
+        "focused_ontology_hash",
+        "prompt_template_version",
+        "debug_snapshot",
+        "candidate_refs",
+        "projection",
+        "response_status",
+        "response_validation",
+        "validation_result",
+        "accepted_requirements",
     }
 )
 _SAFE_ATTEMPT_KEYS = frozenset(
@@ -59,6 +86,10 @@ _SAFE_ATTEMPT_KEYS = frozenset(
         "result",
         "rejection_code",
         "candidate_keys",
+        "candidate_refs",
+        "grounding_round",
+        "interpretation_attempt",
+        "validation_diagnostics",
     }
 )
 _SAFE_VALUE_TYPES = frozenset({"STRING", "INTEGER", "BOOLEAN", "ENUM"})
@@ -80,6 +111,7 @@ def persist_goal_resolution_attempt(
     error_code: str | None = None,
     provider_calls: Sequence[dict[str, object]] | None = None,
     validation_diagnostics: Sequence[dict[str, object]] | None = None,
+    resolution_observation: dict[str, object] | None = None,
 ) -> GoalResolutionAttempt:
     """Commit a redacted Goal resolution result in an independent transaction.
 
@@ -93,7 +125,7 @@ def persist_goal_resolution_attempt(
     observation = (
         resolution.provider_observation
         if resolution is not None and isinstance(resolution.provider_observation, dict)
-        else {}
+        else dict(resolution_observation or {})
     )
     provider_metadata = _safe_provider_metadata(observation, provider)
     provider_metadata_snapshot = provider_call_metadata(provider) if provider is not None else {}
@@ -106,11 +138,15 @@ def persist_goal_resolution_attempt(
     )
     if safe_validation_diagnostics:
         provider_metadata["validation_diagnostics"] = safe_validation_diagnostics
+    observed_provider_calls = observation.get("provider_calls")
     safe_provider_calls = _safe_provider_calls(
-        provider_calls if provider_calls is not None else observation.get("provider_calls")
+        observed_provider_calls if observed_provider_calls is not None else provider_calls
     )
     if safe_provider_calls:
         provider_metadata["provider_calls"] = safe_provider_calls
+    safe_grounding = _safe_grounding_observation(observation.get("grounding"))
+    if safe_grounding:
+        provider_metadata["grounding"] = safe_grounding
     grounding = observation.get("grounding")
     grounding_map = grounding if isinstance(grounding, dict) else {}
     attempts = _safe_attempts(observation.get("attempts"))
@@ -191,32 +227,64 @@ def _safe_provider_metadata(
 ) -> dict[str, object]:
     metadata: dict[str, object] = {}
     if provider is not None:
-        metadata.update(provider_call_metadata(provider))
+        latest_metadata = provider_call_metadata(provider)
+        latest_metadata.pop("debug_snapshot", None)
+        metadata.update(latest_metadata)
     metadata.update(
         {key: value for key, value in observation.items() if key in _SAFE_PROVIDER_METADATA_KEYS}
     )
-    return {
-        key: value
-        for key, value in metadata.items()
-        if key in _SAFE_PROVIDER_METADATA_KEYS and _is_safe_metadata_value(value)
-    }
+    result: dict[str, object] = {}
+    for key, value in metadata.items():
+        if key in _SAFE_PROVIDER_METADATA_KEYS and _is_safe_metadata_value(value):
+            result[key] = value
+        elif key in _SAFE_PROVIDER_SNAPSHOT_KEYS:
+            snapshot = _safe_observation_snapshot(value)
+            if snapshot:
+                result[key] = snapshot
+    return result
 
 
 def _safe_provider_calls(value: object) -> list[dict[str, object]]:
     if not isinstance(value, (list, tuple)):
         return []
     result: list[dict[str, object]] = []
-    safe_keys = _SAFE_PROVIDER_METADATA_KEYS | frozenset({"call_sequence"})
+    safe_keys = _SAFE_PROVIDER_METADATA_KEYS | _SAFE_PROVIDER_CALL_KEYS
     for raw in value:
         if not isinstance(raw, dict):
             continue
         item: dict[str, object] = {}
         for key in safe_keys:
             candidate = raw.get(key)
-            if key == "call_sequence":
+            if key in {
+                "call_sequence",
+                "logical_call_sequence",
+                "call_order",
+                "grounding_round",
+                "interpretation_attempt",
+            }:
                 integer = _safe_int(candidate)
                 if integer is not None:
                     item[key] = integer
+            elif key in _SAFE_PROVIDER_SNAPSHOT_KEYS:
+                snapshot = _safe_observation_snapshot(candidate)
+                if snapshot:
+                    item[key] = snapshot
+            elif key == "candidate_refs":
+                refs = _safe_candidate_refs(candidate)
+                if refs:
+                    item[key] = refs
+            elif key == "projection":
+                projection = _safe_projection(candidate)
+                if projection:
+                    item[key] = projection
+            elif key == "validation_result":
+                validation_result = _safe_observation_snapshot(candidate)
+                if validation_result:
+                    item[key] = validation_result
+            elif key == "accepted_requirements":
+                accepted_requirements = _safe_observation_snapshot(candidate)
+                if accepted_requirements:
+                    item[key] = accepted_requirements
             elif key in _SAFE_PROVIDER_METADATA_KEYS and _is_safe_metadata_value(candidate):
                 item[key] = candidate
         call_diagnostics = _safe_provider_validation_diagnostics(raw.get("validation_diagnostics"))
@@ -259,6 +327,66 @@ def _safe_provider_validation_diagnostics(value: object) -> list[dict[str, str]]
     return result
 
 
+def _safe_observation_snapshot(value: object, *, depth: int = 0) -> object:
+    """Bound nested public Goal snapshots before writing the JSON audit row."""
+
+    if depth >= 8:
+        return {"json_type": _safe_json_type(value), "truncated": True}
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:4000]
+    if isinstance(value, (list, tuple)):
+        items = [_safe_observation_snapshot(item, depth=depth + 1) for item in value[:200]]
+        if len(value) > 200:
+            items.append({"truncated": True, "remaining": len(value) - 200})
+        return items
+    if isinstance(value, dict):
+        mapping: dict[str, object] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 200:
+                mapping["_truncated"] = True
+                break
+            if not isinstance(key, str):
+                continue
+            if key.casefold() in {
+                "authorization",
+                "chain_of_thought",
+                "content",
+                "credentials",
+                "headers",
+                "hidden_truth",
+                "messages",
+                "reasoning",
+                "secret",
+                "thinking",
+                "thought",
+                "token",
+            }:
+                continue
+            mapping[key[:160]] = _safe_observation_snapshot(item, depth=depth + 1)
+        return mapping
+    return {"json_type": _safe_json_type(value)}
+
+
+def _safe_json_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "unknown"
+
+
 def _provider_purpose(call_type: str) -> str:
     if call_type == "DYNAMIC_GOAL":
         return "DYNAMIC_GOAL_INTERPRETATION"
@@ -279,14 +407,83 @@ def _safe_attempts(value: object) -> list[dict[str, object]]:
                 strings = _safe_string_list(candidate)
                 if strings:
                     item[key] = strings
-            elif key == "attempt":
+            elif key == "candidate_refs":
+                refs = _safe_candidate_refs(candidate)
+                if refs:
+                    item[key] = refs
+            elif key == "attempt" or key in {"grounding_round", "interpretation_attempt"}:
                 integer = _safe_int(candidate)
                 if integer is not None:
                     item[key] = integer
+            elif key == "validation_diagnostics":
+                diagnostics = _safe_provider_validation_diagnostics(candidate)
+                if diagnostics:
+                    item[key] = diagnostics
             elif isinstance(candidate, str):
                 item[key] = candidate[:160]
         if item:
             result.append(item)
+    return result
+
+
+def _safe_candidate_refs(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[dict[str, str]] = []
+    allowed_types = {"NODE", "REGION", "RESOURCE", "DERIVED_STATE"}
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        ref_type = raw.get("ref_type")
+        key = raw.get("key")
+        if (
+            isinstance(ref_type, str)
+            and ref_type in allowed_types
+            and isinstance(key, str)
+            and key.strip()
+        ):
+            result.append({"ref_type": ref_type, "key": key[:160]})
+        if len(result) >= 50:
+            break
+    return result
+
+
+def _safe_grounding_observation(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, object] = {}
+    source = _safe_text(value.get("source"))
+    if source is not None:
+        result["source"] = source
+    candidate_refs = _safe_candidate_refs(value.get("candidate_refs"))
+    if candidate_refs:
+        result["candidate_refs"] = candidate_refs
+    for key in ("entity_keys", "scope_keys"):
+        strings = _safe_string_list(value.get(key))
+        if strings:
+            result[key] = strings
+    projection = value.get("projection")
+    if isinstance(projection, dict):
+        safe_projection = _safe_projection(projection)
+        if safe_projection:
+            result["projection"] = safe_projection
+    return result
+
+
+def _safe_projection(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, object] = {}
+    for key in (
+        "allowed_entity_keys",
+        "allowed_region_keys",
+        "allowed_resource_keys",
+        "allowed_derived_state_keys",
+        "allowed_fact_keys",
+    ):
+        strings = _safe_string_list(value.get(key))
+        if strings:
+            result[key] = strings
     return result
 
 
@@ -336,7 +533,13 @@ def _safe_int(value: object) -> int | None:
 
 def _is_recovery_attempt(item: dict[str, object]) -> bool:
     attempt = _safe_int(item.get("attempt"))
-    return attempt is not None and attempt > 1
+    grounding_round = _safe_int(item.get("grounding_round"))
+    interpretation_attempt = _safe_int(item.get("interpretation_attempt"))
+    return (
+        (attempt is not None and attempt > 1)
+        or (grounding_round is not None and grounding_round > 1)
+        or (interpretation_attempt is not None and interpretation_attempt > 1)
+    )
 
 
 def _is_safe_metadata_value(value: object) -> bool:

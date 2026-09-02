@@ -12,12 +12,20 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
 from time import perf_counter
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 import httpx
 import structlog
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StrictStr,
+    ValidationError,
+    model_validator,
+)
 
 from app.core.config import Settings
 from app.domain.formal_goal import AdHocGoalRequirementCandidateV1
@@ -47,19 +55,46 @@ class DynamicGoalEntityGroundingRequest(ProviderModel):
     public_catalog: dict[str, object] = Field(default_factory=dict)
 
 
+class DynamicGoalCandidateReference(ProviderModel):
+    """One public Scenario definition that Stage 1 may ground."""
+
+    ref_type: Literal["NODE", "REGION", "RESOURCE", "DERIVED_STATE"]
+    key: StrictStr = Field(min_length=1, max_length=160)
+
+
 class DynamicGoalEntityGrounding(ProviderModel):
-    """Closed provider output containing public entity candidates only."""
+    """Closed provider output containing public heterogeneous candidates only.
+
+    ``candidate_keys`` remains a compatibility input for older deterministic
+    test providers and is normalized to ``NODE`` references.  The provider
+    contract itself is ``candidate_refs`` so Stage 1 can ground resources and
+    public Derived States without pretending they are world Nodes.
+    """
 
     status: Literal["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"] = "RESOLVED"
-    candidate_keys: tuple[str, ...] = ()
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    candidate_keys: tuple[StrictStr, ...] = ()
     clarification_prompt: str | None = None
 
     @model_validator(mode="after")
     def validate_grounding(self) -> DynamicGoalEntityGrounding:
-        if self.status == "RESOLVED" and not self.candidate_keys:
-            raise ValueError("A resolved Entity Grounding needs at least one candidate key")
-        if self.status != "RESOLVED" and self.candidate_keys:
-            raise ValueError("An unresolved Entity Grounding cannot carry candidate keys")
+        if self.candidate_keys:
+            legacy_refs = tuple(
+                DynamicGoalCandidateReference(ref_type="NODE", key=key)
+                for key in self.candidate_keys
+            )
+            if self.candidate_refs and self.candidate_refs != legacy_refs:
+                raise ValueError("Entity Grounding candidate_refs and candidate_keys disagree")
+            if not self.candidate_refs:
+                object.__setattr__(self, "candidate_refs", legacy_refs)
+        refs = self.candidate_refs
+        identities = tuple((item.ref_type, item.key) for item in refs)
+        if len(set(identities)) != len(identities):
+            raise ValueError("Entity Grounding candidate references must be unique")
+        if self.status == "RESOLVED" and not refs:
+            raise ValueError("A resolved Entity Grounding needs at least one candidate reference")
+        if self.status != "RESOLVED" and refs:
+            raise ValueError("An unresolved Entity Grounding cannot carry candidate references")
         if self.status == "NEEDS_CLARIFICATION" and not (
             self.clarification_prompt and self.clarification_prompt.strip()
         ):
@@ -72,6 +107,9 @@ class DynamicGoalInterpretationRequest(ProviderModel):
 
     goal: str = Field(min_length=1, max_length=4000)
     ontology: dict[str, object] = Field(default_factory=dict)
+    grounded_candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    # Kept for compatibility with existing provider integrations.  It is the
+    # NODE subset of grounded_candidate_refs, never the complete Stage 1 scope.
     grounded_entity_keys: tuple[str, ...] = ()
     recovery_attempt: int = Field(default=0, ge=0, le=1)
 
@@ -456,6 +494,16 @@ class ProviderCallMetadata(ProviderModel):
     finish_reason: str | None = None
     validation_diagnostics: tuple[dict[str, object], ...] = ()
     network_calls: tuple[dict[str, object], ...] = ()
+    # Goal-resolution calls may retain one bounded public input/output snapshot
+    # when the configured observability level is DEBUG.  Planning calls leave
+    # this field unset so PlannerInput payloads keep their existing storage
+    # contract.
+    prompt_template_version: str | None = None
+    request_hash: str | None = None
+    public_catalog_hash: str | None = None
+    focused_ontology_hash: str | None = None
+    debug_snapshot: dict[str, object] | None = None
+    response_validation: str | None = None
 
 
 class GenericModelProvider(Protocol):
@@ -490,11 +538,15 @@ class GenericProviderError(ValueError):
         message: str,
         *,
         validation_diagnostics: tuple[dict[str, object], ...] = (),
+        resolution_observation: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.validation_diagnostics = validation_diagnostics
+        self.resolution_observation = (
+            dict(resolution_observation) if resolution_observation is not None else None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -595,6 +647,387 @@ def _safe_json_type(value: object) -> str | None:
     if isinstance(value, dict):
         return "object"
     return None
+
+
+_GOAL_PROVIDER_PURPOSES = frozenset(
+    {"dynamic_goal_grounding", "dynamic_goal", "dynamic_goal_interpretation"}
+)
+_GOAL_PROMPT_TEMPLATE_VERSIONS = {
+    "dynamic_goal_grounding": "dynamic-goal-grounding-v1",
+    "dynamic_goal": "dynamic-goal-interpretation-v1",
+    "dynamic_goal_interpretation": "dynamic-goal-interpretation-v1",
+}
+_GOAL_SNAPSHOT_MAX_DEPTH = 8
+_GOAL_SNAPSHOT_MAX_ITEMS = 200
+_GOAL_SNAPSHOT_MAX_STRING = 4000
+_GOAL_REQUEST_SNAPSHOT_MAX_BYTES = 32_768
+_GOAL_RESPONSE_SNAPSHOT_MAX_BYTES = 16_384
+_SENSITIVE_SNAPSHOT_KEYS = frozenset(
+    {
+        "authorization",
+        "chain_of_thought",
+        "content",
+        "credentials",
+        "headers",
+        "hidden_truth",
+        "messages",
+        "reasoning",
+        "secret",
+        "thinking",
+        "thought",
+        "token",
+    }
+)
+
+
+def goal_provider_request_snapshot(
+    purpose: str,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    """Return a bounded public snapshot of a Dynamic Goal request payload."""
+
+    if purpose not in _GOAL_PROVIDER_PURPOSES:
+        return {}
+    snapshot = _safe_goal_snapshot(payload, depth=0)
+    return _bounded_goal_snapshot(snapshot, max_bytes=_GOAL_REQUEST_SNAPSHOT_MAX_BYTES)
+
+
+def goal_provider_response_snapshot(
+    purpose: str,
+    value: object,
+    *,
+    public_catalog: dict[str, object] | None = None,
+    public_ontology: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return a redacted structured/shape snapshot of a Goal response.
+
+    Valid DTOs are already closed provider models.  Invalid responses are
+    reduced to their safe contract fields and JSON shapes; unknown values are
+    never copied, which prevents provider reasoning or accidental private
+    fields from entering telemetry.
+    """
+
+    if purpose not in _GOAL_PROVIDER_PURPOSES:
+        return {}
+    raw: object = value
+    if isinstance(value, BaseModel):
+        raw = value.model_dump(mode="json")
+    if not isinstance(raw, dict):
+        return {"json_type": _safe_json_type(raw) or "unknown"}
+    if purpose == "dynamic_goal_grounding":
+        raw = _redact_goal_grounding_identities(raw, public_catalog)
+        allowed = {"status", "candidate_refs", "candidate_keys", "clarification_prompt"}
+        nested_allowed = {"ref_type", "key"}
+    else:
+        raw = _redact_goal_interpretation_identities(raw, public_ontology)
+        allowed = {"status", "requirements", "clarification_prompt"}
+        nested_allowed = {
+            "kind",
+            "node_key",
+            "fact_key",
+            "accepted_values",
+            "region_key",
+            "resource_key",
+            "minimum",
+            "derived_key",
+        }
+    snapshot = _safe_goal_response_mapping(raw, allowed=allowed, nested_allowed=nested_allowed)
+    return _bounded_goal_snapshot(snapshot, max_bytes=_GOAL_RESPONSE_SNAPSHOT_MAX_BYTES)
+
+
+def _redact_goal_grounding_identities(
+    value: dict[str, object],
+    public_catalog: dict[str, object] | None,
+) -> dict[str, object]:
+    if public_catalog is None:
+        return value
+    references = public_catalog.get("references")
+    allowed: set[tuple[str, str]] = set()
+    if isinstance(references, (list, tuple)):
+        for reference in references:
+            if not isinstance(reference, dict):
+                continue
+            ref_type = reference.get("ref_type")
+            key = reference.get("key")
+            if isinstance(ref_type, str) and isinstance(key, str):
+                allowed.add((ref_type, key))
+    result = dict(value)
+    candidate_refs = value.get("candidate_refs")
+    if isinstance(candidate_refs, (list, tuple)):
+        result["candidate_refs"] = [
+            _redact_goal_reference(item, allowed) for item in candidate_refs
+        ]
+    candidate_keys = value.get("candidate_keys")
+    if isinstance(candidate_keys, (list, tuple)):
+        result["candidate_keys"] = [
+            item
+            if isinstance(item, str) and any(key == item for _, key in allowed)
+            else {"json_type": _safe_json_type(item) or "unknown", "value_omitted": True}
+            for item in candidate_keys
+        ]
+    return result
+
+
+def _redact_goal_reference(
+    value: object,
+    allowed: set[tuple[str, str]],
+) -> object:
+    if not isinstance(value, dict):
+        return value
+    ref_type = value.get("ref_type")
+    key = value.get("key")
+    if isinstance(ref_type, str) and isinstance(key, str) and (ref_type, key) in allowed:
+        return {"ref_type": ref_type, "key": key}
+    return {
+        "ref_type": {"json_type": _safe_json_type(ref_type) or "unknown", "value_omitted": True},
+        "key": {"json_type": _safe_json_type(key) or "unknown", "value_omitted": True},
+    }
+
+
+def _redact_goal_interpretation_identities(
+    value: dict[str, object],
+    public_ontology: dict[str, object] | None,
+) -> dict[str, object]:
+    if public_ontology is None:
+        return value
+    world = public_ontology.get("world")
+    if not isinstance(world, dict):
+        return value
+    region_keys = _public_ontology_string_keys(world.get("regions"), key_name="key")
+    resource_keys = _public_ontology_string_keys(world.get("resources"), key_name="key")
+    derived_keys = _public_ontology_string_keys(world.get("derived_states"), key_name="key")
+    fact_keys: set[tuple[str, str]] = set()
+    facts = world.get("facts")
+    if isinstance(facts, (list, tuple)):
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            node_key = fact.get("node_key")
+            fact_key = fact.get("fact_key")
+            if isinstance(node_key, str) and isinstance(fact_key, str):
+                fact_keys.add((node_key, fact_key))
+    result = dict(value)
+    requirements = value.get("requirements")
+    if not isinstance(requirements, (list, tuple)):
+        return result
+    safe_requirements: list[object] = []
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            safe_requirements.append(requirement)
+            continue
+        item = dict(requirement)
+        kind = item.get("kind")
+        if kind == "FACT":
+            node_key = item.get("node_key")
+            fact_key = item.get("fact_key")
+            is_public_fact = (
+                isinstance(node_key, str)
+                and isinstance(fact_key, str)
+                and (node_key, fact_key) in fact_keys
+            )
+            if not is_public_fact:
+                item["node_key"] = _redacted_goal_identity(node_key)
+                item["fact_key"] = _redacted_goal_identity(fact_key)
+                _omit_goal_requirement_value(item)
+        elif kind == "RESOURCE_AT_LEAST":
+            region_key = item.get("region_key")
+            resource_key = item.get("resource_key")
+            if not (
+                isinstance(region_key, str)
+                and region_key in region_keys
+                and isinstance(resource_key, str)
+                and resource_key in resource_keys
+            ):
+                item["region_key"] = _redacted_goal_identity(region_key)
+                item["resource_key"] = _redacted_goal_identity(resource_key)
+        elif kind == "DERIVED_STATE":
+            derived_key = item.get("derived_key")
+            if not isinstance(derived_key, str) or derived_key not in derived_keys:
+                item["derived_key"] = _redacted_goal_identity(derived_key)
+                _omit_goal_requirement_value(item)
+        safe_requirements.append(item)
+    result["requirements"] = safe_requirements
+    return result
+
+
+def _public_ontology_string_keys(value: object, *, key_name: str) -> set[str]:
+    if not isinstance(value, (list, tuple)):
+        return set()
+    keys: set[str] = set()
+    for item in value:
+        if isinstance(item, str):
+            keys.add(item)
+        elif isinstance(item, dict) and isinstance(item.get(key_name), str):
+            keys.add(item[key_name])
+    return keys
+
+
+def _redacted_goal_identity(value: object) -> object:
+    if (
+        isinstance(value, dict)
+        and value.get("value_omitted") is True
+        and isinstance(value.get("json_type"), str)
+    ):
+        return value
+    return {
+        "json_type": _safe_json_type(value) or "unknown",
+        "value_omitted": True,
+    }
+
+
+def _omit_goal_requirement_value(item: dict[str, object]) -> None:
+    if "accepted_values" in item:
+        value = item["accepted_values"]
+        item["accepted_values"] = _redacted_goal_identity(value)
+
+
+def _bounded_goal_snapshot(value: object, *, max_bytes: int) -> dict[str, object]:
+    """Bound a safe Goal snapshot by encoded size without retaining raw input."""
+
+    snapshot = value if isinstance(value, dict) else {"json_type": _safe_json_type(value)}
+    encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    original_size = len(encoded.encode("utf-8"))
+    if original_size <= max_bytes:
+        return snapshot
+
+    # The recursively safe snapshot is already depth/item/string capped.  If
+    # its encoded form is still too large, retain only a small shape marker and
+    # size evidence; never slice the provider's raw response or prompt text.
+    truncated: dict[str, object] = {
+        "truncated": True,
+        "original_size": original_size,
+        "snapshot": {"json_type": "object", "value_omitted": True},
+        "stored_size": 0,
+    }
+    for _ in range(3):
+        stored_size = len(
+            json.dumps(truncated, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        if truncated["stored_size"] == stored_size:
+            break
+        truncated["stored_size"] = stored_size
+    return truncated
+
+
+def _safe_goal_snapshot(value: object, *, depth: int) -> object:
+    if depth >= _GOAL_SNAPSHOT_MAX_DEPTH:
+        return {
+            "json_type": _safe_json_type(value) or "unknown",
+            "truncated": True,
+        }
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:_GOAL_SNAPSHOT_MAX_STRING]
+    if isinstance(value, (list, tuple)):
+        items = [
+            _safe_goal_snapshot(item, depth=depth + 1) for item in value[:_GOAL_SNAPSHOT_MAX_ITEMS]
+        ]
+        if len(value) > _GOAL_SNAPSHOT_MAX_ITEMS:
+            items.append({"truncated": True, "remaining": len(value) - _GOAL_SNAPSHOT_MAX_ITEMS})
+        return items
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _GOAL_SNAPSHOT_MAX_ITEMS:
+                result["_truncated"] = True
+                break
+            if not isinstance(key, str):
+                continue
+            if key.casefold() in _SENSITIVE_SNAPSHOT_KEYS:
+                continue
+            result[key[:160]] = _safe_goal_snapshot(item, depth=depth + 1)
+        return result
+    return {"json_type": _safe_json_type(value) or "unknown"}
+
+
+def _safe_goal_response_mapping(
+    value: dict[str, object],
+    *,
+    allowed: set[str],
+    nested_allowed: set[str],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for index, (key, item) in enumerate(value.items()):
+        if index >= _GOAL_SNAPSHOT_MAX_ITEMS:
+            result["_truncated"] = True
+            break
+        if not isinstance(key, str) or key.casefold() in _SENSITIVE_SNAPSHOT_KEYS:
+            continue
+        if key in allowed:
+            if key in {"candidate_refs", "requirements"}:
+                if isinstance(item, (list, tuple)):
+                    result[key] = [
+                        _safe_goal_response_mapping(
+                            nested,
+                            allowed=nested_allowed,
+                            nested_allowed=set(),
+                        )
+                        if isinstance(nested, dict)
+                        else {"json_type": _safe_json_type(nested) or "unknown"}
+                        for nested in item[:_GOAL_SNAPSHOT_MAX_ITEMS]
+                    ]
+                else:
+                    result[key] = {"json_type": _safe_json_type(item) or "unknown"}
+            else:
+                result[key] = _safe_goal_snapshot(item, depth=1)
+        else:
+            # Keep the field name and its shape so schema failures such as an
+            # unexpected ``target_value`` are diagnosable without retaining
+            # the rejected value itself.
+            result[key[:160]] = {
+                "json_type": _safe_json_type(item) or "unknown",
+                "value_omitted": True,
+            }
+    return result
+
+
+def _goal_provider_metadata(
+    purpose: str,
+    payload: dict[str, object],
+    *,
+    include_debug_snapshot: bool,
+) -> dict[str, Any]:
+    if purpose not in _GOAL_PROVIDER_PURPOSES:
+        return {}
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    catalog = payload.get("public_catalog")
+    ontology = payload.get("ontology")
+    metadata: dict[str, Any] = {
+        "prompt_template_version": _GOAL_PROMPT_TEMPLATE_VERSIONS[purpose],
+        "request_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        "public_catalog_hash": (
+            hashlib.sha256(
+                json.dumps(
+                    catalog,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if isinstance(catalog, dict)
+            else None
+        ),
+        "focused_ontology_hash": (
+            hashlib.sha256(
+                json.dumps(
+                    ontology,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if isinstance(ontology, dict)
+            else None
+        ),
+    }
+    if include_debug_snapshot:
+        metadata["debug_snapshot"] = {
+            "input": goal_provider_request_snapshot(purpose, payload),
+        }
+    return metadata
 
 
 class ProviderTotalTimeout(TimeoutError):
@@ -706,6 +1139,7 @@ class OpenAICompatibleGenericProvider:
         self._api_key = settings.model_api_key.get_secret_value()
         self._model_name = settings.model_name
         self._semantic_model_name = settings.semantic_model or self._model_name
+        self._goal_resolution_observability = settings.goal_resolution_observability
         self._timeout = settings.model_timeout_seconds
         self._total_timeout = settings.model_total_timeout_seconds
         self._max_output_tokens = settings.model_max_output_tokens
@@ -774,6 +1208,10 @@ class OpenAICompatibleGenericProvider:
         return self._model_name
 
     @property
+    def goal_resolution_observability(self) -> str:
+        return self._goal_resolution_observability
+
+    @property
     def last_call_metadata(self) -> ProviderCallMetadata | None:
         return self._last_call_metadata
 
@@ -790,6 +1228,29 @@ class OpenAICompatibleGenericProvider:
             return
         metadata = self._call_metadata_history[-1].model_copy(
             update={"validation_diagnostics": diagnostics}
+        )
+        self._call_metadata_history[-1] = metadata
+        self._last_call_metadata = metadata
+
+    def _record_goal_response_snapshot(
+        self,
+        response_snapshot: dict[str, object],
+        *,
+        validation: str,
+    ) -> None:
+        if not self._call_metadata_history:
+            return
+        previous_snapshot = self._call_metadata_history[-1].debug_snapshot
+        if previous_snapshot is None:
+            return
+        debug_snapshot = dict(previous_snapshot)
+        debug_snapshot["output"] = response_snapshot
+        debug_snapshot["response_validation"] = validation
+        metadata = self._call_metadata_history[-1].model_copy(
+            update={
+                "debug_snapshot": debug_snapshot,
+                "response_validation": validation,
+            }
         )
         self._call_metadata_history[-1] = metadata
         self._last_call_metadata = metadata
@@ -815,24 +1276,53 @@ class OpenAICompatibleGenericProvider:
     def ground_dynamic_goal_entities(
         self, request: DynamicGoalEntityGroundingRequest
     ) -> DynamicGoalEntityGrounding:
+        raw = self._invoke("dynamic_goal_grounding", request.model_dump(mode="json"))
         try:
-            return DynamicGoalEntityGrounding.model_validate(
-                self._invoke("dynamic_goal_grounding", request.model_dump())
-            )
+            result = DynamicGoalEntityGrounding.model_validate(raw)
         except ValidationError as exc:
+            if self._goal_resolution_observability == "DEBUG":
+                self._record_goal_response_snapshot(
+                    goal_provider_response_snapshot(
+                        "dynamic_goal_grounding",
+                        raw,
+                        public_catalog=request.public_catalog,
+                    ),
+                    validation="REJECTED",
+                )
+            diagnostics = provider_validation_diagnostics(exc)
+            self._record_validation_diagnostics(diagnostics)
             raise GenericProviderError(
                 "MODEL_PROVIDER_RESPONSE_INVALID",
                 "The model provider returned an invalid Dynamic Goal Entity Grounding",
+                validation_diagnostics=diagnostics,
             ) from exc
+        if self._goal_resolution_observability == "DEBUG":
+            self._record_goal_response_snapshot(
+                goal_provider_response_snapshot(
+                    "dynamic_goal_grounding",
+                    result,
+                    public_catalog=request.public_catalog,
+                ),
+                validation="ACCEPTED",
+            )
+        return result
 
     def interpret_dynamic_goal(
         self, request: DynamicGoalInterpretationRequest
     ) -> DynamicGoalInterpretation:
+        raw = self._invoke("dynamic_goal", request.model_dump(mode="json"))
         try:
-            return DynamicGoalInterpretation.model_validate(
-                self._invoke("dynamic_goal", request.model_dump())
-            )
+            result = DynamicGoalInterpretation.model_validate(raw)
         except ValidationError as exc:
+            if self._goal_resolution_observability == "DEBUG":
+                self._record_goal_response_snapshot(
+                    goal_provider_response_snapshot(
+                        "dynamic_goal",
+                        raw,
+                        public_ontology=request.ontology,
+                    ),
+                    validation="REJECTED",
+                )
             diagnostics = provider_validation_diagnostics(exc)
             self._record_validation_diagnostics(diagnostics)
             raise GenericProviderError(
@@ -840,6 +1330,16 @@ class OpenAICompatibleGenericProvider:
                 "The model provider returned an invalid Dynamic Goal interpretation",
                 validation_diagnostics=diagnostics,
             ) from exc
+        if self._goal_resolution_observability == "DEBUG":
+            self._record_goal_response_snapshot(
+                goal_provider_response_snapshot(
+                    "dynamic_goal",
+                    result,
+                    public_ontology=request.ontology,
+                ),
+                validation="ACCEPTED",
+            )
+        return result
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         try:
@@ -865,7 +1365,8 @@ class OpenAICompatibleGenericProvider:
         elif purpose == "dynamic_goal_grounding":
             response_contract = (
                 '{"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
-                '"candidate_keys":["public_entity_key"],'
+                '"candidate_refs":[{"ref_type":"NODE|REGION|RESOURCE|DERIVED_STATE",'
+                '"key":"public_scenario_reference_key"}],'
                 '"clarification_prompt":null}'
             )
         elif purpose == "dynamic_goal":
@@ -894,12 +1395,15 @@ class OpenAICompatibleGenericProvider:
             )
         if purpose == "dynamic_goal_grounding":
             planning_prompt = (
-                "Ground only public entities mentioned by the player's Goal. Return only "
-                "candidate_keys from the supplied public_catalog, or clarification/unsupported "
-                "with no keys. Use canonical names, descriptions, aliases, and public topology "
-                "as semantic evidence, but never invent a key. Do not select an authored "
-                "Objective, generate a Goal requirement, inspect current Fact values, infer "
-                "hidden Truth, choose an Action, or perform planning. Do not expose "
+                "Ground only public Scenario references mentioned by the player's Goal. Return "
+                "candidate_refs with ref_type NODE, REGION, RESOURCE, or DERIVED_STATE and a "
+                "key copied exactly from the supplied public_catalog. Multiple plausible public "
+                "references are allowed. If no public reference can be grounded, return "
+                "clarification or unsupported with no candidate_refs. Use canonical names, "
+                "descriptions, aliases, and public topology as semantic evidence, but never "
+                "invent a key. Stage 1 identifies references only: do not emit a Goal kind, "
+                "value, threshold, Formal Goal requirement, authored Objective, Action, or "
+                "plan. Do not inspect current Fact values, infer hidden Truth, or expose "
                 "chain-of-thought."
             )
         elif purpose == "dynamic_goal":
@@ -909,8 +1413,9 @@ class OpenAICompatibleGenericProvider:
                 "Use only FACT, RESOURCE_AT_LEAST, or DERIVED_STATE. Use only node, fact, "
                 "region, resource, and derived keys present in the public ontology supplied "
                 "by the user payload. "
-                "If grounded_entity_keys is non-empty, use only those public entities (or "
-                "their explicitly listed public endpoint Regions for a resource target). "
+                "Use only the grounded candidate references and the explicit projection in "
+                "the focused ontology. Do not select a reference merely because it exists in "
+                "the ScenarioVersion. "
                 "Match every FACT accepted_values item to that Fact's declared value_type. "
                 "For BOOLEAN Facts, emit native JSON true or false, never quoted strings. "
                 "For INTEGER Facts, emit native JSON integers, never quoted numeric text. "
@@ -1191,6 +1696,11 @@ class OpenAICompatibleGenericProvider:
     def _invoke(self, purpose: str, payload: dict[str, object]) -> object:
         profile = self._profile_for_purpose(purpose)
         request_body, request_size_bytes = self._build_request_body(purpose, payload)
+        goal_metadata = _goal_provider_metadata(
+            purpose,
+            payload,
+            include_debug_snapshot=self._goal_resolution_observability == "DEBUG",
+        )
         started_at = datetime.now(UTC)
         started = perf_counter()
         network_calls: list[dict[str, object]] = []
@@ -1330,6 +1840,7 @@ class OpenAICompatibleGenericProvider:
                 error_category=final_error_category,
                 telemetry=telemetry,
                 network_calls=tuple(network_calls),
+                **goal_metadata,
             )
             _log_provider_failure(
                 purpose=purpose,
@@ -1368,6 +1879,9 @@ class OpenAICompatibleGenericProvider:
                 error_category=type(exc).__name__,
                 telemetry=telemetry,
                 network_calls=tuple(network_calls),
+                debug_response_snapshot={"json_type": "invalid_json"},
+                response_validation="REJECTED",
+                **goal_metadata,
             )
             raise GenericProviderError(
                 "MODEL_PROVIDER_RESPONSE_INVALID",
@@ -1411,6 +1925,7 @@ class OpenAICompatibleGenericProvider:
             ),
             finish_reason=finish_reason,
             network_calls=tuple(network_calls),
+            **goal_metadata,
         )
         self._record_call_metadata(metadata)
         return parsed
@@ -1460,7 +1975,19 @@ class OpenAICompatibleGenericProvider:
         error_category: str,
         telemetry: _ProviderPhaseTelemetry,
         network_calls: tuple[dict[str, object], ...] = (),
+        prompt_template_version: str | None = None,
+        request_hash: str | None = None,
+        public_catalog_hash: str | None = None,
+        focused_ontology_hash: str | None = None,
+        debug_snapshot: dict[str, object] | None = None,
+        debug_response_snapshot: dict[str, object] | None = None,
+        response_validation: str | None = None,
     ) -> None:
+        if debug_snapshot is not None and debug_response_snapshot is not None:
+            debug_snapshot = {
+                **debug_snapshot,
+                "output": debug_response_snapshot,
+            }
         metadata = ProviderCallMetadata(
             call_type=purpose.upper(),
             call_sequence=self._next_call_sequence(),
@@ -1482,6 +2009,12 @@ class OpenAICompatibleGenericProvider:
             context_bytes=context_bytes,
             request_size_bytes=request_size_bytes,
             network_calls=network_calls,
+            prompt_template_version=prompt_template_version,
+            request_hash=request_hash,
+            public_catalog_hash=public_catalog_hash,
+            focused_ontology_hash=focused_ontology_hash,
+            debug_snapshot=debug_snapshot,
+            response_validation=response_validation,
         )
         self._record_call_metadata(metadata)
 
@@ -1494,7 +2027,7 @@ def build_generic_provider(settings: Settings) -> GenericModelProvider | None:
 
 def provider_call_metadata(provider: GenericModelProvider) -> dict[str, object]:
     metadata = getattr(provider, "last_call_metadata", None)
-    return metadata.model_dump(mode="json") if isinstance(metadata, ProviderCallMetadata) else {}
+    return _provider_metadata_dump(metadata)
 
 
 def provider_call_history_metadata(
@@ -1512,12 +2045,21 @@ def provider_call_history_metadata(
     history = getattr(provider, "call_metadata_history", None)
     if isinstance(history, (list, tuple)):
         return tuple(
-            item.model_dump(mode="json")
+            _provider_metadata_dump(item)
             for item in history
             if isinstance(item, ProviderCallMetadata)
         )
     latest = provider_call_metadata(provider)
     return (latest,) if latest else ()
+
+
+def _provider_metadata_dump(metadata: ProviderCallMetadata | None) -> dict[str, object]:
+    if not isinstance(metadata, ProviderCallMetadata):
+        return {}
+    result = metadata.model_dump(mode="json")
+    if result.get("debug_snapshot") is None:
+        result.pop("debug_snapshot", None)
+    return result
 
 
 def provider_call_start_metadata(
@@ -1680,6 +2222,10 @@ def _safe_text(value: object, *, limit: int) -> str:
 
 __all__ = [
     "AntiRegressionMemoryItem",
+    "DynamicGoalCandidateReference",
+    "DynamicGoalEntityGrounder",
+    "DynamicGoalEntityGrounding",
+    "DynamicGoalEntityGroundingRequest",
     "DynamicGoalInterpretation",
     "DynamicGoalInterpretationRequest",
     "DynamicGoalInterpreter",
@@ -1703,6 +2249,8 @@ __all__ = [
     "ProviderCallMetadata",
     "ProviderTotalTimeout",
     "build_generic_provider",
+    "goal_provider_request_snapshot",
+    "goal_provider_response_snapshot",
     "provider_call_history_metadata",
     "provider_call_metadata",
     "provider_call_start_metadata",

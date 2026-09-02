@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     model_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4.1-mini"
     semantic_model: str | None = None
+    goal_resolution_observability: Literal["NORMAL", "DEBUG"] = "NORMAL"
     model_api_key: SecretStr | None = None
     developer_api_token: SecretStr | None = None
     model_thinking_mode: Literal["disabled", "enabled"] = "disabled"
