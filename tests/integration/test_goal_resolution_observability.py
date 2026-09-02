@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.provider import (
+    DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
     DynamicGoalInterpretation,
@@ -18,12 +19,12 @@ from app.agent.provider import (
 )
 from app.domain.formal_goal import AdHocGoalRequirementCandidateV1
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ObjectiveRequirementKind
+from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
 from app.infrastructure.db.models import GoalResolutionAttempt, Player
 from app.scenarios.builtin import require_builtin_v2_version
 from app.services.play import PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
-from tests.scenario_fixtures import GENERIC_TEST
+from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
 
 
 class _ResolutionProvider:
@@ -39,10 +40,53 @@ class _ResolutionProvider:
         self.requests.append(request)
         return self.response
 
+    def ground_dynamic_goal_entities(
+        self, request: DynamicGoalEntityGroundingRequest
+    ) -> DynamicGoalEntityGrounding:
+        if self.response.requirements:
+            refs: list[DynamicGoalCandidateReference] = []
+            for candidate in self.response.requirements:
+                if candidate.kind == ObjectiveRequirementKind.FACT:
+                    assert candidate.node_key is not None
+                    refs.append(
+                        DynamicGoalCandidateReference(ref_type="NODE", key=candidate.node_key)
+                    )
+                elif candidate.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+                    assert candidate.region_key is not None and candidate.resource_key is not None
+                    refs.extend(
+                        (
+                            DynamicGoalCandidateReference(
+                                ref_type="REGION", key=candidate.region_key
+                            ),
+                            DynamicGoalCandidateReference(
+                                ref_type="RESOURCE", key=candidate.resource_key
+                            ),
+                        )
+                    )
+                elif candidate.derived_key is not None:
+                    refs.append(
+                        DynamicGoalCandidateReference(
+                            ref_type="DERIVED_STATE", key=candidate.derived_key
+                        )
+                    )
+            return DynamicGoalEntityGrounding(candidate_refs=tuple(refs))
+        key = "patient_one" if "patient" in request.goal.casefold() else "triage_room"
+        return DynamicGoalEntityGrounding(
+            candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key=key),)
+        )
+
 
 class _HistoryResolutionProvider(_ResolutionProvider):
-    def __init__(self, response: DynamicGoalInterpretation) -> None:
+    def __init__(
+        self,
+        response: DynamicGoalInterpretation,
+        *,
+        observability_level: str = "NORMAL",
+        grounding_refs: tuple[DynamicGoalCandidateReference, ...] | None = None,
+    ) -> None:
         super().__init__(response)
+        self.goal_resolution_observability = observability_level
+        self.grounding_refs = grounding_refs
         self._call_metadata_history: list[ProviderCallMetadata] = []
 
     @property
@@ -75,6 +119,8 @@ class _HistoryResolutionProvider(_ResolutionProvider):
         _request: DynamicGoalEntityGroundingRequest,
     ) -> DynamicGoalEntityGrounding:
         self._record_call("DYNAMIC_GOAL_GROUNDING")
+        if self.grounding_refs is not None:
+            return DynamicGoalEntityGrounding(candidate_refs=self.grounding_refs)
         return DynamicGoalEntityGrounding(candidate_keys=("triage_room",))
 
     def interpret_dynamic_goal(
@@ -102,8 +148,12 @@ class _ErrorResolutionProvider(_ResolutionProvider):
         )
 
 
-def _new_game(client: TestClient, session: Session) -> tuple[str, UUID]:
-    version = require_builtin_v2_version(session, GENERIC_TEST)
+def _new_game(
+    client: TestClient,
+    session: Session,
+    definition: ScenarioDefinitionV2 = GENERIC_TEST,
+) -> tuple[str, UUID]:
+    version = require_builtin_v2_version(session, definition)
     session.commit()
     response = client.post(
         "/api/v1/games",
@@ -150,7 +200,7 @@ def test_unresolved_goal_attempt_survives_api_rollback(
     assert submitted.status_code == 200, submitted.text
     assert submitted.json()["status"] == status
     assert submitted.json()["task"] is None
-    assert len(provider.requests) == 1
+    assert len(provider.requests) == (2 if status == "UNSUPPORTED" else 1)
 
     attempt = _attempt(session, game_id)
     assert attempt.scenario_version_id == version_id
@@ -170,7 +220,7 @@ def test_unresolved_goal_attempt_survives_api_rollback(
     assert len(attempt.focused_ontology_hash or "") == 64
     assert attempt.interpretation_status == status
     assert attempt.backend_validation_result == "ACCEPTED"
-    assert goal not in str(attempt.provider_metadata)
+    assert goal not in str(attempt.provider_metadata["provider_calls"])
     assert goal not in str(attempt.interpretation_attempts)
 
     # The API performs the request rollback after returning an unresolved
@@ -216,7 +266,7 @@ def test_resolved_dynamic_attempt_records_safe_provider_diagnostics(
     assert attempt.normalized_goal_text == "make the patient better"
     assert attempt.resolution_status == "RESOLVED"
     assert attempt.resolver_source == "AD_HOC_DYNAMIC"
-    assert attempt.grounded_public_entity_keys == []
+    assert attempt.grounded_public_entity_keys == ["patient_one"]
     assert attempt.public_catalog_hash and len(attempt.public_catalog_hash) == 64
     assert attempt.focused_ontology_hash and len(attempt.focused_ontology_hash) == 64
     assert attempt.interpretation_status == "RESOLVED"
@@ -228,12 +278,24 @@ def test_resolved_dynamic_attempt_records_safe_provider_diagnostics(
     assert attempt.provider_model == provider.model_name
     assert attempt.interpretation_attempts == [
         {
+            "stage": "ENTITY_GROUNDING",
+            "attempt": 1,
+            "source": "MODEL",
+            "status": "RESOLVED",
+            "validation": "ACCEPTED",
+            "result": "BACKEND_ACCEPTED",
+            "grounding_round": 1,
+            "candidate_refs": [{"ref_type": "NODE", "key": "patient_one"}],
+        },
+        {
             "stage": "DYNAMIC_GOAL_INTERPRETATION",
             "attempt": 1,
             "status": "RESOLVED",
             "validation": "ACCEPTED",
             "result": "MODEL_ACCEPTED",
-        }
+            "grounding_round": 1,
+            "interpretation_attempt": 1,
+        },
     ]
 
 
@@ -276,6 +338,108 @@ def test_resolution_attempt_persists_each_provider_call_in_order(
     assert [call["completion_tokens"] for call in calls] == [21, 22]
     assert [call["reasoning_tokens"] for call in calls] == [1, 2]
     assert [call["model"] for call in calls] == [provider.model_name] * 2
+    session.rollback()
+    persisted_calls = _attempt(session, game_id).provider_metadata["provider_calls"]
+    assert all("debug_snapshot" not in call for call in persisted_calls)
+
+
+def test_debug_resolution_attempt_persists_bounded_call_snapshots(
+    client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _HistoryResolutionProvider(
+        DynamicGoalInterpretation(
+            status="NEEDS_CLARIFICATION",
+            clarification_prompt="Please clarify the desired state",
+        ),
+        observability_level="DEBUG",
+        grounding_refs=(
+            DynamicGoalCandidateReference(
+                ref_type="DERIVED_STATE", key="north_basic_engineering_support"
+            ),
+            DynamicGoalCandidateReference(ref_type="NODE", key="central_telecom_hub"),
+            DynamicGoalCandidateReference(ref_type="REGION", key="central_district"),
+            DynamicGoalCandidateReference(ref_type="RESOURCE", key="general_engineering_parts"),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.composition.build_generic_provider", lambda _settings: provider
+    )
+    game_id, _version_id = _new_game(client, session, LINJIANG_V2_TEST)
+
+    submitted = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "repair the room", "idempotency_key": str(uuid4())},
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    session.rollback()
+    attempt = _attempt(session, game_id)
+    calls = attempt.provider_metadata["provider_calls"]
+    assert len(calls) == 2
+    grounding_call, interpretation_call = calls
+    grounding_snapshot = grounding_call["debug_snapshot"]
+    interpretation_snapshot = interpretation_call["debug_snapshot"]
+    assert grounding_snapshot["input"]["goal"] == "repair the room"
+    public_catalog = grounding_snapshot["input"]["public_catalog"]
+    assert public_catalog["references"]
+    catalog_reference_ids = {
+        (item["ref_type"], item["key"]) for item in public_catalog["references"]
+    }
+    assert {
+        ("NODE", "central_telecom_hub"),
+        ("REGION", "central_district"),
+        ("RESOURCE", "general_engineering_parts"),
+        ("DERIVED_STATE", "north_basic_engineering_support"),
+    } <= catalog_reference_ids
+    assert len(catalog_reference_ids) > 4
+    assert all(
+        (reference["ref_type"], reference["key"]) in catalog_reference_ids
+        for reference in grounding_call["candidate_refs"]
+    )
+    assert grounding_snapshot["output"]["status"] == "RESOLVED"
+    assert grounding_snapshot["output"]["candidate_refs"] == grounding_call["candidate_refs"]
+
+    assert grounding_call["validation_result"] == {
+        "pydantic": "ACCEPTED",
+        "candidate_refs": "ACCEPTED",
+        "result": "ACCEPTED",
+    }
+    validated_refs = grounding_call["candidate_refs"]
+    assert interpretation_snapshot["input"]["grounded_candidate_refs"] == validated_refs
+    ontology = interpretation_snapshot["input"]["ontology"]
+    assert ontology
+    assert ontology["grounding"]["candidate_refs"] == validated_refs
+    assert isinstance(ontology["grounding"]["projection"], dict)
+    assert ontology["grounding"]["projection"] == grounding_call["projection"]
+
+    world = ontology["world"]
+    assert world["nodes"]
+    assert world["regions"]
+    assert world["facts"]
+    assert world["resources"]
+    assert world["derived_states"]
+    assert set(item["key"] for item in world["nodes"]) == {
+        *grounding_call["projection"]["allowed_entity_keys"],
+        *grounding_call["projection"]["allowed_region_keys"],
+    }
+    assert set(world["regions"]) == set(grounding_call["projection"]["allowed_region_keys"])
+    assert {f"{item['node_key']}.{item['fact_key']}" for item in world["facts"]} == set(
+        grounding_call["projection"]["allowed_fact_keys"]
+    )
+    assert {item["key"] for item in world["resources"]} == set(
+        grounding_call["projection"]["allowed_resource_keys"]
+    )
+    assert {item["key"] for item in world["derived_states"]} == set(
+        grounding_call["projection"]["allowed_derived_state_keys"]
+    )
+    assert interpretation_snapshot["output"]["status"] == "NEEDS_CLARIFICATION"
+
+    # This row was re-read after the API session rollback; the assertions above
+    # therefore cover the persisted provider_metadata, not an in-memory object.
+    persisted_calls = attempt.provider_metadata["provider_calls"]
+    assert persisted_calls == calls
 
 
 def test_rejected_dynamic_value_type_persists_safe_type_diagnostics(
@@ -343,6 +507,10 @@ def test_provider_error_attempt_persists_goal_text(
             "actual_json_type": "string",
         }
     ]
+    assert attempt.grounded_public_entity_keys == ["patient_one"]
+    assert attempt.public_catalog_hash and len(attempt.public_catalog_hash) == 64
+    assert attempt.focused_ontology_hash and len(attempt.focused_ontology_hash) == 64
+    assert attempt.interpretation_attempts
 
 
 def test_authored_resolution_attempt_is_recorded_without_provider_call(

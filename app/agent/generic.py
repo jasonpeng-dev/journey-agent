@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -29,6 +29,7 @@ from app.agent.planning_context import (
 )
 from app.agent.provider import (
     AntiRegressionMemoryItem,
+    DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
     DynamicGoalInterpretation,
@@ -45,6 +46,8 @@ from app.agent.provider import (
     PlanProposal,
     PlanRequest,
     PlanViolation,
+    goal_provider_request_snapshot,
+    goal_provider_response_snapshot,
     provider_call_history_metadata,
     provider_call_metadata,
     provider_call_start_metadata,
@@ -88,10 +91,8 @@ from app.domain.scenario_v2 import (
     ComparisonOperator,
     ConditionKind,
     ConditionV2,
-    DerivedStateDefinitionV2,
     EffectKind,
     EffectV2,
-    FactDefinitionV2,
     NodeSelectorKind,
     NodeSelectorV2,
     ObjectiveDefinitionV2,
@@ -221,7 +222,8 @@ class GenericAgentError(ValueError):
 PLAN_INVALIDATED_BY_NEW_KNOWLEDGE = "PLAN_INVALIDATED_BY_NEW_KNOWLEDGE"
 
 
-_DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS = 3
+_DYNAMIC_GOAL_MAX_GROUNDING_ROUNDS = 2
+_DYNAMIC_GOAL_MAX_INTERPRETATION_ATTEMPTS = 2
 _DYNAMIC_GOAL_RETRYABLE_PROVIDER_ERRORS = frozenset(
     {
         "MODEL_PROVIDER_RESPONSE_INVALID",
@@ -258,97 +260,27 @@ class GenericGoalResolution:
 @dataclass(frozen=True, slots=True)
 class _DynamicGoalGrounding:
     status: str
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
     entity_keys: tuple[str, ...] = ()
     scope_keys: tuple[str, ...] = ()
     source: str = "NONE"
     clarification_prompt: str | None = None
 
 
-def _derived_goal_state_matches(
-    goal: str,
-    definition: ScenarioDefinitionV2,
-) -> tuple[DerivedStateDefinitionV2, ...]:
-    normalized = _normalize(goal)
-    return tuple(
-        state
-        for state in sorted(definition.derived_states, key=lambda item: item.key)
-        if state.goal_addressable
-        and normalized
-        in {
-            _normalize(state.key),
-            _normalize(state.name),
-            *(_normalize(alias) for alias in state.goal_aliases),
-            *(_normalize(example) for example in state.goal_examples),
-        }
-    )
+@dataclass(frozen=True, slots=True)
+class _DynamicGoalProjection:
+    """The single Stage 1 -> Stage 2 allow-list contract.
 
+    The same projection builds the focused ontology and validates the typed
+    requirements returned by Stage 2.  It contains public semantic identities
+    only; it never carries runtime Truth or Knowledge values.
+    """
 
-def _world_goal_fact_matches(
-    goal: str,
-    definition: ScenarioDefinitionV2,
-    db: Session | None,
-    scope: RuntimeScope | None,
-) -> tuple[tuple[str, FactDefinitionV2], ...]:
-    """Match exact authored public Fact semantics without reading Fact Truth."""
-
-    normalized = _normalize(goal)
-    public_nodes, _goal_addressable_facts, _public_regions = _dynamic_goal_public_keys(
-        db,
-        scope,
-        definition,
-    )
-    matches: list[tuple[str, FactDefinitionV2]] = []
-    for node in sorted(definition.world.nodes, key=lambda item: item.key):
-        if node.key not in public_nodes:
-            continue
-        for fact in sorted(node.facts, key=lambda item: item.key):
-            if not fact.goal_addressable or not fact.goal_target_values:
-                continue
-            identifiers = {
-                _normalize(fact.key),
-                _normalize(fact.name),
-                *(_normalize(alias) for alias in fact.goal_aliases),
-                *(_normalize(example) for example in fact.goal_examples),
-            }
-            if normalized in identifiers:
-                matches.append((node.key, fact))
-    return tuple(matches)
-
-
-def _world_goal_fact_resolution(
-    matches: tuple[tuple[str, FactDefinitionV2], ...],
-    definition: ScenarioDefinitionV2,
-) -> GenericGoalResolution:
-    if len(matches) == 1:
-        node_key, fact = matches[0]
-        return GenericGoalResolution(
-            "RESOLVED",
-            source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
-            dynamic_requirements=(
-                AdHocGoalRequirementCandidateV1(
-                    kind=ObjectiveRequirementKind.FACT,
-                    node_key=node_key,
-                    fact_key=fact.key,
-                    accepted_values=fact.goal_target_values,
-                ),
-            ),
-            provider_observation={
-                "stage": "WORLD_GOAL_STATE_CATALOG",
-                "result": "DETERMINISTIC_FACT",
-                "fact": f"{node_key}.{fact.key}",
-            },
-        )
-    candidate_keys = tuple(f"{node_key}.{fact.key}" for node_key, fact in matches)
-    return GenericGoalResolution(
-        "NEEDS_CLARIFICATION",
-        candidate_keys=candidate_keys,
-        clarification_prompt=definition.goal_resolution.clarification_prompt,
-        source="DETERMINISTIC_WORLD_GOAL_STATE_CATALOG",
-        provider_observation={
-            "stage": "WORLD_GOAL_STATE_CATALOG",
-            "result": "BACKEND_NEEDS_CLARIFICATION",
-        },
-    )
+    allowed_entity_keys: tuple[str, ...] = ()
+    allowed_region_keys: tuple[str, ...] = ()
+    allowed_resource_keys: tuple[str, ...] = ()
+    allowed_derived_state_keys: tuple[str, ...] = ()
+    allowed_fact_keys: tuple[tuple[str, str], ...] = ()
 
 
 def _is_current_derived_objective(
@@ -365,27 +297,6 @@ def _is_current_derived_objective(
         and (state := definition.derived_state_definitions.get(requirement.derived_key)) is not None
         and state.goal_addressable
         for requirement in objective.completion_requirements
-    )
-
-
-def _derived_goal_resolution(
-    state: DerivedStateDefinitionV2,
-) -> GenericGoalResolution:
-    return GenericGoalResolution(
-        "RESOLVED",
-        source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
-        dynamic_requirements=(
-            AdHocGoalRequirementCandidateV1(
-                kind=ObjectiveRequirementKind.DERIVED_STATE,
-                derived_key=state.key,
-                accepted_values=(state.available_value,),
-            ),
-        ),
-        provider_observation={
-            "stage": "DERIVED_GOAL_CATALOG",
-            "result": "DETERMINISTIC_DERIVED_STATE",
-            "derived_key": state.key,
-        },
     )
 
 
@@ -418,12 +329,19 @@ class GenericGoalResolver:
         *,
         db: Session | None = None,
         scope: RuntimeScope | None = None,
+        observability_level: Literal["NORMAL", "DEBUG"] | None = None,
     ) -> None:
         if (db is None) != (scope is None):
             raise ValueError("Dynamic Goal resolution needs both db and runtime scope")
         self.provider = provider
         self.db = db
         self.scope = scope
+        configured_level = observability_level or getattr(
+            provider, "goal_resolution_observability", "NORMAL"
+        )
+        self.observability_level: Literal["NORMAL", "DEBUG"] = (
+            "DEBUG" if configured_level == "DEBUG" else "NORMAL"
+        )
 
     @staticmethod
     def _resolve_authored_objective(
@@ -437,25 +355,7 @@ class GenericGoalResolver:
         definition: ScenarioDefinitionV2,
     ) -> GenericGoalResolution:
         normalized = _normalize(goal)
-        derived_matches = _derived_goal_state_matches(goal, definition)
-        if len(derived_matches) == 1:
-            return _derived_goal_resolution(derived_matches[0])
-        if len(derived_matches) > 1:
-            return GenericGoalResolution(
-                "NEEDS_CLARIFICATION",
-                candidate_keys=tuple(item.key for item in derived_matches),
-                clarification_prompt=definition.goal_resolution.clarification_prompt,
-                source="DETERMINISTIC_DERIVED_GOAL_CATALOG",
-                provider_observation={
-                    "stage": "DERIVED_GOAL_CATALOG",
-                    "result": "BACKEND_NEEDS_CLARIFICATION",
-                },
-            )
-        if definition.goal_resolution.world_goal_state_catalog:
-            fact_matches = _world_goal_fact_matches(goal, definition, self.db, self.scope)
-            if fact_matches:
-                return _world_goal_fact_resolution(fact_matches, definition)
-        else:
+        if not definition.goal_resolution.world_goal_state_catalog:
             matches = [
                 objective
                 for objective in definition.objectives
@@ -492,10 +392,18 @@ class GenericGoalResolver:
         interpreter = getattr(self.provider, "interpret_dynamic_goal", None)
         if not callable(interpreter):
             return None
-        provider_history_start = len(provider_call_history_metadata(self.provider))
+        provider = self.provider
+        assert provider is not None
+        provider_history_start = len(provider_call_history_metadata(provider))
+
+        # Keep one resolver-local record per logical call.  Provider history
+        # supplies latency/model/token metadata when available; the resolver
+        # adds the exact public request, safe response shape, round, and
+        # validation outcome so G1/I1/I2/G2/I1/I2 can be audited together.
+        provider_call_records: list[dict[str, object]] = []
 
         def resolution_provider_calls() -> list[dict[str, object]]:
-            return list(provider_call_history_metadata(self.provider)[provider_history_start:])
+            return [dict(item) for item in provider_call_records]
 
         grounding = _deterministic_dynamic_goal_grounding(
             goal,
@@ -503,269 +411,631 @@ class GenericGoalResolver:
             self.scope,
             definition,
         )
-        # The catalog is public semantic metadata only.  Hashing it here
-        # gives the resolution audit a stable view identifier without adding
-        # the catalog (or any runtime Truth) to persisted diagnostics.
         public_catalog = _dynamic_goal_entity_catalog(
             self.db,
             self.scope,
             definition,
         )
         public_catalog_hash = _dynamic_goal_payload_hash(public_catalog)
+
+        grounding_attempts: list[dict[str, object]] = []
+        interpretation_attempts: list[dict[str, object]] = []
+        ontology: dict[str, object] | None = None
+        projection: _DynamicGoalProjection | None = None
+        grounding_rounds_used = 0
+
+        def record_provider_call(
+            *,
+            purpose: str,
+            grounding_round: int,
+            interpretation_attempt: int | None,
+            request: DynamicGoalEntityGroundingRequest | DynamicGoalInterpretationRequest,
+            response: object | None = None,
+            validation_result: dict[str, object] | None = None,
+            rejection_code: str | None = None,
+            validation_diagnostics: tuple[dict[str, object], ...] = (),
+            accepted_requirements: tuple[AdHocGoalRequirementCandidateV1, ...] = (),
+            candidate_refs: tuple[DynamicGoalCandidateReference, ...] = (),
+            projection_for_call: _DynamicGoalProjection | None = None,
+        ) -> None:
+            current_history = list(provider_call_history_metadata(provider))[
+                provider_history_start:
+            ]
+            record = (
+                dict(current_history[len(provider_call_records)])
+                if len(current_history) > len(provider_call_records)
+                else {}
+            )
+            inherited_debug_snapshot = record.get("debug_snapshot")
+            request_payload = request.model_dump(mode="json")
+            normalized_purpose = (
+                "DYNAMIC_GOAL_INTERPRETATION"
+                if purpose == "dynamic_goal"
+                else "DYNAMIC_GOAL_GROUNDING"
+            )
+            record.update(
+                {
+                    "purpose": normalized_purpose,
+                    "call_type": normalized_purpose,
+                    "logical_call_sequence": len(provider_call_records) + 1,
+                    "call_order": len(provider_call_records) + 1,
+                    "grounding_round": grounding_round,
+                    "request_hash": _dynamic_goal_payload_hash(request_payload),
+                    "prompt_template_version": (
+                        "dynamic-goal-grounding-v1"
+                        if purpose == "dynamic_goal_grounding"
+                        else "dynamic-goal-interpretation-v1"
+                    ),
+                }
+            )
+            record.pop("debug_snapshot", None)
+            if self.observability_level == "DEBUG":
+                debug_snapshot: dict[str, object] = {
+                    "input": goal_provider_request_snapshot(
+                        purpose,
+                        request_payload,
+                    ),
+                }
+                # A real provider can fail before the resolver receives a
+                # response object (for example malformed JSON).  Preserve
+                # the provider's already-sanitized output shape in that case;
+                # the resolver still owns the logical-call association.
+                if isinstance(inherited_debug_snapshot, dict):
+                    inherited_output = inherited_debug_snapshot.get("output")
+                    if inherited_output is not None:
+                        debug_snapshot["output"] = inherited_output
+                    inherited_validation = inherited_debug_snapshot.get("response_validation")
+                    if inherited_validation is not None:
+                        debug_snapshot["response_validation"] = inherited_validation
+                record["debug_snapshot"] = debug_snapshot
+            if interpretation_attempt is not None:
+                record["interpretation_attempt"] = interpretation_attempt
+            if purpose == "dynamic_goal_grounding":
+                record["public_catalog_hash"] = public_catalog_hash
+            else:
+                record["focused_ontology_hash"] = _dynamic_goal_payload_hash(
+                    request_payload.get("ontology", {})
+                    if isinstance(request_payload.get("ontology", {}), dict)
+                    else {}
+                )
+            if response is not None:
+                response_for_observation = response
+                if purpose == "dynamic_goal":
+                    response_for_observation = _dynamic_goal_response_observation(
+                        response,
+                        projection,
+                    )
+                if self.observability_level == "DEBUG":
+                    current_debug_snapshot = record.get("debug_snapshot")
+                    debug_snapshot = (
+                        current_debug_snapshot if isinstance(current_debug_snapshot, dict) else {}
+                    )
+                    record["debug_snapshot"] = {
+                        **debug_snapshot,
+                        "output": goal_provider_response_snapshot(
+                            purpose,
+                            response_for_observation,
+                            public_catalog=(
+                                public_catalog if purpose == "dynamic_goal_grounding" else None
+                            ),
+                            public_ontology=(
+                                request_payload.get("ontology")
+                                if purpose == "dynamic_goal"
+                                and isinstance(request_payload.get("ontology"), dict)
+                                else None
+                            ),
+                        ),
+                    }
+                response_status = (
+                    response.status
+                    if isinstance(
+                        response,
+                        (DynamicGoalEntityGrounding, DynamicGoalInterpretation),
+                    )
+                    else response.get("status")
+                    if isinstance(response, dict)
+                    else None
+                )
+                if isinstance(response_status, str):
+                    record["response_status"] = response_status
+            if validation_result is not None:
+                record["validation_result"] = validation_result
+                pydantic_result = validation_result.get("pydantic")
+                if "response_validation" not in record and isinstance(pydantic_result, str):
+                    record["response_validation"] = pydantic_result
+            if rejection_code is not None:
+                record["rejection_code"] = rejection_code
+            if validation_diagnostics:
+                record["validation_diagnostics"] = list(validation_diagnostics)
+            if candidate_refs:
+                record["candidate_refs"] = [item.model_dump(mode="json") for item in candidate_refs]
+            if projection_for_call is not None:
+                record["projection"] = _dynamic_goal_projection_observation(projection_for_call)
+            if accepted_requirements:
+                record["accepted_requirements"] = [
+                    item.model_dump(mode="json") for item in accepted_requirements
+                ]
+            provider_call_records.append(record)
+
+        def build_observation(
+            *,
+            stage: str,
+            status: str | None = None,
+            result: str | None = None,
+            validation: str | None = None,
+            rejection_code: str | None = None,
+            validation_diagnostics: tuple[dict[str, object], ...] = (),
+        ) -> dict[str, object]:
+            scalar_provider_metadata = provider_call_metadata(provider)
+            scalar_provider_metadata.pop("debug_snapshot", None)
+            observation: dict[str, object] = {
+                **scalar_provider_metadata,
+                "call_type": stage,
+                "stage": stage,
+                "grounding": _dynamic_goal_grounding_observation(grounding, projection),
+                "catalog_hash": public_catalog_hash,
+                "provider_calls": resolution_provider_calls(),
+                "attempts": [*grounding_attempts, *interpretation_attempts],
+                "grounding_attempt_count": len(grounding_attempts),
+                "grounding_round_count": grounding_rounds_used,
+                "interpretation_attempt_count": len(interpretation_attempts),
+                "provider_attempt_count": len(provider_call_records),
+            }
+            observation["attempt_count"] = (
+                len(grounding_attempts)
+                if stage == "DYNAMIC_GOAL_ENTITY_GROUNDING"
+                else len(interpretation_attempts)
+            )
+            if status is not None:
+                observation["status"] = status
+            if result is not None:
+                observation["result"] = result
+            if validation is not None:
+                observation["validation"] = validation
+            if rejection_code is not None:
+                observation["rejection_code"] = rejection_code
+            if validation_diagnostics:
+                observation["validation_diagnostics"] = list(validation_diagnostics)
+            if ontology is not None:
+                observation["ontology_hash"] = _dynamic_goal_payload_hash(ontology)
+            return observation
+
+        def raise_with_observation(
+            error: GenericProviderError,
+            *,
+            stage: str,
+        ) -> None:
+            error.resolution_observation = build_observation(
+                stage=stage,
+                status="ERROR",
+                result=error.code,
+                validation="REJECTED",
+                rejection_code=error.code,
+                validation_diagnostics=error.validation_diagnostics,
+            )
+            raise error
+
         if grounding.status == "NEEDS_CLARIFICATION":
             return GenericGoalResolution(
                 "NEEDS_CLARIFICATION",
-                candidate_keys=grounding.entity_keys,
+                candidate_keys=_dynamic_goal_grounding_keys(grounding),
                 clarification_prompt=grounding.clarification_prompt,
                 source="DETERMINISTIC_ENTITY_GROUNDING",
-                provider_observation={
-                    "stage": "DETERMINISTIC_ENTITY_GROUNDING",
-                    "status": grounding.status,
-                    "result": "BACKEND_NEEDS_CLARIFICATION",
-                    "grounding": _dynamic_goal_grounding_observation(grounding),
-                    "catalog_hash": public_catalog_hash,
-                    "validation": "ACCEPTED",
-                },
+                provider_observation=build_observation(
+                    stage="DETERMINISTIC_ENTITY_GROUNDING",
+                    status=grounding.status,
+                    result="BACKEND_NEEDS_CLARIFICATION",
+                    validation="ACCEPTED",
+                ),
             )
 
-        grounding_attempts: list[dict[str, object]] = []
-        if grounding.status != "RESOLVED":
-            grounder = getattr(self.provider, "ground_dynamic_goal_entities", None)
-            if callable(grounder):
-                grounding_request = DynamicGoalEntityGroundingRequest(
-                    goal=goal,
-                    public_catalog=public_catalog,
-                )
-                for attempt_index in range(1, _DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS + 1):
-                    try:
-                        raw_grounding = grounder(grounding_request)
-                        interpreted_grounding = DynamicGoalEntityGrounding.model_validate(
-                            raw_grounding
-                        )
-                    except GenericProviderError as exc:
-                        grounding_attempts.append(
-                            {
-                                "stage": "ENTITY_GROUNDING",
-                                "attempt": attempt_index,
-                                "source": "MODEL",
-                                "status": "ERROR",
-                                "validation": "REJECTED",
-                                "result": exc.code,
-                            }
-                        )
-                        if (
-                            _dynamic_goal_provider_error_is_retryable(exc)
-                            and attempt_index < _DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS
-                        ):
-                            continue
-                        raise
-                    except (TypeError, ValueError) as exc:
-                        error = GenericProviderError(
-                            "MODEL_PROVIDER_RESPONSE_INVALID",
-                            "The model provider returned an invalid Dynamic Goal Entity Grounding",
-                        )
-                        grounding_attempts.append(
-                            {
-                                "stage": "ENTITY_GROUNDING",
-                                "attempt": attempt_index,
-                                "source": "MODEL",
-                                "status": "ERROR",
-                                "validation": "REJECTED",
-                                "result": error.code,
-                            }
-                        )
-                        if attempt_index < _DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS:
-                            continue
-                        raise error from exc
+        grounder = getattr(provider, "ground_dynamic_goal_entities", None)
+        needs_provider_grounding = grounding.status != "RESOLVED"
+        if needs_provider_grounding and not callable(grounder):
+            return GenericGoalResolution(
+                "UNSUPPORTED",
+                source="NO_PUBLIC_GROUNDING",
+                provider_observation=build_observation(
+                    stage="DYNAMIC_GOAL_ENTITY_GROUNDING",
+                    result="NO_GROUNDING_PROVIDER",
+                    validation="ACCEPTED",
+                ),
+            )
 
+        grounding_request = DynamicGoalEntityGroundingRequest(
+            goal=goal,
+            public_catalog=public_catalog,
+        )
+        max_grounding_rounds = _DYNAMIC_GOAL_MAX_GROUNDING_ROUNDS if needs_provider_grounding else 1
+        last_interpretation_error: GenericProviderError | None = None
+        last_backend_rejection_code: str | None = None
+        last_backend_value_type_diagnostics: list[dict[str, object]] = []
+
+        for grounding_round in range(1, max_grounding_rounds + 1):
+            ontology = None
+            projection = None
+            last_backend_rejection_code = None
+            last_backend_value_type_diagnostics = []
+            if needs_provider_grounding:
+                grounding = _DynamicGoalGrounding(status="NONE")
+                grounding_rounds_used = grounding_round
+                assert callable(grounder)
+                raw_grounding: object | None = None
+                try:
+                    raw_grounding = grounder(grounding_request)
+                    interpreted_grounding = DynamicGoalEntityGrounding.model_validate(raw_grounding)
+                except GenericProviderError as exc:
                     grounding_attempt: dict[str, object] = {
                         "stage": "ENTITY_GROUNDING",
-                        "attempt": attempt_index,
+                        "attempt": 1,
+                        "grounding_round": grounding_round,
                         "source": "MODEL",
-                        "status": interpreted_grounding.status,
-                        "validation": "ACCEPTED",
-                        "result": (
-                            "MODEL_NEEDS_CLARIFICATION"
-                            if interpreted_grounding.status == "NEEDS_CLARIFICATION"
-                            else "MODEL_UNSUPPORTED"
-                            if interpreted_grounding.status == "UNSUPPORTED"
-                            else "MODEL_ACCEPTED"
-                        ),
-                    }
-                    if interpreted_grounding.status == "NEEDS_CLARIFICATION":
-                        grounding_attempts.append(grounding_attempt)
-                        return GenericGoalResolution(
-                            "NEEDS_CLARIFICATION",
-                            clarification_prompt=interpreted_grounding.clarification_prompt,
-                            source="MODEL_VALIDATED",
-                            provider_observation={
-                                **provider_call_metadata(self.provider),
-                                "call_type": "DYNAMIC_GOAL_ENTITY_GROUNDING",
-                                "stage": "ENTITY_GROUNDING",
-                                "status": interpreted_grounding.status,
-                                "result": "MODEL_NEEDS_CLARIFICATION",
-                                "validation": "ACCEPTED",
-                                "catalog_hash": public_catalog_hash,
-                                "attempt_count": len(grounding_attempts),
-                                "provider_calls": resolution_provider_calls(),
-                                "attempts": grounding_attempts,
-                            },
-                        )
-                    if interpreted_grounding.status == "UNSUPPORTED":
-                        grounding_attempts.append(grounding_attempt)
-                        if attempt_index < _DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS:
-                            continue
-                        return GenericGoalResolution(
-                            "UNSUPPORTED",
-                            source="MODEL_VALIDATED",
-                            provider_observation={
-                                **provider_call_metadata(self.provider),
-                                "call_type": "DYNAMIC_GOAL_ENTITY_GROUNDING",
-                                "stage": "ENTITY_GROUNDING",
-                                "status": interpreted_grounding.status,
-                                "result": "MODEL_UNSUPPORTED",
-                                "validation": "ACCEPTED",
-                                "catalog_hash": public_catalog_hash,
-                                "attempt_count": len(grounding_attempts),
-                                "provider_calls": resolution_provider_calls(),
-                                "attempts": grounding_attempts,
-                            },
-                        )
-                    try:
-                        grounded_keys = _validate_dynamic_entity_grounding_keys(
-                            definition,
-                            self.db,
-                            self.scope,
-                            interpreted_grounding.candidate_keys,
-                        )
-                        grounding = _dynamic_goal_grounding_from_keys(
-                            grounded_keys,
-                            "MODEL_ENTITY_GROUNDING",
-                            self.db,
-                            self.scope,
-                            definition,
-                        )
-                    except FormalGoalError as exc:
-                        grounding_attempt.update(
-                            {
-                                "validation": "REJECTED",
-                                "result": "BACKEND_VALIDATION_REJECTED",
-                                "rejection_code": exc.code,
-                            }
-                        )
-                        grounding_attempts.append(grounding_attempt)
-                        return GenericGoalResolution(
-                            "UNSUPPORTED",
-                            source="MODEL_VALIDATED",
-                            provider_observation={
-                                **provider_call_metadata(self.provider),
-                                "call_type": "DYNAMIC_GOAL_ENTITY_GROUNDING",
-                                "stage": "ENTITY_GROUNDING",
-                                "status": interpreted_grounding.status,
-                                "result": "BACKEND_VALIDATION_REJECTED",
-                                "validation": "REJECTED",
-                                "rejection_code": exc.code,
-                                "catalog_hash": public_catalog_hash,
-                                "provider_calls": resolution_provider_calls(),
-                                "attempts": grounding_attempts,
-                            },
-                        )
-                    grounding_attempt.update(
-                        {
-                            "result": "BACKEND_ACCEPTED",
-                            "candidate_keys": list(grounding.entity_keys),
-                        }
-                    )
-                    grounding_attempts.append(grounding_attempt)
-                    break
-
-        ontology = _dynamic_goal_ontology(
-            self.db,
-            self.scope,
-            definition,
-            grounding=grounding if grounding.status == "RESOLVED" else None,
-        )
-        grounding_info = _dynamic_goal_grounding_observation(grounding)
-        interpretation_attempts: list[dict[str, object]] = []
-        can_retry_unsupported_interpretation = (
-            grounding.status == "RESOLVED"
-            and _dynamic_goal_grounding_has_semantics(
-                self.db,
-                self.scope,
-                definition,
-                grounding,
-            )
-        )
-        interpretation: DynamicGoalInterpretation | None = None
-        for attempt_index in range(1, _DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS + 1):
-            # All retries use the already validated grounding and exactly the
-            # same focused ontology.  ``recovery_attempt`` is a compatibility
-            # marker for the provider request, while the audit attempt number
-            # remains the precise bounded-call count.
-            request = DynamicGoalInterpretationRequest(
-                goal=goal,
-                ontology=ontology,
-                grounded_entity_keys=grounding.entity_keys,
-                recovery_attempt=0 if attempt_index == 1 else 1,
-            )
-            try:
-                raw_interpretation = interpreter(request)
-                try:
-                    interpretation = DynamicGoalInterpretation.model_validate(raw_interpretation)
-                except ValidationError as exc:
-                    diagnostics = provider_validation_diagnostics(exc)
-                    raise GenericProviderError(
-                        "MODEL_PROVIDER_RESPONSE_INVALID",
-                        "The model provider returned an invalid Dynamic Goal interpretation",
-                        validation_diagnostics=diagnostics,
-                    ) from exc
-                except (TypeError, ValueError) as exc:
-                    raise GenericProviderError(
-                        "MODEL_PROVIDER_RESPONSE_INVALID",
-                        "The model provider returned an invalid Dynamic Goal interpretation",
-                    ) from exc
-            except GenericProviderError as exc:
-                interpretation_attempts.append(
-                    {
-                        "stage": "DYNAMIC_GOAL_INTERPRETATION",
-                        "attempt": attempt_index,
                         "status": "ERROR",
                         "validation": "REJECTED",
                         "result": exc.code,
                     }
-                )
-                if (
-                    _dynamic_goal_provider_error_is_retryable(
-                        exc,
-                        allow_model_unsupported=can_retry_unsupported_interpretation,
+                    if exc.validation_diagnostics:
+                        grounding_attempt["validation_diagnostics"] = list(
+                            exc.validation_diagnostics
+                        )
+                    grounding_attempts.append(grounding_attempt)
+                    record_provider_call(
+                        purpose="dynamic_goal_grounding",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=None,
+                        request=grounding_request,
+                        response=raw_grounding,
+                        validation_result={
+                            "pydantic": "REJECTED",
+                            "candidate_refs": "NOT_RUN",
+                            "result": "REJECTED",
+                        },
+                        rejection_code=exc.code,
+                        validation_diagnostics=exc.validation_diagnostics,
                     )
-                    and attempt_index < _DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS
-                ):
-                    continue
-                raise
-            except (TypeError, ValueError) as exc:
-                error = GenericProviderError(
-                    "MODEL_PROVIDER_RESPONSE_INVALID",
-                    "The model provider returned an invalid Dynamic Goal interpretation",
-                )
-                interpretation_attempts.append(
+                    if grounding_round < max_grounding_rounds:
+                        continue
+                    raise_with_observation(exc, stage="DYNAMIC_GOAL_ENTITY_GROUNDING")
+                except ValidationError as exc:
+                    diagnostics = provider_validation_diagnostics(exc)
+                    error = GenericProviderError(
+                        "MODEL_PROVIDER_RESPONSE_INVALID",
+                        "The model provider returned an invalid Dynamic Goal Entity Grounding",
+                        validation_diagnostics=diagnostics,
+                    )
+                    grounding_attempts.append(
+                        {
+                            "stage": "ENTITY_GROUNDING",
+                            "attempt": 1,
+                            "grounding_round": grounding_round,
+                            "source": "MODEL",
+                            "status": "ERROR",
+                            "validation": "REJECTED",
+                            "result": error.code,
+                            "validation_diagnostics": list(diagnostics),
+                        }
+                    )
+                    record_provider_call(
+                        purpose="dynamic_goal_grounding",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=None,
+                        request=grounding_request,
+                        response=raw_grounding,
+                        validation_result={
+                            "pydantic": "REJECTED",
+                            "candidate_refs": "NOT_RUN",
+                            "result": "REJECTED",
+                        },
+                        rejection_code=error.code,
+                        validation_diagnostics=diagnostics,
+                    )
+                    if grounding_round < max_grounding_rounds:
+                        continue
+                    raise_with_observation(error, stage="DYNAMIC_GOAL_ENTITY_GROUNDING")
+                except (TypeError, ValueError):
+                    error = GenericProviderError(
+                        "MODEL_PROVIDER_RESPONSE_INVALID",
+                        "The model provider returned an invalid Dynamic Goal Entity Grounding",
+                    )
+                    grounding_attempts.append(
+                        {
+                            "stage": "ENTITY_GROUNDING",
+                            "attempt": 1,
+                            "grounding_round": grounding_round,
+                            "source": "MODEL",
+                            "status": "ERROR",
+                            "validation": "REJECTED",
+                            "result": error.code,
+                        }
+                    )
+                    record_provider_call(
+                        purpose="dynamic_goal_grounding",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=None,
+                        request=grounding_request,
+                        response=raw_grounding,
+                        validation_result={
+                            "pydantic": "REJECTED",
+                            "candidate_refs": "NOT_RUN",
+                            "result": "REJECTED",
+                        },
+                        rejection_code=error.code,
+                    )
+                    if grounding_round < max_grounding_rounds:
+                        continue
+                    raise_with_observation(error, stage="DYNAMIC_GOAL_ENTITY_GROUNDING")
+
+                grounding_attempt = {
+                    "stage": "ENTITY_GROUNDING",
+                    "attempt": 1,
+                    "grounding_round": grounding_round,
+                    "source": "MODEL",
+                    "status": interpreted_grounding.status,
+                    "validation": "ACCEPTED",
+                    "result": (
+                        "MODEL_NEEDS_CLARIFICATION"
+                        if interpreted_grounding.status == "NEEDS_CLARIFICATION"
+                        else "MODEL_UNSUPPORTED"
+                        if interpreted_grounding.status == "UNSUPPORTED"
+                        else "MODEL_ACCEPTED"
+                    ),
+                }
+                if interpreted_grounding.status == "NEEDS_CLARIFICATION":
+                    grounding_attempts.append(grounding_attempt)
+                    record_provider_call(
+                        purpose="dynamic_goal_grounding",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=None,
+                        request=grounding_request,
+                        response=interpreted_grounding,
+                        validation_result={
+                            "pydantic": "ACCEPTED",
+                            "candidate_refs": "NOT_RUN",
+                            "result": "MODEL_NEEDS_CLARIFICATION",
+                        },
+                    )
+                    return GenericGoalResolution(
+                        "NEEDS_CLARIFICATION",
+                        clarification_prompt=interpreted_grounding.clarification_prompt,
+                        source="MODEL_VALIDATED",
+                        provider_observation=build_observation(
+                            stage="DYNAMIC_GOAL_ENTITY_GROUNDING",
+                            status=interpreted_grounding.status,
+                            result="MODEL_NEEDS_CLARIFICATION",
+                            validation="ACCEPTED",
+                        ),
+                    )
+                if interpreted_grounding.status == "UNSUPPORTED":
+                    grounding_attempts.append(grounding_attempt)
+                    record_provider_call(
+                        purpose="dynamic_goal_grounding",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=None,
+                        request=grounding_request,
+                        response=interpreted_grounding,
+                        validation_result={
+                            "pydantic": "ACCEPTED",
+                            "candidate_refs": "NOT_RUN",
+                            "result": "MODEL_UNSUPPORTED",
+                        },
+                    )
+                    if grounding_round < max_grounding_rounds:
+                        continue
+                    return GenericGoalResolution(
+                        "UNSUPPORTED",
+                        source="MODEL_VALIDATED",
+                        provider_observation=build_observation(
+                            stage="DYNAMIC_GOAL_ENTITY_GROUNDING",
+                            status=interpreted_grounding.status,
+                            result="MODEL_UNSUPPORTED",
+                            validation="ACCEPTED",
+                        ),
+                    )
+                try:
+                    candidate_refs = _validate_dynamic_goal_candidate_refs(
+                        definition,
+                        self.db,
+                        self.scope,
+                        interpreted_grounding.candidate_refs,
+                    )
+                    grounding = _dynamic_goal_grounding_from_refs(
+                        candidate_refs,
+                        "MODEL_ENTITY_GROUNDING",
+                        self.db,
+                        self.scope,
+                        definition,
+                    )
+                except FormalGoalError as exc:
+                    grounding_attempt.update(
+                        {
+                            "validation": "REJECTED",
+                            "result": "BACKEND_VALIDATION_REJECTED",
+                            "rejection_code": exc.code,
+                        }
+                    )
+                    grounding_attempts.append(grounding_attempt)
+                    record_provider_call(
+                        purpose="dynamic_goal_grounding",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=None,
+                        request=grounding_request,
+                        response=interpreted_grounding,
+                        validation_result={
+                            "pydantic": "ACCEPTED",
+                            "candidate_refs": "REJECTED",
+                            "result": "REJECTED",
+                        },
+                        rejection_code=exc.code,
+                    )
+                    if grounding_round < max_grounding_rounds:
+                        continue
+                    return GenericGoalResolution(
+                        "UNSUPPORTED",
+                        source="MODEL_VALIDATED",
+                        provider_observation=build_observation(
+                            stage="DYNAMIC_GOAL_ENTITY_GROUNDING",
+                            status=interpreted_grounding.status,
+                            result="BACKEND_VALIDATION_REJECTED",
+                            validation="REJECTED",
+                            rejection_code=exc.code,
+                        ),
+                    )
+                grounding_attempt.update(
                     {
-                        "stage": "DYNAMIC_GOAL_INTERPRETATION",
-                        "attempt": attempt_index,
-                        "status": "ERROR",
-                        "validation": "REJECTED",
-                        "result": error.code,
+                        "result": "BACKEND_ACCEPTED",
+                        "candidate_refs": [
+                            item.model_dump(mode="json") for item in grounding.candidate_refs
+                        ],
                     }
                 )
-                if attempt_index < _DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS:
-                    continue
-                raise error from exc
+                grounding_attempts.append(grounding_attempt)
+                record_provider_call(
+                    purpose="dynamic_goal_grounding",
+                    grounding_round=grounding_round,
+                    interpretation_attempt=None,
+                    request=grounding_request,
+                    response=interpreted_grounding,
+                    validation_result={
+                        "pydantic": "ACCEPTED",
+                        "candidate_refs": "ACCEPTED",
+                        "result": "ACCEPTED",
+                    },
+                    candidate_refs=grounding.candidate_refs,
+                )
 
-            assert interpretation is not None
-            interpretation_attempts.append(
-                {
+            if grounding.status != "RESOLVED":
+                continue
+
+            try:
+                candidate_refs = _validate_dynamic_goal_candidate_refs(
+                    definition,
+                    self.db,
+                    self.scope,
+                    grounding.candidate_refs,
+                )
+                if candidate_refs != grounding.candidate_refs:
+                    grounding = _dynamic_goal_grounding_from_refs(
+                        candidate_refs,
+                        grounding.source,
+                        self.db,
+                        self.scope,
+                        definition,
+                    )
+                projection = _dynamic_goal_projection(
+                    db=self.db,
+                    scope=self.scope,
+                    definition=definition,
+                    grounding=grounding,
+                )
+            except FormalGoalError as exc:
+                if needs_provider_grounding and grounding_round < max_grounding_rounds:
+                    continue
+                return GenericGoalResolution(
+                    "UNSUPPORTED",
+                    source="BACKEND_VALIDATED",
+                    provider_observation=build_observation(
+                        stage="DYNAMIC_GOAL_ENTITY_GROUNDING",
+                        result="BACKEND_VALIDATION_REJECTED",
+                        validation="REJECTED",
+                        rejection_code=exc.code,
+                    ),
+                )
+
+            ontology = _dynamic_goal_ontology(
+                self.db,
+                self.scope,
+                definition,
+                grounding=grounding,
+                projection=projection,
+            )
+            for record in reversed(provider_call_records):
+                if (
+                    record.get("purpose") == "DYNAMIC_GOAL_GROUNDING"
+                    and record.get("grounding_round") == grounding_round
+                ):
+                    record["projection"] = _dynamic_goal_projection_observation(projection)
+                    break
+            can_retry_unsupported_interpretation = _dynamic_goal_grounding_has_semantics(projection)
+            last_interpretation_error = None
+            interpretation_failed = False
+            interpretation: DynamicGoalInterpretation | None = None
+
+            for interpretation_attempt_index in range(
+                1,
+                _DYNAMIC_GOAL_MAX_INTERPRETATION_ATTEMPTS + 1,
+            ):
+                request = DynamicGoalInterpretationRequest(
+                    goal=goal,
+                    ontology=ontology,
+                    grounded_candidate_refs=grounding.candidate_refs,
+                    grounded_entity_keys=grounding.entity_keys,
+                    recovery_attempt=0 if interpretation_attempt_index == 1 else 1,
+                )
+                raw_interpretation: object | None = None
+                try:
+                    raw_interpretation = interpreter(request)
+                    try:
+                        interpretation = DynamicGoalInterpretation.model_validate(
+                            raw_interpretation
+                        )
+                    except ValidationError as exc:
+                        diagnostics = provider_validation_diagnostics(exc)
+                        raise GenericProviderError(
+                            "MODEL_PROVIDER_RESPONSE_INVALID",
+                            "The model provider returned an invalid Dynamic Goal interpretation",
+                            validation_diagnostics=diagnostics,
+                        ) from exc
+                    except (TypeError, ValueError) as exc:
+                        raise GenericProviderError(
+                            "MODEL_PROVIDER_RESPONSE_INVALID",
+                            "The model provider returned an invalid Dynamic Goal interpretation",
+                        ) from exc
+                except GenericProviderError as exc:
+                    interpretation_attempt_record: dict[str, object] = {
+                        "stage": "DYNAMIC_GOAL_INTERPRETATION",
+                        "attempt": interpretation_attempt_index,
+                        "grounding_round": grounding_round,
+                        "interpretation_attempt": interpretation_attempt_index,
+                        "status": "ERROR",
+                        "validation": "REJECTED",
+                        "result": exc.code,
+                    }
+                    if exc.validation_diagnostics:
+                        interpretation_attempt_record["validation_diagnostics"] = list(
+                            exc.validation_diagnostics
+                        )
+                    interpretation_attempts.append(interpretation_attempt_record)
+                    record_provider_call(
+                        purpose="dynamic_goal",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=interpretation_attempt_index,
+                        request=request,
+                        response=raw_interpretation,
+                        projection_for_call=projection,
+                        candidate_refs=grounding.candidate_refs,
+                        validation_result={
+                            "pydantic": "REJECTED",
+                            "canonicalization": "NOT_RUN",
+                            "projection": "NOT_RUN",
+                            "exact_version_public": "NOT_RUN",
+                            "result": "REJECTED",
+                        },
+                        rejection_code=exc.code,
+                        validation_diagnostics=exc.validation_diagnostics,
+                    )
+                    last_interpretation_error = exc
+                    interpretation_failed = True
+                    if interpretation_attempt_index < _DYNAMIC_GOAL_MAX_INTERPRETATION_ATTEMPTS:
+                        interpretation_failed = False
+                        continue
+                    break
+
+                assert interpretation is not None
+                interpretation_attempt_record = {
                     "stage": "DYNAMIC_GOAL_INTERPRETATION",
-                    "attempt": attempt_index,
+                    "attempt": interpretation_attempt_index,
+                    "grounding_round": grounding_round,
+                    "interpretation_attempt": interpretation_attempt_index,
                     "status": interpretation.status,
                     "validation": "ACCEPTED",
                     "result": (
@@ -776,97 +1046,219 @@ class GenericGoalResolver:
                         else "MODEL_ACCEPTED"
                     ),
                 }
-            )
+                interpretation_attempts.append(interpretation_attempt_record)
+                if interpretation.status == "NEEDS_CLARIFICATION":
+                    record_provider_call(
+                        purpose="dynamic_goal",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=interpretation_attempt_index,
+                        request=request,
+                        response=interpretation,
+                        projection_for_call=projection,
+                        candidate_refs=grounding.candidate_refs,
+                        validation_result={
+                            "pydantic": "ACCEPTED",
+                            "canonicalization": "NOT_RUN",
+                            "projection": "NOT_RUN",
+                            "exact_version_public": "NOT_RUN",
+                            "result": "MODEL_NEEDS_CLARIFICATION",
+                        },
+                    )
+                    return GenericGoalResolution(
+                        "NEEDS_CLARIFICATION",
+                        clarification_prompt=interpretation.clarification_prompt,
+                        source="MODEL_VALIDATED",
+                        provider_observation={
+                            **build_observation(
+                                stage="DYNAMIC_GOAL_INTERPRETATION",
+                                status=interpretation.status,
+                                result="MODEL_NEEDS_CLARIFICATION",
+                                validation="ACCEPTED",
+                            ),
+                        },
+                    )
+                if interpretation.status == "UNSUPPORTED":
+                    record_provider_call(
+                        purpose="dynamic_goal",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=interpretation_attempt_index,
+                        request=request,
+                        response=interpretation,
+                        projection_for_call=projection,
+                        candidate_refs=grounding.candidate_refs,
+                        validation_result={
+                            "pydantic": "ACCEPTED",
+                            "canonicalization": "NOT_RUN",
+                            "projection": "NOT_RUN",
+                            "exact_version_public": "NOT_RUN",
+                            "result": "MODEL_UNSUPPORTED",
+                        },
+                    )
+                    if (
+                        can_retry_unsupported_interpretation
+                        and interpretation_attempt_index < _DYNAMIC_GOAL_MAX_INTERPRETATION_ATTEMPTS
+                    ):
+                        continue
+                    interpretation_failed = True
+                    break
+
+                candidate_set = AdHocGoalCandidateSetV1(requirements=interpretation.requirements)
+                try:
+                    canonical_candidate_set = canonicalize_ad_hoc_dynamic_candidates(
+                        definition,
+                        candidate_set,
+                    )
+                except FormalGoalError as exc:
+                    last_backend_rejection_code = exc.code
+                    if exc.details:
+                        last_backend_value_type_diagnostics = [exc.details]
+                    interpretation_attempt_record.update(
+                        {
+                            "validation": "REJECTED",
+                            "result": "BACKEND_VALIDATION_REJECTED",
+                            "rejection_code": exc.code,
+                        }
+                    )
+                    if exc.details:
+                        interpretation_attempt_record["value_type_diagnostics"] = [exc.details]
+                    interpretation_attempts[-1] = interpretation_attempt_record
+                    record_provider_call(
+                        purpose="dynamic_goal",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=interpretation_attempt_index,
+                        request=request,
+                        response=interpretation,
+                        projection_for_call=projection,
+                        candidate_refs=grounding.candidate_refs,
+                        validation_result={
+                            "pydantic": "ACCEPTED",
+                            "canonicalization": "REJECTED",
+                            "projection": "NOT_RUN",
+                            "exact_version_public": "NOT_RUN",
+                            "result": "REJECTED",
+                        },
+                        rejection_code=exc.code,
+                    )
+                    if interpretation_attempt_index < _DYNAMIC_GOAL_MAX_INTERPRETATION_ATTEMPTS:
+                        continue
+                    interpretation_failed = True
+                    break
+
+                try:
+                    _validate_dynamic_goal_publicity(
+                        self.db,
+                        self.scope,
+                        definition,
+                        canonical_candidate_set,
+                        projection=projection,
+                    )
+                except FormalGoalError as exc:
+                    last_backend_rejection_code = exc.code
+                    if exc.details:
+                        last_backend_value_type_diagnostics = [exc.details]
+                    interpretation_attempt_record.update(
+                        {
+                            "validation": "REJECTED",
+                            "result": "BACKEND_VALIDATION_REJECTED",
+                            "rejection_code": exc.code,
+                        }
+                    )
+                    if exc.details:
+                        interpretation_attempt_record["value_type_diagnostics"] = [exc.details]
+                    interpretation_attempts[-1] = interpretation_attempt_record
+                    record_provider_call(
+                        purpose="dynamic_goal",
+                        grounding_round=grounding_round,
+                        interpretation_attempt=interpretation_attempt_index,
+                        request=request,
+                        response=interpretation,
+                        projection_for_call=projection,
+                        candidate_refs=grounding.candidate_refs,
+                        validation_result={
+                            "pydantic": "ACCEPTED",
+                            "canonicalization": "ACCEPTED",
+                            "projection": "REJECTED",
+                            "exact_version_public": "REJECTED",
+                            "result": "REJECTED",
+                        },
+                        rejection_code=exc.code,
+                    )
+                    if interpretation_attempt_index < _DYNAMIC_GOAL_MAX_INTERPRETATION_ATTEMPTS:
+                        continue
+                    interpretation_failed = True
+                    break
+
+                interpretation_attempt_record["validation"] = "ACCEPTED"
+                interpretation_attempt_record["result"] = "MODEL_ACCEPTED"
+                interpretation_attempts[-1] = interpretation_attempt_record
+                record_provider_call(
+                    purpose="dynamic_goal",
+                    grounding_round=grounding_round,
+                    interpretation_attempt=interpretation_attempt_index,
+                    request=request,
+                    response=interpretation,
+                    projection_for_call=projection,
+                    candidate_refs=grounding.candidate_refs,
+                    validation_result={
+                        "pydantic": "ACCEPTED",
+                        "canonicalization": "ACCEPTED",
+                        "projection": "ACCEPTED",
+                        "exact_version_public": "ACCEPTED",
+                        "result": "ACCEPTED",
+                    },
+                    accepted_requirements=canonical_candidate_set.requirements,
+                )
+                return GenericGoalResolution(
+                    "RESOLVED",
+                    dynamic_requirements=canonical_candidate_set.requirements,
+                    source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+                    provider_observation={
+                        **build_observation(
+                            stage="DYNAMIC_GOAL_INTERPRETATION",
+                            status=interpretation.status,
+                            result="MODEL_ACCEPTED",
+                            validation="ACCEPTED",
+                        ),
+                        "requirement_count": len(interpretation.requirements),
+                    },
+                )
+
             if (
-                interpretation.status == "UNSUPPORTED"
-                and can_retry_unsupported_interpretation
-                and attempt_index < _DYNAMIC_GOAL_MAX_PROVIDER_ATTEMPTS
+                interpretation_failed
+                and needs_provider_grounding
+                and grounding_round < max_grounding_rounds
             ):
                 continue
-            break
-
-        assert interpretation is not None
-
-        observation: dict[str, object] = {
-            **provider_call_metadata(self.provider),
-            "call_type": "DYNAMIC_GOAL_INTERPRETATION",
-            "stage": "DYNAMIC_GOAL_INTERPRETATION",
-            "model": self.provider.model_name,
-            "status": interpretation.status,
-            "result": (
-                "MODEL_UNSUPPORTED"
-                if interpretation.status == "UNSUPPORTED"
-                else "MODEL_NEEDS_CLARIFICATION"
-                if interpretation.status == "NEEDS_CLARIFICATION"
-                else "MODEL_ACCEPTED"
-            ),
-            "grounding": grounding_info,
-            "catalog_hash": public_catalog_hash,
-            "ontology_hash": _dynamic_goal_payload_hash(ontology),
-            "attempt_count": len(interpretation_attempts),
-            "provider_calls": resolution_provider_calls(),
-            "attempts": [*grounding_attempts, *interpretation_attempts],
-        }
-        if interpretation.status == "NEEDS_CLARIFICATION":
-            return GenericGoalResolution(
-                "NEEDS_CLARIFICATION",
-                clarification_prompt=interpretation.clarification_prompt,
-                source="MODEL_VALIDATED",
-                provider_observation={**observation, "validation": "ACCEPTED"},
+            if last_interpretation_error is not None:
+                raise_with_observation(
+                    last_interpretation_error,
+                    stage="DYNAMIC_GOAL_INTERPRETATION",
+                )
+            status = interpretation.status if interpretation is not None else "UNSUPPORTED"
+            final_observation = build_observation(
+                stage="DYNAMIC_GOAL_INTERPRETATION",
+                status=status,
+                result=(
+                    "MODEL_UNSUPPORTED"
+                    if status == "UNSUPPORTED"
+                    else "BACKEND_VALIDATION_REJECTED"
+                ),
+                validation="REJECTED"
+                if interpretation_failed
+                and interpretation is not None
+                and interpretation.status == "RESOLVED"
+                else "ACCEPTED",
+                rejection_code=last_backend_rejection_code,
             )
-        if interpretation.status == "UNSUPPORTED":
+            if last_backend_value_type_diagnostics:
+                final_observation["value_type_diagnostics"] = last_backend_value_type_diagnostics
             return GenericGoalResolution(
                 "UNSUPPORTED",
                 source="MODEL_VALIDATED",
-                provider_observation={**observation, "validation": "ACCEPTED"},
+                provider_observation=final_observation,
             )
-        candidate_set = AdHocGoalCandidateSetV1(requirements=interpretation.requirements)
-        canonical_candidate_set: AdHocGoalCandidateSetV1 | None = None
-        try:
-            canonical_candidate_set = canonicalize_ad_hoc_dynamic_candidates(
-                definition,
-                candidate_set,
-            )
-            if self.db is not None and self.scope is not None:
-                _validate_dynamic_goal_publicity(
-                    self.db,
-                    self.scope,
-                    definition,
-                    canonical_candidate_set,
-                )
-            else:
-                validate_ad_hoc_dynamic_candidates(definition, canonical_candidate_set)
-            if grounding.status == "RESOLVED":
-                _validate_dynamic_goal_grounding_scope(
-                    definition,
-                    grounding,
-                    canonical_candidate_set,
-                )
-        except FormalGoalError as exc:
-            validation_observation: dict[str, object] = {
-                **observation,
-                "result": "BACKEND_VALIDATION_REJECTED",
-                "validation": "REJECTED",
-                "rejection_code": exc.code,
-            }
-            if exc.details:
-                validation_observation["value_type_diagnostics"] = [exc.details]
-            return GenericGoalResolution(
-                "UNSUPPORTED",
-                source="MODEL_VALIDATED",
-                provider_observation=validation_observation,
-            )
-        assert canonical_candidate_set is not None
-        return GenericGoalResolution(
-            "RESOLVED",
-            dynamic_requirements=canonical_candidate_set.requirements,
-            source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
-            provider_observation={
-                **observation,
-                "validation": "ACCEPTED",
-                "requirement_count": len(interpretation.requirements),
-            },
-        )
+
+        return GenericGoalResolution("UNSUPPORTED", source="NO_PUBLIC_GROUNDING")
 
 
 class GenericAgentService:
@@ -5481,6 +5873,42 @@ def _dynamic_goal_entity_catalog(
                     ],
                 }
             )
+    references: list[dict[str, object]] = []
+    for node in sorted(definition.world.nodes, key=lambda item: item.key):
+        if node.key not in public_nodes:
+            continue
+        ref_type = "REGION" if node.key in public_regions else "NODE"
+        references.append(
+            {
+                "ref_type": ref_type,
+                "key": node.key,
+                "name": node.name,
+                "description": node.description,
+            }
+        )
+    references.extend(
+        {
+            "ref_type": "RESOURCE",
+            "key": resource.key,
+            "name": resource.name,
+            "description": resource.description,
+        }
+        for resource in sorted(definition.world.resources, key=lambda item: item.key)
+    )
+    references.extend(
+        {
+            "ref_type": "DERIVED_STATE",
+            "key": state.key,
+            "name": state.name,
+            "description": state.description,
+            "value_type": state.value_type.value,
+            "allowed_values": list(state.allowed_values),
+            **({"goal_aliases": list(state.goal_aliases)} if state.goal_aliases else {}),
+            **({"goal_examples": list(state.goal_examples)} if state.goal_examples else {}),
+        }
+        for state in sorted(definition.derived_states, key=lambda item: item.key)
+        if state.goal_addressable
+    )
     return {
         "schema_version": 1,
         "entities": nodes,
@@ -5497,8 +5925,10 @@ def _dynamic_goal_entity_catalog(
             "relations": list(public_relations),
             "transport_endpoint_pairs": topology,
         },
+        "references": references,
         "grounding_language": {
-            "selection": "PUBLIC_ENTITY_KEYS_ONLY",
+            "selection": "PUBLIC_CANDIDATE_REFERENCES_ONLY",
+            "reference_types": ["NODE", "REGION", "RESOURCE", "DERIVED_STATE"],
             "outcomes": ["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"],
         },
     }
@@ -5522,16 +5952,44 @@ def _dynamic_goal_exact_public_matches(
     goal: str,
     definition: ScenarioDefinitionV2,
     public_nodes: set[str],
-) -> tuple[str, ...]:
+) -> tuple[DynamicGoalCandidateReference, ...]:
     normalized_goal = _normalize(goal)
-    matches: list[str] = []
+    matches: list[DynamicGoalCandidateReference] = []
+    public_regions = {
+        node.key
+        for node in definition.world.nodes
+        if node.key in public_nodes
+        and definition.metadata.locality.enabled
+        and node.node_type_key == definition.metadata.locality.region_node_type_key
+    }
     for node in sorted(definition.world.nodes, key=lambda item: item.key):
         if node.key not in public_nodes:
             continue
         terms = (_normalize(node.key), _normalize(node.name))
         if any(_contains_public_term(normalized_goal, term) for term in terms):
-            matches.append(node.key)
-    return tuple(matches)
+            matches.append(
+                DynamicGoalCandidateReference(
+                    ref_type="REGION" if node.key in public_regions else "NODE",
+                    key=node.key,
+                )
+            )
+    for resource in sorted(definition.world.resources, key=lambda item: item.key):
+        resource_terms = (_normalize(resource.key), _normalize(resource.name))
+        if any(_contains_public_term(normalized_goal, term) for term in resource_terms):
+            matches.append(DynamicGoalCandidateReference(ref_type="RESOURCE", key=resource.key))
+    for state in sorted(definition.derived_states, key=lambda item: item.key):
+        if not state.goal_addressable:
+            continue
+        state_terms: tuple[str, ...] = (
+            _normalize(state.key),
+            _normalize(state.name),
+            *(_normalize(alias) for alias in state.goal_aliases),
+            *(_normalize(example) for example in state.goal_examples),
+        )
+        if any(_contains_public_term(normalized_goal, term) for term in state_terms):
+            matches.append(DynamicGoalCandidateReference(ref_type="DERIVED_STATE", key=state.key))
+    unique = {(item.ref_type, item.key): item for item in matches}
+    return tuple(unique[key] for key in sorted(unique))
 
 
 def _dynamic_goal_topology_matches(
@@ -5568,8 +6026,8 @@ def _dynamic_goal_topology_matches(
     return tuple(matches)
 
 
-def _dynamic_goal_grounding_from_keys(
-    entity_keys: tuple[str, ...],
+def _dynamic_goal_grounding_from_refs(
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...],
     source: str,
     db: Session | None,
     scope: RuntimeScope | None,
@@ -5586,7 +6044,9 @@ def _dynamic_goal_grounding_from_keys(
         definition,
         public_nodes,
     )
-    scope_keys = set(entity_keys)
+    entity_keys = {item.key for item in candidate_refs if item.ref_type == "NODE"}
+    explicit_region_keys = {item.key for item in candidate_refs if item.ref_type == "REGION"}
+    scope_keys = {*entity_keys, *explicit_region_keys}
     locality = definition.metadata.locality
     endpoint_type = locality.transport_endpoint_relation_type_key
     if locality.enabled and endpoint_type is not None:
@@ -5601,9 +6061,28 @@ def _dynamic_goal_grounding_from_keys(
         )
     return _DynamicGoalGrounding(
         status="RESOLVED",
+        candidate_refs=tuple(sorted(candidate_refs, key=lambda item: (item.ref_type, item.key))),
         entity_keys=tuple(sorted(entity_keys)),
         scope_keys=tuple(sorted(scope_keys)),
         source=source,
+    )
+
+
+def _dynamic_goal_grounding_from_keys(
+    entity_keys: tuple[str, ...],
+    source: str,
+    db: Session | None,
+    scope: RuntimeScope | None,
+    definition: ScenarioDefinitionV2,
+) -> _DynamicGoalGrounding:
+    """Compatibility wrapper for callers that only have NODE keys."""
+
+    return _dynamic_goal_grounding_from_refs(
+        tuple(DynamicGoalCandidateReference(ref_type="NODE", key=key) for key in entity_keys),
+        source,
+        db,
+        scope,
+        definition,
     )
 
 
@@ -5613,34 +6092,25 @@ def _deterministic_dynamic_goal_grounding(
     scope: RuntimeScope | None,
     definition: ScenarioDefinitionV2,
 ) -> _DynamicGoalGrounding:
-    """Ground exact public names/keys and unique public locality topology."""
+    """Ground public references using stable names, keys, and topology.
+
+    This stage only returns public references.  It never chooses a typed Goal
+    requirement or a target value, even when a reference name happens to be an
+    authored Goal example.
+    """
 
     public_nodes, _goal_addressable_facts, public_regions = _dynamic_goal_public_keys(
         db,
         scope,
         definition,
     )
-    exact_matches = _dynamic_goal_exact_public_matches(goal, definition, public_nodes)
-    direct_entity_matches = tuple(key for key in exact_matches if key not in public_regions)
-    if len(direct_entity_matches) == 1:
-        return _dynamic_goal_grounding_from_keys(
-            direct_entity_matches,
-            "DETERMINISTIC_ENTITY_GROUNDING",
-            db,
-            scope,
-            definition,
-        )
-    if len(direct_entity_matches) > 1:
-        return _DynamicGoalGrounding(
-            status="NEEDS_CLARIFICATION",
-            entity_keys=direct_entity_matches,
-            source="DETERMINISTIC_ENTITY_GROUNDING",
-            clarification_prompt=(
-                "Which public entity should this Goal target? Please choose one explicitly."
-            ),
-        )
+    reference_matches = _dynamic_goal_exact_public_matches(goal, definition, public_nodes)
+    direct_entity_matches = tuple(item.key for item in reference_matches if item.ref_type == "NODE")
+    direct_region_matches = tuple(
+        item.key for item in reference_matches if item.ref_type == "REGION"
+    )
 
-    mentioned_regions = tuple(key for key in exact_matches if key in public_regions)
+    mentioned_regions = direct_region_matches
     public_relations = _dynamic_goal_public_relations(
         db,
         scope,
@@ -5654,40 +6124,30 @@ def _deterministic_dynamic_goal_grounding(
         public_regions,
         public_relations,
     )
-    if len(topology_matches) == 1:
-        return _dynamic_goal_grounding_from_keys(
-            topology_matches,
+    non_node_matches = tuple(item for item in reference_matches if item.ref_type != "NODE")
+    if not direct_entity_matches and topology_matches:
+        topology_refs = tuple(
+            DynamicGoalCandidateReference(ref_type="NODE", key=key) for key in topology_matches
+        )
+        return _dynamic_goal_grounding_from_refs(
+            (*topology_refs, *non_node_matches),
             "DETERMINISTIC_PUBLIC_TOPOLOGY",
             db,
             scope,
             definition,
         )
-    if len(topology_matches) > 1:
-        return _DynamicGoalGrounding(
-            status="NEEDS_CLARIFICATION",
-            entity_keys=topology_matches,
-            source="DETERMINISTIC_PUBLIC_TOPOLOGY",
-            clarification_prompt=(
-                "More than one public transport connects those Regions; which one should "
-                "this Goal target?"
-            ),
+    if reference_matches:
+        source = (
+            "DETERMINISTIC_ENTITY_GROUNDING"
+            if direct_entity_matches or mentioned_regions
+            else "DETERMINISTIC_PUBLIC_REFERENCE"
         )
-    if len(mentioned_regions) == 1:
-        return _dynamic_goal_grounding_from_keys(
-            mentioned_regions,
-            "DETERMINISTIC_ENTITY_GROUNDING",
+        return _dynamic_goal_grounding_from_refs(
+            reference_matches,
+            source,
             db,
             scope,
             definition,
-        )
-    if len(mentioned_regions) > 1:
-        return _DynamicGoalGrounding(
-            status="NEEDS_CLARIFICATION",
-            entity_keys=mentioned_regions,
-            source="DETERMINISTIC_ENTITY_GROUNDING",
-            clarification_prompt=(
-                "Which public entity or Region should this Goal target? Please be explicit."
-            ),
         )
     return _DynamicGoalGrounding(status="NONE")
 
@@ -5698,77 +6158,167 @@ def _validate_dynamic_entity_grounding_keys(
     scope: RuntimeScope | None,
     candidate_keys: tuple[str, ...],
 ) -> tuple[str, ...]:
-    public_nodes, _goal_addressable_facts, _public_regions = _dynamic_goal_public_keys(
+    candidate_refs = tuple(
+        DynamicGoalCandidateReference(ref_type="NODE", key=key) for key in candidate_keys
+    )
+    validated = _validate_dynamic_goal_candidate_refs(definition, db, scope, candidate_refs)
+    return tuple(item.key for item in validated)
+
+
+def _validate_dynamic_goal_candidate_refs(
+    definition: ScenarioDefinitionV2,
+    db: Session | None,
+    scope: RuntimeScope | None,
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...],
+) -> tuple[DynamicGoalCandidateReference, ...]:
+    """Validate Stage 1 references against public exact-Version metadata."""
+
+    public_nodes, _goal_addressable_facts, public_regions = _dynamic_goal_public_keys(
         db,
         scope,
         definition,
     )
-    if not candidate_keys or any(not key.strip() for key in candidate_keys):
+    if not candidate_refs:
         raise FormalGoalError(
             "FORMAL_GOAL_DYNAMIC_ENTITY_GROUNDING_INVALID",
-            "Dynamic Goal Entity Grounding returned no usable public entity key",
+            "Dynamic Goal Entity Grounding returned no usable public reference",
         )
-    if len(set(candidate_keys)) != len(candidate_keys):
+    identities = tuple((item.ref_type, item.key) for item in candidate_refs)
+    if len(set(identities)) != len(identities):
         raise FormalGoalError(
             "FORMAL_GOAL_DYNAMIC_ENTITY_GROUNDING_INVALID",
-            "Dynamic Goal Entity Grounding returned duplicate entity keys",
+            "Dynamic Goal Entity Grounding returned duplicate references",
         )
-    if any(key not in public_nodes for key in candidate_keys):
-        raise FormalGoalError(
-            "FORMAL_GOAL_DYNAMIC_ENTITY_NOT_PUBLIC",
-            "Dynamic Goal Entity Grounding returned a non-public entity",
-        )
-    return tuple(sorted(candidate_keys))
+    public_resources = {item.key for item in definition.world.resources}
+    public_derived = {item.key for item in definition.derived_states if item.goal_addressable}
+    for reference in candidate_refs:
+        if reference.ref_type == "NODE":
+            if reference.key not in public_nodes or reference.key in public_regions:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_ENTITY_NOT_PUBLIC",
+                    "Dynamic Goal Entity Grounding returned a non-public Node",
+                )
+        elif reference.ref_type == "REGION":
+            if reference.key not in public_regions:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_REGION_NOT_PUBLIC",
+                    "Dynamic Goal Entity Grounding returned a non-public Region",
+                )
+        elif reference.ref_type == "RESOURCE":
+            if reference.key not in public_resources:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_RESOURCE_NOT_PUBLIC",
+                    "Dynamic Goal Grounding returned a non-public Resource",
+                )
+        elif reference.key not in public_derived:
+            raise FormalGoalError(
+                "FORMAL_GOAL_DYNAMIC_DERIVED_STATE_NOT_PUBLIC",
+                "Dynamic Goal Grounding returned a non-public Derived State",
+            )
+    return tuple(sorted(candidate_refs, key=lambda item: (item.ref_type, item.key)))
 
 
-def _dynamic_goal_grounding_has_semantics(
+def _dynamic_goal_grounding_keys(grounding: _DynamicGoalGrounding) -> tuple[str, ...]:
+    return tuple(item.key for item in grounding.candidate_refs)
+
+
+def _dynamic_goal_projection(
+    *,
     db: Session | None,
     scope: RuntimeScope | None,
     definition: ScenarioDefinitionV2,
     grounding: _DynamicGoalGrounding,
-) -> bool:
-    _public_nodes, goal_addressable_facts, public_regions = _dynamic_goal_public_keys(
+) -> _DynamicGoalProjection:
+    """Build the allow-list shared by ontology and Stage 2 validation."""
+
+    public_nodes, goal_addressable_facts, public_regions = _dynamic_goal_public_keys(
         db,
         scope,
         definition,
     )
-    if any(node_key in grounding.entity_keys for node_key, _fact_key in goal_addressable_facts):
-        return True
-    return bool(set(grounding.scope_keys) & public_regions and definition.world.resources)
-
-
-def _validate_dynamic_goal_grounding_scope(
-    definition: ScenarioDefinitionV2,
-    grounding: _DynamicGoalGrounding,
-    candidates: AdHocGoalCandidateSetV1,
-) -> None:
-    entity_keys = set(grounding.entity_keys)
-    scope_keys = set(grounding.scope_keys)
-    for candidate in candidates.requirements:
-        if candidate.kind.value == "FACT":
-            target_key = candidate.node_key
-            allowed = target_key in entity_keys
-        elif candidate.kind.value == "DERIVED_STATE":
-            # A public Derived capability is a catalog-level target and does
-            # not require an entity grounding scope.
-            continue
-        else:
-            target_key = candidate.region_key
-            allowed = target_key in scope_keys
-        if not allowed:
-            raise FormalGoalError(
-                "FORMAL_GOAL_DYNAMIC_GROUNDING_MISMATCH",
-                "Dynamic Goal interpretation escaped the grounded public entity scope",
+    public_relations = _dynamic_goal_public_relations(
+        db,
+        scope,
+        definition,
+        public_nodes,
+    )
+    allowed_entity_keys = tuple(
+        sorted(item.key for item in grounding.candidate_refs if item.ref_type == "NODE")
+    )
+    allowed_region_keys = {
+        item.key for item in grounding.candidate_refs if item.ref_type == "REGION"
+    }
+    endpoint_type = definition.metadata.locality.transport_endpoint_relation_type_key
+    if definition.metadata.locality.enabled and endpoint_type is not None:
+        allowed_region_keys.update(
+            str(item["target_node_key"])
+            for item in public_relations
+            if (
+                item.get("source_node_key") in allowed_entity_keys
+                and item.get("relation_type_key") == endpoint_type
+                and item.get("target_node_key") in public_regions
             )
+        )
+    fact_nodes = {
+        *allowed_entity_keys,
+        *(item.key for item in grounding.candidate_refs if item.ref_type == "REGION"),
+    }
+    allowed_fact_keys = tuple(
+        sorted(
+            (node_key, fact_key)
+            for node_key, fact_key in goal_addressable_facts
+            if node_key in fact_nodes
+        )
+    )
+    return _DynamicGoalProjection(
+        allowed_entity_keys=allowed_entity_keys,
+        allowed_region_keys=tuple(sorted(allowed_region_keys)),
+        allowed_resource_keys=tuple(
+            sorted(item.key for item in grounding.candidate_refs if item.ref_type == "RESOURCE")
+        ),
+        allowed_derived_state_keys=tuple(
+            sorted(
+                item.key for item in grounding.candidate_refs if item.ref_type == "DERIVED_STATE"
+            )
+        ),
+        allowed_fact_keys=allowed_fact_keys,
+    )
+
+
+def _dynamic_goal_grounding_has_semantics(projection: _DynamicGoalProjection) -> bool:
+    return bool(
+        projection.allowed_fact_keys
+        or (projection.allowed_region_keys and projection.allowed_resource_keys)
+        or projection.allowed_derived_state_keys
+    )
 
 
 def _dynamic_goal_grounding_observation(
     grounding: _DynamicGoalGrounding,
+    projection: _DynamicGoalProjection | None = None,
 ) -> dict[str, object]:
-    return {
-        "source": (grounding.source if grounding.status == "RESOLVED" else "FULL_PUBLIC_CATALOG"),
+    observation: dict[str, object] = {
+        "source": grounding.source,
+        "candidate_refs": [item.model_dump(mode="json") for item in grounding.candidate_refs],
         "entity_keys": list(grounding.entity_keys),
         "scope_keys": list(grounding.scope_keys),
+    }
+    if projection is not None:
+        observation["projection"] = _dynamic_goal_projection_observation(projection)
+    return observation
+
+
+def _dynamic_goal_projection_observation(
+    projection: _DynamicGoalProjection,
+) -> dict[str, object]:
+    return {
+        "allowed_entity_keys": list(projection.allowed_entity_keys),
+        "allowed_region_keys": list(projection.allowed_region_keys),
+        "allowed_resource_keys": list(projection.allowed_resource_keys),
+        "allowed_derived_state_keys": list(projection.allowed_derived_state_keys),
+        "allowed_fact_keys": [
+            f"{node_key}.{fact_key}" for node_key, fact_key in projection.allowed_fact_keys
+        ],
     }
 
 
@@ -5783,12 +6333,65 @@ def _dynamic_goal_payload_hash(payload: dict[str, object]) -> str:
     ).hexdigest()
 
 
+def _dynamic_goal_response_observation(
+    response: object,
+    projection: _DynamicGoalProjection | None,
+) -> object:
+    """Redact rejected private identities before they enter Goal telemetry."""
+
+    if projection is None or isinstance(response, DynamicGoalInterpretation):
+        payload = (
+            response.model_dump(mode="json")
+            if isinstance(response, DynamicGoalInterpretation)
+            else response
+        )
+    else:
+        payload = response
+    if not isinstance(payload, dict):
+        return payload
+    requirements = payload.get("requirements")
+    if not isinstance(requirements, list):
+        return payload
+    assert projection is not None
+    safe_requirements: list[object] = []
+    for raw in requirements:
+        if not isinstance(raw, dict):
+            safe_requirements.append(raw)
+            continue
+        item = dict(raw)
+        kind = item.get("kind")
+        is_public = True
+        if kind == ObjectiveRequirementKind.FACT:
+            identity = (item.get("node_key"), item.get("fact_key"))
+            is_public = identity in projection.allowed_fact_keys
+            if not is_public:
+                item["node_key"] = {"json_type": "string", "value_omitted": True}
+                item["fact_key"] = {"json_type": "string", "value_omitted": True}
+        elif kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+            is_public = (
+                item.get("region_key") in projection.allowed_region_keys
+                and item.get("resource_key") in projection.allowed_resource_keys
+            )
+            if not is_public:
+                item["region_key"] = {"json_type": "string", "value_omitted": True}
+                item["resource_key"] = {"json_type": "string", "value_omitted": True}
+        elif kind == ObjectiveRequirementKind.DERIVED_STATE:
+            is_public = item.get("derived_key") in projection.allowed_derived_state_keys
+            if not is_public:
+                item["derived_key"] = {"json_type": "string", "value_omitted": True}
+        if not is_public and "accepted_values" in item:
+            item["accepted_values"] = {"json_type": "array", "value_omitted": True}
+        safe_requirements.append(item)
+    return {**payload, "requirements": safe_requirements}
+
+
 def _dynamic_goal_ontology(
     db: Session | None,
     scope: RuntimeScope | None,
     definition: ScenarioDefinitionV2,
     *,
     grounding: _DynamicGoalGrounding | None = None,
+    projection: _DynamicGoalProjection | None = None,
 ) -> dict[str, object]:
     """Build the interpreter's public ontology, excluding Truth and planning."""
 
@@ -5803,7 +6406,27 @@ def _dynamic_goal_ontology(
         definition,
         public_nodes,
     )
+    if grounding is not None and projection is None:
+        projection = _dynamic_goal_projection(
+            db=db,
+            scope=scope,
+            definition=definition,
+            grounding=grounding,
+        )
     focused_nodes = set(grounding.scope_keys) if grounding is not None else public_nodes
+    allowed_fact_keys = (
+        set(projection.allowed_fact_keys) if projection is not None else goal_addressable_facts
+    )
+    allowed_resource_keys = (
+        set(projection.allowed_resource_keys)
+        if projection is not None and grounding is not None
+        else {item.key for item in definition.world.resources}
+    )
+    allowed_derived_state_keys = (
+        set(projection.allowed_derived_state_keys)
+        if projection is not None and grounding is not None
+        else {item.key for item in definition.derived_states if item.goal_addressable}
+    )
     nodes = [
         {
             "key": node.key,
@@ -5833,11 +6456,12 @@ def _dynamic_goal_ontology(
         for node in sorted(definition.world.nodes, key=lambda item: item.key)
         if node.key in public_nodes and node.key in focused_nodes
         for fact in sorted(node.facts, key=lambda item: item.key)
-        if (node.key, fact.key) in goal_addressable_facts
+        if (node.key, fact.key) in allowed_fact_keys
     ]
     resources = [
         {"key": resource.key, "name": resource.name, "description": resource.description}
         for resource in sorted(definition.world.resources, key=lambda item: item.key)
+        if resource.key in allowed_resource_keys
     ]
     derived_states = [
         {
@@ -5852,23 +6476,43 @@ def _dynamic_goal_ontology(
             **({"allowed_values": list(state.allowed_values)} if state.allowed_values else {}),
         }
         for state in sorted(definition.derived_states, key=lambda item: item.key)
-        if state.goal_addressable
+        if state.key in allowed_derived_state_keys and state.goal_addressable
     ]
-    requirement_kinds = ["FACT", "RESOURCE_AT_LEAST"]
+    requirement_kinds: list[str] = []
+    if facts:
+        requirement_kinds.append("FACT")
+    if resources and (projection is None or projection.allowed_region_keys):
+        requirement_kinds.append("RESOURCE_AT_LEAST")
     if derived_states:
         requirement_kinds.append("DERIVED_STATE")
+    grounding_payload: dict[str, object]
+    if grounding is not None:
+        grounding_payload = {
+            "mode": "FOCUSED_PUBLIC",
+            "source": grounding.source,
+            "candidate_refs": [item.model_dump(mode="json") for item in grounding.candidate_refs],
+            "entity_keys": list(grounding.entity_keys),
+            "scope_keys": list(grounding.scope_keys),
+            "projection": (
+                {
+                    "allowed_entity_keys": list(projection.allowed_entity_keys),
+                    "allowed_region_keys": list(projection.allowed_region_keys),
+                    "allowed_resource_keys": list(projection.allowed_resource_keys),
+                    "allowed_derived_state_keys": list(projection.allowed_derived_state_keys),
+                    "allowed_fact_keys": [
+                        f"{node_key}.{fact_key}"
+                        for node_key, fact_key in projection.allowed_fact_keys
+                    ],
+                }
+                if projection is not None
+                else {}
+            ),
+        }
+    else:
+        grounding_payload = {"mode": "FULL_PUBLIC"}
     return {
         "schema_version": 1,
-        "grounding": (
-            {
-                "mode": "FOCUSED_PUBLIC",
-                "source": grounding.source,
-                "entity_keys": list(grounding.entity_keys),
-                "scope_keys": list(grounding.scope_keys),
-            }
-            if grounding is not None
-            else {"mode": "FULL_PUBLIC"}
-        ),
+        "grounding": grounding_payload,
         "scenario": {
             "key": definition.metadata.key,
             "name": definition.metadata.name,
@@ -5877,7 +6521,10 @@ def _dynamic_goal_ontology(
         "world": {
             "nodes": nodes,
             "regions": [
-                node_key for node_key in sorted(public_regions) if node_key in focused_nodes
+                node_key
+                for node_key in sorted(public_regions)
+                if node_key in focused_nodes
+                and (projection is None or node_key in projection.allowed_region_keys)
             ],
             "facts": facts,
             "resources": resources,
@@ -5900,10 +6547,12 @@ def _dynamic_goal_ontology(
 
 
 def _validate_dynamic_goal_publicity(
-    db: Session,
-    scope: RuntimeScope,
+    db: Session | None,
+    scope: RuntimeScope | None,
     definition: ScenarioDefinitionV2,
     candidates: AdHocGoalCandidateSetV1,
+    *,
+    projection: _DynamicGoalProjection | None = None,
 ) -> None:
     """Reject a candidate that names a currently non-public ontology item."""
 
@@ -5928,6 +6577,18 @@ def _validate_dynamic_goal_publicity(
                     "Dynamic Goal references a non-public Fact "
                     f"{candidate.node_key}.{candidate.fact_key}",
                 )
+            if (
+                projection is not None
+                and (
+                    candidate.node_key,
+                    candidate.fact_key,
+                )
+                not in projection.allowed_fact_keys
+            ):
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_GROUNDING_MISMATCH",
+                    "Dynamic Goal Fact is outside the grounded public projection",
+                )
             continue
         if candidate.kind.value == "DERIVED_STATE":
             assert candidate.derived_key is not None
@@ -5936,6 +6597,13 @@ def _validate_dynamic_goal_publicity(
                 raise FormalGoalError(
                     "FORMAL_GOAL_DYNAMIC_DERIVED_STATE_NOT_PUBLIC",
                     "Dynamic Goal references a non-public Derived State",
+                )
+            if projection is not None and candidate.derived_key not in set(
+                projection.allowed_derived_state_keys
+            ):
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_GROUNDING_MISMATCH",
+                    "Dynamic Goal Derived State is outside the grounded public projection",
                 )
             continue
         assert candidate.region_key is not None and candidate.resource_key is not None
@@ -5948,6 +6616,14 @@ def _validate_dynamic_goal_publicity(
             raise FormalGoalError(
                 "FORMAL_GOAL_DYNAMIC_RESOURCE_NOT_PUBLIC",
                 f"Dynamic Goal references a non-public Resource {candidate.resource_key}",
+            )
+        if projection is not None and (
+            candidate.region_key not in projection.allowed_region_keys
+            or candidate.resource_key not in projection.allowed_resource_keys
+        ):
+            raise FormalGoalError(
+                "FORMAL_GOAL_DYNAMIC_GROUNDING_MISMATCH",
+                "Dynamic Goal Resource is outside the grounded public projection",
             )
 
 

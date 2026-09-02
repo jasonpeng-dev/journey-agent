@@ -11,6 +11,7 @@ from app.domain.scenario_v2 import DerivedDependencyKind, ObjectiveRequirementKi
 from app.domain.world import Visibility
 from app.infrastructure.db.models import GameInstanceFactState
 from app.services.runtime_initialization import InitializedRuntime
+from tests.scenario_fixtures import predefined_goal_resolution
 from tests.unit.test_linjiang_canonical_task56 import _runtime
 
 
@@ -45,6 +46,7 @@ def test_derived_goal_remains_visible_and_closure_expands_base_dependencies(
     task = agent.create_task(
         runtime.session,
         "恢复东部应急供水",
+        resolved_goal=predefined_goal_resolution("restore_east_emergency_water_supply"),
         initialize_plan=False,
     )
 
@@ -92,6 +94,7 @@ def test_task6_gated_derived_dependency_is_not_exposed_before_reveal(
     task = agent.create_task(
         runtime.session,
         "建立持续应急发电保障",
+        resolved_goal=predefined_goal_resolution("establish_sustained_emergency_generation"),
         initialize_plan=False,
     )
 

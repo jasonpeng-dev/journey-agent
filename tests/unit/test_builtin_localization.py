@@ -1,8 +1,66 @@
 from app.agent.generic import GenericGoalResolver
-from app.domain.formal_goal import FormalGoalSourceKind
+from app.agent.provider import (
+    DynamicGoalCandidateReference,
+    DynamicGoalEntityGrounding,
+    DynamicGoalEntityGroundingRequest,
+    DynamicGoalInterpretation,
+    DynamicGoalInterpretationRequest,
+)
+from app.domain.formal_goal import (
+    AdHocGoalRequirementCandidateV1,
+    FormalGoalSourceKind,
+)
 from app.domain.scenario_v2 import ObjectiveRequirementKind
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
+
+
+class _BuiltinDynamicProvider:
+    @property
+    def model_name(self) -> str:
+        return "builtin-dynamic-test-provider"
+
+    def ground_dynamic_goal_entities(
+        self,
+        request: DynamicGoalEntityGroundingRequest,
+    ) -> DynamicGoalEntityGrounding:
+        goal = request.goal.casefold()
+        if "通信" in request.goal or "communication" in goal:
+            return DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(ref_type="NODE", key="central_telecom_hub"),
+                )
+            )
+        for state in LINJIANG_V2_TEST.derived_states:
+            terms = (state.key, state.name, *state.goal_aliases, *state.goal_examples)
+            if any(term and term.casefold() in goal for term in terms):
+                return DynamicGoalEntityGrounding(
+                    candidate_refs=(
+                        DynamicGoalCandidateReference(ref_type="DERIVED_STATE", key=state.key),
+                    )
+                )
+        return DynamicGoalEntityGrounding(status="UNSUPPORTED")
+
+    def interpret_dynamic_goal(
+        self,
+        request: DynamicGoalInterpretationRequest,
+    ) -> DynamicGoalInterpretation:
+        reference = request.grounded_candidate_refs[0]
+        if reference.ref_type == "NODE" and reference.key == "central_telecom_hub":
+            candidate = AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.FACT,
+                node_key=reference.key,
+                fact_key="operational",
+                accepted_values=(True,),
+            )
+        else:
+            state = LINJIANG_V2_TEST.derived_state_definitions[reference.key]
+            candidate = AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.DERIVED_STATE,
+                derived_key=state.key,
+                accepted_values=(state.available_value,),
+            )
+        return DynamicGoalInterpretation(requirements=(candidate,))
 
 
 def test_current_builtin_preserves_stable_keys_and_player_names() -> None:
@@ -35,7 +93,7 @@ def test_author_content_is_not_implicitly_translated() -> None:
 
 
 def test_linjiang_goal_aliases_resolve_declaratively() -> None:
-    resolver = GenericGoalResolver()
+    resolver = GenericGoalResolver(provider=_BuiltinDynamicProvider())
 
     for goal in (
         "Restore east emergency power",
@@ -52,7 +110,7 @@ def test_linjiang_goal_aliases_resolve_declaratively() -> None:
 
 
 def test_linjiang_final_goal_vocabulary_has_five_derived_states_and_task1_fact() -> None:
-    resolver = GenericGoalResolver()
+    resolver = GenericGoalResolver(provider=_BuiltinDynamicProvider())
     assert {item.key for item in LINJIANG_V2_TEST.derived_states} == {
         "east_emergency_power_network",
         "east_emergency_water_supply",
@@ -84,9 +142,9 @@ def test_linjiang_final_goal_vocabulary_has_five_derived_states_and_task1_fact()
         assert resolution.dynamic_requirements[0].fact_key == "operational"
         assert resolution.dynamic_requirements[0].accepted_values == (True,)
         assert resolution.provider_observation is not None
-        assert resolution.provider_observation["stage"] == "WORLD_GOAL_STATE_CATALOG"
+        assert resolution.provider_observation["stage"] == "DYNAMIC_GOAL_INTERPRETATION"
 
-    assert resolver.resolve(task1.key, LINJIANG_V2_TEST).status == "UNSUPPORTED"
+    assert GenericGoalResolver().resolve(task1.key, LINJIANG_V2_TEST).status == "UNSUPPORTED"
 
     derived_objectives = [
         item
@@ -107,7 +165,7 @@ def test_linjiang_final_goal_vocabulary_has_five_derived_states_and_task1_fact()
             assert resolution.objective_keys == ()
             assert resolution.dynamic_requirements[0].derived_key == state.key
             assert resolution.provider_observation is not None
-            assert resolution.provider_observation["stage"] == "DERIVED_GOAL_CATALOG"
+            assert resolution.provider_observation["stage"] == "DYNAMIC_GOAL_INTERPRETATION"
 
 
 def test_linjiang_unmatched_goal_does_not_use_authored_catalog_fallback() -> None:

@@ -41,11 +41,15 @@ from app.domain.enums import (
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
-from app.domain.formal_goal import FormalGoalSourceKind
+from app.domain.formal_goal import (
+    AdHocGoalRequirementCandidateV1,
+    FormalGoalSourceKind,
+)
 from app.domain.resources import resource_state_key
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import (
     ObjectiveDefinitionV2,
+    ObjectiveRequirementKind,
     ObjectiveRequirementV2,
     ScenarioDefinitionV2,
 )
@@ -77,7 +81,7 @@ from app.services.generic_actions import GenericActionService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import LINJIANG_V2_TEST
+from tests.scenario_fixtures import LINJIANG_V2_TEST, predefined_goal_resolution
 
 
 def _rule_state(
@@ -244,6 +248,7 @@ def test_linjiang_v2_0_planning_context_uses_sparse_target_requirements(
     task = agent.create_task(
         runtime.session,
         "\u6062\u590d\u4e2d\u592e\u901a\u4fe1\u80fd\u529b",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     definition = agent._definition()
@@ -296,6 +301,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     task = agent.create_task(
         runtime.session,
         "\u6062\u590d\u4e2d\u592e\u901a\u4fe1\u80fd\u529b",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     definition = agent._definition()
@@ -499,6 +505,18 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     task = agent.create_task(
         runtime.session,
         "\u6062\u590d\u4e2d\u592e\u901a\u4fe1\u80fd\u529b",
+        resolved_goal=GenericGoalResolution(
+            status="RESOLVED",
+            source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+            dynamic_requirements=(
+                AdHocGoalRequirementCandidateV1(
+                    kind=ObjectiveRequirementKind.FACT,
+                    node_key="central_telecom_hub",
+                    fact_key="operational",
+                    accepted_values=(True,),
+                ),
+            ),
+        ),
         initialize_plan=False,
     )
     definition = agent._definition()
@@ -1371,6 +1389,7 @@ def test_linjiang_v2_0_completed_survey_repair_diagnostic_is_typed(
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
             "恢复中央通信能力",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
@@ -1416,6 +1435,7 @@ def test_linjiang_v2_0_known_resource_deficit_repair_diagnostic_is_typed(
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
             "恢复中央通信能力",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
@@ -1497,6 +1517,7 @@ def test_linjiang_v2_0_known_preflight_repair_diagnostic_has_public_witness(
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
             "恢复东部应急供水",
+            resolved_goal=predefined_goal_resolution("restore_east_emergency_water_supply"),
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
@@ -1563,6 +1584,7 @@ def test_validator_stops_projected_diagnostics_after_static_root_failure(
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
             "恢复中央通信能力",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         )
 
     diagnostics = provider.requests[1].repair_diagnostics
@@ -1603,6 +1625,7 @@ def test_validator_reports_multiple_independent_static_root_failures(
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
             "恢复中央通信能力",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         )
 
     diagnostics = provider.requests[1].repair_diagnostics
@@ -1641,6 +1664,7 @@ def test_validator_reports_actor_capability_mismatch_from_public_actor_state(
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
             "恢复中央通信能力",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         )
 
     planner_actor = next(
@@ -1686,6 +1710,7 @@ def test_validator_stops_after_first_projected_state_root_failure(
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
             "恢复中央通信能力",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         )
 
     diagnostics = provider.requests[1].repair_diagnostics
@@ -1753,6 +1778,7 @@ def test_linjiang_v2_0_projected_repair_applies_selected_target_cost_once(
     task = GenericAgentService(session, scope, provider=provider).create_task(
         runtime.session,
         "恢复中央通信能力",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
     )
 
     assert task.current_plan_version == 1
@@ -2088,6 +2114,7 @@ def test_recreated_task_can_execute_task_scoped_first_travel_without_provider(
     first_task = agent.create_task(
         runtime.session,
         "Restore east emergency power",
+        resolved_goal=predefined_goal_resolution("restore_east_emergency_power_network"),
         initialize_plan=False,
     )
     actor = session.get(
@@ -2115,6 +2142,7 @@ def test_recreated_task_can_execute_task_scoped_first_travel_without_provider(
     second_task = agent.create_task(
         runtime.session,
         "Restore east emergency power",
+        resolved_goal=predefined_goal_resolution("restore_east_emergency_power_network"),
         initialize_plan=False,
     )
     second_key = agent._action_idempotency_key(

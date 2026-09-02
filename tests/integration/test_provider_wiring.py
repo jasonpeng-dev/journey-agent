@@ -18,6 +18,9 @@ import app.agent.provider as provider_module
 from app.agent.generic import GenericAgentError, GenericAgentService, proposal_signature
 from app.agent.planning_context import PlanningContinuityBuilder, legal_candidate_id
 from app.agent.provider import (
+    DynamicGoalCandidateReference,
+    DynamicGoalEntityGrounding,
+    DynamicGoalEntityGroundingRequest,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     GenericProviderError,
@@ -72,6 +75,38 @@ class RecordingProvider:
     def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
         self.goal_requests.append(request)
         return GoalSelection(objective_keys=self.selected)
+
+    def ground_dynamic_goal_entities(
+        self, request: DynamicGoalEntityGroundingRequest
+    ) -> DynamicGoalEntityGrounding:
+        if self.dynamic_interpretation is not None and self.dynamic_interpretation.requirements:
+            refs: dict[tuple[str, str], DynamicGoalCandidateReference] = {}
+            for candidate in self.dynamic_interpretation.requirements:
+                if candidate.kind == ObjectiveRequirementKind.FACT:
+                    assert candidate.node_key is not None
+                    reference = DynamicGoalCandidateReference(
+                        ref_type="NODE", key=candidate.node_key
+                    )
+                    refs[(reference.ref_type, reference.key)] = reference
+                elif candidate.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+                    assert candidate.region_key is not None and candidate.resource_key is not None
+                    for reference in (
+                        DynamicGoalCandidateReference(ref_type="REGION", key=candidate.region_key),
+                        DynamicGoalCandidateReference(
+                            ref_type="RESOURCE", key=candidate.resource_key
+                        ),
+                    ):
+                        refs[(reference.ref_type, reference.key)] = reference
+                elif candidate.derived_key is not None:
+                    reference = DynamicGoalCandidateReference(
+                        ref_type="DERIVED_STATE", key=candidate.derived_key
+                    )
+                    refs[(reference.ref_type, reference.key)] = reference
+            return DynamicGoalEntityGrounding(candidate_refs=tuple(refs.values()))
+        key = "patient_one" if "patient" in request.goal.casefold() else "triage_room"
+        return DynamicGoalEntityGrounding(
+            candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key=key),)
+        )
 
     def interpret_dynamic_goal(
         self,
@@ -372,7 +407,7 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
     assert rejected.task is None
     assert rejected.resolution.status == "UNSUPPORTED"
     assert invented.goal_requests == []
-    assert len(invented.dynamic_requests) == 1
+    assert len(invented.dynamic_requests) == 2
 
 
 def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(

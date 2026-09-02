@@ -227,9 +227,10 @@ def _reject_game_instance_binding_drift(
 class GoalResolutionAttempt(UUIDPrimaryKey, TimestampMixin, Base):
     """Safe, game-scoped audit data for one Goal resolution invocation.
 
-    This record deliberately does not store the submitted Goal text or any
-    provider payload.  It is committed before Task creation so an unresolved
-    submission remains diagnosable when the API rolls back its request.
+    It stores the submitted text and bounded public Goal provider snapshots,
+    but never hidden runtime values, provider reasoning, or credentials.  It
+    is committed before Task creation so an unresolved submission remains
+    diagnosable when the API rolls back its request.
     """
 
     __tablename__ = "goal_resolution_attempts"

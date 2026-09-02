@@ -210,6 +210,7 @@ class PlayOrchestrator:
                 provider=self.goal_resolver.provider,
                 error_code=exc.code,
                 validation_diagnostics=exc.validation_diagnostics,
+                resolution_observation=exc.resolution_observation,
                 provider_calls=provider_call_history_metadata(self.goal_resolver.provider)[
                     provider_history_start:
                 ],

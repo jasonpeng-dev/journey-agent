@@ -39,7 +39,7 @@ from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import LINJIANG_V2_TEST
+from tests.scenario_fixtures import LINJIANG_V2_TEST, predefined_goal_resolution
 
 
 def _definition() -> ScenarioDefinitionV2:
@@ -338,6 +338,7 @@ def test_task5_warehouse_bootstrap_unlocks_aid_and_supports_completion(
     task = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
         "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
     assert task.status == AgentTaskStatus.SUCCEEDED
@@ -519,6 +520,7 @@ def test_task5_unknown_bridge_precondition_is_blocking_and_knowledge_safe(
     task = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
         "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
 
@@ -608,6 +610,7 @@ def test_task5_completion_and_same_objective_reissue_use_current_truth(
     first = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
         "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
     assert first.status == AgentTaskStatus.SUCCEEDED
@@ -617,6 +620,7 @@ def test_task5_completion_and_same_objective_reissue_use_current_truth(
     second = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
         "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
     assert second.status == AgentTaskStatus.ACTIVE
@@ -651,6 +655,7 @@ def test_task5_then_task6_complete_sequentially_on_one_runtime(session: Session)
     task5 = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
         "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
     assert task5.status == AgentTaskStatus.SUCCEEDED
@@ -658,6 +663,7 @@ def test_task5_then_task6_complete_sequentially_on_one_runtime(session: Session)
     task6 = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
         "建立持续应急发电保障",
+        resolved_goal=predefined_goal_resolution("establish_sustained_emergency_generation"),
         initialize_plan=False,
     )
     assert task6.status == AgentTaskStatus.ACTIVE
@@ -724,6 +730,7 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
     task = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
         "建立持续应急发电保障",
+        resolved_goal=predefined_goal_resolution("establish_sustained_emergency_generation"),
         initialize_plan=False,
     )
 

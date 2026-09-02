@@ -53,7 +53,7 @@ from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import LINJIANG_V2_TEST
+from tests.scenario_fixtures import LINJIANG_V2_TEST, predefined_goal_resolution
 
 LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0 = LINJIANG_V2_TEST
 
@@ -347,6 +347,7 @@ def test_hidden_pool_is_absent_from_shared_planner_and_player_safe_projection(
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         "restore central communications",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     objective = definition.objectives[0]
@@ -443,6 +444,7 @@ def test_fresh_linjiang_hides_authored_unsurveyed_inventory_from_all_projections
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         "restore central communications",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     planner_input = PlanningContextBuilder(session, scope).build_v2(
@@ -564,6 +566,7 @@ def test_hidden_truth_pool_presence_cannot_change_public_resource_knowledge(
         task = GenericAgentService(session, scope).create_task(
             runtime.session,
             "restore central communications",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
             initialize_plan=False,
         )
         closure = PlanningContextBuilder(session, scope).build_v2_closure(
@@ -1350,6 +1353,7 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         "restore central communications",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     context = PlanningContextBuilder(session, scope).build(
@@ -1466,6 +1470,7 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
     task = service.create_task(
         runtime.session,
         "restore central communications",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     objective = definition.objectives[0]
