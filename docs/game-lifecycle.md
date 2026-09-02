@@ -26,9 +26,11 @@ authored `PREDEFINED` Objective or compiles an `AD_HOC_DYNAMIC`
 its canonical JSON, hash, source kind, compiler version, and exact
 ScenarioVersion/content-hash proof inside the AgentTask.
 
-The V1 contract is a flat implicit `AND` of `FACT` and
-`RESOURCE_AT_LEAST` requirements. Its deterministic Truth evaluator owns
-completion. A predefined requirement may be hidden behind an authored
+The V1 contract is a flat implicit `AND` of `FACT`, `RESOURCE_AT_LEAST`, and
+public `DERIVED_STATE` requirements. Its deterministic Truth evaluator owns
+completion. Derived State values are recomputed from the exact ScenarioVersion
+and instance Runtime/Knowledge state; they are not directly writable runtime
+rows. A predefined requirement may be hidden behind an authored
 `knowledge_gate`; the requirement is already in the frozen contract, while the
 GameInstance Knowledge projection controls when it is visible to the Agent and
 Player. A Dynamic Goal cannot add a gate or hidden completion semantic, and it
@@ -40,6 +42,14 @@ still Knowledge `UNKNOWN`, satisfying it in hidden Truth cannot immediately
 publish `SUCCEEDED` to the Player; a legal public Knowledge projection must
 make the requirement confirmable first. This preserves deterministic Truth
 evaluation without turning hidden state into a completion oracle.
+
+Derived State follows the same separation: its authoritative value is computed
+from complete Truth, while its player/Agent value is computed from public
+Knowledge. Derived values are not persisted runtime rows and do not create an
+extra runtime revision. Actions and Rules mutate Base Runtime state; the
+capability is recomputed after those mutations. Checkpoint and Fork copy the
+Base Runtime/Knowledge state and recompute Derived values under the exact
+ScenarioVersion.
 
 `ObjectiveScope` remains a predefined/legacy compatibility projection. Dynamic
 Tasks do not have an authored ObjectiveScope. Neither planning, REPAIR, nor
@@ -149,8 +159,10 @@ ScenarioVersion before copying it. It materializes:
 It also copies the stable AgentTask Formal Goal contract fields and the
 `PlanningCycle.formal_goal_contract_hash` linkage together with the existing
 formal history. Contract JSON/hash/source/version proof stays identical after
-materialization; the target receives new instance-scoped row identities. The
-copied GameInstance Knowledge state determines which previously hidden
+materialization; the target receives new instance-scoped row identities.
+Derived State values are recomputed from the copied state rather than copied
+as an independent authority. The copied GameInstance Knowledge state
+determines which previously hidden
 authored requirements are visible after the Fork, while the contract itself is
 not rewritten.
 

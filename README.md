@@ -21,6 +21,12 @@ the browser product.
 * Generic Goal Resolver, frozen `FormalGoalContractV1`, canonical PlannerInput
   V2, deterministic Validator, bounded internal REPAIR, and Knowledge-aware
   REPLAN.
+* Authored Derived World State / capability evaluation with separate
+  authoritative Truth and public Knowledge projections.
+* World Goal State V2 typed requirements: `FACT`, `RESOURCE_AT_LEAST`, and
+  authored `DERIVED_STATE`. In the canonical Linjiang Scenario, Task1 is a
+  genuine typed Fact Objective and Task2-Task6 map to five goal-addressable
+  Derived capabilities; Derived is not a default wrapper around every Fact.
 * Declarative Action/Rule execution, Truth mutation, public Knowledge
   projection, Player-safe Formal PLAY, approvals, immutable archived runtime
   sources, Fork, and plan history.
@@ -90,7 +96,9 @@ models; changing either model is a configuration change and does not require
 changing Goal Resolver or Planner business logic.
 
 Dynamic Goal resolution grounds public entities before building a focused
-ontology and interpreting terminal `FACT` or `RESOURCE_AT_LEAST` requirements.
+ontology and interpreting terminal `FACT`, `RESOURCE_AT_LEAST`, or public
+`DERIVED_STATE` requirements. Derived State dependencies remain authored
+backend semantics and are not exposed as provider planning instructions.
 Transient/provider-format failures use bounded retry, while
 `NEEDS_CLARIFICATION` is not retried into a random resolution. Internal
 provider or validation codes remain developer diagnostics; Goal submission

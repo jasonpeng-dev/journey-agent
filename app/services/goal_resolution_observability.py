@@ -62,9 +62,7 @@ _SAFE_ATTEMPT_KEYS = frozenset(
     }
 )
 _SAFE_VALUE_TYPES = frozenset({"STRING", "INTEGER", "BOOLEAN", "ENUM"})
-_SAFE_JSON_TYPES = frozenset(
-    {"string", "integer", "number", "boolean", "null", "array", "object"}
-)
+_SAFE_JSON_TYPES = frozenset({"string", "integer", "number", "boolean", "null", "array", "object"})
 _SAFE_SCHEMA_TYPES = frozenset(
     {"string", "integer", "number", "boolean", "array", "object", "required", "literal"}
 )
@@ -138,9 +136,7 @@ def persist_goal_resolution_attempt(
     status = resolution.status if resolution is not None else "ERROR"
     resolver_source = resolution.source if resolution is not None else "PROVIDER_ERROR"
     rejection_code = error_code or _safe_text(observation.get("rejection_code"))
-    value_type_diagnostics = _safe_value_type_diagnostics(
-        observation.get("value_type_diagnostics")
-    )
+    value_type_diagnostics = _safe_value_type_diagnostics(observation.get("value_type_diagnostics"))
     with session_factory() as audit_db:
         row = GoalResolutionAttempt(
             game_instance_id=game_instance_id,
@@ -197,11 +193,7 @@ def _safe_provider_metadata(
     if provider is not None:
         metadata.update(provider_call_metadata(provider))
     metadata.update(
-        {
-            key: value
-            for key, value in observation.items()
-            if key in _SAFE_PROVIDER_METADATA_KEYS
-        }
+        {key: value for key, value in observation.items() if key in _SAFE_PROVIDER_METADATA_KEYS}
     )
     return {
         key: value
@@ -227,9 +219,7 @@ def _safe_provider_calls(value: object) -> list[dict[str, object]]:
                     item[key] = integer
             elif key in _SAFE_PROVIDER_METADATA_KEYS and _is_safe_metadata_value(candidate):
                 item[key] = candidate
-        call_diagnostics = _safe_provider_validation_diagnostics(
-            raw.get("validation_diagnostics")
-        )
+        call_diagnostics = _safe_provider_validation_diagnostics(raw.get("validation_diagnostics"))
         if call_diagnostics:
             item["validation_diagnostics"] = call_diagnostics
         call_type = item.get("call_type")
@@ -254,9 +244,7 @@ def _safe_provider_validation_diagnostics(value: object) -> list[dict[str, str]]
         if isinstance(error_type, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", error_type):
             diagnostic["validation_error_type"] = error_type
         field_path = raw.get("field_path")
-        if isinstance(field_path, str) and re.fullmatch(
-            r"[A-Za-z0-9_.<>\[\]-]{1,160}", field_path
-        ):
+        if isinstance(field_path, str) and re.fullmatch(r"[A-Za-z0-9_.<>\[\]-]{1,160}", field_path):
             diagnostic["field_path"] = field_path
         expected = raw.get("expected_type")
         if isinstance(expected, str) and expected in _SAFE_SCHEMA_TYPES:

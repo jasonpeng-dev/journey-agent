@@ -77,7 +77,9 @@ The contract contains a flat, canonically ordered tuple of typed completion
 requirements. The tuple is an implicit `AND`; V1 has no Goal AST, `OR`, generic
 `NOT`, dynamic selector, quantifier, Actor Goal, WorkingGoal, or Milestone
 entity. The supported requirement kinds are the shared `FACT` and
-`RESOURCE_AT_LEAST` contracts already used by authored Objectives. The backend
+`RESOURCE_AT_LEAST` contracts, plus an authored `DERIVED_STATE` capability
+target. Derived State dependencies remain Scenario-authored semantics; they
+are evaluated by the backend rather than supplied by a provider. The backend
 assigns stable requirement identity and computes the contract hash; a provider
 cannot supply either identity or completion semantics.
 
@@ -92,17 +94,45 @@ ontology for Goal Interpretation and validates the resulting typed candidate
 against the exact Version.
 
 The AD_HOC_DYNAMIC interpreter receives only that focused public Scenario
-ontology and currently public entity/fact/Region identities. It cannot see
-hidden Truth, authored Objective metadata, Actions, prerequisites, knowledge
-gates, or hidden completion requirements. It can therefore express only public
-`FACT` and `RESOURCE_AT_LEAST` requirements. Dynamic compilation does not create
-a Scenario ObjectiveDefinition or modify the immutable ScenarioVersion.
+ontology and currently public entity, Fact, Region, Resource, and
+goal-addressable Derived State identities. It cannot see hidden Truth, authored
+Objective metadata, Actions, prerequisites, knowledge gates, hidden Derived
+State dependencies, or hidden completion requirements. It can therefore
+express only public `FACT`, `RESOURCE_AT_LEAST`, and `DERIVED_STATE`
+requirements; a Derived State candidate carries only its public state key and
+typed target value. Dynamic compilation does not create a Scenario
+ObjectiveDefinition or modify the immutable ScenarioVersion.
 
 The canonical contract is embedded in AgentTask with its schema version, source
 kind, exact ScenarioVersion proof, compiler version, canonical JSON, and hash.
 PlanningCycle stores the contract hash alongside its canonical PlannerInput.
 Legacy predefined Tasks are read through a deterministic compile-on-read
 compatibility path; no lazy write-back is required.
+
+### 3.2 World Goal State vocabulary
+
+The typed World Goal State vocabulary is deliberately small:
+
+* `FACT` addresses one authoritative Fact on one entity;
+* `RESOURCE_AT_LEAST` addresses a typed quantity threshold in one Region; and
+* `DERIVED_STATE` addresses an authored computed capability whose independent
+  semantic identity is worth exposing as a World Goal.
+
+`DERIVED_STATE` is not a default wrapper around a single Fact. A single real
+world condition remains a `FACT`; a capability with multiple authored
+dependencies may be a `DERIVED_STATE`. The canonical Linjiang authoring has
+five goal-addressable Derived States:
+
+    Task1 -> FACT: central_telecom_hub.operational == true
+    Task2 -> DERIVED_STATE: north_basic_engineering_support
+    Task3 -> DERIVED_STATE: east_emergency_power_network
+    Task4 -> DERIVED_STATE: east_emergency_water_supply
+    Task5 -> DERIVED_STATE: citywide_sustained_emergency_support
+    Task6 -> DERIVED_STATE: southeast_sustained_emergency_generation
+
+Derived values are computed on read from the immutable ScenarioVersion and
+current Runtime Truth or public Knowledge. They are not runtime rows, do not
+add a runtime revision, and cannot be directly set by an Action or Rule.
 
 ### 3.3 Provider profiles
 
@@ -149,6 +179,13 @@ interpretation. Grounding answers which public entity the player named.
 Interpretation answers which supported terminal Goal state is requested.
 Neither stage plans Actions.
 
+For the current Linjiang catalog, Task1's exact authored key/name/alias stays
+on the genuine `PREDEFINED` Fact Objective path. Task2-Task6 exact capability
+keys/names/aliases/examples use the deterministic public Derived Goal catalog
+and compile to an `AD_HOC_DYNAMIC` Derived requirement. Legacy ScenarioVersions
+without that catalog continue to use their immutable authored Objective
+contracts.
+
 The application composes the configured provider once and injects it into
 the generic resolver and Agent service. API routes and React components are
 adapters; they do not duplicate Rule evaluation, objective completion,
@@ -172,6 +209,20 @@ Hidden Truth is never serialized into PlannerInput. UNKNOWN is not false,
 zero, unavailable, or blocked. Runtime may reveal new public Knowledge through
 survey, inspect, public Action effects, or an explicit deterministic failure.
 Inference alone does not reveal hidden state.
+
+Derived State is computed, not directly mutated: the evaluator derives an
+authoritative value from the full Runtime Truth and a separate player/Agent
+value from the shared public Knowledge projection. No Derived State row or
+provider assertion becomes a new source of Truth. A public Derived State may
+therefore remain Knowledge `UNKNOWN` while its authored schema is a legal Goal
+target.
+
+In Task6, `generate_power` remains the gameplay discovery Action. Its explicit
+reveal changes public Knowledge for the gated sustained-generation dependencies,
+which then changes Closure and Planner projection and triggers REPLAN. It does
+not change the frozen Goal contract or ObjectiveScope. Checkpoint and Fork copy
+the Base Runtime state and Knowledge; Derived values are recomputed in each
+instance.
 
 Player projections expose known Nodes/Facts/Relations/Resources, accepted
 formal Plan History, safe action results, and pacing state. Developer

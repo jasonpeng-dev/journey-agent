@@ -21,9 +21,12 @@ from app.agent.provider import (
 from app.domain.enums import ResourceInventoryVisibility
 from app.domain.formal_goal import FormalGoalContractV1
 from app.domain.scenario_v2 import (
+    DerivedDependencyKind,
     ObjectiveDefinitionV2,
     ObjectiveRequirementKind,
+    ObjectiveRequirementV2,
     ScenarioDefinitionV2,
+    knowledge_gate_is_revealed,
 )
 from app.services.knowledge_projection import resource_knowledge_status
 
@@ -379,6 +382,38 @@ def build_dependency_closure(
     bindings = {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
     queue: deque[tuple[TypedDependency, tuple[str, ...], str | None]] = deque()
     known_facts = planner_input.known_world.facts
+
+    def root_dependency(requirement: ObjectiveRequirementV2) -> TypedDependency:
+        # Older lightweight Objective projections predate the typed
+        # discriminator and represent every requirement as a Fact.  Keep that
+        # adapter shape valid while treating all parsed V2 requirements
+        # through the explicit typed branch below.
+        kind = getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
+        if kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+            assert requirement.resource_key is not None
+            assert requirement.region_key is not None
+            assert requirement.minimum is not None
+            return TypedDependency(
+                "RESOURCE_SOURCE",
+                requirement.resource_key,
+                requirement.region_key,
+                requirement.minimum,
+            )
+        if kind == ObjectiveRequirementKind.DERIVED_STATE:
+            assert requirement.derived_key is not None
+            return TypedDependency(
+                "DERIVED_STATE",
+                requirement.derived_key,
+                required=repr(tuple(requirement.accepted_values)),
+            )
+        assert requirement.node_key is not None and requirement.fact_key is not None
+        return TypedDependency(
+            "FACT",
+            requirement.node_key,
+            requirement.fact_key,
+            repr(tuple(requirement.accepted_values)),
+        )
+
     for objective in objectives:
         requirements = (
             *objective.completion_requirements,
@@ -390,31 +425,12 @@ def build_dependency_closure(
         )
         for requirement in requirements:
             gate = getattr(requirement, "knowledge_gate", None)
-            if gate is not None and known_facts.get(f"{gate.node_key}.{gate.fact_key}") not in (
-                gate.accepted_values
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
             ):
                 continue
-            if (
-                getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
-                == ObjectiveRequirementKind.RESOURCE_AT_LEAST
-            ):
-                assert requirement.resource_key is not None
-                assert requirement.region_key is not None
-                assert requirement.minimum is not None
-                dependency = TypedDependency(
-                    "RESOURCE_SOURCE",
-                    requirement.resource_key,
-                    requirement.region_key,
-                    requirement.minimum,
-                )
-            else:
-                assert requirement.node_key is not None and requirement.fact_key is not None
-                dependency = TypedDependency(
-                    "FACT",
-                    requirement.node_key,
-                    requirement.fact_key,
-                    repr(tuple(requirement.accepted_values)),
-                )
+            dependency = root_dependency(requirement)
             queue.append(
                 (
                     dependency,
@@ -426,22 +442,56 @@ def build_dependency_closure(
     visited: set[TypedDependency] = set()
     selected_actions: set[str] = set()
     selected_bindings: set[tuple[str, str]] = set()
-    relevant_nodes = {
-        node_key
-        for objective in objectives
+    relevant_nodes: set[str] = set()
+    relevant_resources: set[str] = set()
+
+    def include_derived_dependencies(derived_key: str, seen: set[str]) -> None:
+        if derived_key in seen:
+            return
+        state = definition.derived_state_definitions.get(derived_key)
+        if state is None:
+            return
+        seen.add(derived_key)
+        for dependency in state.dependencies:
+            gate = dependency.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+            ):
+                continue
+            if dependency.kind == DerivedDependencyKind.FACT:
+                assert dependency.node_key is not None
+                relevant_nodes.add(dependency.node_key)
+            elif dependency.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+                assert dependency.region_key is not None and dependency.resource_key is not None
+                relevant_nodes.add(dependency.region_key)
+                relevant_resources.add(dependency.resource_key)
+            elif dependency.kind == DerivedDependencyKind.DERIVED_STATE:
+                assert dependency.derived_key is not None
+                include_derived_dependencies(dependency.derived_key, seen)
+
+    for objective in objectives:
         for requirement in (
             *objective.completion_requirements,
             *(item for group in objective.prerequisites for item in group.requirements),
-        )
-        for node_key in (
-            requirement.node_key
-            if getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
-            == ObjectiveRequirementKind.FACT
-            else requirement.region_key,
-        )
-        if node_key is not None
-    }
-    relevant_resources: set[str] = set()
+        ):
+            gate = getattr(requirement, "knowledge_gate", None)
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+            ):
+                continue
+            kind = getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
+            if kind == ObjectiveRequirementKind.FACT:
+                assert requirement.node_key is not None
+                relevant_nodes.add(requirement.node_key)
+            elif kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+                assert requirement.region_key is not None and requirement.resource_key is not None
+                relevant_nodes.add(requirement.region_key)
+                relevant_resources.add(requirement.resource_key)
+            elif kind == ObjectiveRequirementKind.DERIVED_STATE:
+                assert requirement.derived_key is not None
+                include_derived_dependencies(requirement.derived_key, set())
     unknowns: dict[str, dict[str, object]] = {}
     audit: dict[str, list[dict[str, object]]] = {}
     selected_actor_targets: set[str] = set()
@@ -876,6 +926,75 @@ def build_dependency_closure(
             )
         visited.add(dependency)
         state_changed = True
+        if dependency.dimension == "DERIVED_STATE":
+            state = definition.derived_state_definitions.get(dependency.subject)
+            if state is None:
+                return
+            audit.setdefault(
+                f"derived:{state.key}",
+                [],
+            ).append(
+                {
+                    "producer_for": dependency.subject,
+                    "dependency_path": list(path),
+                    "derived_state": state.key,
+                }
+            )
+            for nested in state.dependencies:
+                gate = nested.knowledge_gate
+                if not knowledge_gate_is_revealed(
+                    gate,
+                    known_facts.get(f"{gate.node_key}.{gate.fact_key}")
+                    if gate is not None
+                    else None,
+                ):
+                    # The dependency exists in the immutable definition, but
+                    # it is not an exposed planning root until its authored
+                    # Knowledge gate has been revealed.
+                    continue
+                if nested.kind == DerivedDependencyKind.FACT:
+                    assert nested.node_key is not None and nested.fact_key is not None
+                    queue.append(
+                        (
+                            TypedDependency(
+                                "FACT",
+                                nested.node_key,
+                                nested.fact_key,
+                                repr(tuple(nested.accepted_values)),
+                            ),
+                            (*path, f"derived:{state.key}"),
+                            consumer_action,
+                        )
+                    )
+                elif nested.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+                    assert nested.region_key is not None and nested.resource_key is not None
+                    assert nested.minimum is not None
+                    queue.append(
+                        (
+                            TypedDependency(
+                                "RESOURCE_SOURCE",
+                                nested.resource_key,
+                                nested.region_key,
+                                nested.minimum,
+                            ),
+                            (*path, f"derived:{state.key}"),
+                            consumer_action,
+                        )
+                    )
+                elif nested.kind == DerivedDependencyKind.DERIVED_STATE:
+                    assert nested.derived_key is not None
+                    queue.append(
+                        (
+                            TypedDependency(
+                                "DERIVED_STATE",
+                                nested.derived_key,
+                                required=repr(tuple(nested.accepted_values)),
+                            ),
+                            (*path, f"derived:{state.key}"),
+                            consumer_action,
+                        )
+                    )
+            return
         if dependency.dimension == "FACT":
             fact_identity = f"{dependency.subject}.{dependency.key}"
             # A canonical producer can intentionally hide its planning relevance
@@ -884,8 +1003,10 @@ def build_dependency_closure(
             # an ordinary FACT dependency and re-enters the same fixed point.
             for action in getattr(definition, "actions", ()):
                 gate = getattr(getattr(action, "planning", None), "knowledge_gate", None)
-                if gate is None or known_facts.get(f"{gate.node_key}.{gate.fact_key}") in (
-                    gate.accepted_values
+                if gate is None:
+                    continue
+                if knowledge_gate_is_revealed(
+                    gate, known_facts.get(f"{gate.node_key}.{gate.fact_key}")
                 ):
                     continue
                 effects = (

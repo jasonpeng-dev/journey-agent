@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session
 from app.agent.generic import GenericAgentService
 from app.domain.enums import AgentTaskStatus
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ObjectiveDefinitionV2, ScenarioDefinitionV2
+from app.domain.scenario_v2 import (
+    DerivedDependencyKind,
+    ObjectiveDefinitionV2,
+    ObjectiveRequirementKind,
+    ScenarioDefinitionV2,
+)
 from app.domain.world import Visibility
 from app.infrastructure.db.models import AgentPlan, GameInstanceFactState, Player
 from app.scenarios.persistence import ScenarioDefinitionRepository
@@ -21,15 +26,8 @@ from tests.scenario_fixtures import LINJIANG_V2_TEST
 
 _CANONICAL = LINJIANG_V2_TEST
 _TASK4_KEY = "restore_east_emergency_water_supply"
-_TASK4_REQUIREMENT_KEYS = (
-    "water_treatment_plant_operational",
-    "water_treatment_plant_power_supply",
-    "south_pump_station_operational",
-    "south_pump_station_power_supply",
-    "east_water_pump_station_operational",
-    "east_water_pump_station_power_supply",
-    "south_communication_core_operational",
-)
+_TASK4_DERIVED_KEY = "east_emergency_water_supply"
+_TASK4_GOAL = "恢复东部应急供水"
 
 
 def _objective(definition: ScenarioDefinitionV2, key: str) -> ObjectiveDefinitionV2:
@@ -54,28 +52,59 @@ def _canonical_runtime(
     return _CANONICAL, runtime, GenericAgentService(session, scope)
 
 
-def _set_requirements(
+def _set_derived_dependencies(
     session: Session,
     game_instance_id: Any,
-    objective: ObjectiveDefinitionV2,
+    definition: ScenarioDefinitionV2,
+    *,
+    missing: tuple[str, str] | None = None,
 ) -> None:
-    for requirement in objective.completion_requirements:
+    derived = definition.derived_state_definitions[_TASK4_DERIVED_KEY]
+    for dependency in derived.dependencies:
+        if dependency.kind != DerivedDependencyKind.FACT:
+            continue
+        assert dependency.node_key is not None and dependency.fact_key is not None
         row = session.get(
             GameInstanceFactState,
-            (game_instance_id, requirement.node_key, requirement.fact_key),
+            (game_instance_id, dependency.node_key, dependency.fact_key),
         )
         assert row is not None
-        row.truth_value = requirement.accepted_values[0]
+        row.truth_value = (
+            False
+            if dependency.accepted_values[0] is True
+            else "UNAVAILABLE"
+            if dependency.accepted_values[0] == "AVAILABLE"
+            else dependency.accepted_values[0]
+        )
+        if missing != (dependency.node_key, dependency.fact_key):
+            row.truth_value = dependency.accepted_values[0]
         row.visibility = Visibility.KNOWN
     session.flush()
 
 
-def test_canonical_task4_has_only_the_seven_real_completion_requirements() -> None:
+def test_canonical_task4_has_one_derived_capability_requirement() -> None:
     definition = _CANONICAL
     objective = _objective(definition, _TASK4_KEY)
 
-    assert tuple(item.key for item in objective.completion_requirements) == _TASK4_REQUIREMENT_KEYS
-    assert len(objective.completion_requirements) == 7
+    assert len(objective.completion_requirements) == 1
+    requirement = objective.completion_requirements[0]
+    assert requirement.key == _TASK4_DERIVED_KEY
+    assert requirement.kind == ObjectiveRequirementKind.DERIVED_STATE
+    assert requirement.derived_key == _TASK4_DERIVED_KEY
+    derived = definition.derived_state_definitions[_TASK4_DERIVED_KEY]
+    assert {
+        (item.node_key, item.fact_key, item.accepted_values)
+        for item in derived.dependencies
+        if item.kind == DerivedDependencyKind.FACT
+    } == {
+        ("water_treatment_plant", "operational", (True,)),
+        ("water_treatment_plant", "power_supply", ("AVAILABLE",)),
+        ("south_pump_station", "operational", (True,)),
+        ("south_pump_station", "power_supply", ("AVAILABLE",)),
+        ("east_water_pump_station", "operational", (True,)),
+        ("east_water_pump_station", "power_supply", ("AVAILABLE",)),
+        ("south_communication_core", "operational", (True,)),
+    }
 
     document = definition.model_dump(mode="json")
     serialized = json.dumps(document, ensure_ascii=False)
@@ -95,27 +124,28 @@ def test_canonical_task4_has_only_the_seven_real_completion_requirements() -> No
     assert all(item.required_interaction_key in interaction_keys for item in definition.actions)
 
 
-@pytest.mark.parametrize("missing_key", _TASK4_REQUIREMENT_KEYS)
-def test_task4_requires_each_completion_requirement(
+@pytest.mark.parametrize(
+    "missing",
+    [
+        ("water_treatment_plant", "operational"),
+        ("water_treatment_plant", "power_supply"),
+        ("south_pump_station", "operational"),
+        ("south_pump_station", "power_supply"),
+        ("east_water_pump_station", "operational"),
+        ("east_water_pump_station", "power_supply"),
+        ("south_communication_core", "operational"),
+    ],
+)
+def test_task4_requires_each_derived_dependency(
     session: Session,
-    missing_key: str,
+    missing: tuple[str, str],
 ) -> None:
     definition, runtime, agent = _canonical_runtime(session)
-    objective = _objective(definition, _TASK4_KEY)
-    for requirement in objective.completion_requirements:
-        if requirement.key == missing_key:
-            continue
-        row = session.get(
-            GameInstanceFactState,
-            (runtime.instance.id, requirement.node_key, requirement.fact_key),
-        )
-        assert row is not None
-        row.truth_value = requirement.accepted_values[0]
-    session.flush()
+    _set_derived_dependencies(session, runtime.instance.id, definition, missing=missing)
 
     task = agent.create_task(
         runtime.session,
-        _TASK4_KEY,
+        _TASK4_GOAL,
         initialize_plan=False,
     )
 
@@ -123,14 +153,13 @@ def test_task4_requires_each_completion_requirement(
     assert not agent.evaluate(task).completed
 
 
-def test_task4_completes_directly_when_all_seven_facts_are_satisfied(
+def test_task4_completes_directly_when_all_derived_dependencies_are_satisfied(
     session: Session,
 ) -> None:
     definition, runtime, agent = _canonical_runtime(session)
-    objective = _objective(definition, _TASK4_KEY)
-    _set_requirements(session, runtime.instance.id, objective)
+    _set_derived_dependencies(session, runtime.instance.id, definition)
 
-    task = agent.create_task(runtime.session, _TASK4_KEY, initialize_plan=False)
+    task = agent.create_task(runtime.session, _TASK4_GOAL, initialize_plan=False)
 
     assert task.status == AgentTaskStatus.SUCCEEDED
     assert agent.evaluate(task).completed

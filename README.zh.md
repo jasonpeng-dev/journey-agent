@@ -17,6 +17,10 @@ planning、validation、Action execution、persistence 和浏览器产品。
 * Generic Goal Resolver、冻结的 `FormalGoalContractV1`、canonical
   PlannerInput V2、deterministic Validator、bounded 内部 REPAIR，以及
   Knowledge-aware REPLAN。
+* World Goal State V2 typed requirement：`FACT`、`RESOURCE_AT_LEAST` 和作者声明的
+  `DERIVED_STATE`。canonical Linjiang 中 Task1 是真正的 typed Fact Objective，
+  Task2–Task6 对应 5 个可作为 Goal 的 Derived capability；Derived 不是所有 Fact
+  的默认包装。
 * Declarative Action/Rule execution、Truth mutation、public Knowledge projection、
   Player-safe Formal PLAY、审批、不可变 archived runtime source、Fork 和 plan
   history。

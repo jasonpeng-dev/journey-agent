@@ -84,6 +84,18 @@ def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
         objective["subsumes"].sort()
         objective["goal_aliases"].sort(key=lambda value: value.casefold())
         objective["goal_examples"].sort(key=lambda value: value.casefold())
+    derived_states = normalized.get("derived_states", [])
+    if isinstance(derived_states, list):
+        derived_states.sort(key=lambda item: item["key"])
+        for state in derived_states:
+            state.get("goal_aliases", []).sort(key=lambda value: str(value).casefold())
+            state.get("goal_examples", []).sort(key=lambda value: str(value).casefold())
+            for dependency in state["dependencies"]:
+                dependency.get("accepted_values", []).sort(key=_scalar_sort_key)
+                gate = dependency.get("knowledge_gate")
+                if isinstance(gate, dict):
+                    gate.get("accepted_values", []).sort(key=_scalar_sort_key)
+            state["dependencies"].sort(key=_derived_dependency_sort_key)
     normalized["planning"]["recovery_hints"].sort(key=lambda item: item["failure_code"])
     return ScenarioDefinitionV2.model_validate(normalized)
 
@@ -97,6 +109,40 @@ def _sort_authority(policy: dict[str, Any]) -> None:
 
 def _scalar_sort_key(value: object) -> tuple[str, str]:
     return type(value).__name__, str(value)
+
+
+def _optional_scalar_sort_key(value: object) -> tuple[str, str]:
+    return ("<none>", "") if value is None else _scalar_sort_key(value)
+
+
+def _scalar_sequence_sort_key(value: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(sorted(_scalar_sort_key(item) for item in value))
+
+
+def _knowledge_gate_sort_key(value: object) -> tuple[object, ...]:
+    if not isinstance(value, dict):
+        return (_optional_scalar_sort_key(None), _optional_scalar_sort_key(None), ())
+    return (
+        _optional_scalar_sort_key(value.get("node_key")),
+        _optional_scalar_sort_key(value.get("fact_key")),
+        _scalar_sequence_sort_key(value.get("accepted_values")),
+    )
+
+
+def _derived_dependency_sort_key(item: dict[str, Any]) -> tuple[object, ...]:
+    return (
+        str(item.get("kind", "")),
+        _optional_scalar_sort_key(item.get("node_key")),
+        _optional_scalar_sort_key(item.get("fact_key")),
+        _optional_scalar_sort_key(item.get("region_key")),
+        _optional_scalar_sort_key(item.get("resource_key")),
+        _optional_scalar_sort_key(item.get("minimum")),
+        _optional_scalar_sort_key(item.get("derived_key")),
+        _scalar_sequence_sort_key(item.get("accepted_values")),
+        _knowledge_gate_sort_key(item.get("knowledge_gate")),
+    )
 
 
 def canonical_document_bytes(document: dict[str, Any]) -> bytes:

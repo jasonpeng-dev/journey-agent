@@ -434,7 +434,7 @@ class PublicGoalRequirementResponse(ApiModel):
 
     identity: str
     key: str
-    kind: Literal["FACT", "RESOURCE_AT_LEAST"]
+    kind: Literal["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"]
     description: str
     node_key: str | None = None
     fact_key: str | None = None
@@ -442,6 +442,8 @@ class PublicGoalRequirementResponse(ApiModel):
     region_key: str | None = None
     resource_key: str | None = None
     minimum: int | None = None
+    derived_key: str | None = None
+    current_known_value: str | int | bool | None = None
     current_known_available: int | None = None
     knowledge_status: Literal["KNOWN", "KNOWN_ZERO", "UNKNOWN"] | None = None
 

@@ -5,7 +5,10 @@ from dataclasses import dataclass
 import pytest
 from sqlalchemy import select
 
-from app.agent.generic import GenericAgentService, GenericGoalResolver
+from app.agent.generic import (
+    GenericAgentService,
+    GenericGoalResolver,
+)
 from app.agent.planning_context import PlanningContextBuilder
 from app.agent.provider import (
     DynamicGoalEntityGrounding,
@@ -52,9 +55,7 @@ class _DynamicProvider:
 
     def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
         self.selection_requests.append(request)
-        return GoalSelection(
-            objective_keys=("establish_citywide_sustained_emergency_support",)
-        )
+        return GoalSelection(objective_keys=("establish_citywide_sustained_emergency_support",))
 
     def interpret_dynamic_goal(
         self,
@@ -147,9 +148,7 @@ def test_unmatched_linjiang_goal_routes_to_dynamic_fact_not_task5() -> None:
         fact_key="passable",
         accepted_values=(True,),
     )
-    provider = _DynamicProvider(
-        DynamicGoalInterpretation(requirements=(candidate,))
-    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(candidate,)))
 
     resolution = GenericGoalResolver(provider=provider).resolve(
         "\u4fee\u901a\u897f\u90e8\u8d27\u8fd0\u901a\u9053",
@@ -257,16 +256,12 @@ def test_public_topology_uniquely_grounds_relation_without_model_search() -> Non
     assert provider.selection_requests == []
     assert len(provider.requests) == 1
     assert provider.requests[0].grounded_entity_keys == ("central_river_tunnel",)
-    assert provider.requests[0].ontology["grounding"]["source"] == (
-        "DETERMINISTIC_PUBLIC_TOPOLOGY"
-    )
+    assert provider.requests[0].ontology["grounding"]["source"] == ("DETERMINISTIC_PUBLIC_TOPOLOGY")
 
 
 def test_ambiguous_public_topology_clarifies_without_arbitrary_pick() -> None:
     original = LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
-    transport = next(
-        item for item in original.world.nodes if item.key == "central_river_tunnel"
-    )
+    transport = next(item for item in original.world.nodes if item.key == "central_river_tunnel")
     second_transport = transport.model_copy(
         update={"key": "central_river_tunnel_backup", "name": "备用中央河底隧道"}
     )
@@ -291,9 +286,7 @@ def test_ambiguous_public_topology_clarifies_without_arbitrary_pick() -> None:
         }
     )
     definition = original.model_copy(update={"world": world})
-    provider = _DynamicProvider(
-        DynamicGoalInterpretation(status="UNSUPPORTED")
-    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(status="UNSUPPORTED"))
 
     resolution = GenericGoalResolver(provider=provider).resolve(
         "\u4fee\u590d\u4e2d\u592e\u57ce\u533a\u548c\u4e1c\u90e8\u5c45\u4f4f\u533a\u4e2d\u95f4\u90a3\u6761\u8def",
@@ -437,7 +430,7 @@ def test_entity_grounding_cannot_invent_a_public_entity_key() -> None:
     )
 
 
-def test_canonical_task5_goal_keeps_predefined_fast_path() -> None:
+def test_canonical_task5_goal_routes_to_public_derived_capability() -> None:
     objective = next(
         item
         for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives
@@ -451,8 +444,15 @@ def test_canonical_task5_goal_keeps_predefined_fast_path() -> None:
     )
 
     assert resolution.status == "RESOLVED"
-    assert resolution.source == "DETERMINISTIC"
-    assert resolution.objective_keys == (objective.key,)
+    assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+    assert resolution.provider_observation is not None
+    assert resolution.provider_observation["stage"] == "DERIVED_GOAL_CATALOG"
+    assert resolution.objective_keys == ()
+    assert len(resolution.dynamic_requirements) == 1
+    assert resolution.dynamic_requirements[0].kind == ObjectiveRequirementKind.DERIVED_STATE
+    assert resolution.dynamic_requirements[0].derived_key == (
+        "citywide_sustained_emergency_support"
+    )
     assert provider.selection_requests == []
     assert provider.requests == []
 
@@ -471,8 +471,13 @@ def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
     for goal in (objective.name, *objective.goal_aliases):
         resolution = resolver.resolve(goal, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
         assert resolution.status == "RESOLVED"
-        assert resolution.source == "DETERMINISTIC"
-        assert resolution.objective_keys == (objective.key,)
+        assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+        assert resolution.objective_keys == ()
+        assert len(resolution.dynamic_requirements) == 1
+        assert resolution.dynamic_requirements[0].kind == ObjectiveRequirementKind.DERIVED_STATE
+        assert resolution.dynamic_requirements[0].derived_key == (
+            "southeast_sustained_emergency_generation"
+        )
 
     version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
     assert version is not None
@@ -480,9 +485,16 @@ def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
         ScenarioVersionRepository(session).load(version.id),
         (objective,),
     )
+    assert contract.source_kind == FormalGoalSourceKind.PREDEFINED
+    requirement = contract.completion_requirements[0].requirement
+    assert requirement.kind == ObjectiveRequirementKind.DERIVED_STATE
+    assert requirement.derived_key == "southeast_sustained_emergency_generation"
+    derived = ScenarioVersionRepository(session).load(version.id).definition
     assert any(
-        item.requirement.knowledge_gate is not None
-        for item in contract.completion_requirements
+        item.knowledge_gate is not None
+        for item in derived.derived_state_definitions[
+            "southeast_sustained_emergency_generation"
+        ].dependencies
     )
     assert provider.selection_requests == []
     assert provider.requests == []
@@ -523,9 +535,7 @@ def test_ambiguous_dynamic_goal_does_not_fallback_to_predefined() -> None:
 
 
 def test_dynamic_interpreter_is_strict_and_knowledge_safe() -> None:
-    provider = _DynamicProvider(
-        DynamicGoalInterpretation(requirements=(_stable_candidate(),))
-    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(_stable_candidate(),)))
     resolution = GenericGoalResolver(provider=provider).resolve(
         "Keep the patient stable",
         GENERIC_TEST,
@@ -580,9 +590,7 @@ def test_dynamic_interpreter_records_safe_type_diagnostic_on_rejection() -> None
 
     assert resolution.status == "UNSUPPORTED"
     assert resolution.provider_observation is not None
-    assert resolution.provider_observation["rejection_code"] == (
-        "FORMAL_GOAL_VALUE_TYPE_INVALID"
-    )
+    assert resolution.provider_observation["rejection_code"] == ("FORMAL_GOAL_VALUE_TYPE_INVALID")
     assert resolution.provider_observation["value_type_diagnostics"] == [
         {
             "expected_value_type": "BOOLEAN",
@@ -600,9 +608,7 @@ def test_dynamic_interpreter_malformed_response_fails_closed() -> None:
 
 def test_dynamic_goal_freezes_without_legacy_objective_scope(session) -> None:
     runtime = _runtime(session)
-    provider = _DynamicProvider(
-        DynamicGoalInterpretation(requirements=(_stable_candidate(),))
-    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(_stable_candidate(),)))
     scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
     agent = GenericAgentService(session, scope, provider=provider)
 
@@ -624,9 +630,7 @@ def test_dynamic_goal_freezes_without_legacy_objective_scope(session) -> None:
 
 def test_dynamic_goal_player_projection_keeps_typed_identity(session) -> None:
     runtime = _runtime(session)
-    provider = _DynamicProvider(
-        DynamicGoalInterpretation(requirements=(_stable_candidate(),))
-    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(_stable_candidate(),)))
     scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
     task = GenericAgentService(session, scope, provider=provider).create_task(
         runtime.session,
@@ -646,9 +650,7 @@ def test_dynamic_goal_player_projection_keeps_typed_identity(session) -> None:
     assert requirement.identity == requirement.key
     assert requirement.kind == "FACT"
     assert requirement.node_key == "patient_one"
-    assert requirement.description.startswith(
-        f"{GENERIC_TEST.world.node('patient_one').name}: "
-    )
+    assert requirement.description.startswith(f"{GENERIC_TEST.world.node('patient_one').name}: ")
     assert GENERIC_TEST.world.node("patient_one").fact("stable").name in requirement.description
     assert "patient_one" not in requirement.description
     assert "stable" not in requirement.description
@@ -658,9 +660,7 @@ def test_dynamic_goal_player_projection_keeps_typed_identity(session) -> None:
 
 def test_play_dynamic_goal_idempotency_reuses_frozen_contract(session) -> None:
     runtime = _runtime(session)
-    provider = _DynamicProvider(
-        DynamicGoalInterpretation(requirements=(_stable_candidate(),))
-    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(_stable_candidate(),)))
     orchestrator = PlayOrchestrator(
         session,
         GameInstanceId(runtime.instance.id),
@@ -709,6 +709,97 @@ def test_dynamic_resource_requirement_reuses_the_generic_typed_path(session) -> 
     assert GenericAgentService(session, scope, provider=provider).evaluate(task).completed is False
 
 
+def test_dynamic_catalog_exposes_public_derived_metadata_without_dependencies() -> None:
+    provider = _DynamicProvider(DynamicGoalInterpretation(status="UNSUPPORTED"))
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "Describe a public capability",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    assert len(provider.requests) == 1
+    ontology = provider.requests[0].ontology
+    assert "DERIVED_STATE" in ontology["goal_language"]["requirement_kinds"]
+    derived = ontology["world"]["derived_states"]
+    assert derived
+    capability = next(item for item in derived if item["key"] == "east_emergency_power_network")
+    assert set(capability) == {
+        "key",
+        "name",
+        "description",
+        "value_type",
+        "target_value",
+        "non_target_value",
+        "goal_aliases",
+        "allowed_values",
+    }
+    assert "dependencies" not in capability
+    assert "sustained_requirements_discovered" not in str(ontology)
+    assert "initial_value" not in str(ontology)
+    assert "truth_value" not in str(ontology)
+    assert "current_value" not in str(ontology)
+
+
+def test_dynamic_catalog_excludes_non_goal_addressable_derived_state() -> None:
+    public_state = next(
+        item
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.derived_states
+        if item.key == "east_emergency_power_network"
+    )
+    internal_state = public_state.model_copy(
+        update={
+            "key": "internal_discovery_state",
+            "name": "Internal discovery state",
+            "goal_addressable": False,
+        }
+    )
+    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.model_copy(
+        update={
+            "derived_states": (
+                *LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.derived_states,
+                internal_state,
+            )
+        }
+    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(status="UNSUPPORTED"))
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "Describe a public capability",
+        definition,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    ontology = provider.requests[0].ontology
+    assert all(
+        item["key"] != "internal_discovery_state" for item in ontology["world"]["derived_states"]
+    )
+    assert "internal_discovery_state" not in str(ontology)
+
+
+def test_dynamic_interpreter_can_resolve_public_derived_capability() -> None:
+    candidate = AdHocGoalRequirementCandidateV1(
+        kind=ObjectiveRequirementKind.DERIVED_STATE,
+        derived_key="east_emergency_power_network",
+        accepted_values=("AVAILABLE",),
+    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(candidate,)))
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "Restore the public east power capability",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+    assert resolution.dynamic_requirements == (candidate,)
+    assert len(provider.requests) == 1
+    assert any(
+        item["key"] == "east_emergency_power_network"
+        for item in provider.requests[0].ontology["world"]["derived_states"]
+    )
+
+
 def test_dynamic_multiple_requirements_are_implicit_and(session) -> None:
     runtime = _runtime(session, key="dynamic-and-goal")
     candidates = (
@@ -755,8 +846,7 @@ def test_dynamic_interpreter_never_receives_hidden_fact_truth_or_metadata(sessio
     assert "objectives" not in ontology
     assert "actions" not in ontology
     assert any(
-        fact["fact_key"] == "operational"
-        and fact["node_key"] == "south_fuel_terminal"
+        fact["fact_key"] == "operational" and fact["node_key"] == "south_fuel_terminal"
         for fact in ontology["world"]["facts"]
     )
     assert all(

@@ -351,16 +351,6 @@ world:
       initial_value: city_distribution_center
       initial_visibility: KNOWN
       allowed_values: []
-    - key: sustained_humanitarian_logistics
-      name: 持续人道物流能力
-      description: 持续人道物流能力
-      value_type: ENUM
-      initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values:
-      - AVAILABLE
-      - UNAVAILABLE
   - key: district_service_center
     name: 东南公共服务中心
     description: 提供东南高地区的综合公共服务与办事支持。
@@ -1594,16 +1584,6 @@ world:
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values: []
-    - key: sustained_generation_capability
-      name: 持续发电能力
-      description: 持续发电能力
-      value_type: ENUM
-      initial_value: UNAVAILABLE
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values:
-      - AVAILABLE
-      - UNAVAILABLE
     - key: sustained_requirements_discovered
       name: 持续保障条件已发现
       description: 持续保障条件已发现
@@ -1928,7 +1908,6 @@ actors:
     - survey_resources
     - travel
     - generate_power
-    - commission_sustained_generation
     authority_policy:
       autonomous_limits: []
       approval_required_values: []
@@ -1963,7 +1942,6 @@ actors:
     - transport_resource
     - travel
     - receive_external_relief_supplies
-    - establish_sustained_humanitarian_logistics
     authority_policy:
       autonomous_limits: []
       approval_required_values: []
@@ -2448,30 +2426,6 @@ actions:
     hints: []
   behavior: RULE
   locality: FACILITY_REGION
-- key: establish_sustained_humanitarian_logistics
-  name: 建立持续人道物流网络
-  description: 建立持续人道物流网络
-  required_interaction_key: sustained_logistics_control
-  execution_mode: IMMEDIATE
-  parameters: []
-  allowed_actor_capabilities:
-  - EXECUTE_ACTION
-  required_actor_role_key: emergency_logistics_team
-  expected_outcomes:
-  - code: LOGISTICS_ESTABLISHED
-    name: 建立持续人道物流网络
-    success: true
-  planning:
-    terminal_effects:
-    - node_key: city_distribution_center
-      fact_key: sustained_humanitarian_logistics
-    supporting_effects: []
-    success_outcome_codes:
-    - LOGISTICS_ESTABLISHED
-    wait_success_outcome_codes: []
-    hints: []
-  behavior: RULE
-  locality: FACILITY_REGION
 - key: generate_power
   name: 启动燃料应急发电
   description: 启动燃料应急发电
@@ -2496,35 +2450,6 @@ actions:
     - POWER_GENERATED
     wait_success_outcome_codes: []
     hints: []
-  behavior: RULE
-  locality: FACILITY_REGION
-- key: commission_sustained_generation
-  name: 建立持续应急发电能力
-  description: 建立持续应急发电能力
-  required_interaction_key: generation_control
-  execution_mode: IMMEDIATE
-  parameters: []
-  allowed_actor_capabilities:
-  - EXECUTE_ACTION
-  required_actor_role_key: electrical_response_team
-  expected_outcomes:
-  - code: GENERATION_COMMISSIONED
-    name: 建立持续应急发电能力
-    success: true
-  planning:
-    terminal_effects:
-    - node_key: southeast_fuel_emergency_power_plant
-      fact_key: sustained_generation_capability
-    supporting_effects: []
-    success_outcome_codes:
-    - GENERATION_COMMISSIONED
-    wait_success_outcome_codes: []
-    hints: []
-    knowledge_gate:
-      node_key: southeast_fuel_emergency_power_plant
-      fact_key: sustained_requirements_discovered
-      accepted_values:
-      - true
   behavior: RULE
   locality: FACILITY_REGION
 rules:
@@ -7871,136 +7796,6 @@ rules:
     availability: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: RELIEF_RECEIVED
-- key: establish_logistics_fact_0
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 900
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: rail_freight_yard
-    fact_key: rail_freight_capability
-    value: AVAILABLE
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 持续物流前置条件不满足。
-    retryable: true
-- key: establish_logistics_fact_1
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 899
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: emergency_supply_warehouse
-    fact_key: operational
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 持续物流前置条件不满足。
-    retryable: true
-- key: establish_logistics_fact_2
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 898
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: vehicle_depot
-    fact_key: emergency_delivery_support
-    value: AVAILABLE
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 持续物流前置条件不满足。
-    retryable: true
-- key: establish_logistics_fact_3
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 897
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: city_distribution_center
-    fact_key: operational
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 持续物流前置条件不满足。
-    retryable: true
-- key: establish_logistics_relief_0
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 880
-  condition:
-    kind: RESOURCE_COMPARE
-    resource_key: emergency_relief_supplies
-    resource_scope:
-      kind: EXPLICIT
-      node_key: central_district
-    operator: LT
-    value: 30
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: RESOURCE_INVENTORY_UNKNOWN
-    message: 目标区域救援物资不足。
-    retryable: true
-- key: establish_logistics_relief_1
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 879
-  condition:
-    kind: RESOURCE_COMPARE
-    resource_key: emergency_relief_supplies
-    resource_scope:
-      kind: EXPLICIT
-      node_key: east_residential_district
-    operator: LT
-    value: 30
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: RESOURCE_INVENTORY_UNKNOWN
-    message: 目标区域救援物资不足。
-    retryable: true
-- key: establish_logistics_relief_2
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 878
-  condition:
-    kind: RESOURCE_COMPARE
-    resource_key: emergency_relief_supplies
-    resource_scope:
-      kind: EXPLICIT
-      node_key: southeast_heights_district
-    operator: LT
-    value: 30
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: RESOURCE_INVENTORY_UNKNOWN
-    message: 目标区域救援物资不足。
-    retryable: true
-- key: establish_logistics_resolution
-  phase: RESOLVE
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 0
-  effects:
-  - kind: SET_FACT
-    node:
-      kind: EXPLICIT
-      node_key: city_distribution_center
-    fact_key: sustained_humanitarian_logistics
-    value:
-      source: LITERAL
-      literal: AVAILABLE
-  - kind: EMIT_OUTCOME
-    outcome_code: LOGISTICS_ESTABLISHED
 - key: generate_requires_operational
   phase: PREFLIGHT
   action_key: generate_power
@@ -8073,182 +7868,6 @@ rules:
     visibility: VISIBLE
   - kind: EMIT_OUTCOME
     outcome_code: POWER_GENERATED
-- key: commission_generation_fact_0
-  phase: PREFLIGHT
-  action_key: commission_sustained_generation
-  priority: 900
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: southeast_fuel_emergency_power_plant
-    fact_key: generating
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 持续发电前置条件不满足。
-    retryable: true
-- key: commission_generation_fact_1
-  phase: PREFLIGHT
-  action_key: commission_sustained_generation
-  priority: 899
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: river_port
-    fact_key: operational
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 持续发电前置条件不满足。
-    retryable: true
-- key: commission_generation_fact_2
-  phase: PREFLIGHT
-  action_key: commission_sustained_generation
-  priority: 898
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: south_fuel_terminal
-    fact_key: operational
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 持续发电前置条件不满足。
-    retryable: true
-- key: commission_generation_fuel
-  phase: PREFLIGHT
-  action_key: commission_sustained_generation
-  priority: 890
-  condition:
-    kind: RESOURCE_COMPARE
-    resource_key: emergency_fuel
-    resource_scope:
-      kind: EXPLICIT
-      node_key: southeast_heights_district
-    operator: LT
-    value: 100
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: RESOURCE_INVENTORY_UNKNOWN
-    message: 持续运行燃料储备不足。
-    retryable: true
-- key: commission_generation_resolution
-  phase: RESOLVE
-  action_key: commission_sustained_generation
-  priority: 0
-  effects:
-  - kind: SET_FACT
-    node:
-      kind: EXPLICIT
-      node_key: southeast_fuel_emergency_power_plant
-    fact_key: sustained_generation_capability
-    value:
-      source: LITERAL
-      literal: AVAILABLE
-  - kind: EMIT_OUTCOME
-    outcome_code: GENERATION_COMMISSIONED
-- key: establish_logistics_transport_0
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 870
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: central_river_tunnel
-    fact_key: passable
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 行动前置条件尚未满足。
-    retryable: true
-- key: establish_logistics_transport_1
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 869
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: north_service_corridor
-    fact_key: passable
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 行动前置条件尚未满足。
-    retryable: true
-- key: establish_logistics_transport_2
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 868
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: south_bridge
-    fact_key: passable
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 行动前置条件尚未满足。
-    retryable: true
-- key: establish_logistics_transport_3
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 867
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: southeast_access_corridor
-    fact_key: passable
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 行动前置条件尚未满足。
-    retryable: true
-- key: establish_logistics_transport_4
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 866
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: waterfront_access_corridor
-    fact_key: passable
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 行动前置条件尚未满足。
-    retryable: true
-- key: establish_logistics_transport_5
-  phase: PREFLIGHT
-  action_key: establish_sustained_humanitarian_logistics
-  priority: 865
-  condition:
-    kind: FACT_NOT_EQUALS
-    node:
-      kind: EXPLICIT
-      node_key: west_freight_corridor
-    fact_key: passable
-    value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 行动前置条件尚未满足。
-    retryable: true
 - key: generate_requires_power_supply
   phase: PREFLIGHT
   action_key: generate_power
@@ -8271,6 +7890,7 @@ objectives:
   description: 恢复中央通信核心并重新建立城市调度联络。
   completion_requirements:
   - key: central_telecom_operational
+    kind: FACT
     node_key: central_telecom_hub
     fact_key: operational
     accepted_values:
@@ -8287,30 +7907,12 @@ objectives:
   name: 恢复东部应急供电网络
   description: 恢复东部配电与东部应急设施的供电能力。
   completion_requirements:
-  - key: east_hospital_operational
-    node_key: east_community_hospital
-    fact_key: operational
-    accepted_values:
-    - true
-    description: 东区社区医院已恢复运行。
-  - key: east_hospital_power
-    node_key: east_community_hospital
-    fact_key: power_supply
+  - key: east_emergency_power_network
+    kind: DERIVED_STATE
+    derived_key: east_emergency_power_network
     accepted_values:
     - AVAILABLE
-    description: 东区社区医院已获得供电。
-  - key: riverside_shelter_operational
-    node_key: riverside_shelter
-    fact_key: operational
-    accepted_values:
-    - true
-    description: 河滨避难所已恢复运行。
-  - key: riverside_shelter_power
-    node_key: riverside_shelter
-    fact_key: power_supply
-    accepted_values:
-    - AVAILABLE
-    description: 河滨避难所已获得供电。
+    description: 东部应急供电网络已恢复。
   prerequisites: []
   subsumes: []
   goal_aliases:
@@ -8322,48 +7924,12 @@ objectives:
   name: 恢复东部应急供水
   description: 恢复东部应急供水调度能力。
   completion_requirements:
-  - key: water_treatment_plant_operational
-    node_key: water_treatment_plant
-    fact_key: operational
-    accepted_values:
-    - true
-    description: 城市水处理厂已恢复运行。
-  - key: water_treatment_plant_power_supply
-    node_key: water_treatment_plant
-    fact_key: power_supply
+  - key: east_emergency_water_supply
+    kind: DERIVED_STATE
+    derived_key: east_emergency_water_supply
     accepted_values:
     - AVAILABLE
-    description: 城市水处理厂已获得供电。
-  - key: south_pump_station_operational
-    node_key: south_pump_station
-    fact_key: operational
-    accepted_values:
-    - true
-    description: 南部主泵站已恢复运行。
-  - key: south_pump_station_power_supply
-    node_key: south_pump_station
-    fact_key: power_supply
-    accepted_values:
-    - AVAILABLE
-    description: 南部主泵站已获得供电。
-  - key: east_water_pump_station_operational
-    node_key: east_water_pump_station
-    fact_key: operational
-    accepted_values:
-    - true
-    description: 东部供水泵站已恢复运行。
-  - key: east_water_pump_station_power_supply
-    node_key: east_water_pump_station
-    fact_key: power_supply
-    accepted_values:
-    - AVAILABLE
-    description: 东部供水泵站已获得供电。
-  - key: south_communication_core_operational
-    node_key: south_communication_core
-    fact_key: operational
-    accepted_values:
-    - true
-    description: 南部通信核心已恢复运行。
+    description: 东部应急供水能力已恢复。
   prerequisites: []
   subsumes: []
   goal_aliases:
@@ -8375,18 +7941,12 @@ objectives:
   name: 恢复北部基础工程支援
   description: 恢复北部通信中继与市政工程服务能力。
   completion_requirements:
-  - key: north_depot_operational
-    node_key: utility_service_depot
-    fact_key: operational
+  - key: north_basic_engineering_support
+    kind: DERIVED_STATE
+    derived_key: north_basic_engineering_support
     accepted_values:
-    - true
-    description: 市政工程服务基地已恢复。
-  - key: north_relay_operational
-    node_key: north_communication_relay
-    fact_key: operational
-    accepted_values:
-    - true
-    description: 北部通信中继已恢复。
+    - AVAILABLE
+    description: 北部基础工程支援已恢复。
   prerequisites: []
   subsumes: []
   goal_aliases:
@@ -8398,30 +7958,12 @@ objectives:
   name: 建立全城灾后持续应急保障网络
   description: 建立持续物流与救援物资部署。
   completion_requirements:
-  - key: sustained_logistics
-    node_key: city_distribution_center
-    fact_key: sustained_humanitarian_logistics
+  - key: citywide_sustained_emergency_support
+    kind: DERIVED_STATE
+    derived_key: citywide_sustained_emergency_support
     accepted_values:
     - AVAILABLE
-    description: 持续人道物流能力已建立。
-  - key: relief_central_district
-    kind: RESOURCE_AT_LEAST
-    region_key: central_district
-    resource_key: emergency_relief_supplies
-    minimum: 30
-    description: 区域救援物资达到 30。
-  - key: relief_east_residential_district
-    kind: RESOURCE_AT_LEAST
-    region_key: east_residential_district
-    resource_key: emergency_relief_supplies
-    minimum: 30
-    description: 区域救援物资达到 30。
-  - key: relief_southeast_heights_district
-    kind: RESOURCE_AT_LEAST
-    region_key: southeast_heights_district
-    resource_key: emergency_relief_supplies
-    minimum: 30
-    description: 区域救援物资达到 30。
+    description: 全城灾后持续应急保障已建立。
   prerequisites: []
   subsumes: []
   goal_aliases:
@@ -8432,14 +7974,242 @@ objectives:
   name: 建立持续应急发电保障
   description: 启动并建立东南持续燃料发电保障。
   completion_requirements:
-  - key: generation_capability
-    node_key: southeast_fuel_emergency_power_plant
-    fact_key: sustained_generation_capability
+  - key: southeast_sustained_emergency_generation
+    kind: DERIVED_STATE
+    derived_key: southeast_sustained_emergency_generation
     accepted_values:
     - AVAILABLE
-    description: 持续发电能力已建立。
-  - key: southeast_fuel_reserve
-    kind: RESOURCE_AT_LEAST
+    description: 东南持续应急发电保障已建立。
+  prerequisites: []
+  subsumes: []
+  goal_aliases:
+  - 建立持续应急发电保障
+  goal_examples: []
+  planning_guidance: 先修复电厂并用启动燃料成功发电；根据新揭示的持续保障条件继续规划。
+derived_states:
+- key: east_emergency_power_network
+  name: 东部应急供电网络
+  description: 东部社区医院与河滨避难所均已恢复运行并获得供电。
+  value_type: ENUM
+  available_value: AVAILABLE
+  unavailable_value: UNAVAILABLE
+  allowed_values:
+  - AVAILABLE
+  - UNAVAILABLE
+  goal_addressable: true
+  goal_aliases:
+  - 恢复东部应急供电网络
+  - Restore east emergency power
+  - 恢复东部应急供电
+  dependencies:
+  - kind: FACT
+    node_key: east_community_hospital
+    fact_key: operational
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: east_community_hospital
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+  - kind: FACT
+    node_key: riverside_shelter
+    fact_key: operational
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: riverside_shelter
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+- key: east_emergency_water_supply
+  name: 东部应急供水能力
+  description: 东部应急供水设施及其通信协调条件均已恢复。
+  value_type: ENUM
+  available_value: AVAILABLE
+  unavailable_value: UNAVAILABLE
+  allowed_values:
+  - AVAILABLE
+  - UNAVAILABLE
+  goal_addressable: true
+  goal_aliases:
+  - 恢复东部应急供水
+  - Restore east emergency water supply
+  dependencies:
+  - kind: FACT
+    node_key: water_treatment_plant
+    fact_key: operational
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: water_treatment_plant
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+  - kind: FACT
+    node_key: south_pump_station
+    fact_key: operational
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: south_pump_station
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+  - kind: FACT
+    node_key: east_water_pump_station
+    fact_key: operational
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: east_water_pump_station
+    fact_key: power_supply
+    accepted_values:
+    - AVAILABLE
+  - kind: FACT
+    node_key: south_communication_core
+    fact_key: operational
+    accepted_values:
+    - true
+- key: north_basic_engineering_support
+  name: 北部基础工程支援
+  description: 北部市政工程服务基地与通信中继均已恢复。
+  value_type: ENUM
+  available_value: AVAILABLE
+  unavailable_value: UNAVAILABLE
+  allowed_values:
+  - AVAILABLE
+  - UNAVAILABLE
+  goal_addressable: true
+  goal_aliases:
+  - Restore north engineering support
+  - 恢复北部基础工程支援
+  dependencies:
+  - kind: FACT
+    node_key: utility_service_depot
+    fact_key: operational
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: north_communication_relay
+    fact_key: operational
+    accepted_values:
+    - true
+- key: citywide_sustained_emergency_support
+  name: 全城灾后持续应急保障
+  description: 城市物流设施、运输通道与三处救援物资保障条件均已满足。
+  value_type: ENUM
+  available_value: AVAILABLE
+  unavailable_value: UNAVAILABLE
+  allowed_values:
+  - AVAILABLE
+  - UNAVAILABLE
+  goal_addressable: true
+  goal_aliases:
+  - 建立全城灾后持续应急保障网络
+  - 建立全城持续应急保障网络
+  dependencies:
+  - kind: FACT
+    node_key: rail_freight_yard
+    fact_key: rail_freight_capability
+    accepted_values:
+    - AVAILABLE
+  - kind: FACT
+    node_key: emergency_supply_warehouse
+    fact_key: operational
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: vehicle_depot
+    fact_key: emergency_delivery_support
+    accepted_values:
+    - AVAILABLE
+  - kind: FACT
+    node_key: city_distribution_center
+    fact_key: operational
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: central_river_tunnel
+    fact_key: passable
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: north_service_corridor
+    fact_key: passable
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: south_bridge
+    fact_key: passable
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: southeast_access_corridor
+    fact_key: passable
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: waterfront_access_corridor
+    fact_key: passable
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: west_freight_corridor
+    fact_key: passable
+    accepted_values:
+    - true
+  - kind: RESOURCE_AT_LEAST
+    region_key: central_district
+    resource_key: emergency_relief_supplies
+    minimum: 30
+  - kind: RESOURCE_AT_LEAST
+    region_key: east_residential_district
+    resource_key: emergency_relief_supplies
+    minimum: 30
+  - kind: RESOURCE_AT_LEAST
+    region_key: southeast_heights_district
+    resource_key: emergency_relief_supplies
+    minimum: 30
+- key: southeast_sustained_emergency_generation
+  name: 东南持续应急发电保障
+  description: 东南区域的持续应急发电保障能力状态。
+  value_type: ENUM
+  available_value: AVAILABLE
+  unavailable_value: UNAVAILABLE
+  allowed_values:
+  - AVAILABLE
+  - UNAVAILABLE
+  goal_addressable: true
+  goal_aliases:
+  - 建立持续应急发电保障
+  dependencies:
+  - kind: FACT
+    node_key: southeast_fuel_emergency_power_plant
+    fact_key: generating
+    accepted_values:
+    - true
+  - kind: FACT
+    node_key: river_port
+    fact_key: operational
+    accepted_values:
+    - true
+    knowledge_gate:
+      node_key: southeast_fuel_emergency_power_plant
+      fact_key: sustained_requirements_discovered
+      accepted_values:
+      - true
+  - kind: FACT
+    node_key: south_fuel_terminal
+    fact_key: operational
+    accepted_values:
+    - true
+    knowledge_gate:
+      node_key: southeast_fuel_emergency_power_plant
+      fact_key: sustained_requirements_discovered
+      accepted_values:
+      - true
+  - kind: RESOURCE_AT_LEAST
     region_key: southeast_heights_district
     resource_key: emergency_fuel
     minimum: 100
@@ -8448,13 +8218,6 @@ objectives:
       fact_key: sustained_requirements_discovered
       accepted_values:
       - true
-    description: 东南应急燃料储备至少 100。
-  prerequisites: []
-  subsumes: []
-  goal_aliases:
-  - 建立持续应急发电保障
-  goal_examples: []
-  planning_guidance: 先修复电厂并用启动燃料成功发电；根据新揭示的持续保障条件继续规划。
 goal_resolution:
   allow_llm_fallback: true
   clarification_prompt: 请说明希望恢复的基础设施或公共服务。

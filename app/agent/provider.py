@@ -785,9 +785,7 @@ class OpenAICompatibleGenericProvider:
         self._last_call_metadata = metadata
         self._call_metadata_history.append(metadata)
 
-    def _record_validation_diagnostics(
-        self, diagnostics: tuple[dict[str, object], ...]
-    ) -> None:
+    def _record_validation_diagnostics(self, diagnostics: tuple[dict[str, object], ...]) -> None:
         if not diagnostics or not self._call_metadata_history:
             return
         metadata = self._call_metadata_history[-1].model_copy(

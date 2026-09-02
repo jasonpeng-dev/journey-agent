@@ -29,10 +29,7 @@ def test_goal_resolution_attempt_migration_recovers_cleanly(monkeypatch, tmp_pat
             "interpretation_attempts",
             "value_type_diagnostics",
             "provider_metadata",
-        } <= {
-            str(item["name"])
-            for item in inspector.get_columns("goal_resolution_attempts")
-        }
+        } <= {str(item["name"]) for item in inspector.get_columns("goal_resolution_attempts")}
         engine.dispose()
 
         command.downgrade(config, "r99000000001")

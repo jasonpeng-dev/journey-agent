@@ -54,6 +54,7 @@ class MissionRoadmapProjector:
         contract: FormalGoalContractV1,
         known_facts: dict[tuple[str, str], StrictScalar],
         known_resources: dict[str, object] | None = None,
+        known_derived: dict[str, StrictScalar | None] | None = None,
         *,
         goal_description: str = "",
     ) -> MissionRoadmap:
@@ -72,6 +73,7 @@ class MissionRoadmapProjector:
                 tuple(item.objective_key for item in contract.predefined_objectives),
                 known_facts,
                 known_resources,
+                known_derived,
             )
             identities = {
                 (item.source_objective_key, item.source_requirement_key): item.identity
@@ -95,9 +97,7 @@ class MissionRoadmapProjector:
                     projected["key"] = identity
                     if "kind" not in projected:
                         projected["kind"] = (
-                            "RESOURCE_AT_LEAST"
-                            if "resource_key" in projected
-                            else "FACT"
+                            "RESOURCE_AT_LEAST" if "resource_key" in projected else "FACT"
                         )
                     projected_requirements.append(projected)
                 stages.append(
@@ -127,7 +127,12 @@ class MissionRoadmapProjector:
         )
         visible_requirements = tuple(item.requirement for item in visible)
         resources = known_resources or {}
-        completed = self._satisfied(visible_requirements, known_facts, resources)
+        completed = self._satisfied(
+            visible_requirements,
+            known_facts,
+            resources,
+            known_derived or {},
+        )
         return MissionRoadmap(
             stages=(
                 MissionRoadmapStage(
@@ -146,6 +151,7 @@ class MissionRoadmapProjector:
                             resources,
                             identity=item.identity,
                             definition=definition,
+                            known_derived=known_derived or {},
                         )
                         for item in visible
                     ),
@@ -159,6 +165,7 @@ class MissionRoadmapProjector:
         objective_scope_keys: tuple[str, ...],
         known_facts: dict[tuple[str, str], StrictScalar],
         known_resources: dict[str, object] | None = None,
+        known_derived: dict[str, StrictScalar | None] | None = None,
     ) -> MissionRoadmap:
         objectives = {item.key: item for item in definition.objectives}
         ordered: list[_StageDefinition] = []
@@ -217,7 +224,9 @@ class MissionRoadmapProjector:
 
         resources = known_resources or {}
         visible = [self._visible(item.requirements, known_facts) for item in ordered]
-        completed = [self._satisfied(item, known_facts, resources) for item in visible]
+        completed = [
+            self._satisfied(item, known_facts, resources, known_derived or {}) for item in visible
+        ]
         current_index = next((index for index, done in enumerate(completed) if not done), None)
         return MissionRoadmap(
             stages=tuple(
@@ -234,7 +243,12 @@ class MissionRoadmapProjector:
                     ),
                     objective_key=item.objective_key,
                     requirements=tuple(
-                        self._project_requirement(requirement, resources)
+                        self._project_requirement(
+                            requirement,
+                            resources,
+                            definition=definition,
+                            known_derived=known_derived or {},
+                        )
                         for requirement in visible[index]
                     ),
                 )
@@ -272,6 +286,7 @@ class MissionRoadmapProjector:
         requirements: tuple[ObjectiveRequirementV2, ...],
         known_facts: dict[tuple[str, str], StrictScalar],
         known_resources: dict[str, object],
+        known_derived: dict[str, StrictScalar | None],
     ) -> bool:
         if not requirements:
             return False
@@ -281,6 +296,11 @@ class MissionRoadmapProjector:
                 if known_facts.get((requirement.node_key, requirement.fact_key)) not in (
                     requirement.accepted_values
                 ):
+                    return False
+                continue
+            if requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+                assert requirement.derived_key is not None
+                if known_derived.get(requirement.derived_key) not in requirement.accepted_values:
                     return False
                 continue
             current = MissionRoadmapProjector._known_resource_amount(requirement, known_resources)
@@ -358,6 +378,7 @@ class MissionRoadmapProjector:
         *,
         identity: str | None = None,
         definition: ScenarioDefinitionV2 | None = None,
+        known_derived: dict[str, StrictScalar | None] | None = None,
     ) -> dict[str, object]:
         result = requirement.model_dump(mode="json", exclude={"knowledge_gate"})
         if identity is not None:
@@ -380,6 +401,11 @@ class MissionRoadmapProjector:
             result["knowledge_status"] = status
             if status == "UNKNOWN":
                 result["current_known_available"] = None
+        elif requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+            assert requirement.derived_key is not None
+            current = (known_derived or {}).get(requirement.derived_key)
+            result["current_known_value"] = current
+            result["knowledge_status"] = "UNKNOWN" if current is None else "KNOWN"
         return result
 
     @staticmethod
@@ -396,6 +422,13 @@ class MissionRoadmapProjector:
                 if node is not None and fact is not None:
                     return f"{node.name}: {fact.name} reaches the requested state."
             return "The requested Fact reaches the requested state."
+
+        if requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+            if requirement.derived_key is not None:
+                state = definition.derived_state_definitions.get(requirement.derived_key)
+                if state is not None:
+                    return state.description or f"{state.name} reaches the requested state."
+            return "The requested world capability reaches the requested state."
 
         if requirement.region_key is not None and requirement.resource_key is not None:
             region = definition.world.node(requirement.region_key)

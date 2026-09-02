@@ -250,6 +250,8 @@ class AdHocGoalRequirementCandidateV1(FormalGoalModel):
 
     There is deliberately no ``key``, ``description``, ``knowledge_gate``, or
     prerequisite field.  Those are backend-owned or unsupported V1 concepts.
+    A DERIVED_STATE candidate carries only the public authored state key and
+    its requested typed value; its dependency graph remains backend-owned.
     """
 
     kind: ObjectiveRequirementKind
@@ -259,6 +261,7 @@ class AdHocGoalRequirementCandidateV1(FormalGoalModel):
     region_key: StrictStr | None = None
     resource_key: StrictStr | None = None
     minimum: StrictInt | None = Field(default=None, ge=0)
+    derived_key: StrictStr | None = None
 
     @model_validator(mode="after")
     def validate_candidate_shape(self) -> AdHocGoalRequirementCandidateV1:
@@ -269,6 +272,7 @@ class AdHocGoalRequirementCandidateV1(FormalGoalModel):
                 self.region_key is not None
                 or self.resource_key is not None
                 or self.minimum is not None
+                or self.derived_key is not None
             ):
                 raise ValueError("Dynamic FACT candidate cannot declare resource fields")
         elif self.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
@@ -276,8 +280,26 @@ class AdHocGoalRequirementCandidateV1(FormalGoalModel):
                 raise ValueError(
                     "Dynamic RESOURCE_AT_LEAST candidate needs region/resource/minimum"
                 )
-            if self.node_key is not None or self.fact_key is not None or self.accepted_values:
+            if (
+                self.node_key is not None
+                or self.fact_key is not None
+                or self.accepted_values
+                or self.derived_key is not None
+            ):
                 raise ValueError("Dynamic RESOURCE_AT_LEAST candidate cannot declare Fact fields")
+        elif self.kind == ObjectiveRequirementKind.DERIVED_STATE:
+            if self.derived_key is None or not self.accepted_values:
+                raise ValueError(
+                    "Dynamic DERIVED_STATE candidate needs derived_key/accepted_values"
+                )
+            if (
+                self.node_key is not None
+                or self.fact_key is not None
+                or self.region_key is not None
+                or self.resource_key is not None
+                or self.minimum is not None
+            ):
+                raise ValueError("Dynamic DERIVED_STATE candidate cannot declare Base fields")
         else:
             raise ValueError("Unsupported Dynamic Goal requirement kind")
         return self
@@ -455,9 +477,7 @@ def canonicalize_ad_hoc_dynamic_candidates(
             normalized.append(candidate)
             continue
         fact = _fact_for_dynamic_candidate(candidate, definition)
-        values = tuple(
-            _canonicalize_fact_value(fact, value) for value in candidate.accepted_values
-        )
+        values = tuple(_canonicalize_fact_value(fact, value) for value in candidate.accepted_values)
         normalized.append(candidate.model_copy(update={"accepted_values": values}))
     return AdHocGoalCandidateSetV1(requirements=tuple(normalized))
 
@@ -470,6 +490,9 @@ def canonical_requirement_identity(requirement: ObjectiveRequirementV2) -> str:
     if requirement.kind == ObjectiveRequirementKind.FACT:
         assert requirement.node_key is not None and requirement.fact_key is not None
         return f"fact/{requirement.node_key}/{requirement.fact_key}/{digest}"
+    if requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+        assert requirement.derived_key is not None
+        return f"derived/{requirement.derived_key}/{digest}"
     assert requirement.region_key is not None and requirement.resource_key is not None
     assert requirement.minimum is not None
     return (
@@ -493,6 +516,34 @@ def _candidate_to_requirement(
             fact_key=candidate.fact_key,
             accepted_values=accepted_values,
             description=f"{candidate.node_key}.{candidate.fact_key} has the requested value.",
+        )
+
+    if candidate.kind == ObjectiveRequirementKind.DERIVED_STATE:
+        assert candidate.derived_key is not None
+        state = definition.derived_state_definitions.get(candidate.derived_key)
+        if state is None:
+            raise FormalGoalError(
+                "FORMAL_GOAL_UNKNOWN_DERIVED_STATE",
+                f"Dynamic Goal references unknown Derived State {candidate.derived_key}",
+            )
+        if not state.goal_addressable:
+            raise FormalGoalError(
+                "FORMAL_GOAL_DERIVED_STATE_NOT_PUBLIC",
+                f"Dynamic Goal cannot address Derived State {candidate.derived_key}",
+            )
+        accepted_values = _canonical_scalars(candidate.accepted_values)
+        _validate_typed_values(
+            state.value_type.value,
+            state.allowed_values,
+            accepted_values,
+            state.key,
+        )
+        return ObjectiveRequirementV2(
+            key="dynamic_requirement",
+            kind=ObjectiveRequirementKind.DERIVED_STATE,
+            derived_key=state.key,
+            accepted_values=accepted_values,
+            description=f"{state.name} reaches the requested state.",
         )
 
     assert candidate.region_key is not None
@@ -667,6 +718,64 @@ def _validate_scalar_domain(fact, values: tuple[FormalGoalScalar, ...]) -> None:
                 )
 
 
+def _validate_typed_values(
+    value_type: str,
+    allowed_values: tuple[FormalGoalScalar, ...],
+    values: tuple[FormalGoalScalar, ...],
+    derived_key: str,
+) -> None:
+    """Validate a dynamic Derived target against authored public metadata."""
+
+    for value in values:
+        if value_type == "BOOLEAN" and type(value) is not bool:
+            raise FormalGoalError(
+                "FORMAL_GOAL_VALUE_TYPE_INVALID",
+                "Dynamic Goal value does not match the Derived State BOOLEAN domain",
+                details={
+                    "derived_key": derived_key,
+                    "expected_value_type": value_type,
+                    "actual_candidate_json_type": _json_value_type(value),
+                },
+            )
+        if value_type == "INTEGER" and type(value) is not int:
+            raise FormalGoalError(
+                "FORMAL_GOAL_VALUE_TYPE_INVALID",
+                "Dynamic Goal value does not match the Derived State INTEGER domain",
+                details={
+                    "derived_key": derived_key,
+                    "expected_value_type": value_type,
+                    "actual_candidate_json_type": _json_value_type(value),
+                },
+            )
+        if value_type == "STRING" and type(value) is not str:
+            raise FormalGoalError(
+                "FORMAL_GOAL_VALUE_TYPE_INVALID",
+                "Dynamic Goal value does not match the Derived State STRING domain",
+                details={
+                    "derived_key": derived_key,
+                    "expected_value_type": value_type,
+                    "actual_candidate_json_type": _json_value_type(value),
+                },
+            )
+        if value_type == "ENUM":
+            if not any(type(value) is type(allowed) for allowed in allowed_values):
+                raise FormalGoalError(
+                    "FORMAL_GOAL_VALUE_TYPE_INVALID",
+                    "Dynamic Goal value does not match the Derived State ENUM domain",
+                    details={
+                        "derived_key": derived_key,
+                        "expected_value_type": value_type,
+                        "actual_candidate_json_type": _json_value_type(value),
+                    },
+                )
+            if value not in allowed_values:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_VALUE_OUTSIDE_DOMAIN",
+                    "Dynamic Goal value is outside the Derived State ENUM domain",
+                    details={"derived_key": derived_key},
+                )
+
+
 def _formal_requirement_semantics(item: FormalGoalRequirementV1) -> dict[str, object]:
     return {
         "identity": item.identity,
@@ -695,7 +804,7 @@ def _objective_requirement_semantics(requirement: ObjectiveRequirementV2) -> dic
                 "accepted_values": list(_canonical_scalars(requirement.accepted_values)),
             }
         )
-    else:
+    elif requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
         assert requirement.region_key is not None
         assert requirement.resource_key is not None and requirement.minimum is not None
         payload.update(
@@ -703,6 +812,14 @@ def _objective_requirement_semantics(requirement: ObjectiveRequirementV2) -> dic
                 "region_key": requirement.region_key,
                 "resource_key": requirement.resource_key,
                 "minimum": requirement.minimum,
+            }
+        )
+    else:
+        assert requirement.derived_key is not None
+        payload.update(
+            {
+                "derived_key": requirement.derived_key,
+                "accepted_values": list(_canonical_scalars(requirement.accepted_values)),
             }
         )
     if requirement.knowledge_gate is not None:

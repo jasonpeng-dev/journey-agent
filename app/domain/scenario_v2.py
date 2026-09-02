@@ -183,6 +183,14 @@ class EffectKind(StrEnum):
     SET_RESOURCE_POOL_AVAILABILITY = "SET_RESOURCE_POOL_AVAILABILITY"
 
 
+class DerivedDependencyKind(StrEnum):
+    """Closed dependency vocabulary for a computed World State."""
+
+    FACT = "FACT"
+    RESOURCE_AT_LEAST = "RESOURCE_AT_LEAST"
+    DERIVED_STATE = "DERIVED_STATE"
+
+
 class ResourceInitialStateV2(FrozenDefinitionModel):
     """One initialized balance, optionally scoped to a Region Node."""
 
@@ -554,6 +562,157 @@ class ObjectiveRequirementKnowledgeGateV2(FrozenDefinitionModel):
     accepted_values: tuple[StrictScalar, ...] = Field(min_length=1)
 
 
+def knowledge_gate_is_revealed(
+    gate: ObjectiveRequirementKnowledgeGateV2 | None,
+    known_value: object | None,
+) -> bool:
+    """Return whether a public Knowledge gate permits its dependent semantics."""
+
+    return gate is None or known_value in gate.accepted_values
+
+
+class DerivedStateDependencyV2(FrozenDefinitionModel):
+    """One deterministic, typed input to a computed World State.
+
+    Dependency definitions are Scenario authoring metadata.  They may carry a
+    Knowledge gate so the evaluator can keep a public Derived value UNKNOWN
+    until a gameplay discovery occurs, but the gate is never part of the
+    public Goal State Catalog.
+    """
+
+    kind: DerivedDependencyKind
+    node_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    fact_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    accepted_values: tuple[StrictScalar, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    region_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    resource_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    minimum: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    derived_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_dependency_shape(self) -> DerivedStateDependencyV2:
+        if self.kind == DerivedDependencyKind.FACT:
+            if self.node_key is None or self.fact_key is None or not self.accepted_values:
+                raise ValueError("FACT Derived dependency needs node/fact/accepted_values")
+            if (
+                self.region_key is not None
+                or self.resource_key is not None
+                or self.minimum is not None
+            ):
+                raise ValueError("FACT Derived dependency cannot declare Resource fields")
+            if self.derived_key is not None:
+                raise ValueError("FACT Derived dependency cannot declare derived_key")
+        elif self.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+            if self.region_key is None or self.resource_key is None or self.minimum is None:
+                raise ValueError(
+                    "RESOURCE_AT_LEAST Derived dependency needs region/resource/minimum"
+                )
+            if self.node_key is not None or self.fact_key is not None or self.accepted_values:
+                raise ValueError("RESOURCE_AT_LEAST Derived dependency cannot declare Fact fields")
+            if self.derived_key is not None:
+                raise ValueError("RESOURCE_AT_LEAST Derived dependency cannot declare derived_key")
+        elif self.kind == DerivedDependencyKind.DERIVED_STATE:
+            if self.derived_key is None or not self.accepted_values:
+                raise ValueError("DERIVED_STATE dependency needs derived_key/accepted_values")
+            if (
+                self.node_key is not None
+                or self.fact_key is not None
+                or self.region_key is not None
+            ):
+                raise ValueError("DERIVED_STATE dependency cannot declare Base state fields")
+            if self.resource_key is not None or self.minimum is not None:
+                raise ValueError("DERIVED_STATE dependency cannot declare Resource fields")
+        else:
+            raise ValueError("Unsupported Derived dependency kind")
+        return self
+
+
+# Short aliases keep the domain vocabulary discoverable to callers while the
+# V2 suffix remains consistent with the existing Scenario definitions.
+DerivedDependencyV2 = DerivedStateDependencyV2
+
+
+class DerivedStateDefinitionV2(FrozenDefinitionModel):
+    """Immutable definition of a computed World Goal State/Capability."""
+
+    key: StableKey
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    value_type: FactValueType
+    available_value: StrictScalar
+    unavailable_value: StrictScalar
+    allowed_values: tuple[StrictScalar, ...] = ()
+    goal_addressable: bool = Field(default=False, exclude_if=lambda value: not value)
+    goal_aliases: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    goal_examples: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    dependencies: tuple[DerivedStateDependencyV2, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_value_domain(self) -> DerivedStateDefinitionV2:
+        if self.available_value == self.unavailable_value:
+            raise ValueError("Derived available and unavailable values must differ")
+        if self.value_type == FactValueType.BOOLEAN:
+            valid = type(self.available_value) is bool and type(self.unavailable_value) is bool
+        elif self.value_type == FactValueType.INTEGER:
+            valid = all(
+                type(value) is int for value in (self.available_value, self.unavailable_value)
+            )
+        elif self.value_type == FactValueType.STRING:
+            valid = all(
+                type(value) is str for value in (self.available_value, self.unavailable_value)
+            )
+        else:
+            valid = bool(self.allowed_values) and all(
+                value in self.allowed_values
+                for value in (self.available_value, self.unavailable_value)
+            )
+        if not valid:
+            raise ValueError("Derived state values do not match value_type")
+        if self.value_type != FactValueType.ENUM and self.allowed_values:
+            raise ValueError("allowed_values are valid only for ENUM Derived states")
+        if len(set(self.allowed_values)) != len(self.allowed_values):
+            raise ValueError("Derived state allowed_values must be unique")
+        normalized_aliases = [alias.strip().casefold() for alias in self.goal_aliases]
+        normalized_examples = [example.strip().casefold() for example in self.goal_examples]
+        if any(not alias for alias in (*normalized_aliases, *normalized_examples)):
+            raise ValueError("Derived State goal aliases/examples cannot be blank")
+        _require_unique(normalized_aliases, "Derived State goal aliases")
+        _require_unique(normalized_examples, "Derived State goal examples")
+        identities = tuple(self._dependency_identity(item) for item in self.dependencies)
+        if len(set(identities)) != len(identities):
+            raise ValueError("Derived state dependencies must be unique")
+        return self
+
+    @staticmethod
+    def _dependency_identity(dependency: DerivedStateDependencyV2) -> tuple[object, ...]:
+        return (
+            dependency.kind,
+            dependency.node_key,
+            dependency.fact_key,
+            dependency.accepted_values,
+            dependency.region_key,
+            dependency.resource_key,
+            dependency.minimum,
+            dependency.derived_key,
+            dependency.knowledge_gate,
+        )
+
+    @property
+    def target_value(self) -> StrictScalar:
+        """The typed value representing a satisfied Derived state."""
+
+        return self.available_value
+
+    @property
+    def non_target_value(self) -> StrictScalar:
+        return self.unavailable_value
+
+
 class ActionPlanningProjectionV2(FrozenDefinitionModel):
     terminal_effects: tuple[FactReferenceV2, ...] = ()
     supporting_effects: tuple[FactReferenceV2, ...] = ()
@@ -881,6 +1040,7 @@ class RuleDefinitionV2(FrozenDefinitionModel):
 class ObjectiveRequirementKind(StrEnum):
     FACT = "FACT"
     RESOURCE_AT_LEAST = "RESOURCE_AT_LEAST"
+    DERIVED_STATE = "DERIVED_STATE"
 
 
 class ObjectiveRequirementV2(FrozenDefinitionModel):
@@ -897,6 +1057,7 @@ class ObjectiveRequirementV2(FrozenDefinitionModel):
     region_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
     resource_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
     minimum: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    derived_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
     knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -911,13 +1072,29 @@ class ObjectiveRequirementV2(FrozenDefinitionModel):
                 self.region_key is not None
                 or self.resource_key is not None
                 or self.minimum is not None
+                or self.derived_key is not None
             ):
                 raise ValueError("FACT Objective requirement cannot declare resource fields")
-        else:
+        elif self.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
             if self.region_key is None or self.resource_key is None or self.minimum is None:
                 raise ValueError("RESOURCE_AT_LEAST needs region/resource/minimum")
             if self.node_key is not None or self.fact_key is not None or self.accepted_values:
                 raise ValueError("RESOURCE_AT_LEAST cannot declare Fact fields")
+            if self.derived_key is not None:
+                raise ValueError("RESOURCE_AT_LEAST cannot declare derived_key")
+        elif self.kind == ObjectiveRequirementKind.DERIVED_STATE:
+            if self.derived_key is None or not self.accepted_values:
+                raise ValueError("DERIVED_STATE needs derived_key/accepted_values")
+            if (
+                self.node_key is not None
+                or self.fact_key is not None
+                or self.region_key is not None
+                or self.resource_key is not None
+                or self.minimum is not None
+            ):
+                raise ValueError("DERIVED_STATE cannot declare Base Fact or Resource fields")
+        else:
+            raise ValueError("Unsupported Objective requirement kind")
         return self
 
     @property
@@ -926,6 +1103,12 @@ class ObjectiveRequirementV2(FrozenDefinitionModel):
             return None
         assert self.node_key is not None and self.fact_key is not None
         return self.node_key, self.fact_key
+
+    @property
+    def derived_ref(self) -> str | None:
+        if self.kind != ObjectiveRequirementKind.DERIVED_STATE:
+            return None
+        return self.derived_key
 
 
 class ObjectivePrerequisiteV2(FrozenDefinitionModel):
@@ -1001,6 +1184,9 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     actions: tuple[ActionDefinitionV2, ...]
     rules: tuple[RuleDefinitionV2, ...]
     objectives: tuple[ObjectiveDefinitionV2, ...]
+    derived_states: tuple[DerivedStateDefinitionV2, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     goal_resolution: GoalResolutionV2
     planning: PlanningDefinitionV2 = Field(default_factory=PlanningDefinitionV2)
 
@@ -1011,6 +1197,10 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     @property
     def objective_definitions(self):  # type: ignore[no-untyped-def]
         return MappingProxyType({objective.key: objective for objective in self.objectives})
+
+    @property
+    def derived_state_definitions(self):  # type: ignore[no-untyped-def]
+        return MappingProxyType({state.key: state for state in self.derived_states})
 
     @model_validator(mode="after")
     def validate_references(self) -> ScenarioDefinitionV2:
@@ -1182,6 +1372,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     _require_unique((item.key for item in definition.actions), "Action keys")
     _require_unique((item.key for item in definition.rules), "Rule keys")
     _require_unique((item.key for item in definition.objectives), "Objective keys")
+    _require_unique((item.key for item in definition.derived_states), "Derived State keys")
     _require_unique(
         (relation_identity(item) for item in world.relations),
         "World Relation identities",
@@ -1195,11 +1386,13 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     actors = {item.key: item for item in definition.actors.actor_profiles}
     actions = {item.key: item for item in definition.actions}
     objectives = {item.key: item for item in definition.objectives}
+    derived_states = {item.key: item for item in definition.derived_states}
 
     _validate_locality_contract(definition, nodes, node_types)
     _validate_resource_initial_states(definition, nodes)
     _validate_resource_pools(definition, nodes)
     _validate_region_resource_knowledge(definition, nodes)
+    _validate_derived_states(definition, nodes, resources, derived_states)
 
     _require_key(nodes, definition.initialization.start_node_key, "start Node")
     primary = _require_key(
@@ -1307,12 +1500,20 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     for objective in definition.objectives:
         for requirement in objective.completion_requirements:
             _validate_objective_requirement(
-                requirement, nodes, resources, definition.metadata.locality
+                requirement,
+                nodes,
+                resources,
+                definition.metadata.locality,
+                derived_states,
             )
         for prerequisite in objective.prerequisites:
             for requirement in prerequisite.requirements:
                 _validate_objective_requirement(
-                    requirement, nodes, resources, definition.metadata.locality
+                    requirement,
+                    nodes,
+                    resources,
+                    definition.metadata.locality,
+                    derived_states,
                 )
         for key in objective.subsumes:
             if key == objective.key:
@@ -1453,6 +1654,7 @@ def _validate_objective_requirement(
     nodes: dict[str, NodeDefinitionV2],
     resources: dict[str, ResourceDefinitionV2],
     locality: LocalityContractV2,
+    derived_states: dict[str, DerivedStateDefinitionV2],
 ) -> None:
     if requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
         assert requirement.region_key is not None and requirement.resource_key is not None
@@ -1460,6 +1662,18 @@ def _validate_objective_requirement(
         if not locality.enabled or region.node_type_key != locality.region_node_type_key:
             raise ValueError("Objective resource requirement must reference a Region")
         _require_key(resources, requirement.resource_key, "Objective Resource")
+        if requirement.knowledge_gate is not None:
+            _validate_gate(requirement.knowledge_gate, nodes)
+        return
+    if requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+        assert requirement.derived_key is not None
+        state = _require_key(derived_states, requirement.derived_key, "Objective Derived State")
+        _validate_typed_values(
+            state.value_type,
+            state.allowed_values,
+            requirement.accepted_values,
+            "Objective Derived State value",
+        )
         if requirement.knowledge_gate is not None:
             _validate_gate(requirement.knowledge_gate, nodes)
         return
@@ -1483,6 +1697,99 @@ def _validate_objective_requirement(
             raise ValueError("Objective value does not match BOOLEAN Fact")
     if requirement.knowledge_gate is not None:
         _validate_gate(requirement.knowledge_gate, nodes)
+
+
+def _validate_derived_states(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+    resources: dict[str, ResourceDefinitionV2],
+    derived_states: dict[str, DerivedStateDefinitionV2],
+) -> None:
+    """Validate the closed Derived dependency graph at publish/parse time."""
+
+    locality = definition.metadata.locality
+    for state in derived_states.values():
+        for dependency in state.dependencies:
+            if dependency.kind == DerivedDependencyKind.FACT:
+                assert dependency.node_key is not None and dependency.fact_key is not None
+                fact = _require_fact(
+                    nodes,
+                    dependency.node_key,
+                    dependency.fact_key,
+                    f"Derived State {state.key} dependency",
+                )
+                _validate_typed_values(
+                    fact.value_type,
+                    fact.allowed_values,
+                    dependency.accepted_values,
+                    f"Derived State {state.key} Fact dependency",
+                )
+            elif dependency.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+                assert dependency.region_key is not None and dependency.resource_key is not None
+                region = _require_key(
+                    nodes,
+                    dependency.region_key,
+                    f"Derived State {state.key} resource dependency Region",
+                )
+                if not locality.enabled or region.node_type_key != locality.region_node_type_key:
+                    raise ValueError("Derived resource dependency must reference a Region")
+                _require_key(
+                    resources,
+                    dependency.resource_key,
+                    f"Derived State {state.key} resource dependency Resource",
+                )
+            elif dependency.kind == DerivedDependencyKind.DERIVED_STATE:
+                assert dependency.derived_key is not None
+                nested = _require_key(
+                    derived_states,
+                    dependency.derived_key,
+                    f"Derived State {state.key} dependency",
+                )
+                _validate_typed_values(
+                    nested.value_type,
+                    nested.allowed_values,
+                    dependency.accepted_values,
+                    f"Derived State {state.key} nested dependency",
+                )
+            if dependency.knowledge_gate is not None:
+                _validate_gate(dependency.knowledge_gate, nodes)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(key: str) -> None:
+        if key in visiting:
+            raise ValueError("Derived State dependency graph contains a cycle")
+        if key in visited:
+            return
+        visiting.add(key)
+        state = derived_states[key]
+        for dependency in state.dependencies:
+            if dependency.kind == DerivedDependencyKind.DERIVED_STATE:
+                assert dependency.derived_key is not None
+                visit(dependency.derived_key)
+        visiting.remove(key)
+        visited.add(key)
+
+    for key in sorted(derived_states):
+        visit(key)
+
+
+def _validate_typed_values(
+    value_type: FactValueType,
+    allowed_values: tuple[StrictScalar, ...],
+    values: tuple[StrictScalar, ...],
+    label: str,
+) -> None:
+    for value in values:
+        if value_type == FactValueType.STRING and type(value) is not str:
+            raise ValueError(f"{label} does not match STRING")
+        if value_type == FactValueType.INTEGER and type(value) is not int:
+            raise ValueError(f"{label} does not match INTEGER")
+        if value_type == FactValueType.BOOLEAN and type(value) is not bool:
+            raise ValueError(f"{label} does not match BOOLEAN")
+        if value_type == FactValueType.ENUM and value not in allowed_values:
+            raise ValueError(f"{label} is outside the ENUM domain")
 
 
 def _validate_gate(
@@ -1720,6 +2027,10 @@ __all__ = [
     "ActionParameterType",
     "ActionParameters",
     "ConditionKind",
+    "DerivedDependencyKind",
+    "DerivedDependencyV2",
+    "DerivedStateDefinitionV2",
+    "DerivedStateDependencyV2",
     "EffectKind",
     "EngineCapability",
     "LocalityContractV2",
@@ -1731,5 +2042,6 @@ __all__ = [
     "ResourceScopeV2",
     "RulePhase",
     "ScenarioDefinitionV2",
+    "knowledge_gate_is_revealed",
     "transport_resource_entries",
 ]

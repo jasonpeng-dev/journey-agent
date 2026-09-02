@@ -41,6 +41,7 @@ from app.domain.enums import (
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
+from app.domain.formal_goal import FormalGoalSourceKind
 from app.domain.resources import resource_state_key
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import (
@@ -70,6 +71,7 @@ from app.scenarios.builtin import (
     require_builtin_v2_version,
 )
 from app.scenarios.persistence import ScenarioDefinitionRepository
+from app.services.formal_goal import load_formal_goal_for_task
 from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionService
 from app.services.knowledge_projection import SharedKnowledgeProjection
@@ -308,9 +310,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
 
     assert set(definition_actions) == {
         "clear_transport",
-        "commission_sustained_generation",
         "deploy_heavy_engineering_support",
-        "establish_sustained_humanitarian_logistics",
         "generate_power",
         "inspect",
         "relay_message",
@@ -511,10 +511,15 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     planner_input = closure.planner_input
     payload = planner_input.model_dump(mode="json")
     serialized = json.dumps(payload, ensure_ascii=False)
+    formal_goal = load_formal_goal_for_task(session, scope, task)
 
     assert payload["schema_version"] == 2
+    assert formal_goal.source_kind == FormalGoalSourceKind.PREDEFINED
     assert payload["objective"]["objective_scope"] == ["restore_central_communication_capability"]
+    assert formal_goal.completion_requirements[0].requirement.kind.value == "FACT"
     assert payload["objective"]["completion_requirements"][0]["node_key"] == ("central_telecom_hub")
+    assert payload["objective"]["completion_requirements"][0]["fact_key"] == "operational"
+    assert payload["objective"]["completion_requirements"][0]["accepted_values"] == [True]
     actors = {item["actor_key"]: item for item in payload["actors"]}
     assert all(
         set(actor)
@@ -1365,7 +1370,7 @@ def test_linjiang_v2_0_completed_survey_repair_diagnostic_is_typed(
     with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
-            "restore_central_communication_capability",
+            "恢复中央通信能力",
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
@@ -1410,7 +1415,7 @@ def test_linjiang_v2_0_known_resource_deficit_repair_diagnostic_is_typed(
     with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
-            "restore_central_communication_capability",
+            "恢复中央通信能力",
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
@@ -1491,7 +1496,7 @@ def test_linjiang_v2_0_known_preflight_repair_diagnostic_has_public_witness(
     with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
-            "restore_east_emergency_water_supply",
+            "恢复东部应急供水",
         )
 
     diagnostic = provider.requests[1].repair_diagnostics[0]
@@ -1557,7 +1562,7 @@ def test_validator_stops_projected_diagnostics_after_static_root_failure(
     with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
-            "restore_central_communication_capability",
+            "恢复中央通信能力",
         )
 
     diagnostics = provider.requests[1].repair_diagnostics
@@ -1597,7 +1602,7 @@ def test_validator_reports_multiple_independent_static_root_failures(
     with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
-            "restore_central_communication_capability",
+            "恢复中央通信能力",
         )
 
     diagnostics = provider.requests[1].repair_diagnostics
@@ -1635,7 +1640,7 @@ def test_validator_reports_actor_capability_mismatch_from_public_actor_state(
     with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
-            "restore_central_communication_capability",
+            "恢复中央通信能力",
         )
 
     planner_actor = next(
@@ -1680,7 +1685,7 @@ def test_validator_stops_after_first_projected_state_root_failure(
     with pytest.raises(GenericAgentError, match="backend-valid current Plan"):
         GenericAgentService(session, scope, provider=provider).create_task(
             runtime.session,
-            "restore_central_communication_capability",
+            "恢复中央通信能力",
         )
 
     diagnostics = provider.requests[1].repair_diagnostics
@@ -1747,7 +1752,7 @@ def test_linjiang_v2_0_projected_repair_applies_selected_target_cost_once(
 
     task = GenericAgentService(session, scope, provider=provider).create_task(
         runtime.session,
-        "restore_central_communication_capability",
+        "恢复中央通信能力",
     )
 
     assert task.current_plan_version == 1
@@ -2082,7 +2087,7 @@ def test_recreated_task_can_execute_task_scoped_first_travel_without_provider(
     agent = GenericAgentService(session, scope)
     first_task = agent.create_task(
         runtime.session,
-        "restore east emergency power network",
+        "Restore east emergency power",
         initialize_plan=False,
     )
     actor = session.get(
@@ -2109,7 +2114,7 @@ def test_recreated_task_can_execute_task_scoped_first_travel_without_provider(
 
     second_task = agent.create_task(
         runtime.session,
-        "restore east emergency power network",
+        "Restore east emergency power",
         initialize_plan=False,
     )
     second_key = agent._action_idempotency_key(

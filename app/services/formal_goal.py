@@ -17,6 +17,7 @@ from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import AgentTask
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.derived_state import evaluate_derived_states
 from app.services.objective_requirements import (
     known_requirement_satisfied,
     truth_requirement_satisfied,
@@ -60,12 +61,18 @@ class FormalGoalCompletionEvaluator:
         *,
         definition: ScenarioDefinitionV2 | None = None,
     ) -> FormalGoalEvaluation:
+        derived_evaluation = (
+            evaluate_derived_states(self.db, self.scope, definition)
+            if definition is not None and definition.derived_states
+            else None
+        )
         evaluations: list[FormalGoalRequirementEvaluation] = []
         for item in contract.completion_requirements:
             value, satisfied = truth_requirement_satisfied(
                 self.db,
                 self.scope,
                 item.requirement,
+                derived_evaluation=derived_evaluation,
             )
             player_visible_satisfied = (
                 known_requirement_satisfied(
@@ -73,6 +80,7 @@ class FormalGoalCompletionEvaluator:
                     self.scope,
                     definition,
                     item.requirement,
+                    derived_evaluation=derived_evaluation,
                 )
                 if definition is not None
                 else None
@@ -85,9 +93,7 @@ class FormalGoalCompletionEvaluator:
                     player_visible_satisfied=player_visible_satisfied,
                 )
             )
-        authoritative_completed = bool(evaluations) and all(
-            item.satisfied for item in evaluations
-        )
+        authoritative_completed = bool(evaluations) and all(item.satisfied for item in evaluations)
         player_visible_completed = (
             authoritative_completed
             and all(item.player_visible_satisfied is True for item in evaluations)

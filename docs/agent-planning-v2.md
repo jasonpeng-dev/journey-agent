@@ -114,6 +114,12 @@ focused public ontology, and only then calls Dynamic Goal Interpretation.
 Grounding answers which public entity the player named; interpretation answers
 which supported terminal Goal state is requested. Neither stage plans Actions.
 
+In the current Linjiang Version, an exact Task1 authored key, name, alias, or
+example remains a genuine `PREDEFINED` Fact Objective. Exact Task2-Task6
+capability keys, names, aliases, or examples resolve through the public
+Derived catalog. Older immutable ScenarioVersions without that catalog retain
+their original authored Objective routing and contracts.
+
 An accepted goal creates an AgentTask with:
 
 * the exact ScenarioVersion reference;
@@ -139,11 +145,15 @@ projected deterministic effects, not by a free-form model assertion.
 
 ### 3.1 Objective requirement kinds and gated publication
 
-The current objective evaluator supports both `FACT` and
-`RESOURCE_AT_LEAST` completion requirements. A `RESOURCE_AT_LEAST`
-requirement names a Resource, a Region, and a minimum quantity. Truth
-evaluation aggregates the actual free quantity in matching Runtime Resource
-Pools that are `AVAILABLE`; reserved quantity is excluded.
+The current objective evaluator supports `FACT`, `RESOURCE_AT_LEAST`, and
+`DERIVED_STATE` completion requirements. A `RESOURCE_AT_LEAST` requirement
+names a Resource, a Region, and a minimum quantity. A `DERIVED_STATE`
+requirement names a public authored capability and its typed target value.
+Derived State definitions may depend on Facts, resource thresholds, and other
+Derived States; the evaluator computes them as a validated dependency graph
+and never accepts a direct provider mutation. Truth evaluation aggregates the
+actual free quantity in matching Runtime Resource Pools that are `AVAILABLE`;
+reserved quantity is excluded.
 
 Public planning and player projections apply a stricter Knowledge boundary.
 They aggregate only currently Known Resource Knowledge. A hidden Pool,
@@ -159,33 +169,56 @@ This reveal does not broaden ObjectiveScope, create a later Objective, or
 delegate completion to the Provider. The deterministic evaluator remains the
 completion authority.
 
+The canonical Linjiang Scenario uses five goal-addressable Derived States.
+Task1 is intentionally not one of them: its exact authored Objective is a
+`PREDEFINED` typed Fact requirement for
+`central_telecom_hub.operational == true`. Task2-Task6 use the deterministic
+Derived Goal catalog and compile to their corresponding `DERIVED_STATE`
+requirements. A Derived State is a computed capability with independent
+semantic identity, not a mandatory wrapper around one Fact.
+
+Derived State is compute-on-read. The Truth evaluator reads complete
+authoritative Runtime state; the Knowledge evaluator reads only the public
+projection. No Action or Rule directly sets a Derived State, no Derived row is
+persisted, and recomputation does not create a runtime revision. Checkpoint and
+Fork therefore materialize Base Runtime/Knowledge state and recompute Derived
+values from the exact ScenarioVersion.
+
 ### 3.2 Dynamic Goal boundary
 
 `AD_HOC_DYNAMIC` compilation reuses the same typed requirement and evaluator
 path. The interpreter receives a focused public ontology made from currently
-public entity identities, goal-addressable Fact schemas, public Regions, and
-public Resource types. It may return only `FACT` and `RESOURCE_AT_LEAST`
-candidate semantics, with implicit `AND`; the backend validates every key,
-value domain, Region, and Resource against the exact Version and assigns the
+public entity identities, goal-addressable Fact schemas, public Regions,
+public Resource types, and public goal-addressable Derived State schemas. It
+may return `FACT`, `RESOURCE_AT_LEAST`, or `DERIVED_STATE` candidate
+semantics, with implicit `AND`; the backend validates every key, typed value,
+Region, Resource, and Derived State against the exact Version and assigns the
 canonical identity. Dynamic candidates cannot carry authored Objective keys,
-descriptions, prerequisites, `knowledge_gate` fields, or hidden completion
-semantics. A goal-addressable Fact schema may be exposed even when its current
-Fact value is Knowledge `UNKNOWN`; its Truth value is not included in the
+descriptions, prerequisites, `knowledge_gate` fields, Derived State
+dependencies, or hidden completion semantics. A goal-addressable Fact or
+Derived State schema may be exposed even when its current value is Knowledge
+`UNKNOWN`; its Truth value and dependency details are not included in the
 interpreter payload.
 
 The interpreter payload is a public ontology projection. It excludes current
 Truth values, hidden Facts, Actions, authored Objective definitions, planning
-catalogs, and hidden requirement metadata. A broad or ambiguous Goal must be
-clarified or rejected; the interpreter cannot silently supplement it with
-Scenario-authored hidden obligations. Hidden completion requirements remain an
-authored `PREDEFINED` capability, or require a future deterministic template
-source outside the current V1.
+catalogs, hidden requirement metadata, and non-public Derived State
+dependencies. A broad or ambiguous Goal must be clarified or rejected; the
+interpreter cannot silently supplement it with Scenario-authored hidden
+obligations. Hidden completion requirements remain an authored `PREDEFINED`
+capability, or require a future deterministic template source outside the
+current V1.
 
 Dynamic provider-format or transient failures use bounded retry, reusing the
 validated grounding and focused ontology for interpretation retries.
 `NEEDS_CLARIFICATION` is not retried until a random resolution is obtained.
 Provider/internal error codes are developer diagnostics, not Player wording;
 Goal submission feedback is rendered in the Goal input area.
+
+Task6's `generate_power` Action remains the only staged discovery transition:
+its successful public Knowledge reveal exposes the gated River Port, South Fuel
+Terminal, and emergency-fuel dependencies to Closure and Planner, followed by
+REPLAN. The reveal does not edit the frozen Goal or expand ObjectiveScope.
 
 ### 3.3 Provider profiles
 
@@ -727,6 +760,7 @@ implementation features.
 | Plan validation and repair loop | app/agent/generic.py |
 | Declarative Action/Rule execution | app/services/generic_game.py |
 | Shared public Knowledge projection | app/services/knowledge_projection.py |
+| Derived State evaluator | app/services/derived_state.py |
 | Formal PLAY orchestration | app/services/play.py |
 | Player-safe response projection | app/services/player_projection.py |
 | Player pacing checkpoint | app/services/player_pacing.py |

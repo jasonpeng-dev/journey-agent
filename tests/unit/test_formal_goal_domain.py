@@ -57,7 +57,9 @@ def _resource_document() -> dict[str, object]:
 def _integer_fact_document() -> dict[str, object]:
     document = deepcopy(_contract_scenario_document())
     patient = next(
-        item for item in document["world"]["nodes"] if item["key"] == "patient_one"  # type: ignore[index]
+        item
+        for item in document["world"]["nodes"]
+        if item["key"] == "patient_one"  # type: ignore[index]
     )
     patient["facts"].append(  # type: ignore[index]
         {
