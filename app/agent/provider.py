@@ -22,6 +22,8 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    StrictBool,
+    StrictInt,
     StrictStr,
     ValidationError,
     model_validator,
@@ -60,6 +62,31 @@ class DynamicGoalCandidateReference(ProviderModel):
 
     ref_type: Literal["NODE", "REGION", "RESOURCE", "DERIVED_STATE"]
     key: StrictStr = Field(min_length=1, max_length=160)
+
+
+class DynamicGoalRecoveryFeedback(ProviderModel):
+    """Safe, structured schema feedback for one bounded interpretation retry."""
+
+    requirement_index: StrictInt = Field(ge=0)
+    kind: Literal["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"] | None = None
+    issue: Literal["MISSING_REQUIRED_FIELD", "INVALID_FIELD", "INVALID_REQUIREMENT_SHAPE"]
+    field: (
+        Literal[
+            "kind",
+            "node_key",
+            "fact_key",
+            "accepted_values",
+            "region_key",
+            "resource_key",
+            "minimum",
+            "derived_key",
+            "target_value",
+            "<extra_field>",
+        ]
+        | None
+    ) = None
+    expected_shape: dict[str, object] = Field(default_factory=dict)
+    focused_target_value: StrictStr | StrictInt | StrictBool | None = None
 
 
 class DynamicGoalEntityGrounding(ProviderModel):
@@ -112,6 +139,7 @@ class DynamicGoalInterpretationRequest(ProviderModel):
     # NODE subset of grounded_candidate_refs, never the complete Stage 1 scope.
     grounded_entity_keys: tuple[str, ...] = ()
     recovery_attempt: int = Field(default=0, ge=0, le=1)
+    recovery_feedback: tuple[DynamicGoalRecoveryFeedback, ...] = Field(default=(), max_length=4)
 
 
 class DynamicGoalInterpretation(ProviderModel):
@@ -538,12 +566,14 @@ class GenericProviderError(ValueError):
         message: str,
         *,
         validation_diagnostics: tuple[dict[str, object], ...] = (),
+        recovery_feedback: tuple[DynamicGoalRecoveryFeedback, ...] = (),
         resolution_observation: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.validation_diagnostics = validation_diagnostics
+        self.recovery_feedback = recovery_feedback
         self.resolution_observation = (
             dict(resolution_observation) if resolution_observation is not None else None
         )
@@ -646,6 +676,227 @@ def _safe_json_type(value: object) -> str | None:
         return "array"
     if isinstance(value, dict):
         return "object"
+    return None
+
+
+_DYNAMIC_GOAL_REQUIREMENT_KINDS = frozenset({"FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"})
+_DYNAMIC_GOAL_REQUIREMENT_FIELDS = {
+    "FACT": ("node_key", "fact_key", "accepted_values"),
+    "RESOURCE_AT_LEAST": ("region_key", "resource_key", "minimum"),
+    "DERIVED_STATE": ("derived_key", "accepted_values"),
+}
+_DYNAMIC_GOAL_REQUIREMENT_ALLOWED_FIELDS = {
+    kind: frozenset({"kind", *fields}) for kind, fields in _DYNAMIC_GOAL_REQUIREMENT_FIELDS.items()
+}
+
+
+def dynamic_goal_recovery_feedback(
+    raw: object,
+    *,
+    public_ontology: dict[str, object] | None = None,
+) -> tuple[DynamicGoalRecoveryFeedback, ...]:
+    """Build bounded, public-only feedback for a typed response retry.
+
+    This inspects only the response shape and focused public metadata.  It
+    never copies provider values, exception messages, or hidden runtime data.
+    """
+
+    if not isinstance(raw, dict):
+        return ()
+    requirements = raw.get("requirements")
+    if not isinstance(requirements, list):
+        return ()
+
+    feedback: list[DynamicGoalRecoveryFeedback] = []
+    for index, item in enumerate(requirements[:4]):
+        if not isinstance(item, dict):
+            feedback.append(
+                DynamicGoalRecoveryFeedback(
+                    requirement_index=index,
+                    issue="INVALID_REQUIREMENT_SHAPE",
+                    expected_shape={
+                        "kind": "FACT|RESOURCE_AT_LEAST|DERIVED_STATE",
+                    },
+                )
+            )
+            continue
+
+        raw_kind = item.get("kind")
+        kind = (
+            raw_kind
+            if isinstance(raw_kind, str) and raw_kind in _DYNAMIC_GOAL_REQUIREMENT_KINDS
+            else None
+        )
+        if kind is None:
+            feedback.append(
+                DynamicGoalRecoveryFeedback(
+                    requirement_index=index,
+                    issue="INVALID_FIELD" if "kind" in item else "MISSING_REQUIRED_FIELD",
+                    field="kind",
+                    expected_shape={
+                        "kind": "FACT|RESOURCE_AT_LEAST|DERIVED_STATE",
+                    },
+                )
+            )
+            continue
+
+        expected_shape = _dynamic_goal_expected_shape(kind, item, public_ontology)
+        extra_fields = set(item) - _DYNAMIC_GOAL_REQUIREMENT_ALLOWED_FIELDS[kind]
+        if extra_fields:
+            feedback.append(
+                DynamicGoalRecoveryFeedback(
+                    requirement_index=index,
+                    kind=kind,
+                    issue="INVALID_FIELD",
+                    field=("target_value" if "target_value" in extra_fields else "<extra_field>"),
+                    expected_shape=expected_shape,
+                    focused_target_value=_dynamic_goal_target_value(kind, item, public_ontology),
+                )
+            )
+            continue
+
+        for field in _DYNAMIC_GOAL_REQUIREMENT_FIELDS[kind]:
+            if field not in item or item[field] is None:
+                feedback.append(
+                    DynamicGoalRecoveryFeedback(
+                        requirement_index=index,
+                        kind=kind,
+                        issue="MISSING_REQUIRED_FIELD",
+                        field=field,
+                        expected_shape=expected_shape,
+                        focused_target_value=_dynamic_goal_target_value(
+                            kind, item, public_ontology
+                        ),
+                    )
+                )
+                break
+            value = item[field]
+            if field in {
+                "node_key",
+                "fact_key",
+                "region_key",
+                "resource_key",
+                "derived_key",
+            } and (not isinstance(value, str) or not value):
+                feedback.append(
+                    DynamicGoalRecoveryFeedback(
+                        requirement_index=index,
+                        kind=kind,
+                        issue="INVALID_FIELD",
+                        field=field,
+                        expected_shape=expected_shape,
+                        focused_target_value=_dynamic_goal_target_value(
+                            kind, item, public_ontology
+                        ),
+                    )
+                )
+                break
+            if field == "minimum" and (type(value) is not int or value < 0):
+                feedback.append(
+                    DynamicGoalRecoveryFeedback(
+                        requirement_index=index,
+                        kind=kind,
+                        issue="INVALID_FIELD",
+                        field=field,
+                        expected_shape=expected_shape,
+                    )
+                )
+                break
+            if field == "accepted_values":
+                if not isinstance(value, list) or not value:
+                    feedback.append(
+                        DynamicGoalRecoveryFeedback(
+                            requirement_index=index,
+                            kind=kind,
+                            issue=(
+                                "MISSING_REQUIRED_FIELD"
+                                if isinstance(value, list)
+                                else "INVALID_FIELD"
+                            ),
+                            field=field,
+                            expected_shape=expected_shape,
+                            focused_target_value=_dynamic_goal_target_value(
+                                kind, item, public_ontology
+                            ),
+                        )
+                    )
+                    break
+                if any(type(candidate_value) not in {str, int, bool} for candidate_value in value):
+                    feedback.append(
+                        DynamicGoalRecoveryFeedback(
+                            requirement_index=index,
+                            kind=kind,
+                            issue="INVALID_FIELD",
+                            field=field,
+                            expected_shape=expected_shape,
+                            focused_target_value=_dynamic_goal_target_value(
+                                kind, item, public_ontology
+                            ),
+                        )
+                    )
+                    break
+        else:
+            continue
+
+    return tuple(feedback)
+
+
+def _dynamic_goal_expected_shape(
+    kind: str,
+    item: dict[str, object],
+    public_ontology: dict[str, object] | None,
+) -> dict[str, object]:
+    if kind == "FACT":
+        return {
+            "kind": "FACT",
+            "node_key": "<allowed node key>",
+            "fact_key": "<allowed fact key>",
+            "accepted_values": ["<allowed target value>"],
+        }
+    if kind == "RESOURCE_AT_LEAST":
+        return {
+            "kind": "RESOURCE_AT_LEAST",
+            "region_key": "<allowed region key>",
+            "resource_key": "<allowed resource key>",
+            "minimum": 0,
+        }
+    derived_key = item.get("derived_key")
+    public_target = _dynamic_goal_target_value(kind, item, public_ontology)
+    return {
+        "kind": "DERIVED_STATE",
+        "derived_key": (
+            derived_key
+            if isinstance(derived_key, str) and public_target is not None
+            else "<allowed derived key>"
+        ),
+        "accepted_values": [
+            public_target if public_target is not None else "<allowed target value>"
+        ],
+    }
+
+
+def _dynamic_goal_target_value(
+    kind: str,
+    item: dict[str, object],
+    public_ontology: dict[str, object] | None,
+) -> str | int | bool | None:
+    if kind != "DERIVED_STATE" or public_ontology is None:
+        return None
+    derived_key = item.get("derived_key")
+    if not isinstance(derived_key, str):
+        return None
+    world = public_ontology.get("world")
+    if not isinstance(world, dict):
+        return None
+    states = world.get("derived_states")
+    if not isinstance(states, list):
+        return None
+    for state in states:
+        if not isinstance(state, dict) or state.get("key") != derived_key:
+            continue
+        value = state.get("target_value")
+        if type(value) in {str, int, bool}:
+            return value
     return None
 
 
@@ -1329,6 +1580,10 @@ class OpenAICompatibleGenericProvider:
                 "MODEL_PROVIDER_RESPONSE_INVALID",
                 "The model provider returned an invalid Dynamic Goal interpretation",
                 validation_diagnostics=diagnostics,
+                recovery_feedback=dynamic_goal_recovery_feedback(
+                    raw,
+                    public_ontology=request.ontology,
+                ),
             ) from exc
         if self._goal_resolution_observability == "DEBUG":
             self._record_goal_response_snapshot(
@@ -1371,15 +1626,19 @@ class OpenAICompatibleGenericProvider:
             )
         elif purpose == "dynamic_goal":
             response_contract = (
+                "The outer response is "
                 '{"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
-                '"requirements":[{"kind":"FACT|RESOURCE_AT_LEAST|DERIVED_STATE",'
-                '"node_key":"known_public_node_key",'
-                '"fact_key":"known_public_fact_key",'
-                '"accepted_values":["requested_scalar_matching_fact_value_type"] ,'
-                '"region_key":"known_public_region_key",'
-                '"resource_key":"known_public_resource_key",'
-                '"minimum":0,"derived_key":"known_public_derived_state_key"}],'
-                '"clarification_prompt":null}'
+                '"requirements":[...],"clarification_prompt":null}. '
+                "Each requirements item must use exactly one of these shapes: "
+                'FACT {"kind":"FACT","node_key":"<allowed node key>",'
+                '"fact_key":"<allowed fact key>",'
+                '"accepted_values":["<allowed target value>"]}; '
+                'RESOURCE_AT_LEAST {"kind":"RESOURCE_AT_LEAST",'
+                '"region_key":"<allowed region key>",'
+                '"resource_key":"<allowed resource key>","minimum":0}; '
+                'DERIVED_STATE {"kind":"DERIVED_STATE",'
+                '"derived_key":"<allowed derived key>",'
+                '"accepted_values":["AVAILABLE"]}'
             )
         else:
             response_contract = (
@@ -1416,6 +1675,12 @@ class OpenAICompatibleGenericProvider:
                 "Use only the grounded candidate references and the explicit projection in "
                 "the focused ontology. Do not select a reference merely because it exists in "
                 "the ScenarioVersion. "
+                "For FACT, node_key, fact_key, and non-empty accepted_values are required. "
+                "For RESOURCE_AT_LEAST, region_key, resource_key, and integer minimum are "
+                "required. For DERIVED_STATE, derived_key and non-empty accepted_values are "
+                "required; choose accepted_values from the focused Derived State "
+                "target_value or allowed_values. Do not output target_value, null fields, "
+                "or fields belonging to another requirement kind. "
                 "Match every FACT accepted_values item to that Fact's declared value_type. "
                 "For BOOLEAN Facts, emit native JSON true or false, never quoted strings. "
                 "For INTEGER Facts, emit native JSON integers, never quoted numeric text. "
@@ -1434,9 +1699,11 @@ class OpenAICompatibleGenericProvider:
             if payload.get("recovery_attempt"):
                 planning_prompt += (
                     " This is the one bounded recovery attempt. Re-read the focused public "
-                    "ontology and return a legal terminal requirement when the player's "
-                    "wording supports one; do not broaden the ontology or fall back to an "
-                    "authored Objective."
+                    "ontology and the safe recovery_feedback in the user payload. Correct "
+                    "the indicated requirement shape without changing grounded references "
+                    "or broadening the ontology. For DERIVED_STATE, accepted_values is "
+                    "required and non-empty; use the focused target value, and do not emit "
+                    "target_value. Do not fall back to an authored Objective."
                 )
         elif purpose == "repair":
             planning_prompt = (
@@ -2229,6 +2496,7 @@ __all__ = [
     "DynamicGoalInterpretation",
     "DynamicGoalInterpretationRequest",
     "DynamicGoalInterpreter",
+    "DynamicGoalRecoveryFeedback",
     "GenericModelProvider",
     "GenericProviderError",
     "GoalSelection",
@@ -2249,6 +2517,7 @@ __all__ = [
     "ProviderCallMetadata",
     "ProviderTotalTimeout",
     "build_generic_provider",
+    "dynamic_goal_recovery_feedback",
     "goal_provider_request_snapshot",
     "goal_provider_response_snapshot",
     "provider_call_history_metadata",

@@ -6,12 +6,10 @@ from app.agent.provider import (
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
 )
-from app.domain.formal_goal import (
-    AdHocGoalRequirementCandidateV1,
-    FormalGoalSourceKind,
-)
+from app.domain.formal_goal import FormalGoalSourceKind
 from app.domain.scenario_v2 import ObjectiveRequirementKind
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
 
 

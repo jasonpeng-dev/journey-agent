@@ -245,64 +245,38 @@ class FormalGoalContractV1(FormalGoalModel):
             )
 
 
-class AdHocGoalRequirementCandidateV1(FormalGoalModel):
-    """Provider-facing candidate semantics for an AD_HOC_DYNAMIC Goal.
+class AdHocFactRequirementCandidateV1(FormalGoalModel):
+    """Strict provider-facing FACT candidate semantics."""
 
-    There is deliberately no ``key``, ``description``, ``knowledge_gate``, or
-    prerequisite field.  Those are backend-owned or unsupported V1 concepts.
-    A DERIVED_STATE candidate carries only the public authored state key and
-    its requested typed value; its dependency graph remains backend-owned.
-    """
+    kind: Literal["FACT"]
+    node_key: StrictStr = Field(min_length=1, max_length=160)
+    fact_key: StrictStr = Field(min_length=1, max_length=160)
+    accepted_values: tuple[FormalGoalScalar, ...] = Field(min_length=1)
 
-    kind: ObjectiveRequirementKind
-    node_key: StrictStr | None = None
-    fact_key: StrictStr | None = None
-    accepted_values: tuple[FormalGoalScalar, ...] = ()
-    region_key: StrictStr | None = None
-    resource_key: StrictStr | None = None
-    minimum: StrictInt | None = Field(default=None, ge=0)
-    derived_key: StrictStr | None = None
 
-    @model_validator(mode="after")
-    def validate_candidate_shape(self) -> AdHocGoalRequirementCandidateV1:
-        if self.kind == ObjectiveRequirementKind.FACT:
-            if self.node_key is None or self.fact_key is None or not self.accepted_values:
-                raise ValueError("Dynamic FACT candidate needs node/fact/accepted_values")
-            if (
-                self.region_key is not None
-                or self.resource_key is not None
-                or self.minimum is not None
-                or self.derived_key is not None
-            ):
-                raise ValueError("Dynamic FACT candidate cannot declare resource fields")
-        elif self.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
-            if self.region_key is None or self.resource_key is None or self.minimum is None:
-                raise ValueError(
-                    "Dynamic RESOURCE_AT_LEAST candidate needs region/resource/minimum"
-                )
-            if (
-                self.node_key is not None
-                or self.fact_key is not None
-                or self.accepted_values
-                or self.derived_key is not None
-            ):
-                raise ValueError("Dynamic RESOURCE_AT_LEAST candidate cannot declare Fact fields")
-        elif self.kind == ObjectiveRequirementKind.DERIVED_STATE:
-            if self.derived_key is None or not self.accepted_values:
-                raise ValueError(
-                    "Dynamic DERIVED_STATE candidate needs derived_key/accepted_values"
-                )
-            if (
-                self.node_key is not None
-                or self.fact_key is not None
-                or self.region_key is not None
-                or self.resource_key is not None
-                or self.minimum is not None
-            ):
-                raise ValueError("Dynamic DERIVED_STATE candidate cannot declare Base fields")
-        else:
-            raise ValueError("Unsupported Dynamic Goal requirement kind")
-        return self
+class AdHocResourceAtLeastRequirementCandidateV1(FormalGoalModel):
+    """Strict provider-facing RESOURCE_AT_LEAST candidate semantics."""
+
+    kind: Literal["RESOURCE_AT_LEAST"]
+    region_key: StrictStr = Field(min_length=1, max_length=160)
+    resource_key: StrictStr = Field(min_length=1, max_length=160)
+    minimum: StrictInt = Field(ge=0)
+
+
+class AdHocDerivedStateRequirementCandidateV1(FormalGoalModel):
+    """Strict provider-facing DERIVED_STATE candidate semantics."""
+
+    kind: Literal["DERIVED_STATE"]
+    derived_key: StrictStr = Field(min_length=1, max_length=160)
+    accepted_values: tuple[FormalGoalScalar, ...] = Field(min_length=1)
+
+
+type AdHocGoalRequirementCandidateV1 = Annotated[
+    AdHocFactRequirementCandidateV1
+    | AdHocResourceAtLeastRequirementCandidateV1
+    | AdHocDerivedStateRequirementCandidateV1,
+    Field(discriminator="kind"),
+]
 
 
 class AdHocGoalCandidateSetV1(FormalGoalModel):
@@ -473,7 +447,7 @@ def canonicalize_ad_hoc_dynamic_candidates(
     )
     normalized: list[AdHocGoalRequirementCandidateV1] = []
     for candidate in candidate_set.requirements:
-        if candidate.kind != ObjectiveRequirementKind.FACT:
+        if not isinstance(candidate, AdHocFactRequirementCandidateV1):
             normalized.append(candidate)
             continue
         fact = _fact_for_dynamic_candidate(candidate, definition)
@@ -505,7 +479,7 @@ def _candidate_to_requirement(
     candidate: AdHocGoalRequirementCandidateV1,
     definition: ScenarioDefinitionV2,
 ) -> ObjectiveRequirementV2:
-    if candidate.kind == ObjectiveRequirementKind.FACT:
+    if isinstance(candidate, AdHocFactRequirementCandidateV1):
         assert candidate.node_key is not None and candidate.fact_key is not None
         fact = _fact_for_dynamic_candidate(candidate, definition)
         accepted_values = _canonical_scalars(candidate.accepted_values)
@@ -518,7 +492,7 @@ def _candidate_to_requirement(
             description=f"{candidate.node_key}.{candidate.fact_key} has the requested value.",
         )
 
-    if candidate.kind == ObjectiveRequirementKind.DERIVED_STATE:
+    if isinstance(candidate, AdHocDerivedStateRequirementCandidateV1):
         assert candidate.derived_key is not None
         state = definition.derived_state_definitions.get(candidate.derived_key)
         if state is None:
@@ -546,6 +520,7 @@ def _candidate_to_requirement(
             description=f"{state.name} reaches the requested state.",
         )
 
+    assert isinstance(candidate, AdHocResourceAtLeastRequirementCandidateV1)
     assert candidate.region_key is not None
     assert candidate.resource_key is not None and candidate.minimum is not None
     locality = definition.metadata.locality
@@ -579,7 +554,7 @@ def _candidate_to_requirement(
 
 
 def _fact_for_dynamic_candidate(
-    candidate: AdHocGoalRequirementCandidateV1,
+    candidate: AdHocFactRequirementCandidateV1,
     definition: ScenarioDefinitionV2,
 ) -> FactDefinitionV2:
     assert candidate.node_key is not None and candidate.fact_key is not None
@@ -881,8 +856,11 @@ def _canonical_json(value: object) -> str:
 
 
 __all__ = [
+    "AdHocDerivedStateRequirementCandidateV1",
+    "AdHocFactRequirementCandidateV1",
     "AdHocGoalCandidateSetV1",
     "AdHocGoalRequirementCandidateV1",
+    "AdHocResourceAtLeastRequirementCandidateV1",
     "FormalGoalContractV1",
     "FormalGoalError",
     "FormalGoalObjectiveSourceV1",
