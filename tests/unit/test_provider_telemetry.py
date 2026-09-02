@@ -152,9 +152,7 @@ def test_dynamic_goal_payloads_use_separate_public_grounding_and_interpretation_
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
     grounding = provider.ground_dynamic_goal_entities(
         DynamicGoalEntityGroundingRequest(
             goal="repair the public road",
@@ -235,9 +233,7 @@ def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
     provider.ground_dynamic_goal_entities(
         DynamicGoalEntityGroundingRequest(
             goal="repair the public road",
@@ -279,8 +275,9 @@ def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
     assert [item["call_sequence"] for item in provider_call_history_metadata(provider)] == [1, 2]
 
 
-def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoning_profile(
-) -> None:
+def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoning_profile() -> (
+    None
+):
     captured: list[dict[str, object]] = []
 
     def complete(request: httpx.Request) -> httpx.Response:
@@ -300,11 +297,7 @@ def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoni
             content = _plan_response(request).json()["choices"][0]["message"]["content"]
         return httpx.Response(
             200,
-            json={
-                "choices": [
-                    {"message": {"content": content}, "finish_reason": "stop"}
-                ]
-            },
+            json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}]},
             request=request,
         )
 

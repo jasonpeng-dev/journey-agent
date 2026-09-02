@@ -67,42 +67,83 @@ interpreter, a model-specific provider, or a scenario-specific runtime branch.
 
 ### 3.1 Formal Goal V1
 
-The runtime has one frozen Goal authority: `FormalGoalContractV1`. Current
-product sources are `PREDEFINED` (compiled from exact authored Objectives) and
-`AD_HOC_DYNAMIC` (compiled from a provider candidate set validated against the
-current public ontology). `PARAMETERIZED` is reserved in the domain enum but
-has no V1 resolver or template implementation.
+The runtime has one frozen Goal authority: `FormalGoalContractV1`. Product
+sources are `PREDEFINED` (the compatibility path for catalog-disabled and old
+immutable Versions) and `AD_HOC_DYNAMIC` (the current World Goal State path,
+compiled from catalog semantics or a provider candidate set validated against
+the current public ontology). `PARAMETERIZED` is reserved in the domain enum
+but has no V1 resolver or template implementation.
 
 The contract contains a flat, canonically ordered tuple of typed completion
 requirements. The tuple is an implicit `AND`; V1 has no Goal AST, `OR`, generic
 `NOT`, dynamic selector, quantifier, Actor Goal, WorkingGoal, or Milestone
 entity. The supported requirement kinds are the shared `FACT` and
-`RESOURCE_AT_LEAST` contracts already used by authored Objectives. The backend
+`RESOURCE_AT_LEAST` contracts, plus an authored `DERIVED_STATE` capability
+target. Derived State dependencies remain Scenario-authored semantics; they
+are evaluated by the backend rather than supplied by a provider. The backend
 assigns stable requirement identity and computes the contract hash; a provider
 cannot supply either identity or completion semantics.
 
-Before the contract is frozen, the exact-Version resolver checks only an
-explicit authored Objective key, canonical name, alias, or example. A unique
-match is `PREDEFINED`; unmatched text is never sent to a nearest-Objective
-fallback. The Dynamic path first performs deterministic public entity or
-unique public-topology grounding. If that cannot uniquely identify a public
-entity, bounded Entity Grounding may return only validated public candidate
-keys, clarification, or unsupported. The backend then builds a focused public
+Before the contract is frozen, a Version with
+`goal_resolution.world_goal_state_catalog=true` matches only its public World
+Goal State catalog. Exact Fact/Derived metadata can resolve deterministically;
+other text enters the Dynamic path. A catalog-disabled or older immutable
+Version may use an explicit authored Objective key, canonical name, alias, or
+example as `PREDEFINED`. No path falls back to a nearest Objective. The
+Dynamic path first performs deterministic public entity or unique
+public-topology grounding. If that cannot uniquely identify a public entity,
+bounded Entity Grounding may return only validated public candidate keys,
+clarification, or unsupported. The backend then builds a focused public
 ontology for Goal Interpretation and validates the resulting typed candidate
 against the exact Version.
 
 The AD_HOC_DYNAMIC interpreter receives only that focused public Scenario
-ontology and currently public entity/fact/Region identities. It cannot see
-hidden Truth, authored Objective metadata, Actions, prerequisites, knowledge
-gates, or hidden completion requirements. It can therefore express only public
-`FACT` and `RESOURCE_AT_LEAST` requirements. Dynamic compilation does not create
-a Scenario ObjectiveDefinition or modify the immutable ScenarioVersion.
+ontology and currently public entity, Fact, Region, Resource, and
+goal-addressable Derived State identities. It cannot see hidden Truth, authored
+Objective metadata, Actions, prerequisites, knowledge gates, hidden Derived
+State dependencies, or hidden completion requirements. It can therefore
+express only public `FACT`, `RESOURCE_AT_LEAST`, and `DERIVED_STATE`
+requirements; a Derived State candidate carries only its public state key and
+typed target value. Dynamic compilation does not create a Scenario
+ObjectiveDefinition or modify the immutable ScenarioVersion.
 
 The canonical contract is embedded in AgentTask with its schema version, source
 kind, exact ScenarioVersion proof, compiler version, canonical JSON, and hash.
 PlanningCycle stores the contract hash alongside its canonical PlannerInput.
 Legacy predefined Tasks are read through a deterministic compile-on-read
 compatibility path; no lazy write-back is required.
+
+### 3.2 World Goal State vocabulary
+
+The typed World Goal State vocabulary is deliberately small:
+
+* `FACT` addresses one authoritative Fact on one entity;
+* `RESOURCE_AT_LEAST` addresses a typed quantity threshold in one Region; and
+* `DERIVED_STATE` addresses an authored computed capability whose independent
+  semantic identity is worth exposing as a World Goal.
+
+`DERIVED_STATE` is not a default wrapper around a single Fact. A single real
+world condition remains a `FACT`; a capability with multiple authored
+dependencies may be a `DERIVED_STATE`. The canonical Linjiang authoring has
+five goal-addressable Derived States:
+
+    Task1 -> FACT: central_telecom_hub.operational == true
+    Task2 -> DERIVED_STATE: north_basic_engineering_support
+    Task3 -> DERIVED_STATE: east_emergency_power_network
+    Task4 -> DERIVED_STATE: east_emergency_water_supply
+    Task5 -> DERIVED_STATE: citywide_sustained_emergency_support
+    Task6 -> DERIVED_STATE: southeast_sustained_emergency_generation
+
+`FactDefinitionV2.goal_addressable` is false by default and is independent of
+Fact Truth and current Knowledge. Public `goal_aliases`, `goal_examples`, and
+typed `goal_target_values` describe addressable semantic metadata only. Thus a
+Known entity plus an addressable Fact schema can be a valid Goal while its
+current value remains UNKNOWN; internal/control/discovery Facts remain outside
+the catalog.
+
+Derived values are computed on read from the immutable ScenarioVersion and
+current Runtime Truth or public Knowledge. They are not runtime rows, do not
+add a runtime revision, and cannot be directly set by an Action or Rule.
 
 ### 3.3 Provider profiles
 
@@ -124,11 +165,12 @@ resolution.
 
 The request path is:
 
-    Goal
-      -> authored Objective deterministic routing
-      -> Dynamic public Entity Grounding when unmatched
+    Goal text
+      -> World Goal State catalog deterministic routing (current canonical)
+      -> legacy authored Objective routing (catalog-disabled/old Version)
+      -> Dynamic public Entity Grounding when needed
       -> focused public ontology
-      -> Dynamic Goal Interpretation when unmatched
+      -> Dynamic Goal Interpretation when needed
       -> deterministic exact-Version candidate validation
       -> frozen FormalGoalContractV1
       -> Dependency Closure
@@ -143,11 +185,20 @@ The request path is:
       -> Player pacing / acknowledgement
       -> REPLAN or objective completion
 
-The Dynamic path is conditional: an explicit authored Objective match stops at
-the `PREDEFINED` source; only an unmatched Goal enters public grounding and
-interpretation. Grounding answers which public entity the player named.
-Interpretation answers which supported terminal Goal state is requested.
-Neither stage plans Actions.
+The Dynamic path is conditional: an exact public catalog match can resolve a
+typed `AD_HOC_DYNAMIC` requirement without a provider; otherwise the text
+enters public grounding and interpretation. Only catalog-disabled/legacy
+authored Objective matching stops at the `PREDEFINED` source. Grounding answers
+which public entity the player named. Interpretation answers which supported
+terminal Goal state is requested. Neither stage plans Actions.
+
+For the current Linjiang catalog, all six player-facing preset texts use the
+public World Goal State path. Task1 resolves to an `AD_HOC_DYNAMIC` Fact
+requirement for `central_telecom_hub.operational == true`; Task2-Task6 resolve
+to their `AD_HOC_DYNAMIC` Derived requirements. The six authored Objective rows
+remain as compatibility/authoring data and do not control current canonical
+player routing. Legacy ScenarioVersions without that catalog continue to use
+their immutable authored Objective contracts.
 
 The application composes the configured provider once and injects it into
 the generic resolver and Agent service. API routes and React components are
@@ -172,6 +223,20 @@ Hidden Truth is never serialized into PlannerInput. UNKNOWN is not false,
 zero, unavailable, or blocked. Runtime may reveal new public Knowledge through
 survey, inspect, public Action effects, or an explicit deterministic failure.
 Inference alone does not reveal hidden state.
+
+Derived State is computed, not directly mutated: the evaluator derives an
+authoritative value from the full Runtime Truth and a separate player/Agent
+value from the shared public Knowledge projection. No Derived State row or
+provider assertion becomes a new source of Truth. A public Derived State may
+therefore remain Knowledge `UNKNOWN` while its authored schema is a legal Goal
+target.
+
+In Task6, `generate_power` remains the gameplay discovery Action. Its explicit
+reveal changes public Knowledge for the gated sustained-generation dependencies,
+which then changes Closure and Planner projection and triggers REPLAN. It does
+not change the frozen Goal contract or ObjectiveScope. Checkpoint and Fork copy
+the Base Runtime state and Knowledge; Derived values are recomputed in each
+instance.
 
 Player projections expose known Nodes/Facts/Relations/Resources, accepted
 formal Plan History, safe action results, and pacing state. Developer

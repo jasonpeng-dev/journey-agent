@@ -11,8 +11,9 @@ scenario-specific control flow.
 The current end-to-end lifecycle is:
 
     Natural-language Goal
-      -> exact authored Objective routing
-      -> deterministic public Entity Grounding when unmatched
+      -> World Goal State catalog routing (current canonical)
+      -> legacy authored Objective routing for catalog-disabled/old Versions
+      -> deterministic public Entity Grounding when needed
       -> bounded semantic Entity Grounding when deterministic grounding is not unique
       -> focused public ontology
       -> Dynamic Goal Interpretation
@@ -33,9 +34,11 @@ The current end-to-end lifecycle is:
       -> REPLAN when required
       -> objective verification
 
-An explicit authored Objective key, canonical name, alias, or example takes
-the `PREDEFINED` path and does not enter Dynamic interpretation. An unmatched
-Goal never falls back to selecting the nearest authored Objective.
+In a catalog-enabled Version, exact public World Goal State metadata resolves
+to a typed `AD_HOC_DYNAMIC` requirement. In catalog-disabled or older
+immutable Versions, an explicit authored Objective key, canonical name, alias,
+or example takes the `PREDEFINED` path. An unmatched Goal never falls back to
+selecting the nearest authored Objective.
 
 The runtime is generic because the same source code interprets every
 published ScenarioVersion through the declarative ScenarioDefinitionV2 and
@@ -114,6 +117,14 @@ focused public ontology, and only then calls Dynamic Goal Interpretation.
 Grounding answers which public entity the player named; interpretation answers
 which supported terminal Goal state is requested. Neither stage plans Actions.
 
+In the current Linjiang Version, all six player-facing preset texts use the
+public World Goal State catalog. Task1 resolves to an `AD_HOC_DYNAMIC` Fact
+requirement for `central_telecom_hub.operational == true`; Task2-Task6 resolve
+through the public Derived catalog. The six authored Objective rows remain
+compatibility/authoring data and do not control current canonical routing.
+Older immutable ScenarioVersions without that catalog retain their original
+authored Objective routing and contracts.
+
 An accepted goal creates an AgentTask with:
 
 * the exact ScenarioVersion reference;
@@ -139,11 +150,15 @@ projected deterministic effects, not by a free-form model assertion.
 
 ### 3.1 Objective requirement kinds and gated publication
 
-The current objective evaluator supports both `FACT` and
-`RESOURCE_AT_LEAST` completion requirements. A `RESOURCE_AT_LEAST`
-requirement names a Resource, a Region, and a minimum quantity. Truth
-evaluation aggregates the actual free quantity in matching Runtime Resource
-Pools that are `AVAILABLE`; reserved quantity is excluded.
+The current objective evaluator supports `FACT`, `RESOURCE_AT_LEAST`, and
+`DERIVED_STATE` completion requirements. A `RESOURCE_AT_LEAST` requirement
+names a Resource, a Region, and a minimum quantity. A `DERIVED_STATE`
+requirement names a public authored capability and its typed target value.
+Derived State definitions may depend on Facts, resource thresholds, and other
+Derived States; the evaluator computes them as a validated dependency graph
+and never accepts a direct provider mutation. Truth evaluation aggregates the
+actual free quantity in matching Runtime Resource Pools that are `AVAILABLE`;
+reserved quantity is excluded.
 
 Public planning and player projections apply a stricter Knowledge boundary.
 They aggregate only currently Known Resource Knowledge. A hidden Pool,
@@ -159,33 +174,58 @@ This reveal does not broaden ObjectiveScope, create a later Objective, or
 delegate completion to the Provider. The deterministic evaluator remains the
 completion authority.
 
+The canonical Linjiang Scenario uses five goal-addressable Derived States.
+Task1 is intentionally not one of them: its public catalog metadata resolves
+to an `AD_HOC_DYNAMIC` typed Fact requirement for
+`central_telecom_hub.operational == true`. Task2-Task6 use the deterministic
+Derived Goal catalog and compile to their corresponding `DERIVED_STATE`
+requirements. The six authored Objective rows remain compatibility/authoring
+data for this Version and do not control current player routing. A Derived
+State is a computed capability with independent semantic identity, not a
+mandatory wrapper around one Fact.
+
+Derived State is compute-on-read. The Truth evaluator reads complete
+authoritative Runtime state; the Knowledge evaluator reads only the public
+projection. No Action or Rule directly sets a Derived State, no Derived row is
+persisted, and recomputation does not create a runtime revision. Checkpoint and
+Fork therefore materialize Base Runtime/Knowledge state and recompute Derived
+values from the exact ScenarioVersion.
+
 ### 3.2 Dynamic Goal boundary
 
 `AD_HOC_DYNAMIC` compilation reuses the same typed requirement and evaluator
 path. The interpreter receives a focused public ontology made from currently
-public entity identities, goal-addressable Fact schemas, public Regions, and
-public Resource types. It may return only `FACT` and `RESOURCE_AT_LEAST`
-candidate semantics, with implicit `AND`; the backend validates every key,
-value domain, Region, and Resource against the exact Version and assigns the
+public entity identities, goal-addressable Fact schemas, public Regions,
+public Resource types, and public goal-addressable Derived State schemas. It
+may return `FACT`, `RESOURCE_AT_LEAST`, or `DERIVED_STATE` candidate
+semantics, with implicit `AND`; the backend validates every key, typed value,
+Region, Resource, and Derived State against the exact Version and assigns the
 canonical identity. Dynamic candidates cannot carry authored Objective keys,
-descriptions, prerequisites, `knowledge_gate` fields, or hidden completion
-semantics. A goal-addressable Fact schema may be exposed even when its current
-Fact value is Knowledge `UNKNOWN`; its Truth value is not included in the
+descriptions, prerequisites, `knowledge_gate` fields, Derived State
+dependencies, or hidden completion semantics. A goal-addressable Fact or
+Derived State schema may be exposed even when its current value is Knowledge
+`UNKNOWN`; its Truth value and dependency details are not included in the
 interpreter payload.
 
 The interpreter payload is a public ontology projection. It excludes current
 Truth values, hidden Facts, Actions, authored Objective definitions, planning
-catalogs, and hidden requirement metadata. A broad or ambiguous Goal must be
-clarified or rejected; the interpreter cannot silently supplement it with
-Scenario-authored hidden obligations. Hidden completion requirements remain an
-authored `PREDEFINED` capability, or require a future deterministic template
-source outside the current V1.
+catalogs, hidden requirement metadata, and non-public Derived State
+dependencies. A broad or ambiguous Goal must be clarified or rejected; the
+interpreter cannot silently supplement it with Scenario-authored hidden
+obligations. Hidden completion requirements remain an authored `PREDEFINED`
+capability, or require a future deterministic template source outside the
+current V1.
 
 Dynamic provider-format or transient failures use bounded retry, reusing the
 validated grounding and focused ontology for interpretation retries.
 `NEEDS_CLARIFICATION` is not retried until a random resolution is obtained.
 Provider/internal error codes are developer diagnostics, not Player wording;
 Goal submission feedback is rendered in the Goal input area.
+
+Task6's `generate_power` Action remains the only staged discovery transition:
+its successful public Knowledge reveal exposes the gated River Port, South Fuel
+Terminal, and emergency-fuel dependencies to Closure and Planner, followed by
+REPLAN. The reveal does not edit the frozen Goal or expand ObjectiveScope.
 
 ### 3.3 Provider profiles
 
@@ -727,6 +767,7 @@ implementation features.
 | Plan validation and repair loop | app/agent/generic.py |
 | Declarative Action/Rule execution | app/services/generic_game.py |
 | Shared public Knowledge projection | app/services/knowledge_projection.py |
+| Derived State evaluator | app/services/derived_state.py |
 | Formal PLAY orchestration | app/services/play.py |
 | Player-safe response projection | app/services/player_projection.py |
 | Player pacing checkpoint | app/services/player_pacing.py |

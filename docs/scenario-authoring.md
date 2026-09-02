@@ -64,6 +64,13 @@ schema can be included in Dynamic Goal ontology without revealing that value.
 Internal, control, and discovery Facts such as requirement-discovery markers
 should keep `goal_addressable=false`.
 
+For a goal-addressable Fact, `goal_aliases`, `goal_examples`, and optional
+`goal_target_values` are public semantic metadata. They describe how a player
+may name the schema and which lossless typed target values may be matched;
+they never publish the Fact's current value. The current Linjiang
+`central_telecom_hub.operational` Fact uses this boundary for its public
+"restore communications" Goal text while its initial Truth remains hidden.
+
 `initialization.region_resource_knowledge` is the authority for initial Region inventory
 visibility and survey completion. Neither choosing a starting Region nor placing an Actor there
 automatically makes that Region's Resource inventory Known.
@@ -108,7 +115,8 @@ does not prove that every unavailable Pool has a reachable unlock producer.
 Current objective completion requirements support:
 
 - `FACT`: `node_key`, `fact_key`, and non-empty `accepted_values`;
-- `RESOURCE_AT_LEAST`: `region_key`, `resource_key`, and non-negative `minimum`.
+- `RESOURCE_AT_LEAST`: `region_key`, `resource_key`, and non-negative `minimum`;
+- `DERIVED_STATE`: a public authored `derived_key` and typed `accepted_values`.
 
 A requirement can also declare `knowledge_gate` with `node_key`, `fact_key`, and
 `accepted_values`. The requirement formally belongs to the Objective before it becomes public.
@@ -120,18 +128,93 @@ All cross-entity references use stable machine keys. Display and localized names
 not identity; editing a display name must not change Rule, Objective, Relation, Pool, or Knowledge
 references.
 
+### Derived World State / capability
+
+`derived_states` contains authored `DerivedStateDefinitionV2` capability
+schemas. Each definition has a typed available/unavailable value and a
+validated dependency list whose entries may reference Facts, resource
+thresholds, or another Derived State. The evaluator computes the capability
+from the current Runtime Truth and separately from public Knowledge; Actions
+may change the underlying dependencies but never directly set a Derived State.
+The dependency graph is Scenario semantics, not a Goal AST or provider-authored
+formula.
+
+`DerivedStateDefinitionV2.goal_addressable` is `false` by default. Only a
+public, goal-addressable Derived State schema is included in the Dynamic Goal
+catalog. Its public identity and type may be exposed while its current value,
+Truth, and dependency details remain hidden. A `DERIVED_STATE` Objective
+requirement points to the authored capability and is evaluated through the
+same deterministic completion path.
+
+### Marker rule
+
+Do not add a confirmation Action that merely observes satisfied conditions and
+sets a summary marker Fact for Objective completion. If the final state is a
+deterministic summary of real world conditions, author a Derived State. If an
+existing Fact or Resource predicate already expresses the single obligation,
+use that primitive directly instead of adding a Derived wrapper.
+
+The World Goal State vocabulary is intentionally explicit:
+
+- `FACT` is one real authored Fact condition;
+- `RESOURCE_AT_LEAST` is one typed Region/resource threshold; and
+- `DERIVED_STATE` is a computed capability with multiple meaningful
+  dependencies and its own stable semantic identity.
+
+Do not wrap a single real Fact in a Derived State merely to give an Objective a
+marker. The current canonical Linjiang authoring is:
+
+| Objective | Completion form |
+| --- | --- |
+| Task1 `restore_central_communication_capability` | `FACT`: `central_telecom_hub.operational == true` |
+| Task2 `restore_north_basic_engineering_support` | `DERIVED_STATE`: `north_basic_engineering_support` |
+| Task3 `restore_east_emergency_power_network` | `DERIVED_STATE`: `east_emergency_power_network` |
+| Task4 `restore_east_emergency_water_supply` | `DERIVED_STATE`: `east_emergency_water_supply` |
+| Task5 `establish_citywide_sustained_emergency_support` | `DERIVED_STATE`: `citywide_sustained_emergency_support` |
+| Task6 `establish_sustained_emergency_generation` | `DERIVED_STATE`: `southeast_sustained_emergency_generation` |
+
+Thus the current Version has five goal-addressable Derived States. Derived
+values are computed on read from the immutable ScenarioVersion and Runtime
+Truth or public Knowledge. They are not persisted runtime rows, do not create
+an extra `runtime_revision`, and cannot be directly written by an Action or
+Rule. Checkpoint/Fork copies Base Runtime and Knowledge state, then recomputes
+Derived values in the target.
+
+Task5's `citywide_sustained_emergency_support` is an implicit-AND capability
+over the real base contracts: `rail_freight_yard.rail_freight_capability`,
+`emergency_supply_warehouse.operational`, `vehicle_depot.emergency_delivery_support`,
+`city_distribution_center.operational`, six transport `passable` Facts, and
+three typed `RESOURCE_AT_LEAST` requirements for 30 emergency-relief supplies
+in Central, East, and Southeast. The rail-freight and emergency-delivery
+Facts remain Base Facts because Actions consume them as independent downstream
+preconditions, even though the current repair Action sets each alongside its
+facility's `operational` Fact. No final activate/establish marker Action is
+used, and resource inventory is not converted into a persistent marker Fact.
+
+Task6 keeps `generate_power` as the real discovery Action. Its successful
+reveal of `sustained_requirements_discovered` exposes the gated sustained
+generation dependencies to public planning and causes REPLAN. The frozen Goal
+contract is unchanged; Knowledge gates control exposure, not Truth
+satisfaction. `commission_sustained_generation` is not part of the current
+canonical Scenario.
+
 ## Formal Goals and Dynamic Goals
 
-An authored `ObjectiveDefinitionV2` is a `PREDEFINED` Goal source. Its typed
+An authored `ObjectiveDefinitionV2` remains a `PREDEFINED` compatibility
+source when the exact Version uses the legacy Objective route. Its typed
 completion requirements, authored prerequisites, aliases, and planning
 metadata are compiled deterministically into the frozen
 `FormalGoalContractV1` when a Task is created. The contract is bound to the
 exact immutable ScenarioVersion; later Draft edits or publication do not alter
-an existing Task.
+an existing Task. A Version may set
+`goal_resolution.world_goal_state_catalog=true`; in that mode its authored
+Objective rows can remain for compatibility and preset text, but do not
+shortcut current player Goal routing.
 
 The current runtime also accepts an `AD_HOC_DYNAMIC` Goal. The Dynamic Goal
 interpreter receives a Knowledge-safe public ontology and may return one or
-more `FACT` or `RESOURCE_AT_LEAST` candidates with implicit `AND` semantics.
+more `FACT`, `RESOURCE_AT_LEAST`, or public `DERIVED_STATE` candidates with
+implicit `AND` semantics.
 The backend validates those candidates against the exact ScenarioVersion,
 assigns their stable semantic identities, and compiles the same typed contract
 used by predefined Objectives. A dynamic submission does not create an
@@ -141,18 +224,19 @@ objective key.
 The Dynamic ontology is built from currently public entity identities plus
 goal-addressable Fact schemas (and public Resource/Region semantic metadata),
 not only from rows whose current Fact value is Known. It includes names,
-descriptions, types, and allowed public domains, but not current Truth values,
-hidden Fact values, hidden resource source/quantity, or internal discovery
-metadata. `KNOWN public entity + goal_addressable Fact schema + UNKNOWN current
-value` is therefore a valid Goal boundary.
+descriptions, types, aliases/examples, and allowed public domains, but not
+current Truth values, hidden Fact values, hidden resource source/quantity, or
+internal discovery metadata. `KNOWN public entity + goal_addressable Fact
+schema + UNKNOWN current value` is therefore a valid Goal boundary.
 
 Dynamic interpretation cannot see hidden Truth, hidden Facts, authored
-Objective definitions, Actions, prerequisites, knowledge gates, or hidden
-completion semantics. It cannot invent ontology or attach a requirement
-`knowledge_gate`. If a player Goal needs authored hidden semantics, it must
-resolve to a predefined source or a future deterministic template source; it
-cannot be supplied by the interpreter itself. V1 has no parameterized template
-source, Goal AST, `OR`, generic `NOT`, Actor Goal, Milestone, or WorkingGoal.
+Objective definitions, Actions, prerequisites, knowledge gates, hidden
+completion semantics, or non-public Derived State dependencies. It cannot
+invent ontology or attach a requirement `knowledge_gate`. If a player Goal
+needs authored hidden semantics, it must resolve to a predefined source or a
+future deterministic template source; it cannot be supplied by the interpreter
+itself. V1 has no parameterized template source, Goal AST, `OR`, generic
+`NOT`, Actor Goal, Milestone, or WorkingGoal.
 
 `FormalGoalContractV1` is a Task/runtime contract, not a replacement for
 Scenario authoring. Its flat requirement tuple is an implicit conjunction and

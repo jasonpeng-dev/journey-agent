@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from typing import cast
 from uuid import UUID
 
@@ -43,8 +44,10 @@ from app.domain.scenario_v2 import (
     ActionLocality,
     ActionTargetKind,
     ObjectiveDefinitionV2,
+    ObjectiveRequirementKind,
     ObjectiveRequirementV2,
     ScenarioDefinitionV2,
+    knowledge_gate_is_revealed,
 )
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
@@ -57,6 +60,7 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     WorldOperation,
 )
+from app.services.derived_state import evaluate_derived_states
 from app.services.knowledge_projection import SharedKnowledgeProjection
 
 
@@ -527,6 +531,12 @@ class PlanningContextBuilder:
         knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
         planner_action_requirements = knowledge_projection.planner_action_requirements()
         known_pool_keys = {item.pool_key for item in knowledge_projection.visible_resource_pools()}
+        known_derived = _public_derived_knowledge(
+            definition,
+            evaluate_derived_states(self.db, self.scope, definition).knowledge_values
+            if definition.derived_states
+            else {},
+        )
         relevant_action_keys = self._retrieve_action_keys(
             definition,
             objectives,
@@ -569,9 +579,11 @@ class PlanningContextBuilder:
                 known_refs,
                 known_world,
                 formal_goal=formal_goal,
+                known_derived=known_derived,
             ),
             current_knowledge={
                 **known_world,
+                "derived_states": known_derived,
                 "known_action_requirements": list(planner_action_requirements),
                 "observations": self._observations(task),
             },
@@ -670,7 +682,11 @@ class PlanningContextBuilder:
         references; it never ranks or removes a hard-valid alternative.
         """
 
-        objective_refs = _objective_refs(objectives)
+        objective_refs = _objective_refs(
+            objectives,
+            definition=definition,
+            known_facts=known_facts,
+        )
         selected: set[str] = set()
         frontier = set(objective_refs)
         known_nodes = {
@@ -754,13 +770,15 @@ class PlanningContextBuilder:
         known_world: dict[str, object],
         *,
         formal_goal: FormalGoalContractV1 | None = None,
+        known_derived: dict[str, object] | None = None,
     ) -> dict[str, object]:
         known_facts = _known_world_facts(known_world)
+        derived_values = known_derived or {}
         completion = [
-            item.model_dump(mode="json")
+            _planning_goal_requirement_payload(item, derived_values)
             for objective in objectives
             for item in objective.completion_requirements
-            if _requirement_is_public(item, known_refs, known_facts)
+            if _requirement_is_public(item, known_refs, known_facts, definition)
         ]
         prerequisites = [
             {
@@ -770,13 +788,14 @@ class PlanningContextBuilder:
                 "requirements": [
                     item.model_dump(mode="json")
                     for item in group.requirements
-                    if _requirement_is_public(item, known_refs, known_facts)
+                    if _requirement_is_public(item, known_refs, known_facts, definition)
                 ],
             }
             for objective in objectives
             for group in objective.prerequisites
             if any(
-                _requirement_is_public(item, known_refs, known_facts) for item in group.requirements
+                _requirement_is_public(item, known_refs, known_facts, definition)
+                for item in group.requirements
             )
         ]
         result: dict[str, object] = {
@@ -806,10 +825,10 @@ class PlanningContextBuilder:
                 "requirements": [
                     {
                         "identity": item.identity,
-                        **item.requirement.model_dump(mode="json"),
+                        **_planning_goal_requirement_payload(item.requirement, derived_values),
                     }
                     for item in formal_goal.completion_requirements
-                    if _requirement_is_public(item.requirement, known_refs, known_facts)
+                    if _requirement_is_public(item.requirement, known_refs, known_facts, definition)
                 ],
             }
         return result
@@ -825,7 +844,12 @@ class PlanningContextBuilder:
         known_pool_keys: set[str],
         known_preconditions_by_action: dict[str, tuple[dict[str, object], ...]],
     ) -> list[dict[str, object]]:
-        objective_refs = _objective_refs(objectives)
+        known_facts = _known_world_facts(known_world)
+        objective_refs = _objective_refs(
+            objectives,
+            definition=definition,
+            known_facts=known_facts,
+        )
         objective_nodes = {node_key for node_key, _fact_key in objective_refs}
         raw_nodes = known_world.get("nodes", [])
         node_rows = cast(list[dict[str, object]], raw_nodes) if isinstance(raw_nodes, list) else []
@@ -843,14 +867,6 @@ class PlanningContextBuilder:
             for item in relation_rows
             if isinstance(item, dict) and isinstance(item.get("relation_key"), str)
         }
-        raw_facts = known_world.get("facts", {})
-        known_facts: dict[tuple[str, str], object] = {}
-        if isinstance(raw_facts, dict):
-            for identity, value in raw_facts.items():
-                if not isinstance(identity, str) or "." not in identity:
-                    continue
-                node_key, fact_key = identity.split(".", 1)
-                known_facts[(node_key, fact_key)] = value
         result: list[dict[str, object]] = []
         for action in sorted(definition.actions, key=lambda item: item.key):
             if action.key not in action_keys:
@@ -1264,7 +1280,20 @@ class PlanningActionCatalogBuilder:
             )
         )
         known_fact_refs = self.known_fact_refs()
-        objective_refs = _objective_refs(objectives)
+        known_facts = {
+            (item.node_key, item.fact_key): item.truth_value
+            for item in self.db.scalars(
+                select(GameInstanceFactState).where(
+                    GameInstanceFactState.game_instance_id == self.scope.game_instance_id,
+                    GameInstanceFactState.visibility == Visibility.KNOWN,
+                )
+            )
+        }
+        objective_refs = _objective_refs(
+            objectives,
+            definition=definition,
+            known_facts=known_facts,
+        )
         successful_bindings = {
             (item.action_key, item.target_key)
             for item in self.db.scalars(
@@ -1276,7 +1305,13 @@ class PlanningActionCatalogBuilder:
             )
             if isinstance(item.outcome, dict) and item.outcome.get("failure") is None
         }
-        needed_refs = _unsatisfied_objective_refs(self.db, self.scope, objectives)
+        needed_refs = _unsatisfied_objective_refs(
+            self.db,
+            self.scope,
+            objectives,
+            definition,
+            known_facts=known_facts,
+        )
         public_prerequisites = _public_prerequisites(objectives)
         candidates: list[PlanningActionCandidate] = []
         canonical_contracts = (
@@ -1617,6 +1652,7 @@ def objective_context(
     *,
     known_fact_refs: set[tuple[str, str]],
     known_facts: dict[tuple[str, str], object] | None = None,
+    definition: ScenarioDefinitionV2 | None = None,
 ) -> tuple[dict[str, object], ...]:
     facts = known_facts or {}
     return tuple(
@@ -1632,7 +1668,7 @@ def objective_context(
             "completion_requirements": [
                 item.model_dump(mode="json")
                 for item in objective.completion_requirements
-                if _requirement_is_public(item, known_fact_refs, facts)
+                if _requirement_is_public(item, known_fact_refs, facts, definition)
             ],
             "prerequisites": [
                 {
@@ -1640,12 +1676,12 @@ def objective_context(
                     "requirements": [
                         requirement.model_dump(mode="json")
                         for requirement in item.requirements
-                        if _requirement_is_public(requirement, known_fact_refs, facts)
+                        if _requirement_is_public(requirement, known_fact_refs, facts, definition)
                     ],
                 }
                 for item in objective.prerequisites
                 if any(
-                    _requirement_is_public(requirement, known_fact_refs, facts)
+                    _requirement_is_public(requirement, known_fact_refs, facts, definition)
                     for requirement in item.requirements
                 )
             ],
@@ -1656,10 +1692,38 @@ def objective_context(
 
 def _objective_refs(
     objectives: tuple[ObjectiveDefinitionV2, ...],
+    *,
+    definition: ScenarioDefinitionV2 | None = None,
+    known_facts: Mapping[tuple[str, str], object] | None = None,
 ) -> set[tuple[str, str]]:
-    return {
-        item.fact_ref
-        for objective in objectives
+    result: set[tuple[str, str]] = set()
+    visited_derived: set[str] = set()
+    public_known_facts = known_facts or {}
+
+    def add_derived_dependencies(derived_key: str) -> None:
+        if definition is None or derived_key in visited_derived:
+            return
+        state = definition.derived_state_definitions.get(derived_key)
+        if state is None:
+            return
+        visited_derived.add(derived_key)
+        for dependency in state.dependencies:
+            gate = dependency.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                public_known_facts.get((gate.node_key, gate.fact_key))
+                if gate is not None
+                else None,
+            ):
+                continue
+            if dependency.kind.value == "FACT":
+                assert dependency.node_key is not None and dependency.fact_key is not None
+                result.add((dependency.node_key, dependency.fact_key))
+            elif dependency.kind.value == "DERIVED_STATE":
+                assert dependency.derived_key is not None
+                add_derived_dependencies(dependency.derived_key)
+
+    for objective in objectives:
         for item in (
             *objective.completion_requirements,
             *(
@@ -1667,23 +1731,76 @@ def _objective_refs(
                 for group in objective.prerequisites
                 for requirement in group.requirements
             ),
-        )
-        if item.fact_ref is not None
+        ):
+            gate = item.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                public_known_facts.get((gate.node_key, gate.fact_key))
+                if gate is not None
+                else None,
+            ):
+                continue
+            if item.fact_ref is not None:
+                result.add(item.fact_ref)
+            if item.derived_ref is not None:
+                add_derived_dependencies(item.derived_ref)
+    return result
+
+
+def _public_derived_knowledge(
+    definition: ScenarioDefinitionV2,
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        key: values.get(key)
+        for key, state in definition.derived_state_definitions.items()
+        if state.goal_addressable
     }
+
+
+def _planning_goal_requirement_payload(
+    requirement: ObjectiveRequirementV2,
+    known_derived: dict[str, object],
+) -> dict[str, object]:
+    payload = requirement.model_dump(mode="json")
+    if requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+        assert requirement.derived_key is not None
+        current = known_derived.get(requirement.derived_key)
+        payload["current_known_value"] = current
+        payload["knowledge_status"] = "UNKNOWN" if current is None else "KNOWN"
+    return payload
 
 
 def _requirement_is_public(
     requirement: ObjectiveRequirementV2,
     known_fact_refs: set[tuple[str, str]],
     known_facts: dict[tuple[str, str], object],
+    definition: ScenarioDefinitionV2 | None = None,
 ) -> bool:
     gate = requirement.knowledge_gate
-    if (
-        gate is not None
-        and known_facts.get((gate.node_key, gate.fact_key)) not in gate.accepted_values
+    if not knowledge_gate_is_revealed(
+        gate,
+        known_facts.get((gate.node_key, gate.fact_key)) if gate is not None else None,
     ):
         return False
-    return requirement.fact_ref is None or requirement.fact_ref in known_fact_refs
+    if requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+        return True
+    if requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+        return bool(
+            definition is not None
+            and requirement.derived_key is not None
+            and (state := definition.derived_state_definitions.get(requirement.derived_key))
+            is not None
+            and state.goal_addressable
+        )
+    assert requirement.fact_ref is not None
+    if requirement.fact_ref in known_fact_refs:
+        return True
+    if definition is None:
+        return False
+    node = definition.world.node(requirement.fact_ref[0])
+    fact = node.fact(requirement.fact_ref[1]) if node is not None else None
+    return bool(fact is not None and fact.goal_addressable)
 
 
 def _action_planning_is_public(
@@ -1693,7 +1810,10 @@ def _action_planning_is_public(
     """Keep gated Action relevance out of Planner projections until discovered."""
 
     gate = action.planning.knowledge_gate
-    return gate is None or known_facts.get((gate.node_key, gate.fact_key)) in gate.accepted_values
+    return knowledge_gate_is_revealed(
+        gate,
+        known_facts.get((gate.node_key, gate.fact_key)) if gate is not None else None,
+    )
 
 
 def _known_world_facts(known_world: dict[str, object]) -> dict[tuple[str, str], object]:
@@ -1713,14 +1833,62 @@ def _unsatisfied_objective_refs(
     db: Session,
     scope: RuntimeScope,
     objectives: tuple[ObjectiveDefinitionV2, ...],
+    definition: ScenarioDefinitionV2 | None = None,
+    *,
+    known_facts: Mapping[tuple[str, str], object] | None = None,
 ) -> set[tuple[str, str]]:
     needed: set[tuple[str, str]] = set()
+    visited_derived: set[str] = set()
+    public_known_facts = known_facts or {
+        (item.node_key, item.fact_key): item.truth_value
+        for item in db.scalars(
+            select(GameInstanceFactState).where(
+                GameInstanceFactState.game_instance_id == scope.game_instance_id,
+                GameInstanceFactState.visibility == Visibility.KNOWN,
+            )
+        )
+    }
+
+    def add_derived_dependencies(derived_key: str) -> None:
+        if definition is None or derived_key in visited_derived:
+            return
+        state = definition.derived_state_definitions.get(derived_key)
+        if state is None:
+            return
+        visited_derived.add(derived_key)
+        for dependency in state.dependencies:
+            gate = dependency.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                public_known_facts.get((gate.node_key, gate.fact_key))
+                if gate is not None
+                else None,
+            ):
+                continue
+            if dependency.kind.value == "FACT":
+                assert dependency.node_key is not None and dependency.fact_key is not None
+                needed.add((dependency.node_key, dependency.fact_key))
+            elif dependency.kind.value == "DERIVED_STATE":
+                assert dependency.derived_key is not None
+                add_derived_dependencies(dependency.derived_key)
+
     for objective in objectives:
         requirements = (
             *objective.completion_requirements,
             *(item for group in objective.prerequisites for item in group.requirements),
         )
         for requirement in requirements:
+            gate = requirement.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                public_known_facts.get((gate.node_key, gate.fact_key))
+                if gate is not None
+                else None,
+            ):
+                continue
+            if requirement.derived_ref is not None:
+                add_derived_dependencies(requirement.derived_ref)
+                continue
             if requirement.fact_ref is None:
                 continue
             state = db.get(

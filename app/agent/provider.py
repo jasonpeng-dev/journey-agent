@@ -785,9 +785,7 @@ class OpenAICompatibleGenericProvider:
         self._last_call_metadata = metadata
         self._call_metadata_history.append(metadata)
 
-    def _record_validation_diagnostics(
-        self, diagnostics: tuple[dict[str, object], ...]
-    ) -> None:
+    def _record_validation_diagnostics(self, diagnostics: tuple[dict[str, object], ...]) -> None:
         if not diagnostics or not self._call_metadata_history:
             return
         metadata = self._call_metadata_history[-1].model_copy(
@@ -873,13 +871,14 @@ class OpenAICompatibleGenericProvider:
         elif purpose == "dynamic_goal":
             response_contract = (
                 '{"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
-                '"requirements":[{"kind":"FACT|RESOURCE_AT_LEAST",'
+                '"requirements":[{"kind":"FACT|RESOURCE_AT_LEAST|DERIVED_STATE",'
                 '"node_key":"known_public_node_key",'
                 '"fact_key":"known_public_fact_key",'
                 '"accepted_values":["requested_scalar_matching_fact_value_type"] ,'
                 '"region_key":"known_public_region_key",'
                 '"resource_key":"known_public_resource_key",'
-                '"minimum":0}],"clarification_prompt":null}'
+                '"minimum":0,"derived_key":"known_public_derived_state_key"}],'
+                '"clarification_prompt":null}'
             )
         else:
             response_contract = (
@@ -907,8 +906,9 @@ class OpenAICompatibleGenericProvider:
             planning_prompt = (
                 "Interpret the player's Goal only into the closed V1 typed requirement "
                 "vocabulary. Return one or more requirements with implicit AND semantics. "
-                "Use only FACT or RESOURCE_AT_LEAST. Use only node, fact, region, and "
-                "resource keys present in the public ontology supplied by the user payload. "
+                "Use only FACT, RESOURCE_AT_LEAST, or DERIVED_STATE. Use only node, fact, "
+                "region, resource, and derived keys present in the public ontology supplied "
+                "by the user payload. "
                 "If grounded_entity_keys is non-empty, use only those public entities (or "
                 "their explicitly listed public endpoint Regions for a resource target). "
                 "Match every FACT accepted_values item to that Fact's declared value_type. "

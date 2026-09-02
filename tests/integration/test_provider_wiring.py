@@ -339,9 +339,7 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
     )
     provider = RecordingProvider(
         selected=("stabilize_patient",),
-        dynamic_interpretation=DynamicGoalInterpretation(
-            requirements=(dynamic_candidate,)
-        ),
+        dynamic_interpretation=DynamicGoalInterpretation(requirements=(dynamic_candidate,)),
         proposals=[_generic_plan()],
     )
     monkeypatch.setattr(

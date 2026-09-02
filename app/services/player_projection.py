@@ -81,6 +81,7 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.derived_state import evaluate_derived_states
 from app.services.formal_goal import load_formal_goal_for_task
 from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
@@ -601,16 +602,20 @@ class PlayerProjectionService:
         objective_names = {item.key: item.name for item in definition.objectives}
         task_scope = GameInstanceService(self.db).load(GameInstanceId(task.game_instance_id))
         formal_goal = load_formal_goal_for_task(self.db, task_scope, task)
+        derived_evaluation = (
+            evaluate_derived_states(self.db, task_scope, definition)
+            if definition.derived_states
+            else None
+        )
         roadmap = MissionRoadmapProjector().project_formal_goal(
             definition,
             formal_goal,
             known_facts,
             known_resources,
+            derived_evaluation.knowledge_values if derived_evaluation is not None else None,
             goal_description=task.goal_description,
         )
-        formal_requirement_ids = {
-            item.identity for item in formal_goal.completion_requirements
-        }
+        formal_requirement_ids = {item.identity for item in formal_goal.completion_requirements}
         goal_requirements = [
             requirement
             for stage in roadmap.stages
@@ -645,8 +650,7 @@ class PlayerProjectionService:
                         status=stage.status.value,
                         objective_key=stage.objective_key,
                         requirements=[
-                            PublicGoalRequirementResponse(**item)
-                            for item in stage.requirements
+                            PublicGoalRequirementResponse(**item) for item in stage.requirements
                         ],
                     )
                     for stage in roadmap.stages

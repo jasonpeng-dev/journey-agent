@@ -155,13 +155,14 @@ def test_unresolved_goal_attempt_survives_api_rollback(
     attempt = _attempt(session, game_id)
     assert attempt.scenario_version_id == version_id
     assert attempt.original_goal_text == goal
-    assert attempt.normalized_goal_text == " ".join(
-        goal.casefold().replace("_", " ").split()
-    )
+    assert attempt.normalized_goal_text == " ".join(goal.casefold().replace("_", " ").split())
     assert attempt.resolution_status == status
-    assert attempt.goal_hash == hashlib.sha256(
-        " ".join(goal.casefold().replace("_", " ").split()).encode("utf-8")
-    ).hexdigest()
+    assert (
+        attempt.goal_hash
+        == hashlib.sha256(
+            " ".join(goal.casefold().replace("_", " ").split()).encode("utf-8")
+        ).hexdigest()
+    )
     assert attempt.goal_hash != goal
     assert attempt.provider_purpose == "DYNAMIC_GOAL_INTERPRETATION"
     assert attempt.provider_model == provider.model_name
@@ -361,9 +362,7 @@ def test_authored_resolution_attempt_is_recorded_without_provider_call(
         GameInstanceId(runtime.instance.id),
         provider=None,
     )
-    submitted = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key=str(uuid4())
-    )
+    submitted = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
     assert submitted.task is not None
     attempt = _attempt(session, str(runtime.instance.id))
@@ -439,9 +438,7 @@ def test_resolution_checkpoint_does_not_commit_play_session(
         raise AssertionError("Goal resolution audit must not commit the PLAY session")
 
     monkeypatch.setattr(session, "commit", fail_main_commit)
-    submitted = orchestrator.submit_goal(
-        "invent warp travel", idempotency_key=str(uuid4())
-    )
+    submitted = orchestrator.submit_goal("invent warp travel", idempotency_key=str(uuid4()))
 
     assert submitted.task is None
     assert submitted.resolution.status == "UNSUPPORTED"

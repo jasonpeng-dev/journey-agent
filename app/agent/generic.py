@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
@@ -24,6 +24,7 @@ from app.agent.planning_context import (
     PlanningActionCatalogBuilder,
     PlanningContextBuilder,
     _known_world_facts,
+    _objective_refs,
     objective_context,
 )
 from app.agent.provider import (
@@ -87,17 +88,21 @@ from app.domain.scenario_v2 import (
     ComparisonOperator,
     ConditionKind,
     ConditionV2,
+    DerivedStateDefinitionV2,
     EffectKind,
     EffectV2,
+    FactDefinitionV2,
     NodeSelectorKind,
     NodeSelectorV2,
     ObjectiveDefinitionV2,
+    ObjectiveRequirementKind,
     RuleDefinitionV2,
     RulePhase,
     ScenarioDefinitionV2,
     StrictScalar,
     ValueExpressionV2,
     ValueSource,
+    knowledge_gate_is_revealed,
     normalize_action_parameters,
     relation_identity,
     transport_resource_entries,
@@ -259,6 +264,131 @@ class _DynamicGoalGrounding:
     clarification_prompt: str | None = None
 
 
+def _derived_goal_state_matches(
+    goal: str,
+    definition: ScenarioDefinitionV2,
+) -> tuple[DerivedStateDefinitionV2, ...]:
+    normalized = _normalize(goal)
+    return tuple(
+        state
+        for state in sorted(definition.derived_states, key=lambda item: item.key)
+        if state.goal_addressable
+        and normalized
+        in {
+            _normalize(state.key),
+            _normalize(state.name),
+            *(_normalize(alias) for alias in state.goal_aliases),
+            *(_normalize(example) for example in state.goal_examples),
+        }
+    )
+
+
+def _world_goal_fact_matches(
+    goal: str,
+    definition: ScenarioDefinitionV2,
+    db: Session | None,
+    scope: RuntimeScope | None,
+) -> tuple[tuple[str, FactDefinitionV2], ...]:
+    """Match exact authored public Fact semantics without reading Fact Truth."""
+
+    normalized = _normalize(goal)
+    public_nodes, _goal_addressable_facts, _public_regions = _dynamic_goal_public_keys(
+        db,
+        scope,
+        definition,
+    )
+    matches: list[tuple[str, FactDefinitionV2]] = []
+    for node in sorted(definition.world.nodes, key=lambda item: item.key):
+        if node.key not in public_nodes:
+            continue
+        for fact in sorted(node.facts, key=lambda item: item.key):
+            if not fact.goal_addressable or not fact.goal_target_values:
+                continue
+            identifiers = {
+                _normalize(fact.key),
+                _normalize(fact.name),
+                *(_normalize(alias) for alias in fact.goal_aliases),
+                *(_normalize(example) for example in fact.goal_examples),
+            }
+            if normalized in identifiers:
+                matches.append((node.key, fact))
+    return tuple(matches)
+
+
+def _world_goal_fact_resolution(
+    matches: tuple[tuple[str, FactDefinitionV2], ...],
+    definition: ScenarioDefinitionV2,
+) -> GenericGoalResolution:
+    if len(matches) == 1:
+        node_key, fact = matches[0]
+        return GenericGoalResolution(
+            "RESOLVED",
+            source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+            dynamic_requirements=(
+                AdHocGoalRequirementCandidateV1(
+                    kind=ObjectiveRequirementKind.FACT,
+                    node_key=node_key,
+                    fact_key=fact.key,
+                    accepted_values=fact.goal_target_values,
+                ),
+            ),
+            provider_observation={
+                "stage": "WORLD_GOAL_STATE_CATALOG",
+                "result": "DETERMINISTIC_FACT",
+                "fact": f"{node_key}.{fact.key}",
+            },
+        )
+    candidate_keys = tuple(f"{node_key}.{fact.key}" for node_key, fact in matches)
+    return GenericGoalResolution(
+        "NEEDS_CLARIFICATION",
+        candidate_keys=candidate_keys,
+        clarification_prompt=definition.goal_resolution.clarification_prompt,
+        source="DETERMINISTIC_WORLD_GOAL_STATE_CATALOG",
+        provider_observation={
+            "stage": "WORLD_GOAL_STATE_CATALOG",
+            "result": "BACKEND_NEEDS_CLARIFICATION",
+        },
+    )
+
+
+def _is_current_derived_objective(
+    objective: ObjectiveDefinitionV2,
+    definition: ScenarioDefinitionV2,
+) -> bool:
+    """Identify migrated Objective shells that no longer own routing semantics."""
+
+    if objective.prerequisites or not objective.completion_requirements:
+        return False
+    return all(
+        requirement.kind == ObjectiveRequirementKind.DERIVED_STATE
+        and requirement.derived_key is not None
+        and (state := definition.derived_state_definitions.get(requirement.derived_key)) is not None
+        and state.goal_addressable
+        for requirement in objective.completion_requirements
+    )
+
+
+def _derived_goal_resolution(
+    state: DerivedStateDefinitionV2,
+) -> GenericGoalResolution:
+    return GenericGoalResolution(
+        "RESOLVED",
+        source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+        dynamic_requirements=(
+            AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.DERIVED_STATE,
+                derived_key=state.key,
+                accepted_values=(state.available_value,),
+            ),
+        ),
+        provider_observation={
+            "stage": "DERIVED_GOAL_CATALOG",
+            "result": "DETERMINISTIC_DERIVED_STATE",
+            "derived_key": state.key,
+        },
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GenericObjectiveEvaluation:
     objective_keys: tuple[str, ...]
@@ -275,7 +405,7 @@ class PlanRevalidationResult:
 
 
 class GenericGoalResolver:
-    """Route authored exact matches and otherwise invoke the Dynamic interpreter.
+    """Route public catalog matches and legacy exact matches to Dynamic/Predefined Goals.
 
     The legacy Objective-selection model is intentionally not part of this
     routing path: an unmatched player Goal must never be converted into the
@@ -295,31 +425,58 @@ class GenericGoalResolver:
         self.db = db
         self.scope = scope
 
+    @staticmethod
+    def _resolve_authored_objective(
+        objective: ObjectiveDefinitionV2,
+    ) -> GenericGoalResolution:
+        return GenericGoalResolution("RESOLVED", objective.key, (objective.key,))
+
     def resolve(
         self,
         goal: str,
         definition: ScenarioDefinitionV2,
     ) -> GenericGoalResolution:
         normalized = _normalize(goal)
-        matches = [
-            objective
-            for objective in definition.objectives
-            if normalized
-            in {
-                _normalize(objective.key),
-                _normalize(objective.name),
-                *(_normalize(alias) for alias in objective.goal_aliases),
-                *(_normalize(example) for example in objective.goal_examples),
-            }
-        ]
-        if len(matches) == 1:
-            return GenericGoalResolution("RESOLVED", matches[0].key, (matches[0].key,))
-        if len(matches) > 1:
+        derived_matches = _derived_goal_state_matches(goal, definition)
+        if len(derived_matches) == 1:
+            return _derived_goal_resolution(derived_matches[0])
+        if len(derived_matches) > 1:
             return GenericGoalResolution(
                 "NEEDS_CLARIFICATION",
-                candidate_keys=tuple(sorted(item.key for item in matches)),
+                candidate_keys=tuple(item.key for item in derived_matches),
                 clarification_prompt=definition.goal_resolution.clarification_prompt,
+                source="DETERMINISTIC_DERIVED_GOAL_CATALOG",
+                provider_observation={
+                    "stage": "DERIVED_GOAL_CATALOG",
+                    "result": "BACKEND_NEEDS_CLARIFICATION",
+                },
             )
+        if definition.goal_resolution.world_goal_state_catalog:
+            fact_matches = _world_goal_fact_matches(goal, definition, self.db, self.scope)
+            if fact_matches:
+                return _world_goal_fact_resolution(fact_matches, definition)
+        else:
+            matches = [
+                objective
+                for objective in definition.objectives
+                if not _is_current_derived_objective(objective, definition)
+                if normalized
+                in {
+                    _normalize(objective.key),
+                    _normalize(objective.name),
+                    *(_normalize(alias) for alias in objective.goal_aliases),
+                    *(_normalize(example) for example in objective.goal_examples),
+                }
+            ]
+            if len(matches) == 1:
+                return self._resolve_authored_objective(matches[0])
+            if len(matches) > 1:
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION",
+                    candidate_keys=tuple(sorted(item.key for item in matches)),
+                    clarification_prompt=definition.goal_resolution.clarification_prompt,
+                    source="DETERMINISTIC_AUTHORED_OBJECTIVE",
+                )
         dynamic = self._resolve_dynamic_goal(goal, definition)
         if dynamic is not None:
             return dynamic
@@ -554,9 +711,7 @@ class GenericGoalResolver:
             try:
                 raw_interpretation = interpreter(request)
                 try:
-                    interpretation = DynamicGoalInterpretation.model_validate(
-                        raw_interpretation
-                    )
+                    interpretation = DynamicGoalInterpretation.model_validate(raw_interpretation)
                 except ValidationError as exc:
                     diagnostics = provider_validation_diagnostics(exc)
                     raise GenericProviderError(
@@ -895,10 +1050,7 @@ class GenericAgentService:
         definition = self._definition()
         self._task_scope(task)
         formal_goal = self._formal_goal(task)
-        if (
-            formal_goal.source_kind.value == "AD_HOC_DYNAMIC"
-            and self.provider is None
-        ):
+        if formal_goal.source_kind.value == "AD_HOC_DYNAMIC" and self.provider is None:
             raise GenericAgentError(
                 "DYNAMIC_GOAL_PROVIDER_REQUIRED",
                 "An AD_HOC_DYNAMIC Goal requires a planning Provider",
@@ -1917,6 +2069,7 @@ class GenericAgentService:
                     objectives,
                     known_fact_refs=catalog_builder.known_fact_refs(),
                     known_facts=_known_world_facts(planning_context.current_knowledge),
+                    definition=definition,
                 ),
                 replan_reason=reason,
                 known_world=planning_context.current_knowledge,
@@ -2278,7 +2431,16 @@ class GenericAgentService:
         if diagnostics:
             return [], tuple(_diagnostic_with_step_id(item, proposed_steps) for item in diagnostics)
 
-        objective_resource_refs = _objective_resource_refs(objectives)
+        public_known_facts = {
+            identity: projected.value
+            for identity, projected in projected_known_facts.items()
+            if projected.visibility == Visibility.KNOWN
+        }
+        objective_resource_refs = _objective_resource_refs(
+            objectives,
+            definition=definition,
+            known_facts=public_known_facts,
+        )
         for static_binding in static_bindings:
             index = static_binding.index
             raw_step = static_binding.raw_step
@@ -2729,16 +2891,17 @@ class GenericAgentService:
             if planner_input is not None
             else None
         )
-        objective_refs = {
-            requirement.fact_ref
-            for objective in objectives
-            for requirement in (
-                *objective.completion_requirements,
-                *(item for group in objective.prerequisites for item in group.requirements),
-            )
-            if requirement.fact_ref is not None
-        }
-        objective_resource_refs = _objective_resource_refs(objectives)
+        known_facts = _known_world_facts(planning_context.current_knowledge)
+        objective_refs = _objective_refs(
+            objectives,
+            definition=definition,
+            known_facts=known_facts,
+        )
+        objective_resource_refs = _objective_resource_refs(
+            objectives,
+            definition=definition,
+            known_facts=known_facts,
+        )
         bindings: list[_StaticProposalBinding] = []
         diagnostics: list[dict[str, object]] = []
         for index, raw_step in enumerate(proposed_steps, start=1):
@@ -4893,21 +5056,26 @@ class GenericAgentService:
             )
         if not self._validate_planning_action(definition, action, actor, candidate.target_key):
             raise GenericAgentError("GENERIC_PROVIDER_PLAN_INVALID", "Action assignment is invalid")
-        objective_refs = {
-            requirement.fact_ref
-            for objective in objectives
-            for requirement in (
-                *objective.completion_requirements,
-                *(item for group in objective.prerequisites for item in group.requirements),
-            )
-            if requirement.fact_ref is not None
+        public_known_facts = {
+            identity: projected.value
+            for identity, projected in self._known_fact_projection().items()
+            if projected.visibility == Visibility.KNOWN
         }
+        objective_refs = _objective_refs(
+            objectives,
+            definition=definition,
+            known_facts=public_known_facts,
+        )
         resource_effects = _action_resource_goal_effects(
             definition,
             action,
             candidate.target_key,
             parameters,
-            _objective_resource_refs(objectives),
+            _objective_resource_refs(
+                objectives,
+                definition=definition,
+                known_facts=public_known_facts,
+            ),
         )
         projected_refs = {
             (item.node_key, item.fact_key)
@@ -5061,6 +5229,10 @@ class GenericAgentService:
     def _known_requirement_public(self, requirement) -> bool:  # type: ignore[no-untyped-def]
         if not requirement_gate_is_public(self.db, self.scope, requirement):
             return False
+        if requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+            definition = self._definition()
+            state = definition.derived_state_definitions.get(requirement.derived_key or "")
+            return bool(state is not None and state.goal_addressable)
         if requirement.fact_ref is None:
             return True
         row = self.db.get(
@@ -5125,6 +5297,19 @@ class GenericAgentService:
         task: AgentTask, definition: ScenarioDefinitionV2
     ) -> tuple[ObjectiveDefinitionV2, ...]:
         keys = tuple(task.objective_scope_keys or ())
+        if not keys and task.formal_goal_contract_json is not None:
+            try:
+                contract = FormalGoalContractV1.model_validate(task.formal_goal_contract_json)
+            except (TypeError, ValueError) as exc:
+                raise GenericAgentError(
+                    "FORMAL_GOAL_PERSISTENCE_INVALID",
+                    "Task Formal Goal contract is invalid",
+                ) from exc
+            return formal_goal_planning_objectives(
+                contract,
+                definition,
+                goal_description=task.goal_description,
+            )
         catalog = {item.key: item for item in definition.objectives}
         if not keys or any(key not in catalog for key in keys):
             raise GenericAgentError(
@@ -5324,10 +5509,13 @@ def _contains_public_term(text: str, term: str) -> bool:
         return False
     if any(ord(character) > 127 for character in term):
         return term in text
-    return re.search(
-        rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])",
-        text,
-    ) is not None
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])",
+            text,
+        )
+        is not None
+    )
 
 
 def _dynamic_goal_exact_public_matches(
@@ -5371,8 +5559,7 @@ def _dynamic_goal_topology_matches(
             for item in public_relations
             if (
                 item.get("source_node_key") == node.key
-                and item.get("relation_type_key")
-                == locality.transport_endpoint_relation_type_key
+                and item.get("relation_type_key") == locality.transport_endpoint_relation_type_key
                 and item.get("target_node_key") in public_regions
             )
         }
@@ -5547,9 +5734,7 @@ def _dynamic_goal_grounding_has_semantics(
     )
     if any(node_key in grounding.entity_keys for node_key, _fact_key in goal_addressable_facts):
         return True
-    return bool(
-        set(grounding.scope_keys) & public_regions and definition.world.resources
-    )
+    return bool(set(grounding.scope_keys) & public_regions and definition.world.resources)
 
 
 def _validate_dynamic_goal_grounding_scope(
@@ -5563,6 +5748,10 @@ def _validate_dynamic_goal_grounding_scope(
         if candidate.kind.value == "FACT":
             target_key = candidate.node_key
             allowed = target_key in entity_keys
+        elif candidate.kind.value == "DERIVED_STATE":
+            # A public Derived capability is a catalog-level target and does
+            # not require an entity grounding scope.
+            continue
         else:
             target_key = candidate.region_key
             allowed = target_key in scope_keys
@@ -5577,11 +5766,7 @@ def _dynamic_goal_grounding_observation(
     grounding: _DynamicGoalGrounding,
 ) -> dict[str, object]:
     return {
-        "source": (
-            grounding.source
-            if grounding.status == "RESOLVED"
-            else "FULL_PUBLIC_CATALOG"
-        ),
+        "source": (grounding.source if grounding.status == "RESOLVED" else "FULL_PUBLIC_CATALOG"),
         "entity_keys": list(grounding.entity_keys),
         "scope_keys": list(grounding.scope_keys),
     }
@@ -5636,6 +5821,13 @@ def _dynamic_goal_ontology(
             "name": fact.name,
             "description": fact.description,
             "value_type": fact.value_type.value,
+            **({"goal_aliases": list(fact.goal_aliases)} if fact.goal_aliases else {}),
+            **({"goal_examples": list(fact.goal_examples)} if fact.goal_examples else {}),
+            **(
+                {"goal_target_values": list(fact.goal_target_values)}
+                if fact.goal_target_values
+                else {}
+            ),
             **({"allowed_values": list(fact.allowed_values)} if fact.allowed_values else {}),
         }
         for node in sorted(definition.world.nodes, key=lambda item: item.key)
@@ -5647,6 +5839,24 @@ def _dynamic_goal_ontology(
         {"key": resource.key, "name": resource.name, "description": resource.description}
         for resource in sorted(definition.world.resources, key=lambda item: item.key)
     ]
+    derived_states = [
+        {
+            "key": state.key,
+            "name": state.name,
+            "description": state.description,
+            "value_type": state.value_type.value,
+            "target_value": state.available_value,
+            "non_target_value": state.unavailable_value,
+            **({"goal_aliases": list(state.goal_aliases)} if state.goal_aliases else {}),
+            **({"goal_examples": list(state.goal_examples)} if state.goal_examples else {}),
+            **({"allowed_values": list(state.allowed_values)} if state.allowed_values else {}),
+        }
+        for state in sorted(definition.derived_states, key=lambda item: item.key)
+        if state.goal_addressable
+    ]
+    requirement_kinds = ["FACT", "RESOURCE_AT_LEAST"]
+    if derived_states:
+        requirement_kinds.append("DERIVED_STATE")
     return {
         "schema_version": 1,
         "grounding": (
@@ -5667,12 +5877,11 @@ def _dynamic_goal_ontology(
         "world": {
             "nodes": nodes,
             "regions": [
-                node_key
-                for node_key in sorted(public_regions)
-                if node_key in focused_nodes
+                node_key for node_key in sorted(public_regions) if node_key in focused_nodes
             ],
             "facts": facts,
             "resources": resources,
+            "derived_states": derived_states,
             "topology": [
                 relation
                 for relation in public_relations
@@ -5683,7 +5892,7 @@ def _dynamic_goal_ontology(
             ],
         },
         "goal_language": {
-            "requirement_kinds": ["FACT", "RESOURCE_AT_LEAST"],
+            "requirement_kinds": requirement_kinds,
             "combination": "IMPLICIT_AND",
             "comparison": "AT_LEAST_FOR_RESOURCE",
         },
@@ -5718,6 +5927,15 @@ def _validate_dynamic_goal_publicity(
                     "FORMAL_GOAL_DYNAMIC_FACT_NOT_PUBLIC",
                     "Dynamic Goal references a non-public Fact "
                     f"{candidate.node_key}.{candidate.fact_key}",
+                )
+            continue
+        if candidate.kind.value == "DERIVED_STATE":
+            assert candidate.derived_key is not None
+            state = definition.derived_state_definitions.get(candidate.derived_key)
+            if state is None or not state.goal_addressable:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_DERIVED_STATE_NOT_PUBLIC",
+                    "Dynamic Goal references a non-public Derived State",
                 )
             continue
         assert candidate.region_key is not None and candidate.resource_key is not None
@@ -6807,18 +7025,59 @@ def _provider_error_category(error: GenericProviderError) -> str:
 
 def _objective_resource_refs(
     objectives: tuple[ObjectiveDefinitionV2, ...],
+    *,
+    definition: ScenarioDefinitionV2 | None = None,
+    known_facts: Mapping[tuple[str, str], object] | None = None,
 ) -> set[tuple[str, str]]:
-    return {
-        (requirement.region_key, requirement.resource_key)
-        for objective in objectives
+    result: set[tuple[str, str]] = set()
+    visited: set[str] = set()
+    public_known_facts = known_facts or {}
+
+    def add_derived(derived_key: str) -> None:
+        if definition is None or derived_key in visited:
+            return
+        state = definition.derived_state_definitions.get(derived_key)
+        if state is None:
+            return
+        visited.add(derived_key)
+        for dependency in state.dependencies:
+            gate = dependency.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                public_known_facts.get((gate.node_key, gate.fact_key))
+                if gate is not None
+                else None,
+            ):
+                continue
+            if dependency.kind.value == "RESOURCE_AT_LEAST":
+                assert dependency.region_key is not None and dependency.resource_key is not None
+                result.add((dependency.region_key, dependency.resource_key))
+            elif dependency.kind.value == "DERIVED_STATE":
+                assert dependency.derived_key is not None
+                add_derived(dependency.derived_key)
+
+    for objective in objectives:
         for requirement in (
             *objective.completion_requirements,
             *(item for group in objective.prerequisites for item in group.requirements),
-        )
-        if requirement.kind.value == "RESOURCE_AT_LEAST"
-        and requirement.region_key is not None
-        and requirement.resource_key is not None
-    }
+        ):
+            gate = requirement.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                public_known_facts.get((gate.node_key, gate.fact_key))
+                if gate is not None
+                else None,
+            ):
+                continue
+            if (
+                requirement.kind.value == "RESOURCE_AT_LEAST"
+                and requirement.region_key is not None
+                and requirement.resource_key is not None
+            ):
+                result.add((requirement.region_key, requirement.resource_key))
+            elif requirement.derived_ref is not None:
+                add_derived(requirement.derived_ref)
+    return result
 
 
 def _action_resource_goal_effects(

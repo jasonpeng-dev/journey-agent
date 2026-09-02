@@ -1360,7 +1360,7 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
     )
     context_json = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
     assert "north_power_substation" in context_json
-    assert "known_value" not in context_json
+    assert '"known_value":' not in context_json
 
 
 def test_region_visibility_effect_does_not_complete_survey_or_reveal_hidden_pools(
