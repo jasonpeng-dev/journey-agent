@@ -9,8 +9,9 @@ from pydantic import ValidationError
 
 from app.agent.formal_goal_projection import formal_goal_planning_objectives
 from app.domain.formal_goal import (
+    AdHocFactRequirementCandidateV1,
     AdHocGoalCandidateSetV1,
-    AdHocGoalRequirementCandidateV1,
+    AdHocResourceAtLeastRequirementCandidateV1,
     FormalGoalError,
     FormalGoalSourceKind,
     compile_ad_hoc_dynamic_goal,
@@ -23,6 +24,7 @@ from app.domain.world import Visibility
 from app.infrastructure.db.models import GameInstanceFactState
 from app.scenarios.serialization import scenario_content_hash
 from app.services.formal_goal import FormalGoalCompletionEvaluator
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
@@ -150,7 +152,7 @@ def test_dynamic_fact_identity_is_backend_owned_and_candidate_key_is_rejected() 
     assert item.requirement.key == "dynamic_requirement"
 
     with pytest.raises(ValidationError):
-        AdHocGoalRequirementCandidateV1.model_validate(
+        AdHocFactRequirementCandidateV1.model_validate(
             {
                 "kind": "FACT",
                 "node_key": "patient_one",
@@ -223,7 +225,7 @@ def test_dynamic_resource_reuses_typed_requirement_and_rejects_gate() -> None:
     assert item.requirement.minimum == 10
 
     with pytest.raises(ValidationError):
-        AdHocGoalRequirementCandidateV1.model_validate(
+        AdHocResourceAtLeastRequirementCandidateV1.model_validate(
             {
                 "kind": "RESOURCE_AT_LEAST",
                 "region_key": "triage_room",

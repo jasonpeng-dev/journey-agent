@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from app.agent.objective_scope import ObjectiveScope
 from app.domain.formal_goal import (
-    AdHocGoalRequirementCandidateV1,
     FormalGoalSourceKind,
     compile_ad_hoc_dynamic_goal,
     compile_predefined_formal_goal,
@@ -20,6 +19,7 @@ from app.scenarios.versions import ScenarioVersionRepository
 from app.services.formal_goal import load_formal_goal_for_task
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import GENERIC_TEST
 
 

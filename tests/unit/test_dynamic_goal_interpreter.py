@@ -24,7 +24,6 @@ from app.agent.provider import (
 )
 from app.domain.enums import AgentTaskStatus, ResourcePoolAvailability, ResourcePoolVisibility
 from app.domain.formal_goal import (
-    AdHocGoalRequirementCandidateV1,
     FormalGoalSourceKind,
     compile_predefined_formal_goal,
 )
@@ -39,6 +38,7 @@ from app.services.game_instances import GameInstanceService
 from app.services.play import PlayOrchestrator
 from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import GENERIC_TEST
 
 
@@ -484,6 +484,58 @@ def test_two_by_two_retries_interpretation_without_regrounding_after_first_rejec
     ]
     assert [call["grounding_round"] for call in calls] == [1, 1, 1]
     assert [call["interpretation_attempt"] for call in calls[1:]] == [1, 2]
+
+
+def test_interpretation_schema_recovery_reuses_grounding_projection_and_feedback() -> None:
+    derived_key = "north_basic_engineering_support"
+    candidate = AdHocGoalRequirementCandidateV1(
+        kind=ObjectiveRequirementKind.DERIVED_STATE,
+        derived_key=derived_key,
+        accepted_values=("AVAILABLE",),
+    )
+    provider = _SequenceDynamicProvider(
+        (
+            DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(ref_type="DERIVED_STATE", key=derived_key),
+                )
+            ),
+        ),
+        (
+            {
+                "status": "RESOLVED",
+                "requirements": [{"kind": "DERIVED_STATE", "derived_key": derived_key}],
+            },
+            DynamicGoalInterpretation(requirements=(candidate,)),
+        ),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "Restore northern basic engineering support",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 1
+    assert len(provider.requests) == 2
+    first_request, recovery_request = provider.requests
+    assert recovery_request.grounded_candidate_refs == first_request.grounded_candidate_refs
+    assert recovery_request.ontology == first_request.ontology
+    assert recovery_request.recovery_attempt == 1
+    assert [item.model_dump(mode="json") for item in recovery_request.recovery_feedback] == [
+        {
+            "requirement_index": 0,
+            "kind": "DERIVED_STATE",
+            "issue": "MISSING_REQUIRED_FIELD",
+            "field": "accepted_values",
+            "expected_shape": {
+                "kind": "DERIVED_STATE",
+                "derived_key": derived_key,
+                "accepted_values": ["AVAILABLE"],
+            },
+            "focused_target_value": "AVAILABLE",
+        }
+    ]
 
 
 def test_debug_observation_records_each_logical_call_input_and_output() -> None:

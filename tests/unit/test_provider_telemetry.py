@@ -8,17 +8,19 @@ from typing import Literal
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from app.agent.provider import (
     DynamicGoalCandidateReference,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     GenericProviderError,
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
     PlannerInput,
     PlanRequest,
+    dynamic_goal_recovery_feedback,
     goal_provider_request_snapshot,
     goal_provider_response_snapshot,
     provider_call_history_metadata,
@@ -219,6 +221,158 @@ def test_dynamic_goal_payloads_use_separate_public_grounding_and_interpretation_
     assert "seed" not in captured[0]
     assert "temperature" not in captured[1]
     assert "seed" not in captured[1]
+
+
+def test_dynamic_goal_requirement_schema_is_strict_and_discriminated() -> None:
+    schema = DynamicGoalInterpretation.model_json_schema()
+    definitions = schema["$defs"]
+    union = definitions["AdHocGoalRequirementCandidateV1"]
+
+    assert union["discriminator"] == {
+        "mapping": {
+            "DERIVED_STATE": "#/$defs/AdHocDerivedStateRequirementCandidateV1",
+            "FACT": "#/$defs/AdHocFactRequirementCandidateV1",
+            "RESOURCE_AT_LEAST": "#/$defs/AdHocResourceAtLeastRequirementCandidateV1",
+        },
+        "propertyName": "kind",
+    }
+    expected_required = {
+        "AdHocFactRequirementCandidateV1": {"kind", "node_key", "fact_key", "accepted_values"},
+        "AdHocResourceAtLeastRequirementCandidateV1": {
+            "kind",
+            "region_key",
+            "resource_key",
+            "minimum",
+        },
+        "AdHocDerivedStateRequirementCandidateV1": {
+            "kind",
+            "derived_key",
+            "accepted_values",
+        },
+    }
+    for definition_name, required in expected_required.items():
+        definition = definitions[definition_name]
+        assert definition["additionalProperties"] is False
+        assert set(definition["required"]) == required
+        assert "target_value" not in definition["properties"]
+
+    assert (
+        definitions["AdHocFactRequirementCandidateV1"]["properties"]["accepted_values"]["minItems"]
+        == 1
+    )
+    assert (
+        definitions["AdHocDerivedStateRequirementCandidateV1"]["properties"]["accepted_values"][
+            "minItems"
+        ]
+        == 1
+    )
+    assert (
+        definitions["AdHocResourceAtLeastRequirementCandidateV1"]["properties"]["minimum"][
+            "minimum"
+        ]
+        == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_requirement",
+    [
+        {
+            "kind": "DERIVED_STATE",
+            "derived_key": "north_basic_engineering_support",
+        },
+        {
+            "kind": "DERIVED_STATE",
+            "derived_key": "north_basic_engineering_support",
+            "accepted_values": None,
+        },
+        {
+            "kind": "DERIVED_STATE",
+            "derived_key": "north_basic_engineering_support",
+            "accepted_values": [],
+        },
+        {
+            "kind": "DERIVED_STATE",
+            "derived_key": "north_basic_engineering_support",
+            "accepted_values": ["AVAILABLE"],
+            "target_value": "AVAILABLE",
+        },
+        {
+            "kind": "FACT",
+            "node_key": "public_node",
+            "accepted_values": [True],
+        },
+        {
+            "kind": "RESOURCE_AT_LEAST",
+            "region_key": "east_residential_district",
+            "resource_key": "emergency_relief_supplies",
+        },
+    ],
+)
+def test_dynamic_goal_requirement_union_rejects_invalid_shapes(
+    invalid_requirement: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        DynamicGoalInterpretation.model_validate(
+            {"status": "RESOLVED", "requirements": [invalid_requirement]}
+        )
+
+
+def test_dynamic_goal_recovery_feedback_contains_the_legal_derived_shape() -> None:
+    ontology = {
+        "world": {
+            "derived_states": [
+                {
+                    "key": "north_basic_engineering_support",
+                    "target_value": "AVAILABLE",
+                }
+            ]
+        }
+    }
+    feedback = dynamic_goal_recovery_feedback(
+        {
+            "status": "RESOLVED",
+            "requirements": [
+                {
+                    "kind": "DERIVED_STATE",
+                    "derived_key": "north_basic_engineering_support",
+                }
+            ],
+        },
+        public_ontology=ontology,
+    )
+
+    assert [item.model_dump(mode="json") for item in feedback] == [
+        {
+            "requirement_index": 0,
+            "kind": "DERIVED_STATE",
+            "issue": "MISSING_REQUIRED_FIELD",
+            "field": "accepted_values",
+            "expected_shape": {
+                "kind": "DERIVED_STATE",
+                "derived_key": "north_basic_engineering_support",
+                "accepted_values": ["AVAILABLE"],
+            },
+            "focused_target_value": "AVAILABLE",
+        }
+    ]
+
+    request = DynamicGoalInterpretationRequest(
+        goal="restore northern support",
+        ontology=ontology,
+        grounded_entity_keys=("north_basic_engineering_support",),
+        recovery_attempt=1,
+        recovery_feedback=feedback,
+    )
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(lambda request: _goal_response(request))
+    )
+    body, _ = provider._build_request_body("dynamic_goal", request.model_dump(mode="json"))
+    user_payload = json.loads(body["messages"][1]["content"])
+    assert user_payload["recovery_feedback"] == [item.model_dump(mode="json") for item in feedback]
+    assert "DERIVED_STATE" in body["messages"][0]["content"]
+    assert '"accepted_values":["AVAILABLE"]' in body["messages"][0]["content"]
+    assert "target_value" in body["messages"][0]["content"]
 
 
 def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
@@ -510,7 +664,7 @@ def test_dynamic_interpretation_schema_failure_records_safe_type_diagnostics() -
 
     expected = {
         "validation_error_type": "tuple_type",
-        "field_path": "requirements[0].accepted_values",
+        "field_path": "requirements[0].FACT.accepted_values",
         "expected_type": "array",
         "actual_json_type": "string",
     }

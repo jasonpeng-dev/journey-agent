@@ -8,10 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.enums import ResourcePoolVisibility
-from app.domain.formal_goal import (
-    AdHocGoalRequirementCandidateV1,
-    compile_ad_hoc_dynamic_goal,
-)
+from app.domain.formal_goal import compile_ad_hoc_dynamic_goal
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
 from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
 from app.domain.world import Visibility
@@ -29,6 +26,7 @@ from app.services.formal_goal import FormalGoalCompletionEvaluator, load_formal_
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import InitializedRuntime, RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.unit.test_derived_state_domain import _resource_derived_document
 
 

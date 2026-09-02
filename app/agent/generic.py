@@ -34,6 +34,7 @@ from app.agent.provider import (
     DynamicGoalEntityGroundingRequest,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
+    DynamicGoalRecoveryFeedback,
     GenericModelProvider,
     GenericProviderError,
     PlannerActionContract,
@@ -46,6 +47,7 @@ from app.agent.provider import (
     PlanProposal,
     PlanRequest,
     PlanViolation,
+    dynamic_goal_recovery_feedback,
     goal_provider_request_snapshot,
     goal_provider_response_snapshot,
     provider_call_history_metadata,
@@ -69,8 +71,11 @@ from app.domain.enums import (
     WorldOperationStatus,
 )
 from app.domain.formal_goal import (
+    AdHocDerivedStateRequirementCandidateV1,
+    AdHocFactRequirementCandidateV1,
     AdHocGoalCandidateSetV1,
     AdHocGoalRequirementCandidateV1,
+    AdHocResourceAtLeastRequirementCandidateV1,
     FormalGoalContractV1,
     FormalGoalError,
     FormalGoalSourceKind,
@@ -650,12 +655,14 @@ class GenericGoalResolver:
         last_interpretation_error: GenericProviderError | None = None
         last_backend_rejection_code: str | None = None
         last_backend_value_type_diagnostics: list[dict[str, object]] = []
+        last_recovery_feedback: tuple[DynamicGoalRecoveryFeedback, ...] = ()
 
         for grounding_round in range(1, max_grounding_rounds + 1):
             ontology = None
             projection = None
             last_backend_rejection_code = None
             last_backend_value_type_diagnostics = []
+            last_recovery_feedback = ()
             if needs_provider_grounding:
                 grounding = _DynamicGoalGrounding(status="NONE")
                 grounding_rounds_used = grounding_round
@@ -970,6 +977,7 @@ class GenericGoalResolver:
                     grounded_candidate_refs=grounding.candidate_refs,
                     grounded_entity_keys=grounding.entity_keys,
                     recovery_attempt=0 if interpretation_attempt_index == 1 else 1,
+                    recovery_feedback=last_recovery_feedback,
                 )
                 raw_interpretation: object | None = None
                 try:
@@ -984,6 +992,10 @@ class GenericGoalResolver:
                             "MODEL_PROVIDER_RESPONSE_INVALID",
                             "The model provider returned an invalid Dynamic Goal interpretation",
                             validation_diagnostics=diagnostics,
+                            recovery_feedback=dynamic_goal_recovery_feedback(
+                                raw_interpretation,
+                                public_ontology=request.ontology,
+                            ),
                         ) from exc
                     except (TypeError, ValueError) as exc:
                         raise GenericProviderError(
@@ -1004,6 +1016,7 @@ class GenericGoalResolver:
                         interpretation_attempt_record["validation_diagnostics"] = list(
                             exc.validation_diagnostics
                         )
+                    last_recovery_feedback = exc.recovery_feedback
                     interpretation_attempts.append(interpretation_attempt_record)
                     record_provider_call(
                         purpose="dynamic_goal",
@@ -6564,8 +6577,7 @@ def _validate_dynamic_goal_publicity(
     )
     public_resources = {item.key for item in definition.world.resources}
     for candidate in candidates.requirements:
-        if candidate.kind.value == "FACT":
-            assert candidate.node_key is not None and candidate.fact_key is not None
+        if isinstance(candidate, AdHocFactRequirementCandidateV1):
             if candidate.node_key not in public_nodes:
                 raise FormalGoalError(
                     "FORMAL_GOAL_DYNAMIC_NODE_NOT_PUBLIC",
@@ -6590,8 +6602,7 @@ def _validate_dynamic_goal_publicity(
                     "Dynamic Goal Fact is outside the grounded public projection",
                 )
             continue
-        if candidate.kind.value == "DERIVED_STATE":
-            assert candidate.derived_key is not None
+        if isinstance(candidate, AdHocDerivedStateRequirementCandidateV1):
             state = definition.derived_state_definitions.get(candidate.derived_key)
             if state is None or not state.goal_addressable:
                 raise FormalGoalError(
@@ -6606,7 +6617,7 @@ def _validate_dynamic_goal_publicity(
                     "Dynamic Goal Derived State is outside the grounded public projection",
                 )
             continue
-        assert candidate.region_key is not None and candidate.resource_key is not None
+        assert isinstance(candidate, AdHocResourceAtLeastRequirementCandidateV1)
         if candidate.region_key not in public_regions:
             raise FormalGoalError(
                 "FORMAL_GOAL_DYNAMIC_REGION_NOT_PUBLIC",

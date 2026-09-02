@@ -34,7 +34,6 @@ from app.agent.provider import (
 )
 from app.core.config import Settings
 from app.domain.enums import NodeStatus, WorldOperationStatus
-from app.domain.formal_goal import AdHocGoalRequirementCandidateV1
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
 from app.infrastructure.db.models import (
@@ -52,6 +51,7 @@ from app.scenarios.builtin import require_builtin_v2_version
 from app.services.composition import configured_play_orchestrator
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import GENERIC_TEST, create_test_scenario
 
 

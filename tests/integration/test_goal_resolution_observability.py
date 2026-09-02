@@ -17,13 +17,13 @@ from app.agent.provider import (
     GenericProviderError,
     ProviderCallMetadata,
 )
-from app.domain.formal_goal import AdHocGoalRequirementCandidateV1
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
 from app.infrastructure.db.models import GoalResolutionAttempt, Player
 from app.scenarios.builtin import require_builtin_v2_version
 from app.services.play import PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
 
 

@@ -42,7 +42,6 @@ from app.domain.enums import (
     ResourcePoolVisibility,
 )
 from app.domain.formal_goal import (
-    AdHocGoalRequirementCandidateV1,
     FormalGoalSourceKind,
 )
 from app.domain.resources import resource_state_key
@@ -81,6 +80,7 @@ from app.services.generic_actions import GenericActionService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import LINJIANG_V2_TEST, predefined_goal_resolution
 
 
