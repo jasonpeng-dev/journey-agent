@@ -24,9 +24,11 @@ the browser product.
 * Authored Derived World State / capability evaluation with separate
   authoritative Truth and public Knowledge projections.
 * World Goal State V2 typed requirements: `FACT`, `RESOURCE_AT_LEAST`, and
-  authored `DERIVED_STATE`. In the canonical Linjiang Scenario, Task1 is a
-  genuine typed Fact Objective and Task2-Task6 map to five goal-addressable
-  Derived capabilities; Derived is not a default wrapper around every Fact.
+  authored `DERIVED_STATE`. The current canonical Linjiang Scenario routes all
+  six player-facing goal texts through this public catalog: Task1 is a typed
+  Fact target and Task2-Task6 are five goal-addressable Derived capabilities.
+  The retained authored Objective rows are compatibility/authoring data, not
+  the current canonical player-goal routing shortcut.
 * Declarative Action/Rule execution, Truth mutation, public Knowledge
   projection, Player-safe Formal PLAY, approvals, immutable archived runtime
   sources, Fork, and plan history.
@@ -37,11 +39,12 @@ the browser product.
 
     ScenarioVersion
       -> GameInstance
-           -> Goal
-                -> exact authored Objective routing, or Dynamic Goal
-                     -> public entity grounding -> focused ontology
-                          -> typed Goal interpretation -> exact-Version validation
-                               -> frozen FormalGoalContractV1
+           -> Goal text
+                -> public World Goal State catalog / legacy compatibility routing
+                     -> Dynamic public entity grounding when needed
+                          -> focused ontology -> typed Goal interpretation
+                               -> exact-Version validation
+                                    -> frozen FormalGoalContractV1
                                     -> Closure -> PlannerInput V2
                                          -> Provider PlanSegment -> Validator
                                               -> AgentPlan -> Runtime -> Truth / Knowledge
@@ -103,6 +106,13 @@ Transient/provider-format failures use bounded retry, while
 `NEEDS_CLARIFICATION` is not retried into a random resolution. Internal
 provider or validation codes remain developer diagnostics; Goal submission
 feedback is shown below the Goal input rather than as a page-level error.
+
+The current Linjiang Version enables the World Goal State catalog. Its preset
+entries are suggested text that fills the same editable Goal input; they are
+not Objective or Task selectors and submit no separate identity. A dynamic
+submission compiles against the exact Version without creating a new authored
+Objective. Older immutable Versions retain their original predefined
+Objective behavior.
 
 Never commit API keys.
 

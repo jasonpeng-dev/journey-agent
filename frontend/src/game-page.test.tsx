@@ -587,9 +587,9 @@ describe("Formal Play player projections", () => {
     );
     expect(screen.getByTestId("goal-composer")).toBeVisible();
     expect(screen.getByText("当前 · 下达目标")).toBeVisible();
-    expect(screen.queryByText("选择任务", { selector: "label" })).not.toBeInTheDocument();
+    expect(screen.queryByText("自定义目标", { selector: "label" })).not.toBeInTheDocument();
     expect(screen.queryByText(/智能体只会选择当前精确版本/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("自定义目标")).toHaveValue("打开北部贸易路线");
+    expect(screen.getByLabelText("目标内容")).toHaveValue("打开北部贸易路线");
     fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
@@ -693,7 +693,7 @@ describe("Formal Play player projections", () => {
     ).toBe("收到，继续规划任务");
   });
 
-  it("uses Scenario Objective names in the preset Goal Composer and keeps custom input separate", () => {
+  it("uses suggested Goal text to fill the editable composer", () => {
     const onGoalChange = vi.fn();
     const onSubmit = vi.fn();
     render(
@@ -703,28 +703,27 @@ describe("Formal Play player projections", () => {
         resolving={false}
         startedAt={null}
         busy={false}
-        objectivesLoaded
-        objectives={[
-          { key: "restore_power", name: "恢复东部应急供电网络" },
-        ]}
+        presetsLoaded
+        goalPresets={["恢复东部应急供电网络"]}
         onGoalChange={onGoalChange}
         onSubmit={onSubmit}
       />,
     );
 
-    expect(screen.getByRole("combobox", { name: "选择任务" })).toBeVisible();
-    expect(screen.queryByLabelText("自定义目标")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole("combobox", { name: "选择任务" }), {
-      target: { value: "restore_power" },
+    const presetSelect = screen.getByRole("combobox", { name: "选择快捷目标" });
+    expect(presetSelect).toBeVisible();
+    expect(screen.getByLabelText("目标内容")).toBeVisible();
+    fireEvent.change(presetSelect, {
+      target: { value: "恢复东部应急供电网络" },
     });
     expect(onGoalChange).toHaveBeenLastCalledWith("恢复东部应急供电网络");
+    expect(screen.getByLabelText("目标内容")).toHaveValue("恢复东部应急供电网络");
+    fireEvent.change(screen.getByLabelText("目标内容"), {
+      target: { value: "优先恢复东部应急供电网络" },
+    });
+    expect(onGoalChange).toHaveBeenLastCalledWith("优先恢复东部应急供电网络");
     fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
-
-    fireEvent.change(screen.getByRole("combobox", { name: "选择任务" }), {
-      target: { value: "__custom_goal__" },
-    });
-    expect(screen.getByLabelText("自定义目标")).toBeVisible();
   });
 
   it("keeps the composer and its timer visible while Goal Resolution runs", () => {

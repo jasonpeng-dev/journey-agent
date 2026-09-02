@@ -71,12 +71,22 @@ def test_linjiang_final_goal_vocabulary_has_five_derived_states_and_task1_fact()
     assert task1_requirement.node_key == "central_telecom_hub"
     assert task1_requirement.fact_key == "operational"
     assert task1_requirement.accepted_values == (True,)
-    for goal in (task1.key, task1.name, *task1.goal_aliases):
+    assert LINJIANG_V2_TEST.goal_resolution.world_goal_state_catalog is True
+    assert task1.key not in task1.goal_aliases
+    for goal in (task1.name, *task1.goal_aliases):
         resolution = resolver.resolve(goal, LINJIANG_V2_TEST)
         assert resolution.status == "RESOLVED"
-        assert resolution.source == "DETERMINISTIC"
-        assert resolution.objective_keys == (task1.key,)
-        assert resolution.dynamic_requirements == ()
+        assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+        assert resolution.objective_keys == ()
+        assert len(resolution.dynamic_requirements) == 1
+        assert resolution.dynamic_requirements[0].kind == ObjectiveRequirementKind.FACT
+        assert resolution.dynamic_requirements[0].node_key == "central_telecom_hub"
+        assert resolution.dynamic_requirements[0].fact_key == "operational"
+        assert resolution.dynamic_requirements[0].accepted_values == (True,)
+        assert resolution.provider_observation is not None
+        assert resolution.provider_observation["stage"] == "WORLD_GOAL_STATE_CATALOG"
+
+    assert resolver.resolve(task1.key, LINJIANG_V2_TEST).status == "UNSUPPORTED"
 
     derived_objectives = [
         item

@@ -67,11 +67,12 @@ interpreter, a model-specific provider, or a scenario-specific runtime branch.
 
 ### 3.1 Formal Goal V1
 
-The runtime has one frozen Goal authority: `FormalGoalContractV1`. Current
-product sources are `PREDEFINED` (compiled from exact authored Objectives) and
-`AD_HOC_DYNAMIC` (compiled from a provider candidate set validated against the
-current public ontology). `PARAMETERIZED` is reserved in the domain enum but
-has no V1 resolver or template implementation.
+The runtime has one frozen Goal authority: `FormalGoalContractV1`. Product
+sources are `PREDEFINED` (the compatibility path for catalog-disabled and old
+immutable Versions) and `AD_HOC_DYNAMIC` (the current World Goal State path,
+compiled from catalog semantics or a provider candidate set validated against
+the current public ontology). `PARAMETERIZED` is reserved in the domain enum
+but has no V1 resolver or template implementation.
 
 The contract contains a flat, canonically ordered tuple of typed completion
 requirements. The tuple is an implicit `AND`; V1 has no Goal AST, `OR`, generic
@@ -83,13 +84,16 @@ are evaluated by the backend rather than supplied by a provider. The backend
 assigns stable requirement identity and computes the contract hash; a provider
 cannot supply either identity or completion semantics.
 
-Before the contract is frozen, the exact-Version resolver checks only an
-explicit authored Objective key, canonical name, alias, or example. A unique
-match is `PREDEFINED`; unmatched text is never sent to a nearest-Objective
-fallback. The Dynamic path first performs deterministic public entity or
-unique public-topology grounding. If that cannot uniquely identify a public
-entity, bounded Entity Grounding may return only validated public candidate
-keys, clarification, or unsupported. The backend then builds a focused public
+Before the contract is frozen, a Version with
+`goal_resolution.world_goal_state_catalog=true` matches only its public World
+Goal State catalog. Exact Fact/Derived metadata can resolve deterministically;
+other text enters the Dynamic path. A catalog-disabled or older immutable
+Version may use an explicit authored Objective key, canonical name, alias, or
+example as `PREDEFINED`. No path falls back to a nearest Objective. The
+Dynamic path first performs deterministic public entity or unique
+public-topology grounding. If that cannot uniquely identify a public entity,
+bounded Entity Grounding may return only validated public candidate keys,
+clarification, or unsupported. The backend then builds a focused public
 ontology for Goal Interpretation and validates the resulting typed candidate
 against the exact Version.
 
@@ -130,6 +134,13 @@ five goal-addressable Derived States:
     Task5 -> DERIVED_STATE: citywide_sustained_emergency_support
     Task6 -> DERIVED_STATE: southeast_sustained_emergency_generation
 
+`FactDefinitionV2.goal_addressable` is false by default and is independent of
+Fact Truth and current Knowledge. Public `goal_aliases`, `goal_examples`, and
+typed `goal_target_values` describe addressable semantic metadata only. Thus a
+Known entity plus an addressable Fact schema can be a valid Goal while its
+current value remains UNKNOWN; internal/control/discovery Facts remain outside
+the catalog.
+
 Derived values are computed on read from the immutable ScenarioVersion and
 current Runtime Truth or public Knowledge. They are not runtime rows, do not
 add a runtime revision, and cannot be directly set by an Action or Rule.
@@ -154,11 +165,12 @@ resolution.
 
 The request path is:
 
-    Goal
-      -> authored Objective deterministic routing
-      -> Dynamic public Entity Grounding when unmatched
+    Goal text
+      -> World Goal State catalog deterministic routing (current canonical)
+      -> legacy authored Objective routing (catalog-disabled/old Version)
+      -> Dynamic public Entity Grounding when needed
       -> focused public ontology
-      -> Dynamic Goal Interpretation when unmatched
+      -> Dynamic Goal Interpretation when needed
       -> deterministic exact-Version candidate validation
       -> frozen FormalGoalContractV1
       -> Dependency Closure
@@ -173,18 +185,20 @@ The request path is:
       -> Player pacing / acknowledgement
       -> REPLAN or objective completion
 
-The Dynamic path is conditional: an explicit authored Objective match stops at
-the `PREDEFINED` source; only an unmatched Goal enters public grounding and
-interpretation. Grounding answers which public entity the player named.
-Interpretation answers which supported terminal Goal state is requested.
-Neither stage plans Actions.
+The Dynamic path is conditional: an exact public catalog match can resolve a
+typed `AD_HOC_DYNAMIC` requirement without a provider; otherwise the text
+enters public grounding and interpretation. Only catalog-disabled/legacy
+authored Objective matching stops at the `PREDEFINED` source. Grounding answers
+which public entity the player named. Interpretation answers which supported
+terminal Goal state is requested. Neither stage plans Actions.
 
-For the current Linjiang catalog, Task1's exact authored key/name/alias stays
-on the genuine `PREDEFINED` Fact Objective path. Task2-Task6 exact capability
-keys/names/aliases/examples use the deterministic public Derived Goal catalog
-and compile to an `AD_HOC_DYNAMIC` Derived requirement. Legacy ScenarioVersions
-without that catalog continue to use their immutable authored Objective
-contracts.
+For the current Linjiang catalog, all six player-facing preset texts use the
+public World Goal State path. Task1 resolves to an `AD_HOC_DYNAMIC` Fact
+requirement for `central_telecom_hub.operational == true`; Task2-Task6 resolve
+to their `AD_HOC_DYNAMIC` Derived requirements. The six authored Objective rows
+remain as compatibility/authoring data and do not control current canonical
+player routing. Legacy ScenarioVersions without that catalog continue to use
+their immutable authored Objective contracts.
 
 The application composes the configured provider once and injects it into
 the generic resolver and Agent service. API routes and React components are

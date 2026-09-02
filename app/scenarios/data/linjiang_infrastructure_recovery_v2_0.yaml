@@ -289,6 +289,12 @@ world:
       initial_value: false
       initial_visibility: HIDDEN
       goal_addressable: true
+      goal_aliases:
+      - 恢复中央通信能力
+      - 恢复中央通信核心
+      - Restore central communications
+      goal_target_values:
+      - true
       allowed_values: []
     - key: power_generation_capable
       name: 供电能力
@@ -8221,6 +8227,7 @@ derived_states:
 goal_resolution:
   allow_llm_fallback: true
   clarification_prompt: 请说明希望恢复的基础设施或公共服务。
+  world_goal_state_catalog: true
 planning:
   instructions:
   - 只使用当前 Knowledge 中已知的地点、关系、资源与设施状态。

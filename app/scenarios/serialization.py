@@ -27,6 +27,9 @@ def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
         for fact in node["facts"]:
             if fact["value_type"] == "ENUM":
                 fact["allowed_values"].sort(key=_scalar_sort_key)
+            fact.get("goal_aliases", []).sort(key=lambda value: str(value).casefold())
+            fact.get("goal_examples", []).sort(key=lambda value: str(value).casefold())
+            fact.get("goal_target_values", []).sort(key=_scalar_sort_key)
     world["relations"].sort(
         key=lambda item: (
             item["source_node_key"],

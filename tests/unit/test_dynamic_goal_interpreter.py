@@ -739,6 +739,17 @@ def test_dynamic_catalog_exposes_public_derived_metadata_without_dependencies() 
     assert "initial_value" not in str(ontology)
     assert "truth_value" not in str(ontology)
     assert "current_value" not in str(ontology)
+    operational = next(
+        item
+        for item in ontology["world"]["facts"]
+        if item["node_key"] == "central_telecom_hub" and item["fact_key"] == "operational"
+    )
+    assert operational["goal_aliases"] == [
+        "恢复中央通信能力",
+        "恢复中央通信核心",
+        "Restore central communications",
+    ]
+    assert operational["goal_target_values"] == [True]
 
 
 def test_dynamic_catalog_excludes_non_goal_addressable_derived_state() -> None:

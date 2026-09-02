@@ -340,6 +340,12 @@ class FactDefinitionV2(FrozenDefinitionModel):
     # This is an authored semantic boundary, not runtime Knowledge.  A Fact
     # may be goal-addressable even while its current Truth remains hidden.
     goal_addressable: bool = Field(default=False, exclude_if=lambda value: not value)
+    goal_aliases: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    goal_examples: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    goal_target_values: tuple[StrictScalar, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     allowed_values: tuple[StrictScalar, ...] = ()
 
     @model_validator(mode="after")
@@ -362,6 +368,24 @@ class FactDefinitionV2(FrozenDefinitionModel):
             type(value) is not type(self.initial_value) for value in self.allowed_values
         ):
             raise ValueError("ENUM values must share one scalar type")
+        normalized_aliases = [alias.strip().casefold() for alias in self.goal_aliases]
+        normalized_examples = [example.strip().casefold() for example in self.goal_examples]
+        if any(not alias for alias in (*normalized_aliases, *normalized_examples)):
+            raise ValueError("Fact goal aliases/examples cannot be blank")
+        _require_unique(
+            (*normalized_aliases, *normalized_examples),
+            "Fact goal aliases/examples",
+        )
+        if not self.goal_addressable and (
+            self.goal_aliases or self.goal_examples or self.goal_target_values
+        ):
+            raise ValueError("Only goal-addressable Facts may declare Goal metadata")
+        _validate_typed_values(
+            self.value_type,
+            self.allowed_values,
+            self.goal_target_values,
+            "Fact goal target value",
+        )
         return self
 
 
@@ -1153,6 +1177,10 @@ class ObjectiveDefinitionV2(FrozenDefinitionModel):
 class GoalResolutionV2(FrozenDefinitionModel):
     allow_llm_fallback: bool = True
     clarification_prompt: str = Field(min_length=1, max_length=2000)
+    # When enabled, current authored Objective rows are compatibility
+    # metadata only; player text resolves through the public World Goal State
+    # catalog instead of the legacy Objective shortcut.
+    world_goal_state_catalog: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class RecoveryHintV2(FrozenDefinitionModel):

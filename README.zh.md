@@ -18,9 +18,10 @@ planning、validation、Action execution、persistence 和浏览器产品。
   PlannerInput V2、deterministic Validator、bounded 内部 REPAIR，以及
   Knowledge-aware REPLAN。
 * World Goal State V2 typed requirement：`FACT`、`RESOURCE_AT_LEAST` 和作者声明的
-  `DERIVED_STATE`。canonical Linjiang 中 Task1 是真正的 typed Fact Objective，
-  Task2–Task6 对应 5 个可作为 Goal 的 Derived capability；Derived 不是所有 Fact
-  的默认包装。
+  `DERIVED_STATE`。当前 canonical Linjiang 的六条玩家目标文案都通过公开
+  catalog 解析：Task1 是 typed Fact，Task2–Task6 对应 5 个可作为 Goal 的
+  Derived capability。保留的 authored Objective 行只用于兼容/authoring，不再
+  作为当前 canonical 玩家目标的快捷路由。
 * Declarative Action/Rule execution、Truth mutation、public Knowledge projection、
   Player-safe Formal PLAY、审批、不可变 archived runtime source、Fork 和 plan
   history。
@@ -32,11 +33,12 @@ planning、validation、Action execution、persistence 和浏览器产品。
 ~~~text
 ScenarioVersion
   -> GameInstance
-       -> Goal
-            -> exact authored Objective routing，或 Dynamic Goal
-                 -> public entity grounding -> focused ontology
-                      -> typed Goal interpretation -> exact-Version validation
-                           -> frozen FormalGoalContractV1
+       -> Goal 文本
+            -> public World Goal State catalog / legacy compatibility routing
+                 -> 需要时进行 Dynamic public entity grounding
+                      -> focused ontology -> typed Goal interpretation
+                           -> exact-Version validation
+                                -> frozen FormalGoalContractV1
                                 -> Closure -> PlannerInput V2
                                      -> Provider PlanSegment -> Validator
                                           -> AgentPlan -> Runtime -> Truth / Knowledge
@@ -87,10 +89,17 @@ semantic output budget，并由代码强制 `thinking=disabled`。
 只需要改配置，不需要修改 Goal Resolver 或 Planner 业务逻辑。
 
 Dynamic Goal 会先 grounding public entity，再构造 focused ontology，最后解释
-terminal `FACT` 或 `RESOURCE_AT_LEAST` requirement。transient/provider-format
+terminal `FACT`、`RESOURCE_AT_LEAST` 或公开 `DERIVED_STATE` requirement。Derived
+依赖仍是 backend authored semantics，不会作为 provider planning instructions
+暴露。transient/provider-format
 failure 使用 bounded retry；`NEEDS_CLARIFICATION` 不会被随机 retry 成某个结果。
 provider 或 validation 内部错误码只保留给 developer diagnostics；Goal submission
 feedback 显示在 Goal input 下方，不作为页面级错误。
+
+当前 Linjiang Version 开启 World Goal State catalog。快捷目标只是把建议文案
+填入同一个可编辑 Goal 输入框，不是 Objective/Task selector，也不会提交额外
+identity。Dynamic submission 直接针对 exact Version 编译，不会创建新的 authored
+Objective；旧的 immutable Version 继续保留原有 predefined Objective 行为。
 
 不要提交 API key。
 

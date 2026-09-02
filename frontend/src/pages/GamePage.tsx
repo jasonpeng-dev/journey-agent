@@ -1570,8 +1570,8 @@ export function GoalComposer({
   startedAt,
   busy,
   feedback = null,
-  objectives = [],
-  objectivesLoaded = false,
+  goalPresets = [],
+  presetsLoaded = false,
   onGoalChange,
   onSubmit,
 }: {
@@ -1581,21 +1581,16 @@ export function GoalComposer({
   startedAt: number | null;
   busy: boolean;
   feedback?: string | null;
-  objectives?: Array<{ key: string; name: string }>;
-  objectivesLoaded?: boolean;
+  goalPresets?: string[];
+  presetsLoaded?: boolean;
   onGoalChange: (value: string) => void;
   onSubmit: () => void;
 }) {
-  const CUSTOM_GOAL = "__custom_goal__";
-  const [selectedObjectiveKey, setSelectedObjectiveKey] = useState("");
-  const selectedObjective = objectives.find((item) => item.key === selectedObjectiveKey);
-  const customGoalSelected = selectedObjectiveKey === CUSTOM_GOAL;
-  const showCustomInput = !objectivesLoaded || objectives.length === 0 || customGoalSelected;
+  const [selectedPresetText, setSelectedPresetText] = useState("");
   const displayedGoal = resolving ? pendingGoal ?? goal : goal;
-  const handleObjectiveChange = (value: string) => {
-    setSelectedObjectiveKey(value);
-    const objective = objectives.find((item) => item.key === value);
-    onGoalChange(objective?.name ?? "");
+  const handlePresetChange = (value: string) => {
+    setSelectedPresetText(value);
+    if (value) onGoalChange(value);
   };
   return (
     <section className="command-panel goal-composer-panel" data-testid="goal-composer">
@@ -1610,51 +1605,38 @@ export function GoalComposer({
         className="command-composer-v2"
         onSubmit={(event) => {
           event.preventDefault();
-          if (!resolving && goal.trim() && (showCustomInput || selectedObjective)) onSubmit();
+          if (!resolving && goal.trim()) onSubmit();
         }}
       >
+        <div className="goal-input-row">
+          <label className="sr-only" htmlFor="goal">目标内容</label>
+          <textarea
+            id="goal"
+            rows={2}
+            value={displayedGoal}
+            onChange={(event) => {
+              setSelectedPresetText("");
+              onGoalChange(event.target.value);
+            }}
+            placeholder="描述你希望达成的目标，例如“修复中央隧道”……"
+            disabled={resolving}
+          />
+          <button disabled={resolving || !goal.trim() || busy} type="submit">
+            {resolving ? "正在接收……" : "开始目标"}
+          </button>
+        </div>
         <select
-          id="objective-select"
-          aria-label="选择任务"
-          value={objectivesLoaded ? selectedObjectiveKey : ""}
-          onChange={(event) => handleObjectiveChange(event.target.value)}
-          disabled={resolving || !objectivesLoaded}
+          id="goal-preset-select"
+          aria-label="选择快捷目标"
+          value={presetsLoaded ? selectedPresetText : ""}
+          onChange={(event) => handlePresetChange(event.target.value)}
+          disabled={resolving || !presetsLoaded}
         >
-          <option value="" disabled>
-            {objectivesLoaded ? "请选择一个任务" : "正在加载任务……"}
-          </option>
-          {objectives.map((objective) => (
-            <option key={objective.key} value={objective.key}>{objective.name}</option>
+          <option value="">{presetsLoaded ? '选择快捷目标……' : '正在加载快捷目标……'}</option>
+          {goalPresets.map((preset) => (
+            <option key={preset} value={preset}>{preset}</option>
           ))}
-          {objectivesLoaded && <option value={CUSTOM_GOAL}>自定义目标……</option>}
         </select>
-        {showCustomInput && (
-          <div>
-            <label htmlFor="goal">自定义目标</label>
-            <textarea
-              id="goal"
-              rows={3}
-              value={displayedGoal}
-              onChange={(event) => {
-                setSelectedObjectiveKey(CUSTOM_GOAL);
-                onGoalChange(event.target.value);
-              }}
-              placeholder="输入自定义目标"
-              disabled={resolving}
-            />
-            <button disabled={resolving || !goal.trim() || busy} type="submit">
-              {resolving ? "正在接收……" : "开始目标"}
-            </button>
-          </div>
-        )}
-        {!showCustomInput && selectedObjective && (
-          <div className="goal-composer-selected">
-            <strong>{selectedObjective?.name}</strong>
-            <button disabled={resolving || !goal.trim() || busy} type="submit">
-              {resolving ? "正在接收……" : "开始目标"}
-            </button>
-          </div>
-        )}
         {feedback && (
           <p className="goal-submission-feedback" data-testid="goal-submission-feedback" role="status">
             {feedback}
@@ -1672,14 +1654,14 @@ export function GoalComposer({
   );
 }
 
-function scenarioObjectiveOptions(
+function scenarioGoalPresets(
   version: ScenarioVersionDetail | undefined,
-): Array<{ key: string; name: string }> {
+): string[] {
   return (version?.definition_document.objectives ?? []).flatMap((item) => {
     if (typeof item.key !== "string" || typeof item.name !== "string" || !item.name.trim()) {
       return [];
     }
-    return [{ key: item.key, name: item.name }];
+    return [item.name];
   });
 }
 
@@ -1873,7 +1855,7 @@ export function GamePage() {
   }
   const { game } = play.data;
   const liveGame = livePlay.data.game;
-  const objectiveOptions = scenarioObjectiveOptions(scenarioVersion.data);
+  const goalPresets = scenarioGoalPresets(scenarioVersion.data);
   const rawScenarioWorld = scenarioVersion.data?.definition_document.world;
   const scenarioWorld = rawScenarioWorld && typeof rawScenarioWorld === "object" && !Array.isArray(rawScenarioWorld)
     ? rawScenarioWorld as Record<string, unknown>
@@ -2113,8 +2095,8 @@ export function GamePage() {
               startedAt={goalResolving ? activeOperation?.startedAt ?? null : null}
               busy={busy}
               feedback={goalSubmissionFeedback}
-              objectives={objectiveOptions}
-              objectivesLoaded={scenarioVersion.isFetched}
+              goalPresets={goalPresets}
+              presetsLoaded={scenarioVersion.isFetched}
               onGoalChange={setGoal}
               onSubmit={() => submit.mutate()}
             />

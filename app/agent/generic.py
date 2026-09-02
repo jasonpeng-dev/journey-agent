@@ -91,6 +91,7 @@ from app.domain.scenario_v2 import (
     DerivedStateDefinitionV2,
     EffectKind,
     EffectV2,
+    FactDefinitionV2,
     NodeSelectorKind,
     NodeSelectorV2,
     ObjectiveDefinitionV2,
@@ -282,6 +283,74 @@ def _derived_goal_state_matches(
     )
 
 
+def _world_goal_fact_matches(
+    goal: str,
+    definition: ScenarioDefinitionV2,
+    db: Session | None,
+    scope: RuntimeScope | None,
+) -> tuple[tuple[str, FactDefinitionV2], ...]:
+    """Match exact authored public Fact semantics without reading Fact Truth."""
+
+    normalized = _normalize(goal)
+    public_nodes, _goal_addressable_facts, _public_regions = _dynamic_goal_public_keys(
+        db,
+        scope,
+        definition,
+    )
+    matches: list[tuple[str, FactDefinitionV2]] = []
+    for node in sorted(definition.world.nodes, key=lambda item: item.key):
+        if node.key not in public_nodes:
+            continue
+        for fact in sorted(node.facts, key=lambda item: item.key):
+            if not fact.goal_addressable or not fact.goal_target_values:
+                continue
+            identifiers = {
+                _normalize(fact.key),
+                _normalize(fact.name),
+                *(_normalize(alias) for alias in fact.goal_aliases),
+                *(_normalize(example) for example in fact.goal_examples),
+            }
+            if normalized in identifiers:
+                matches.append((node.key, fact))
+    return tuple(matches)
+
+
+def _world_goal_fact_resolution(
+    matches: tuple[tuple[str, FactDefinitionV2], ...],
+    definition: ScenarioDefinitionV2,
+) -> GenericGoalResolution:
+    if len(matches) == 1:
+        node_key, fact = matches[0]
+        return GenericGoalResolution(
+            "RESOLVED",
+            source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+            dynamic_requirements=(
+                AdHocGoalRequirementCandidateV1(
+                    kind=ObjectiveRequirementKind.FACT,
+                    node_key=node_key,
+                    fact_key=fact.key,
+                    accepted_values=fact.goal_target_values,
+                ),
+            ),
+            provider_observation={
+                "stage": "WORLD_GOAL_STATE_CATALOG",
+                "result": "DETERMINISTIC_FACT",
+                "fact": f"{node_key}.{fact.key}",
+            },
+        )
+    candidate_keys = tuple(f"{node_key}.{fact.key}" for node_key, fact in matches)
+    return GenericGoalResolution(
+        "NEEDS_CLARIFICATION",
+        candidate_keys=candidate_keys,
+        clarification_prompt=definition.goal_resolution.clarification_prompt,
+        source="DETERMINISTIC_WORLD_GOAL_STATE_CATALOG",
+        provider_observation={
+            "stage": "WORLD_GOAL_STATE_CATALOG",
+            "result": "BACKEND_NEEDS_CLARIFICATION",
+        },
+    )
+
+
 def _is_current_derived_objective(
     objective: ObjectiveDefinitionV2,
     definition: ScenarioDefinitionV2,
@@ -336,7 +405,7 @@ class PlanRevalidationResult:
 
 
 class GenericGoalResolver:
-    """Route authored exact matches and otherwise invoke the Dynamic interpreter.
+    """Route public catalog matches and legacy exact matches to Dynamic/Predefined Goals.
 
     The legacy Objective-selection model is intentionally not part of this
     routing path: an unmatched player Goal must never be converted into the
@@ -382,27 +451,32 @@ class GenericGoalResolver:
                     "result": "BACKEND_NEEDS_CLARIFICATION",
                 },
             )
-        matches = [
-            objective
-            for objective in definition.objectives
-            if not _is_current_derived_objective(objective, definition)
-            if normalized
-            in {
-                _normalize(objective.key),
-                _normalize(objective.name),
-                *(_normalize(alias) for alias in objective.goal_aliases),
-                *(_normalize(example) for example in objective.goal_examples),
-            }
-        ]
-        if len(matches) == 1:
-            return self._resolve_authored_objective(matches[0])
-        if len(matches) > 1:
-            return GenericGoalResolution(
-                "NEEDS_CLARIFICATION",
-                candidate_keys=tuple(sorted(item.key for item in matches)),
-                clarification_prompt=definition.goal_resolution.clarification_prompt,
-                source="DETERMINISTIC_AUTHORED_OBJECTIVE",
-            )
+        if definition.goal_resolution.world_goal_state_catalog:
+            fact_matches = _world_goal_fact_matches(goal, definition, self.db, self.scope)
+            if fact_matches:
+                return _world_goal_fact_resolution(fact_matches, definition)
+        else:
+            matches = [
+                objective
+                for objective in definition.objectives
+                if not _is_current_derived_objective(objective, definition)
+                if normalized
+                in {
+                    _normalize(objective.key),
+                    _normalize(objective.name),
+                    *(_normalize(alias) for alias in objective.goal_aliases),
+                    *(_normalize(example) for example in objective.goal_examples),
+                }
+            ]
+            if len(matches) == 1:
+                return self._resolve_authored_objective(matches[0])
+            if len(matches) > 1:
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION",
+                    candidate_keys=tuple(sorted(item.key for item in matches)),
+                    clarification_prompt=definition.goal_resolution.clarification_prompt,
+                    source="DETERMINISTIC_AUTHORED_OBJECTIVE",
+                )
         dynamic = self._resolve_dynamic_goal(goal, definition)
         if dynamic is not None:
             return dynamic
@@ -5747,6 +5821,13 @@ def _dynamic_goal_ontology(
             "name": fact.name,
             "description": fact.description,
             "value_type": fact.value_type.value,
+            **({"goal_aliases": list(fact.goal_aliases)} if fact.goal_aliases else {}),
+            **({"goal_examples": list(fact.goal_examples)} if fact.goal_examples else {}),
+            **(
+                {"goal_target_values": list(fact.goal_target_values)}
+                if fact.goal_target_values
+                else {}
+            ),
             **({"allowed_values": list(fact.allowed_values)} if fact.allowed_values else {}),
         }
         for node in sorted(definition.world.nodes, key=lambda item: item.key)

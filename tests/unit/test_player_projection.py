@@ -809,7 +809,7 @@ def test_relay_projection_uses_target_actor_plan_time_region_and_name(
         session,
         "player-projection-relay-subtitle",
         definition,
-        goal=definition.objectives[0].key,
+        goal=definition.objectives[0].name,
     )
     target_actor = session.get(
         GameInstanceActor,

@@ -20,11 +20,14 @@ materialization.
 ## 1.1 Goal freeze and Formal PLAY
 
 Submitting a Goal to an ACTIVE GameInstance creates at most one non-terminal
-AgentTask for that instance. The exact-Version resolver either selects an
-authored `PREDEFINED` Objective or compiles an `AD_HOC_DYNAMIC`
-`FormalGoalContractV1` from public typed candidates. The frozen contract stores
-its canonical JSON, hash, source kind, compiler version, and exact
-ScenarioVersion/content-hash proof inside the AgentTask.
+AgentTask for that instance. A catalog-enabled Version resolves player text
+through its public World Goal State catalog and compiles an
+`AD_HOC_DYNAMIC` `FormalGoalContractV1`; a catalog-disabled or older immutable
+Version may use the authored `PREDEFINED` compatibility route. The frozen
+contract stores its canonical JSON, hash, source kind, compiler version, and
+exact ScenarioVersion/content-hash proof inside the AgentTask. Preset Goal
+entries in the UI only fill the same editable text input and do not submit an
+Objective or Task identity.
 
 The V1 contract is a flat implicit `AND` of `FACT`, `RESOURCE_AT_LEAST`, and
 public `DERIVED_STATE` requirements. Its deterministic Truth evaluator owns

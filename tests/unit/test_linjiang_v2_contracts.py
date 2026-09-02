@@ -514,8 +514,8 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     formal_goal = load_formal_goal_for_task(session, scope, task)
 
     assert payload["schema_version"] == 2
-    assert formal_goal.source_kind == FormalGoalSourceKind.PREDEFINED
-    assert payload["objective"]["objective_scope"] == ["restore_central_communication_capability"]
+    assert formal_goal.source_kind == FormalGoalSourceKind.AD_HOC_DYNAMIC
+    assert payload["objective"]["objective_scope"] == ["dynamic_goal"]
     assert formal_goal.completion_requirements[0].requirement.kind.value == "FACT"
     assert payload["objective"]["completion_requirements"][0]["node_key"] == ("central_telecom_hub")
     assert payload["objective"]["completion_requirements"][0]["fact_key"] == "operational"

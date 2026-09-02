@@ -11,8 +11,9 @@ scenario-specific control flow.
 The current end-to-end lifecycle is:
 
     Natural-language Goal
-      -> exact authored Objective routing
-      -> deterministic public Entity Grounding when unmatched
+      -> World Goal State catalog routing (current canonical)
+      -> legacy authored Objective routing for catalog-disabled/old Versions
+      -> deterministic public Entity Grounding when needed
       -> bounded semantic Entity Grounding when deterministic grounding is not unique
       -> focused public ontology
       -> Dynamic Goal Interpretation
@@ -33,9 +34,11 @@ The current end-to-end lifecycle is:
       -> REPLAN when required
       -> objective verification
 
-An explicit authored Objective key, canonical name, alias, or example takes
-the `PREDEFINED` path and does not enter Dynamic interpretation. An unmatched
-Goal never falls back to selecting the nearest authored Objective.
+In a catalog-enabled Version, exact public World Goal State metadata resolves
+to a typed `AD_HOC_DYNAMIC` requirement. In catalog-disabled or older
+immutable Versions, an explicit authored Objective key, canonical name, alias,
+or example takes the `PREDEFINED` path. An unmatched Goal never falls back to
+selecting the nearest authored Objective.
 
 The runtime is generic because the same source code interprets every
 published ScenarioVersion through the declarative ScenarioDefinitionV2 and
@@ -114,11 +117,13 @@ focused public ontology, and only then calls Dynamic Goal Interpretation.
 Grounding answers which public entity the player named; interpretation answers
 which supported terminal Goal state is requested. Neither stage plans Actions.
 
-In the current Linjiang Version, an exact Task1 authored key, name, alias, or
-example remains a genuine `PREDEFINED` Fact Objective. Exact Task2-Task6
-capability keys, names, aliases, or examples resolve through the public
-Derived catalog. Older immutable ScenarioVersions without that catalog retain
-their original authored Objective routing and contracts.
+In the current Linjiang Version, all six player-facing preset texts use the
+public World Goal State catalog. Task1 resolves to an `AD_HOC_DYNAMIC` Fact
+requirement for `central_telecom_hub.operational == true`; Task2-Task6 resolve
+through the public Derived catalog. The six authored Objective rows remain
+compatibility/authoring data and do not control current canonical routing.
+Older immutable ScenarioVersions without that catalog retain their original
+authored Objective routing and contracts.
 
 An accepted goal creates an AgentTask with:
 
@@ -170,12 +175,14 @@ delegate completion to the Provider. The deterministic evaluator remains the
 completion authority.
 
 The canonical Linjiang Scenario uses five goal-addressable Derived States.
-Task1 is intentionally not one of them: its exact authored Objective is a
-`PREDEFINED` typed Fact requirement for
+Task1 is intentionally not one of them: its public catalog metadata resolves
+to an `AD_HOC_DYNAMIC` typed Fact requirement for
 `central_telecom_hub.operational == true`. Task2-Task6 use the deterministic
 Derived Goal catalog and compile to their corresponding `DERIVED_STATE`
-requirements. A Derived State is a computed capability with independent
-semantic identity, not a mandatory wrapper around one Fact.
+requirements. The six authored Objective rows remain compatibility/authoring
+data for this Version and do not control current player routing. A Derived
+State is a computed capability with independent semantic identity, not a
+mandatory wrapper around one Fact.
 
 Derived State is compute-on-read. The Truth evaluator reads complete
 authoritative Runtime state; the Knowledge evaluator reads only the public
