@@ -4,8 +4,10 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.domain.enums import ResourcePoolVisibility
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.engine.rules import ResourceMutation
 from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceMemoryEvent,
@@ -122,6 +124,22 @@ def test_generic_service_rejects_complete_invalid_outcome_before_mutation(
     )
     assert fact is not None and fact.truth_value is False
     assert resource.value == 2
+
+
+def test_generic_service_distinguishes_unknown_global_source(
+    session: Session,
+) -> None:
+    game, _runtime_value = _runtime(session, "generic-unknown-source")
+    resource = session.scalar(select(GameInstanceResourceState))
+    assert resource is not None
+    resource.visibility = ResourcePoolVisibility.HIDDEN
+    session.flush()
+
+    with pytest.raises(GenericGameError) as caught:
+        game._expand_resource_mutations((ResourceMutation("medicine", -3, None, "default"),))
+
+    assert caught.value.code == "RESOURCE_SOURCE_UNKNOWN"
+    assert caught.value.retryable is True
 
 
 def test_generic_service_never_writes_another_instance(session: Session) -> None:

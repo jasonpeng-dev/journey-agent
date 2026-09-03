@@ -1749,6 +1749,29 @@ def test_unknown_region_without_projected_inflow_remains_unknown() -> None:
     assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
 
 
+def test_unknown_global_source_is_not_reported_as_known_zero() -> None:
+    validator = _projected_resource_validator()
+
+    with pytest.raises(GenericAgentError) as error:
+        validator._consume_projected_resource(
+            None,
+            "synthetic_resource",
+            10,
+            {},
+            {},
+        )
+
+    assert error.value.code == "RESOURCE_SOURCE_UNKNOWN"
+    assert error.value.details == {
+        "dimension": "RESOURCE_SOURCE",
+        "resource_key": "synthetic_resource",
+        "scope_region": None,
+        "required_amount": 10,
+        "required": "KNOWN_PUBLIC_SOURCE",
+        "actual": "UNKNOWN",
+    }
+
+
 def test_projected_inflow_does_not_reveal_unknown_inventory() -> None:
     validator = _projected_resource_validator()
     hidden_pool = _projected_pool(

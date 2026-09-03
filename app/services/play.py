@@ -666,6 +666,7 @@ class PlayOrchestrator:
         if step is not None:
             step.status = AgentStepStatus.FAILED
             step.failure_code = "PLAYER_REJECTED"
+            self.agent.retire_failed_plan_suffix(task, step)
         replan_started = perf_counter()
         try:
             plan = self.agent.plan(task, reason="PLAYER_REJECTED")

@@ -268,7 +268,7 @@ world:
       name: 通行状态
       description: 该通道是否可通行。
       value_type: BOOLEAN
-      initial_value: false
+      initial_value: true
       initial_visibility: HIDDEN
       goal_addressable: true
       allowed_values: []
@@ -847,7 +847,7 @@ world:
       name: 通行状态
       description: 该通道是否可通行。
       value_type: BOOLEAN
-      initial_value: false
+      initial_value: true
       initial_visibility: HIDDEN
       goal_addressable: true
       allowed_values: []
@@ -2344,7 +2344,7 @@ actions:
   locality: REGION
 - key: transport_resource
   name: 运输资源
-  description: 将当前 Region 的已知可用资源运往目标 Region。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复；不会移动 Actor。
+  description: 将当前 Region 的已知可用资源运往目标 Region。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复；成功后 Actor 随资源移动到目标 Region。
   required_interaction_key: transport_destination
   execution_mode: IMMEDIATE
   parameters:

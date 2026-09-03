@@ -321,6 +321,39 @@ def test_resource_objective_enters_closure_without_selecting_a_source() -> None:
     assert "synthetic_region" in _node_keys(result)
 
 
+def test_resource_objective_unknown_inventory_is_not_reported_as_unknown_source() -> None:
+    base = _planner_input(available_amount=0)
+    resources = {
+        "support_material": {
+            "scopes": {
+                "synthetic_region": {
+                    "knowledge_status": "UNKNOWN",
+                }
+            }
+        }
+    }
+    planner_input = base.model_copy(
+        update={"known_world": base.known_world.model_copy(update={"resources": resources})}
+    )
+
+    result = build_dependency_closure(
+        _definition(),
+        (_resource_objective(),),
+        planner_input,
+    )
+
+    unknown = next(
+        item
+        for item in result.planner_input.known_world.unknown_dependencies
+        if item.get("dimension") == "RESOURCE_SOURCE"
+    )
+    assert unknown["source_knowledge_status"] == "KNOWN"
+    assert unknown["inventory_knowledge_status"] == "UNKNOWN"
+    assert unknown["knowledge_status_code"] == "RESOURCE_INVENTORY_UNKNOWN"
+    assert "known_available_amount" not in unknown
+    assert "deficit" not in unknown
+
+
 def test_gated_resource_objective_is_absent_before_public_gate_reveal() -> None:
     result = build_dependency_closure(
         _definition(),
