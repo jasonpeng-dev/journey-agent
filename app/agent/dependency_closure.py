@@ -1156,22 +1156,34 @@ def build_dependency_closure(
                 planner_input,
                 dependency.key,
             )
+            source_status = _resource_source_knowledge_status(
+                definition,
+                dependency,
+                known_resource,
+            )
             inventory_status = _resource_inventory_status(
                 known_resource,
                 planner_input,
                 required_amount=required_amount,
             )
-            if inventory_status == "UNKNOWN":
+            if source_status == "UNKNOWN" or inventory_status == "UNKNOWN":
+                knowledge_status_code = (
+                    "RESOURCE_SOURCE_UNKNOWN"
+                    if source_status == "UNKNOWN"
+                    else "RESOURCE_INVENTORY_UNKNOWN"
+                )
                 unknown: dict[str, object] = {
                     "dimension": "RESOURCE_SOURCE",
                     "resource_key": dependency.subject,
                     "target_key": dependency.key,
                     "required_amount": required_amount,
-                    "known_available_amount": known_available_amount,
-                    "deficit": required_amount - known_available_amount,
-                    "source_knowledge_status": "UNKNOWN",
+                    "source_knowledge_status": source_status,
+                    "inventory_knowledge_status": inventory_status,
+                    "knowledge_status_code": knowledge_status_code,
                     "status": "UNKNOWN",
-                    "blocks": "SOURCE_SELECTION",
+                    "blocks": (
+                        "SOURCE_SELECTION" if source_status == "UNKNOWN" else "SOURCE_INVENTORY"
+                    ),
                     "resolvable_by_effect_types": [
                         "REGION_RESOURCE_KNOWLEDGE",
                         "RESOURCE_POOL_KNOWLEDGE",
@@ -1663,6 +1675,37 @@ def _known_available_resource_amount(raw: object) -> int:
         and isinstance(value.get("known_available"), int)
         and not isinstance(value.get("known_available"), bool)
     )
+
+
+def _resource_source_knowledge_status(
+    definition: ScenarioDefinitionV2,
+    dependency: TypedDependency,
+    raw: object,
+) -> str:
+    """Return whether a public source scope is identified for a dependency.
+
+    A typed Resource requirement can identify its destination Region even when
+    that Region's inventory is still unknown.  Action-level consumption and a
+    resource summary without a public scope do not identify a source; neither
+    case may be represented as a known zero quantity.
+    """
+
+    target_key = dependency.key
+    locality = definition.metadata.locality
+    target_node = definition.world.node(target_key) if target_key else None
+    if (
+        target_node is not None
+        and locality.enabled
+        and target_node.node_type_key == locality.region_node_type_key
+    ):
+        return "KNOWN"
+    if isinstance(raw, dict):
+        scopes = raw.get("scopes")
+        if isinstance(scopes, dict) and scopes:
+            return "KNOWN"
+        if any(key in raw for key in ("global", "known_total", "known_available")):
+            return "KNOWN"
+    return "UNKNOWN"
 
 
 def _known_linked_pool_unlock_dependencies(

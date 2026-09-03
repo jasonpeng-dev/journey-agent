@@ -370,6 +370,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     )
 
     transport = actions["transport_resource"]
+    assert "不会移动 Actor" not in definition_actions["transport_resource"].description
     assert {item["key"] for item in transport["parameter_schema"]} == {"resources"}
     parameter_schema = transport["parameter_schema"][0]
     assert parameter_schema["value_type"] == "OBJECT_ARRAY"
@@ -389,6 +390,12 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
         and item["required"] == "KNOWN_VISIBLE_AVAILABLE"
         and item["unknown"] == "CANNOT_INTENTIONALLY_TRANSPORT"
         for item in transport["planner_constraints"]["knowledge"]
+    )
+    assert any(
+        effect["type"] == "ACTOR_LOCATION"
+        and effect["actor"] == "executor"
+        and effect["value"] == "target_key"
+        for effect in transport["planner_effects"]
     )
     assert any(
         effect["type"] == "RESOURCE_TRANSFER"
@@ -617,15 +624,19 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
         if item.get("dimension") == "RESOURCE_SOURCE"
     }
     communication_dependency = resource_dependencies["communication_equipment"]
-    assert (
-        communication_dependency["required_amount"],
-        communication_dependency["known_available_amount"],
-        communication_dependency["deficit"],
-    ) == (10, 0, 10)
+    assert communication_dependency["required_amount"] == 10
+    assert "known_available_amount" not in communication_dependency
+    assert "deficit" not in communication_dependency
     assert communication_dependency["source_knowledge_status"] == "UNKNOWN"
+    assert communication_dependency["inventory_knowledge_status"] == "UNKNOWN"
+    assert communication_dependency["knowledge_status_code"] == "RESOURCE_SOURCE_UNKNOWN"
     assert resource_dependencies["general_engineering_parts"]["required_amount"] == 15
     assert (
         resource_dependencies["general_engineering_parts"]["source_knowledge_status"] == "UNKNOWN"
+    )
+    assert (
+        resource_dependencies["general_engineering_parts"]["knowledge_status_code"]
+        == "RESOURCE_SOURCE_UNKNOWN"
     )
     assert all(item.get("status") == "UNKNOWN" for item in dependencies)
     resource_knowledge = {
@@ -2069,7 +2080,19 @@ def test_linjiang_v2_0_clear_transport_uses_endpoint_locality_not_passability(
 def test_linjiang_v2_0_hidden_block_is_discovered_only_during_runtime(
     session: Session,
 ) -> None:
-    runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-central-east-runtime")
+    document = LINJIANG_V2_TEST.model_dump(mode="json")
+    central_tunnel = next(
+        node for node in document["world"]["nodes"] if node["key"] == "central_river_tunnel"
+    )
+    next(fact for fact in central_tunnel["facts"] if fact["key"] == "passable")["initial_value"] = (
+        False
+    )
+    blocked_route_definition = ScenarioDefinitionV2.model_validate(document)
+    runtime, scope = _v2_0_runtime(
+        session,
+        "linjiang-v2_0-central-east-runtime",
+        blocked_route_definition,
+    )
     fact = session.get(
         GameInstanceFactState,
         (runtime.instance.id, "central_river_tunnel", "passable"),

@@ -1445,6 +1445,12 @@ class GenericGameService:
                 ),
                 key=lambda row: row.pool_key,
             )
+            if mutation.scope_node_key is None and not visible_rows:
+                raise GenericGameError(
+                    "RESOURCE_SOURCE_UNKNOWN",
+                    "No public Resource source is known",
+                    retryable=True,
+                )
             inventory_status = resource_knowledge_status(
                 inventory_visibility=(
                     ResourceInventoryVisibility(knowledge.resource_inventory_visibility)

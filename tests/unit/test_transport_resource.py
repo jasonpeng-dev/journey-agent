@@ -18,8 +18,10 @@ from app.domain.scenario_v2 import (
     normalize_action_parameters,
     transport_resource_entries,
 )
+from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     GameInstanceActor,
+    GameInstanceFactState,
     GameInstanceRegionResourceKnowledge,
     GameInstanceResourceState,
     Player,
@@ -593,6 +595,64 @@ def test_validator_projects_transport_actor_location_for_the_next_hop(session: S
         )
         == "edge_bc"
     )
+
+
+def test_unknown_transport_passability_is_may_attempt_and_runtime_reveals_failure(
+    session: Session,
+) -> None:
+    document = _definition().model_dump(mode="json")
+    edge_ab = next(node for node in document["world"]["nodes"] if node["key"] == "edge_ab")
+    passability = next(fact for fact in edge_ab["facts"] if fact["key"] == "passable")
+    passability["initial_value"] = False
+    passability["initial_visibility"] = "HIDDEN"
+    definition = ScenarioDefinitionV2.model_validate(document)
+    runtime, scope = _runtime(session, definition, "unknown-transport-passability")
+    agent = GenericAgentService(session, scope)
+    actors = {
+        actor.actor_key: actor
+        for actor in session.query(GameInstanceActor).all()
+        if actor.game_instance_id == runtime.instance.id
+    }
+    action = definition.actions[0]
+    projected_locations = {key: actor.current_node_key for key, actor in actors.items()}
+    projected_reachability = {
+        key: CommandReachability(actor.command_reachability) for key, actor in actors.items()
+    }
+    projected_passability = agent._known_passability(definition)
+    assert "edge_ab" not in projected_passability
+    assert (
+        agent._validate_projected_action_state(
+            definition,
+            action,
+            "carrier",
+            "region_b",
+            {"resource_key": "cargo_alpha", "amount": 1},
+            projected_locations,
+            projected_passability,
+            agent._known_fact_projection(),
+            agent._known_node_keys(),
+            agent._known_relation_keys(definition),
+            actors=actors,
+            projected_command_reachability=projected_reachability,
+        )
+        == "edge_ab"
+    )
+
+    result = _transport(
+        session,
+        scope,
+        target_key="region_b",
+        parameters={"resource_key": "cargo_alpha", "amount": 1},
+        key="unknown-transport-passability-1",
+    )
+
+    assert result.applied is not None
+    assert result.applied.outcome.failure is not None
+    assert result.applied.outcome.failure.code == "TRANSPORT_BLOCKED"
+    actor = session.get(GameInstanceActor, (runtime.instance.id, "carrier"))
+    fact = session.get(GameInstanceFactState, (runtime.instance.id, "edge_ab", "passable"))
+    assert actor is not None and actor.current_node_key == "region_a"
+    assert fact is not None and fact.visibility == Visibility.KNOWN and fact.truth_value is False
 
 
 def test_multi_resource_shortfall_does_not_partially_mutate(session: Session) -> None:

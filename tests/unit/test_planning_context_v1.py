@@ -533,7 +533,8 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "planner_input.known_world",
         "projected deterministic effects",
         "boundary_dependency_id",
-        "attempt_policy MAY_ATTEMPT is not an information boundary",
+        "MAY_ATTEMPT is legal under uncertainty, not known safe",
+        "Runtime may fail, reveal public passability, leave the Actor unmoved, and trigger REPLAN",
         "validate every Step in order against the projected known state",
         "Apply all declared deterministic effects from earlier Steps",
         "known deterministic contradiction",
@@ -550,12 +551,9 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "transport_resource is the Region-to-Region Resource transfer Action",
         "steps MUST be empty",
         "inability to think of the causal chain is not BLOCKED",
-        (
-            "first submitted Knowledge-acquisition Action that matches the "
-            "active boundary_dependency_id"
-        ),
-        "MUST be the final Step of this PlanSegment",
-        "do not schedule another candidate inspect or survey",
+        "a legal Knowledge-acquisition Action before the first future Action",
+        "Knowledge-acquisition Actions do not automatically terminate a PlanSegment",
+        "End the segment before the first Action whose legality",
         "existing REPLAN lifecycle",
         "planning_continuity",
         "Use it to retain still-relevant causal intent",
@@ -595,6 +593,10 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         "does not prescribe or preserve any previous Action, Actor, Target",
         "You may redesign the entire PlanSegment freely",
         "does not reintroduce contradictions represented by this memory",
+        "proposal crossed an information-dependency boundary",
+        "rejected Action is not legal in the current PlannerInput",
+        "retain other currently legal steps whose validity is independent",
+        "end the segment before the first result-dependent Action",
     ):
         assert repair_term in repair_prompt
     assert (
@@ -673,9 +675,8 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=(acquisition,)),
         planner_input,
     )
-    assert len(objective_completion_bypass) == 1
-    assert objective_completion_bypass[0].code == "INFORMATION_BOUNDARY_REQUIRED"
-    acquisition_not_last = _validate_plan_segment_contract(
+    assert objective_completion_bypass == ()
+    independent_after_observation = _validate_plan_segment_contract(
         valid.model_copy(
             update={
                 "steps": (
@@ -690,10 +691,95 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
             }
         ),
         planner_input,
+    )
+    assert independent_after_observation == ()
+
+    transport = PlannerActionContract(
+        action_key="transport_resource",
+        knowledge_semantics=(
+            {
+                "type": "SOURCE_INVENTORY",
+                "source": "PROJECTED_ACTOR_REGION",
+                "required": "KNOWN_VISIBLE_AVAILABLE",
+            },
+        ),
+    )
+    result_dependent_transport = _validate_plan_segment_contract(
+        valid.model_copy(
+            update={
+                "steps": (
+                    acquisition,
+                    PlanStepProposal(
+                        step_id="transport-after-survey",
+                        action_key="transport_resource",
+                        actor_key="actor",
+                        target_key="region",
+                        parameters={"resource_key": "repair_parts", "amount": 1},
+                    ),
+                )
+            }
+        ),
+        planner_input.model_copy(
+            update={"action_contracts": (transport, *planner_input.action_contracts)}
+        ),
     )[0]
-    assert acquisition_not_last.code == "INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST"
-    assert acquisition_not_last.dimension == "INFORMATION_BOUNDARY_ACQUISITION"
-    assert acquisition_not_last.required == "FIRST_MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP"
+    assert result_dependent_transport.code == "INFORMATION_BOUNDARY_DEPENDENT_ACTION_INCLUDED"
+    assert result_dependent_transport.required == "END_SEGMENT_BEFORE_FIRST_RESULT_DEPENDENT_ACTION"
+    assert result_dependent_transport.actual["dependent_step_indices"] == [1]
+
+    inspect = PlannerActionContract(
+        action_key="inspect",
+        deterministic_effects=({"type": "KNOWLEDGE_REVEAL", "target": "target_key"},),
+    )
+    clear = PlannerActionContract(
+        action_key="clear_transport",
+        known_preconditions=(
+            {
+                "node_key": "bridge",
+                "fact_key": "passable",
+                "knowledge_status": "UNKNOWN",
+                "failure_condition": {"kind": "FACT_NOT_EQUALS", "value": False},
+            },
+        ),
+    )
+    result_dependent_clear = _validate_plan_segment_contract(
+        PlanProposal(
+            stop_reason="INFORMATION_BOUNDARY",
+            boundary_dependency_id="dependency-passability-test",
+            steps=(
+                PlanStepProposal(
+                    step_id="inspect-bridge",
+                    action_key="inspect",
+                    actor_key="actor",
+                    target_key="bridge",
+                ),
+                PlanStepProposal(
+                    step_id="clear-bridge",
+                    action_key="clear_transport",
+                    actor_key="actor",
+                    target_key="bridge",
+                ),
+            ),
+        ),
+        PlannerInput(
+            action_contracts=(inspect, clear),
+            known_world=PlannerKnownWorldSlice(
+                unknown_dependencies=(
+                    {
+                        "dependency_id": "dependency-passability-test",
+                        "dimension": "FACT",
+                        "subject_key": "bridge",
+                        "fact_key": "passable",
+                        "status": "UNKNOWN",
+                        "blocks": "ACTION_PRECONDITION",
+                        "resolvable_by_effect_types": ["KNOWLEDGE_REVEAL"],
+                    },
+                )
+            ),
+        ),
+    )[0]
+    assert result_dependent_clear.code == "INFORMATION_BOUNDARY_DEPENDENT_ACTION_INCLUDED"
+    assert result_dependent_clear.actual["dependent_step_indices"] == [1]
 
     multiple_acquisitions = _validate_plan_segment_contract(
         valid.model_copy(
@@ -711,12 +797,8 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
             }
         ),
         planner_input,
-    )[0]
-    assert multiple_acquisitions.code == "INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST"
-    assert multiple_acquisitions.required == (
-        "FIRST_MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP"
     )
-    assert multiple_acquisitions.actual["matching_step_indices"] == [0, 2]
+    assert multiple_acquisitions == ()
 
     supporting_actions_before_acquisition = _validate_plan_segment_contract(
         valid.model_copy(
@@ -800,12 +882,11 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         )
         for index in range(1, 14)
     )
-    thirteen_step_violation = _validate_plan_segment_contract(
+    thirteen_step_result = _validate_plan_segment_contract(
         valid.model_copy(update={"steps": thirteen_step_plan}),
         planner_input,
-    )[0]
-    assert thirteen_step_violation.code == "INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST"
-    assert thirteen_step_violation.actual["matching_step_indices"] == [1, 3, 5, 8, 12]
+    )
+    assert thirteen_step_result == ()
     wrong_scope = valid.model_copy(
         update={"steps": (acquisition.model_copy(update={"target_key": "different-region"}),)}
     )

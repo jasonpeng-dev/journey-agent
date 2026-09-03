@@ -117,6 +117,7 @@ def _definition_with_pool(
     quantity: int,
     public_facility_keys: tuple[str, ...] = (),
     hidden_facility_keys: tuple[str, ...] = (),
+    blocked_transport_keys: tuple[str, ...] = (),
 ) -> ScenarioDefinitionV2:
     document = deepcopy(V2_0.model_dump(mode="json"))
     document["metadata"]["key"] = key
@@ -128,6 +129,9 @@ def _definition_with_pool(
             node["initial_visibility"] = "KNOWN"
         if node["key"] in hidden_facility_keys:
             node["initial_visibility"] = "HIDDEN"
+        if node["key"] in blocked_transport_keys:
+            passable = next(fact for fact in node["facts"] if fact["key"] == "passable")
+            passable["initial_value"] = False
     document["initialization"]["resource_pools"].append(
         {
             "pool_key": pool_key,
@@ -554,6 +558,7 @@ def test_route_attempts_reveal_truth_and_clear_requires_known_blocked(
         resource_key="municipal_repair_materials",
         region_key="central_district",
         quantity=10,
+        blocked_transport_keys=("central_river_tunnel",),
     )
     runtime, scope = _runtime(session, definition, "linjiang_v2_0_route_reveal")
     knowledge = session.get(

@@ -396,6 +396,62 @@ def test_retryable_rule_failure_creates_generic_replan_without_fixed_fallback(
     assert task.status == AgentTaskStatus.SUCCEEDED
 
 
+def test_failed_plan_retires_unreachable_suffix_before_generic_replan(
+    session: Session,
+) -> None:
+    provider = _RecordingProvider(
+        PlanProposal(
+            steps=(
+                PlanStepProposal(
+                    action_key="treat_patient",
+                    actor_key="doctor_lee",
+                    target_key="patient_one",
+                    parameters={"dosage": 2},
+                ),
+                PlanStepProposal(
+                    action_key="treat_patient",
+                    actor_key="doctor_lee",
+                    target_key="patient_one",
+                    parameters={"dosage": 2},
+                ),
+            )
+        )
+    )
+    agent, runtime = _agent(session, preflight=True, provider=provider)
+    task = agent.create_task(runtime.session, "stabilize the patient")
+    old_plan = session.scalar(
+        select(AgentPlan).where(
+            AgentPlan.task_id == task.id,
+            AgentPlan.status == AgentPlanStatus.ACTIVE,
+        )
+    )
+    assert old_plan is not None
+    old_steps = session.scalars(
+        select(AgentStep).where(AgentStep.plan_id == old_plan.id).order_by(AgentStep.sequence)
+    ).all()
+    assert len(old_steps) == 2
+
+    resource = session.get(GameInstanceResourceState, (runtime.instance.id, "medicine"))
+    assert resource is not None
+    resource.value = 0
+    session.flush()
+
+    failed_step = agent.execute_next(task)
+
+    assert failed_step is old_steps[0]
+    assert old_steps[0].status == AgentStepStatus.FAILED
+    assert old_steps[1].status == AgentStepStatus.SKIPPED
+    assert old_plan.status == AgentPlanStatus.SUPERSEDED
+    new_plan = session.scalar(
+        select(AgentPlan).where(
+            AgentPlan.task_id == task.id,
+            AgentPlan.status == AgentPlanStatus.ACTIVE,
+        )
+    )
+    assert new_plan is not None
+    assert new_plan.id != old_plan.id
+
+
 def test_generic_replan_hard_limit_remains_enforced(session: Session) -> None:
     agent, runtime = _agent(session)
     task = agent.create_task(runtime.session, "stabilize the patient")

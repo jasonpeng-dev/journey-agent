@@ -182,4 +182,5 @@ def test_continuous_execution_stops_on_failure_without_running_later_steps(
         select(AgentStep).where(AgentStep.plan_id == plan.id).order_by(AgentStep.sequence)
     ).all()
     assert persisted_steps[0].status == AgentStepStatus.FAILED
-    assert persisted_steps[1].status == AgentStepStatus.PENDING
+    assert persisted_steps[1].status == AgentStepStatus.SKIPPED
+    assert plan.status == AgentPlanStatus.SUPERSEDED

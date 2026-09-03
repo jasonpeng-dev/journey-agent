@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
 from app.agent.planning_context import PlanningContextBuilder
+from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import (
     AgentTaskStatus,
     CommandReachability,
@@ -190,6 +191,38 @@ def _set_derived_facts(
             visibility=Visibility.KNOWN,
         )
     session.flush()
+
+
+class _Task6ReplanProvider:
+    model_name = "synthetic-task6-replan"
+
+    def __init__(self) -> None:
+        self.plan_requests: list[PlanRequest] = []
+
+    def select_objectives(self, _request: object) -> object:
+        raise AssertionError("Task6 regression uses an exact predefined Objective")
+
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        self.plan_requests.append(request)
+        if len(self.plan_requests) == 1:
+            return PlanProposal(
+                steps=(
+                    PlanStepProposal(
+                        action_key="generate_power",
+                        actor_key="electrical_repair_team_alpha",
+                        target_key="southeast_fuel_emergency_power_plant",
+                    ),
+                )
+            )
+        return PlanProposal(
+            steps=(
+                PlanStepProposal(
+                    action_key="travel",
+                    actor_key="electrical_repair_team_alpha",
+                    target_key="south_waterfront_district",
+                ),
+            )
+        )
 
 
 def test_task5_and_task6_objective_contracts_are_exact() -> None:
@@ -377,6 +410,37 @@ def test_task5_public_dependency_and_transport_contract_is_complete() -> None:
         "southeast_access_corridor",
         "waterfront_access_corridor",
         "west_freight_corridor",
+    }
+    transport_passability = {
+        node.key: next(fact for fact in node.facts if fact.key == "passable").initial_value
+        for node in nodes.values()
+        if node.node_type_key == "transport"
+    }
+    assert transport_passability == {
+        "central_river_tunnel": True,
+        "north_service_corridor": True,
+        "south_bridge": False,
+        "southeast_access_corridor": True,
+        "waterfront_access_corridor": True,
+        "west_freight_corridor": True,
+    }
+    assert all(
+        next(fact for fact in nodes[key].facts if fact.key == "passable").initial_visibility.value
+        == "HIDDEN"
+        for key in transport_keys
+    )
+    endpoint_pairs = {
+        node.key: {
+            relation.target_node_key
+            for relation in definition.world.relations
+            if relation.relation_type_key == "endpoint" and relation.source_node_key == node.key
+        }
+        for node in nodes.values()
+        if node.node_type_key == "transport"
+    }
+    assert endpoint_pairs["south_bridge"] == {
+        "south_waterfront_district",
+        "west_logistics_district",
     }
     assert "clearable" in nodes["south_bridge"].interaction_keys
     assert actions["receive_external_relief_supplies"].required_interaction_key == (
@@ -830,6 +894,76 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
     assert {"river_port", "south_fuel_terminal"} <= revealed_nodes
     revealed_actions = {item["action_key"] for item in revealed_payload["action_contracts"]}
     assert "commission_sustained_generation" not in revealed_actions
+
+
+def test_task6_generate_power_reveal_rebuilds_real_replan_input(
+    session: Session,
+) -> None:
+    provider = _Task6ReplanProvider()
+    runtime, scope, _agent, _definition = _runtime(session, "task56-real-replan")
+    game_id = runtime.instance.id  # type: ignore[attr-defined]
+    agent = GenericAgentService(session, scope, provider=provider)
+    task = agent.create_task(
+        runtime.session,  # type: ignore[attr-defined]
+        "寤虹珛鎸佺画搴旀€ュ彂鐢典繚闅?",
+        resolved_goal=predefined_goal_resolution("establish_sustained_emergency_generation"),
+        initialize_plan=False,
+    )
+
+    plant = session.get(
+        GameInstanceFactState,
+        (game_id, "southeast_fuel_emergency_power_plant", "operational"),
+    )
+    actor = session.get(GameInstanceActor, (game_id, "electrical_repair_team_alpha"))
+    assert plant is not None and actor is not None
+    plant.truth_value = True
+    actor.current_node_key = "southeast_heights_district"
+    actor.command_reachability = CommandReachability.ONLINE.value
+    _known_inflow(
+        session,
+        game_id,
+        "southeast_heights_district",
+        "emergency_fuel",
+        50,
+    )
+    session.flush()
+
+    first_plan = agent.plan(task)
+    assert first_plan.stop_reason == "OBJECTIVE_COMPLETION"
+    executed = agent.execute_next(task, replan_on_failure=False)
+    assert executed is not None and executed.status == "SUCCEEDED"
+    assert provider.plan_requests[0].call_type == "INITIAL_PLAN"
+
+    gate = session.get(
+        GameInstanceFactState,
+        (
+            game_id,
+            "southeast_fuel_emergency_power_plant",
+            "sustained_requirements_discovered",
+        ),
+    )
+    assert gate is not None and gate.truth_value is True and gate.visibility == Visibility.KNOWN
+
+    second_plan = agent.plan(task, reason="INFORMATION_BOUNDARY")
+    assert second_plan.stop_reason == "OBJECTIVE_COMPLETION"
+    assert provider.plan_requests[1].call_type == "REPLAN"
+    replanned_dependencies = provider.plan_requests[1].planner_input
+    assert replanned_dependencies is not None
+    unknown_dependencies = replanned_dependencies.known_world.unknown_dependencies
+    assert any(
+        item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
+        and item.get("subject_key") in {"river_port", "south_fuel_terminal"}
+        for item in unknown_dependencies
+    )
+    assert any(
+        item.get("dimension") == "RESOURCE_SOURCE"
+        and item.get("resource_key") == "emergency_fuel"
+        and item.get("required_amount") == 100
+        for item in unknown_dependencies
+    )
+    assert "commission_sustained_generation" not in {
+        item.action_key for item in replanned_dependencies.action_contracts
+    }
 
 
 def test_task6_generate_power_requires_operational_power_and_startup_fuel() -> None:

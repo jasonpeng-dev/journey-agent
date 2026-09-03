@@ -414,8 +414,10 @@ because the final Action was attempted.
 Use this only when a genuinely blocking UNKNOWN dependency prevents the next
 legal choice of Target, Resource source, parameter, or public precondition.
 The segment must include a legal Knowledge-acquisition Action that matches
-that dependency as its final step. boundary_dependency_id must identify the
-same UNKNOWN dependency.
+that dependency before the first Action whose legality, binding, or choice
+would consume its unresolved result. Independent currently legal Actions may
+follow the acquisition in the same segment. `boundary_dependency_id` must
+identify the same UNKNOWN dependency.
 
 MAY_ATTEMPT transport or route uncertainty is not an information boundary.
 General complexity, lack of confidence, or inability to think of a causal
@@ -614,9 +616,11 @@ recovery does not reveal Region Resource inventory. Linjiang is one data-defined
 instance of this generic behavior, not a Runtime scenario-key branch or a
 hard-coded Region reveal table.
 
-A Knowledge-acquisition step must match the declared dependency. When it is
-the final step of an `INFORMATION_BOUNDARY` segment, the lifecycle pauses for
-execution and Player acknowledgement before REPLAN. The existence of a
+A Knowledge-acquisition step must match the declared dependency. An
+`INFORMATION_BOUNDARY` segment may contain independent legal Actions after
+that acquisition, but it must end before the first Action that consumes the
+unresolved observation result. The lifecycle pauses at that segment boundary
+for execution and Player acknowledgement before REPLAN. The existence of a
 Knowledge-producing Action alone does not make a segment an information
 boundary.
 

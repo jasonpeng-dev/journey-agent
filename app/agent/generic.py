@@ -4758,6 +4758,19 @@ class GenericAgentService:
         has_unknown_available = any(pool.quantity is None for pool in available)
 
         if known_available < amount:
+            if region_key is None and not candidates:
+                raise GenericAgentError(
+                    "RESOURCE_SOURCE_UNKNOWN",
+                    "No public Resource source is known",
+                    details={
+                        "dimension": "RESOURCE_SOURCE",
+                        "resource_key": resource_key,
+                        "scope_region": region_key,
+                        "required_amount": amount,
+                        "required": "KNOWN_PUBLIC_SOURCE",
+                        "actual": "UNKNOWN",
+                    },
+                )
             knowledge = (
                 projected_region_knowledge.get(region_key) if region_key is not None else None
             )
@@ -5658,10 +5671,43 @@ class GenericAgentService:
         step.status = AgentStepStatus.FAILED
         step.failure_code = code
         task.last_error_code = code
+        self.retire_failed_plan_suffix(task, step)
         if retryable and replan:
             self.plan(task, reason=code)
         elif not retryable:
             task.status = AgentTaskStatus.BLOCKED
+
+    def retire_failed_plan_suffix(self, task: AgentTask, failed_step: AgentStep) -> None:
+        """Retire the unreachable suffix after an Action failure.
+
+        The failed Step and all prior history remain auditable.  The failed
+        Plan itself is no longer executable, and only non-terminal suffix
+        Steps are marked ``SKIPPED`` so a later REPLAN cannot accidentally
+        resume the old execution path.
+        """
+
+        plan = self.db.get(AgentPlan, failed_step.plan_id)
+        if plan is None or plan.task_id != task.id:
+            return
+        for suffix_step in self.db.scalars(
+            select(AgentStep).where(
+                AgentStep.plan_id == plan.id,
+                AgentStep.sequence > failed_step.sequence,
+                AgentStep.status.in_(
+                    (
+                        AgentStepStatus.PENDING,
+                        AgentStepStatus.IN_PROGRESS,
+                        AgentStepStatus.REQUIRES_PLAYER_DECISION,
+                        AgentStepStatus.WAITING_FOR_PLAYER_ACTION,
+                        AgentStepStatus.WAITING_FOR_WORLD_EVENT,
+                    )
+                ),
+            )
+        ):
+            suffix_step.status = AgentStepStatus.SKIPPED
+        if plan.status == AgentPlanStatus.ACTIVE:
+            plan.status = AgentPlanStatus.SUPERSEDED
+        self.db.flush()
 
     def _snapshot(self) -> ScenarioVersionSnapshot:
         persisted = GameInstanceService(self.db).load(self.scope.game_instance_id)
@@ -6821,6 +6867,12 @@ def _diagnostic_blocker(
             "current_value": CommandReachability.DISCONNECTED.value,
             "required_value": CommandReachability.ONLINE.value,
         }
+    if failure_code == "RESOURCE_SOURCE_UNKNOWN":
+        return {
+            "type": "RESOURCE_SOURCE",
+            "required_value": "KNOWN_PUBLIC_SOURCE",
+            "unknown_value": "UNKNOWN",
+        }
     if failure_code in {
         "RESOURCE_INVENTORY_UNKNOWN",
         "TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
@@ -7005,6 +7057,7 @@ def _validate_plan_segment_contract(
         (item.action_key, item.target_key): item for item in planner_input.target_bindings
     }
     acquisition_indices: list[int] = []
+    dependent_indices: list[int] = []
     for index, step in enumerate(segment.steps):
         contract = action_contracts.get(str(step.action_key))
         binding = target_bindings.get((str(step.action_key), str(step.target_key)))
@@ -7020,6 +7073,13 @@ def _validate_plan_segment_contract(
             planner_input=planner_input,
         ):
             acquisition_indices.append(index)
+        if _step_consumes_unknown_dependency(
+            step,
+            matching,
+            contract=contract,
+            binding=binding,
+        ):
+            dependent_indices.append(index)
     if not resolver_types or not acquisition_indices:
         return (
             PlanViolation(
@@ -7032,15 +7092,16 @@ def _validate_plan_segment_contract(
                 required_effect_types=tuple(sorted(resolver_types)),
             ),
         )
-    if acquisition_indices[0] != len(segment.steps) - 1:
+    if dependent_indices:
         return (
             PlanViolation(
-                code="INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST",
-                failure_code="INFORMATION_BOUNDARY_ACQUISITION_NOT_LAST",
-                dimension="INFORMATION_BOUNDARY_ACQUISITION",
-                required="FIRST_MATCHING_KNOWLEDGE_ACQUISITION_MUST_BE_LAST_STEP",
+                code="INFORMATION_BOUNDARY_DEPENDENT_ACTION_INCLUDED",
+                failure_code="INFORMATION_BOUNDARY_DEPENDENT_ACTION_INCLUDED",
+                dimension="INFORMATION_BOUNDARY_DEPENDENCY",
+                required="END_SEGMENT_BEFORE_FIRST_RESULT_DEPENDENT_ACTION",
                 actual={
                     "matching_step_indices": acquisition_indices,
+                    "dependent_step_indices": dependent_indices,
                     "segment_step_count": len(segment.steps),
                 },
                 dependency_id=dependency_id,
@@ -7054,11 +7115,12 @@ def _objective_completion_boundary_violation(
     segment: PlanProposal,
     planner_input: PlannerInput,
 ) -> PlanViolation | None:
-    """Prevent an acquisition step from disguising an information boundary.
+    """Prevent a dependent Step from disguising an information boundary.
 
-    The Validator does not choose an acquisition.  It only observes whether a
-    submitted step publicly resolves an active blocking UNKNOWN dependency;
-    if so, the segment must stop at that step and name the dependency.
+    The Validator does not choose an acquisition or a recovery path. It only
+    observes whether a submitted Step consumes an active blocking UNKNOWN
+    dependency; if so, the segment must end before that Step. Independent
+    Steps after an observation remain valid.
     """
 
     contracts = {item.action_key: item for item in planner_input.action_contracts}
@@ -7080,7 +7142,8 @@ def _objective_completion_boundary_violation(
         )
         if not resolver_types:
             continue
-        matches: list[int] = []
+        acquisition_indices: list[int] = []
+        dependent_indices: list[int] = []
         for index, step in enumerate(segment.steps):
             contract = contracts.get(str(step.action_key))
             binding = bindings.get((str(step.action_key), str(step.target_key)))
@@ -7095,16 +7158,30 @@ def _objective_completion_boundary_violation(
                 effects,
                 planner_input=planner_input,
             ):
-                matches.append(index)
-        if matches:
+                acquisition_indices.append(index)
+            if _step_consumes_unknown_dependency(
+                step,
+                dependency,
+                contract=contract,
+                binding=binding,
+            ):
+                dependent_indices.append(index)
+        first_acquisition_index = min(acquisition_indices, default=None)
+        dependent_after_acquisition = [
+            index
+            for index in dependent_indices
+            if first_acquisition_index is not None and index > first_acquisition_index
+        ]
+        if dependent_after_acquisition:
             return PlanViolation(
                 code="INFORMATION_BOUNDARY_REQUIRED",
                 failure_code="INFORMATION_BOUNDARY_REQUIRED",
                 dimension="INFORMATION_BOUNDARY",
-                required="INFORMATION_BOUNDARY_WITH_ACQUISITION_LAST",
+                required="INFORMATION_BOUNDARY_BEFORE_FIRST_RESULT_DEPENDENT_ACTION",
                 actual={
                     "stop_reason": segment.stop_reason,
-                    "matching_step_indices": matches,
+                    "matching_step_indices": acquisition_indices,
+                    "dependent_step_indices": dependent_after_acquisition,
                 },
                 dependency_id=dependency_id,
                 required_effect_types=tuple(sorted(resolver_types)),
@@ -7587,6 +7664,131 @@ def _submitted_step_matches_dependency(
     return False
 
 
+def _step_consumes_unknown_dependency(
+    step: object,
+    dependency: dict[str, object],
+    *,
+    contract: PlannerActionContract | None,
+    binding: PlannerTargetBinding | None,
+) -> bool:
+    """Return whether a proposed Step needs the dependency's future result.
+
+    This is deliberately a symbolic, public-contract check.  It does not
+    inspect Runtime Truth and it does not infer a recovery Action.  Action
+    contracts expose the public preconditions and knowledge semantics needed
+    to distinguish an independent Step from one whose legality or binding
+    consumes an unresolved observation.
+    """
+
+    if contract is None:
+        return False
+    dimension = dependency.get("dimension")
+    if dimension == "RESOURCE_SOURCE":
+        resource_key = dependency.get("resource_key")
+        if not isinstance(resource_key, str):
+            return False
+        if _step_parameters_contain_resource(step, resource_key):
+            return True
+        if _requirements_contain_resource(
+            binding.requirements if binding is not None else (), resource_key
+        ):
+            return True
+        return any(
+            _is_negative_resource_effect(effect, resource_key)
+            for effect in contract.deterministic_effects
+        )
+
+    subject_key = dependency.get("subject_key")
+    fact_key = dependency.get("fact_key")
+    if not isinstance(subject_key, str) or not isinstance(fact_key, str):
+        return False
+
+    for requirement in contract.known_preconditions:
+        if (
+            requirement.get("node_key") == subject_key
+            and requirement.get("fact_key") == fact_key
+            and requirement.get("knowledge_status") == "UNKNOWN"
+        ):
+            return True
+    raw_parameters = getattr(step, "parameters", {})
+    source_key = raw_parameters.get("source_key") if isinstance(raw_parameters, dict) else None
+    if source_key == subject_key and any(
+        requirement.get("fact_key") == fact_key
+        for requirement in _source_precondition_entries(contract.source_preconditions)
+    ):
+        return True
+    return _requirements_contain_fact(
+        binding.requirements if binding is not None else (),
+        subject_key,
+        fact_key,
+    )
+
+
+def _step_parameters_contain_resource(step: object, resource_key: str) -> bool:
+    parameters = getattr(step, "parameters", {})
+    if not isinstance(parameters, dict):
+        return False
+    if parameters.get("resource_key") == resource_key:
+        return True
+    resources = parameters.get("resources")
+    return isinstance(resources, list) and any(
+        isinstance(item, dict) and item.get("resource_key") == resource_key for item in resources
+    )
+
+
+def _is_negative_resource_effect(effect: dict[str, object], resource_key: str) -> bool:
+    amount = effect.get("amount")
+    return (
+        effect.get("resource_key") == resource_key
+        and effect.get("type") in {"RESOURCE_DELTA", "RESOURCE_CONSUMPTION"}
+        and isinstance(amount, int)
+        and not isinstance(amount, bool)
+        and amount < 0
+    )
+
+
+def _requirements_contain_resource(requirements: Sequence[object], resource_key: str) -> bool:
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        cost = requirement.get("cost")
+        if isinstance(cost, dict) and resource_key in cost:
+            return True
+    return False
+
+
+def _requirements_contain_fact(
+    requirements: Sequence[object], subject_key: str, fact_key: str
+) -> bool:
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        special = requirement.get("special_requirements")
+        if not isinstance(special, (list, tuple)):
+            continue
+        if any(
+            isinstance(item, dict)
+            and item.get("node_key") == subject_key
+            and item.get("fact_key") == fact_key
+            for item in special
+        ):
+            return True
+    return False
+
+
+def _source_precondition_entries(
+    requirements: Sequence[object],
+) -> tuple[dict[str, object], ...]:
+    result: list[dict[str, object]] = []
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        condition = requirement.get("failure_condition")
+        if isinstance(condition, dict):
+            result.append(condition)
+    return tuple(result)
+
+
 _ANTI_REGRESSION_LOCATION_FIELDS: set[str] = {
     "step_id",
     "sequence",
@@ -7681,6 +7883,7 @@ def _safe_provider_diagnostic(code: str) -> str:
         "ACTOR_BINDING_INVALID",
         "ACTOR_NOT_AVAILABLE",
         "RESOURCE_SURVEY_ALREADY_COMPLETED",
+        "RESOURCE_SOURCE_UNKNOWN",
         "RESOURCE_INVENTORY_UNKNOWN",
         "KNOWN_RESOURCE_INSUFFICIENT",
     }:
