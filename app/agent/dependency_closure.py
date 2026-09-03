@@ -16,6 +16,7 @@ from app.agent.provider import (
     PlannerActorState,
     PlannerInput,
     PlannerKnownWorldSlice,
+    PlannerResourceSourceHint,
     PlannerTargetBinding,
 )
 from app.domain.enums import ResourceInventoryVisibility
@@ -444,6 +445,7 @@ def build_dependency_closure(
     selected_bindings: set[tuple[str, str]] = set()
     relevant_nodes: set[str] = set()
     relevant_resources: set[str] = set()
+    relevant_resource_source_hint_resources: set[str] = set()
 
     def include_derived_dependencies(derived_key: str, seen: set[str]) -> None:
         if derived_key in seen:
@@ -1137,6 +1139,10 @@ def build_dependency_closure(
             # not assign quantities to Pools or choose a source for Planner.
             relevant_demand = _resource_demand_total(dependency.subject, required_amount)
             if known_available_amount < relevant_demand:
+                # Authored source background is relevant only for an active
+                # unresolved shortage.  Known sufficient inventory, including
+                # inventory in a non-primary Region, suppresses the hint.
+                relevant_resource_source_hint_resources.add(dependency.subject)
                 for unlock_dependency in _known_linked_pool_unlock_dependencies(
                     known_resource,
                     planner_input,
@@ -1309,6 +1315,7 @@ def build_dependency_closure(
             len(selected_bindings),
             len(relevant_nodes),
             len(relevant_resources),
+            len(relevant_resource_source_hint_resources),
             len(unknowns),
             len(selected_actor_keys),
             len(selected_actor_targets),
@@ -1339,6 +1346,11 @@ def build_dependency_closure(
             definition,
             planner_input,
             selected_actions,
+            relevant_nodes,
+        )
+        _include_relevant_resource_source_hint_regions(
+            planner_input,
+            relevant_resource_source_hint_resources,
             relevant_nodes,
         )
 
@@ -1393,6 +1405,7 @@ def build_dependency_closure(
             len(selected_bindings),
             len(relevant_nodes),
             len(relevant_resources),
+            len(relevant_resource_source_hint_resources),
             len(unknowns),
             len(selected_actor_keys),
             len(selected_actor_targets),
@@ -1404,6 +1417,7 @@ def build_dependency_closure(
         relevant_nodes,
         relevant_resources,
         tuple(unknowns.values()),
+        relevant_resource_source_hint_resources,
     )
     sliced_action_contracts = tuple(
         item for item in planner_input.action_contracts if item.action_key in selected_actions
@@ -2031,6 +2045,33 @@ def _include_public_resource_acquisition_regions(
     )
 
 
+def _include_relevant_resource_source_hint_regions(
+    planner_input: PlannerInput,
+    resource_keys: set[str],
+    relevant_nodes: set[str],
+) -> None:
+    """Expose public hinted Regions without selecting a source or route."""
+
+    if not resource_keys:
+        return
+    known_nodes = {
+        str(item["key"]): item
+        for item in planner_input.known_world.nodes
+        if isinstance(item.get("key"), str)
+    }
+    for hint in planner_input.known_world.resource_source_hints:
+        if hint.resource_key not in resource_keys:
+            continue
+        region_keys = (
+            *((hint.primary_region_key,) if hint.primary_region_key is not None else ()),
+            *hint.candidate_region_keys,
+        )
+        for region_key in region_keys:
+            node = known_nodes.get(region_key)
+            if node is not None and node.get("access") in {"AVAILABLE", "ENTERED"}:
+                relevant_nodes.add(region_key)
+
+
 def _dependency_id(dimension: str, **identity: object) -> str:
     """Return a stable ID from typed semantic keys, never display/scenario text."""
 
@@ -2051,6 +2092,7 @@ def _slice_known_world(
     node_keys: set[str],
     resource_keys: set[str],
     unknown_dependencies: tuple[dict[str, object], ...],
+    resource_source_hint_resources: set[str],
 ) -> PlannerKnownWorldSlice:
     nodes = tuple(item for item in known_world.nodes if item.get("key") in node_keys)
     facts = {
@@ -2067,12 +2109,45 @@ def _slice_known_world(
     resource_knowledge = tuple(
         item for item in known_world.resource_knowledge if item.get("region_key") in node_keys
     )
+    surveyed_regions = {
+        str(item["region_key"])
+        for item in known_world.resource_knowledge
+        if isinstance(item.get("region_key"), str)
+        and item.get("resource_inventory_visibility") == "VISIBLE"
+        and item.get("resource_survey_completed") is True
+    }
+    resource_source_hints: list[PlannerResourceSourceHint] = []
+    for hint in known_world.resource_source_hints:
+        if hint.resource_key not in resource_source_hint_resources:
+            continue
+        primary_region_key = (
+            hint.primary_region_key
+            if hint.primary_region_key in node_keys
+            and hint.primary_region_key not in surveyed_regions
+            else None
+        )
+        candidate_region_keys = tuple(
+            region_key
+            for region_key in hint.candidate_region_keys
+            if region_key in node_keys and region_key not in surveyed_regions
+        )
+        if primary_region_key is None and not candidate_region_keys:
+            continue
+        resource_source_hints.append(
+            hint.model_copy(
+                update={
+                    "primary_region_key": primary_region_key,
+                    "candidate_region_keys": candidate_region_keys,
+                }
+            )
+        )
     return PlannerKnownWorldSlice(
         nodes=nodes,
         facts=facts,
         relations=relations,
         resources=resources,
         resource_knowledge=resource_knowledge,
+        resource_source_hints=tuple(resource_source_hints),
         unknown_dependencies=unknown_dependencies,
     )
 
