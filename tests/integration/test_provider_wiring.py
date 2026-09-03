@@ -874,7 +874,7 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     assert "upstream unavailable" in json.dumps(fields)
 
 
-def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
+def test_generic_planner_prompt_defines_local_and_risk_frontier_tie_breakers() -> None:
     settings = _settings("openai_compatible")
     system_prompts: list[str] = []
 
@@ -927,6 +927,53 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
         assert "concrete purpose supported by the current Knowledge and task state" in prompt
         assert "Do not add speculative or preventive corrective actions" in prompt
         assert "currently known failure, blockage, unmet prerequisite" in prompt
+        assert "Do not perform unrelated, speculative, preventive" in prompt
+        assert "completeness-driven" in prompt
+        assert "completeness scans" in prompt
+        assert "remote reconnaissance" in prompt
+        assert "remote detours solely for information" in prompt
+        assert (
+            "currently legal Action as merely convenient when it addresses an active "
+            "unresolved dependency" in prompt
+        )
+        assert "current locality" in prompt
+        assert "no additional Travel or meaningful Resource cost" in prompt
+        assert "deferring it would likely require returning to the same locality" in prompt
+        assert "equivalent Goal progress" in prompt
+        assert "avoiding unnecessary locality teardown, return Travel, or repeated setup" in prompt
+        assert "Apply the same preference before a risky frontier" in prompt
+        assert (
+            "attempt_policy MAY_ATTEMPT and Runtime failure could abort the current PlanSegment"
+            in prompt
+        )
+        assert "without changing real dependency order" in prompt
+        assert "prefer placing before it any already-legal work" in prompt
+        assert "does not depend on that MAY_ATTEMPT Action succeeding" in prompt
+        assert "later independent Steps are SKIPPED after a Runtime failure" in prompt
+        assert "do not move a success-dependent suffix earlier" in prompt
+        assert "current-region survey or Relay may precede a MAY_ATTEMPT Travel" in prompt
+        assert "destination-dependent inspect must remain after that Travel" in prompt
+        assert "planning heuristics and tie-breakers" in prompt
+        assert "not backend-mandated sequences" in prompt
+        assert (
+            "Do not front-load unrelated preparation merely because a risky Action exists" in prompt
+        )
+        assert "merely convenient work" not in prompt
+        assert "Do not treat every non-blocking Action as merely convenient" not in prompt
+        assert "consider batching" not in prompt
+        assert "near-term planning" not in prompt
+        assert "every active dependency immediately" in prompt
+        assert "survey before every departure" in prompt
+        assert "inspect every local target" in prompt
+        assert "eliminate every UNKNOWN state" in prompt
+        assert "always survey" not in prompt
+        assert "always inspect" not in prompt
+        assert "inspect everything" not in prompt
+        assert "Do not predict an observation result" in prompt
+        assert "same PlanSegment" in prompt
+        assert "Information Boundary" in prompt
+        assert "MAY_ATTEMPT is legal under uncertainty, not known safe" in prompt
+        assert "do not delay completion for optional Knowledge" in prompt
 
 
 def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
