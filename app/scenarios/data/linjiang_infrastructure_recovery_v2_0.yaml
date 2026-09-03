@@ -169,7 +169,7 @@ initialization:
     reserved_value: 0
     visibility: HIDDEN
     availability: UNAVAILABLE
-    survey_discoverable: false
+    survey_discoverable: true
     availability_requirement:
       node_key: south_fuel_terminal
       fact_key: operational
@@ -8228,6 +8228,27 @@ goal_resolution:
   allow_llm_fallback: true
   clarification_prompt: 请说明希望恢复的基础设施或公共服务。
   world_goal_state_catalog: true
+public_knowledge:
+  resource_source_hints:
+  - resource_key: general_engineering_parts
+    primary_region_key: north_industrial_district
+    candidate_region_keys:
+    - west_logistics_district
+    - central_district
+  - resource_key: municipal_repair_materials
+    primary_region_key: west_logistics_district
+  - resource_key: communication_equipment
+    primary_region_key: east_residential_district
+  - resource_key: electrical_repair_parts
+    primary_region_key: southeast_heights_district
+  - resource_key: water_system_parts
+    primary_region_key: south_waterfront_district
+  - resource_key: emergency_relief_supplies
+    primary_region_key: west_logistics_district
+  - resource_key: emergency_fuel
+    primary_region_key: south_waterfront_district
+    candidate_region_keys:
+    - north_industrial_district
 planning:
   instructions:
   - 只使用当前 Knowledge 中已知的地点、关系、资源与设施状态。

@@ -234,6 +234,33 @@ class PlannerTargetBinding(ProviderModel):
     deterministic_effects: tuple[dict[str, object], ...] = ()
 
 
+class PlannerResourceSourceHint(ProviderModel):
+    """Quantity-free public guidance for discovering a Resource source."""
+
+    resource_key: StrictStr = Field(min_length=1, max_length=80)
+    primary_region_key: StrictStr | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    candidate_region_keys: tuple[StrictStr, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def validate_regions(self) -> PlannerResourceSourceHint:
+        if self.primary_region_key is None and not self.candidate_region_keys:
+            raise ValueError("Resource source hint needs a primary or candidate Region")
+        if len(set(self.candidate_region_keys)) != len(self.candidate_region_keys):
+            raise ValueError("Resource source hint candidate Regions must be unique")
+        if (
+            self.primary_region_key is not None
+            and self.primary_region_key in self.candidate_region_keys
+        ):
+            raise ValueError("Resource source hint primary Region cannot be a candidate Region")
+        return self
+
+
 class PlannerKnownWorldSlice(ProviderModel):
     """Knowledge-safe world entities selected for the current dependency closure."""
 
@@ -242,6 +269,7 @@ class PlannerKnownWorldSlice(ProviderModel):
     relations: tuple[dict[str, object], ...] = ()
     resources: dict[str, object] = Field(default_factory=dict)
     resource_knowledge: tuple[dict[str, object], ...] = ()
+    resource_source_hints: tuple[PlannerResourceSourceHint, ...] = ()
     unknown_dependencies: tuple[dict[str, object], ...] = ()
 
     @model_validator(mode="after")
@@ -1834,6 +1862,17 @@ class OpenAICompatibleGenericProvider:
             "parameters remain readable. Do not consume or transport Resources whose required "
             "availability is UNKNOWN. A PlanSegment may compose supporting Actions performed "
             "by multiple Actors; apply earlier causal effects before validating later Steps. "
+            "If planner_input.known_world.resource_source_hints contains an entry, treat it as "
+            "authored public discovery guidance only for the active unresolved Resource need: "
+            "it is not a source selection, source whitelist, quantity estimate, Pool identity, "
+            "facility state, availability claim, or route. Prefer already-known sufficient "
+            "inventory first; never detour to a hinted Region when current known available "
+            "inventory satisfies the requirement. When discovery is needed, combine the hint's "
+            "primary/candidate ordering with the current Actor locality, public topology, known "
+            "route/passability state, and already completed surveys. Hints do not restrict the "
+            "legal candidate catalog, and do not require surveying a hinted Region before a "
+            "legal MAY_ATTEMPT. Do not infer hidden quantities, availability, facilities, or "
+            "observation results from a hint. "
             "Use OBJECTIVE_COMPLETION only when current Known state plus projected deterministic "
             "effects legally satisfy the frozen Objective completion requirements; partial "
             "progress is not completion. Use INFORMATION_BOUNDARY only when an UNKNOWN "
@@ -2555,6 +2594,7 @@ __all__ = [
     "PlannerActorState",
     "PlannerInput",
     "PlannerKnownWorldSlice",
+    "PlannerResourceSourceHint",
     "PlannerTargetBinding",
     "PlanningActionCandidate",
     "PlanningContext",

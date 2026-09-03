@@ -100,6 +100,11 @@ def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
                     gate.get("accepted_values", []).sort(key=_scalar_sort_key)
             state["dependencies"].sort(key=_derived_dependency_sort_key)
     normalized["planning"]["recovery_hints"].sort(key=lambda item: item["failure_code"])
+    public_knowledge = normalized.get("public_knowledge")
+    if isinstance(public_knowledge, dict):
+        hints = public_knowledge.get("resource_source_hints")
+        if isinstance(hints, list):
+            hints.sort(key=lambda item: item["resource_key"])
     return ScenarioDefinitionV2.model_validate(normalized)
 
 

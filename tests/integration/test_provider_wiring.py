@@ -974,6 +974,24 @@ def test_generic_planner_prompt_defines_local_and_risk_frontier_tie_breakers() -
         assert "Information Boundary" in prompt
         assert "MAY_ATTEMPT is legal under uncertainty, not known safe" in prompt
         assert "do not delay completion for optional Knowledge" in prompt
+        assert "planner_input.known_world.resource_source_hints" in prompt
+        assert "authored public discovery guidance only" in prompt
+        assert "active unresolved Resource need" in prompt
+        assert "not a source selection, source whitelist" in prompt
+        assert "Prefer already-known sufficient inventory first" in prompt
+        assert "never detour to a hinted Region" in prompt
+        assert "current Actor locality, public topology" in prompt
+        assert "known route/passability state" in prompt
+        assert "already completed surveys" in prompt
+        assert "Hints do not restrict the legal candidate catalog" in prompt
+        assert "do not require surveying a hinted Region before a legal MAY_ATTEMPT" in prompt
+        assert "Do not infer hidden quantities, availability, facilities" in prompt
+        for scenario_specific in (
+            "general_engineering_parts",
+            "north_industrial_district",
+            "south_waterfront_district",
+        ):
+            assert scenario_specific not in prompt
 
 
 def test_provider_failure_returns_gateway_error_without_deterministic_fallback(

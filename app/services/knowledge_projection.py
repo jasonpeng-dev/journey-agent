@@ -158,6 +158,35 @@ class SharedKnowledgeProjection:
             known.append(projection)
         return tuple(known)
 
+    def public_resource_source_hints(self) -> tuple[dict[str, Any], ...]:
+        """Project authored, quantity-free Resource source background.
+
+        These rows are immutable ScenarioVersion metadata, not runtime Pool
+        Truth.  Keeping the projection separate prevents hidden inventory,
+        facility state, and storage identities from crossing the Knowledge
+        boundary.
+        """
+
+        return tuple(
+            {
+                "resource_key": hint.resource_key,
+                **(
+                    {"primary_region_key": hint.primary_region_key}
+                    if hint.primary_region_key is not None
+                    else {}
+                ),
+                **(
+                    {"candidate_region_keys": list(hint.candidate_region_keys)}
+                    if hint.candidate_region_keys
+                    else {}
+                ),
+            }
+            for hint in sorted(
+                self.definition.public_knowledge.resource_source_hints,
+                key=lambda item: item.resource_key,
+            )
+        )
+
     def known_action_requirements(self) -> tuple[dict[str, Any], ...]:
         """Expose action requirements that are already supported by Knowledge.
 

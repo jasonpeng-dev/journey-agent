@@ -30,6 +30,7 @@ from app.agent.provider import (
     PlannerActorState,
     PlannerInput,
     PlannerKnownWorldSlice,
+    PlannerResourceSourceHint,
     PlannerTargetBinding,
     PlanningActionCandidate,
     PlanningContext,
@@ -119,6 +120,37 @@ def _canonical_resource_knowledge(raw: object) -> tuple[dict[str, object], ...]:
         if len(entry) > 1:
             result.append(entry)
     return tuple(sorted(result, key=lambda item: str(item["region_key"])))
+
+
+def _canonical_resource_source_hints(raw: object) -> tuple[PlannerResourceSourceHint, ...]:
+    """Normalize authored public source guidance into the V2 Planner shape."""
+
+    candidates: object = raw
+    if isinstance(raw, dict):
+        candidates = raw.get("resource_source_hints", ())
+    if not isinstance(candidates, (list, tuple)):
+        return ()
+    result: list[PlannerResourceSourceHint] = []
+    for value in candidates:
+        if not isinstance(value, dict) or not isinstance(value.get("resource_key"), str):
+            continue
+        primary_region_key = value.get("primary_region_key")
+        raw_candidate_regions = value.get("candidate_region_keys", ())
+        candidate_region_keys = (
+            tuple(item for item in raw_candidate_regions if isinstance(item, str))
+            if isinstance(raw_candidate_regions, (list, tuple))
+            else ()
+        )
+        result.append(
+            PlannerResourceSourceHint(
+                resource_key=value["resource_key"],
+                primary_region_key=(
+                    primary_region_key if isinstance(primary_region_key, str) else None
+                ),
+                candidate_region_keys=candidate_region_keys,
+            )
+        )
+    return tuple(sorted(result, key=lambda item: item.resource_key))
 
 
 def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
@@ -324,6 +356,9 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
             ),
             resource_knowledge=_canonical_resource_knowledge(
                 current.get("region_resource_knowledge", {})
+            ),
+            resource_source_hints=_canonical_resource_source_hints(
+                current.get("resource_source_hints", ())
             ),
         ),
         execution_context=dict(context.previous_execution_context),
@@ -1608,6 +1643,7 @@ class PlanningActionCatalogBuilder:
             "relations": list(knowledge_projection.known_relations()),
             "resources": {resource_key: value for resource_key, value in resources.items()},
             "region_resource_knowledge": resource_projection["regions"],
+            "resource_source_hints": knowledge_projection.public_resource_source_hints(),
             **(
                 {"locality": definition.metadata.locality.model_dump(mode="json")}
                 if definition.metadata.locality.enabled

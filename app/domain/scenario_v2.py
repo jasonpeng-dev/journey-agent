@@ -1188,6 +1188,55 @@ class RecoveryHintV2(FrozenDefinitionModel):
     hint: str = Field(min_length=1, max_length=2000)
 
 
+class ResourceSourceHintV2(FrozenDefinitionModel):
+    """Authored public background about where a Resource may be found.
+
+    This is discovery guidance only.  It is deliberately separate from
+    Resource Pool Truth: it carries no quantity, availability, facility, or
+    storage identity and does not constrain the legal source choices of an
+    Action.
+    """
+
+    resource_key: StableKey
+    primary_region_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    candidate_region_keys: tuple[StableKey, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def validate_regions(self) -> ResourceSourceHintV2:
+        if self.primary_region_key is None and not self.candidate_region_keys:
+            raise ValueError("Resource source hint needs a primary or candidate Region")
+        _require_unique(self.candidate_region_keys, "Resource source hint candidate Regions")
+        if (
+            self.primary_region_key is not None
+            and self.primary_region_key in self.candidate_region_keys
+        ):
+            raise ValueError("Resource source hint primary Region cannot be a candidate Region")
+        return self
+
+
+class PublicKnowledgeDefinitionV2(FrozenDefinitionModel):
+    """Static public discovery metadata authored in a ScenarioVersion."""
+
+    resource_source_hints: tuple[ResourceSourceHintV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def validate_resource_source_hints(self) -> PublicKnowledgeDefinitionV2:
+        _require_unique(
+            (item.resource_key for item in self.resource_source_hints),
+            "Public resource source hint Resource keys",
+        )
+        return self
+
+
 class PlanningDefinitionV2(FrozenDefinitionModel):
     instructions: tuple[str, ...] = ()
     recovery_hints: tuple[RecoveryHintV2, ...] = ()
@@ -1217,6 +1266,10 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     )
     goal_resolution: GoalResolutionV2
     planning: PlanningDefinitionV2 = Field(default_factory=PlanningDefinitionV2)
+    public_knowledge: PublicKnowledgeDefinitionV2 = Field(
+        default_factory=PublicKnowledgeDefinitionV2,
+        exclude_if=lambda value: not value.resource_source_hints,
+    )
 
     @property
     def objective_catalog_version(self) -> str:
@@ -1420,6 +1473,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     _validate_resource_initial_states(definition, nodes)
     _validate_resource_pools(definition, nodes)
     _validate_region_resource_knowledge(definition, nodes)
+    _validate_public_knowledge(definition, nodes, resources)
     _validate_derived_states(definition, nodes, resources, derived_states)
 
     _require_key(nodes, definition.initialization.start_node_key, "start Node")
@@ -1968,6 +2022,32 @@ def _validate_region_resource_knowledge(
             raise ValueError("Region Resource Knowledge must target a Region Node")
 
 
+def _validate_public_knowledge(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+    resources: dict[str, ResourceDefinitionV2],
+) -> None:
+    hints = definition.public_knowledge.resource_source_hints
+    if not hints:
+        return
+    locality = definition.metadata.locality
+    if not locality.enabled or not locality.scoped_resources:
+        raise ValueError("Resource source hints require locality.scoped_resources")
+    assert locality.region_node_type_key is not None
+    for hint in hints:
+        _require_key(resources, hint.resource_key, "Public Resource Source Hint Resource")
+        region_keys = (
+            *((hint.primary_region_key,) if hint.primary_region_key is not None else ()),
+            *hint.candidate_region_keys,
+        )
+        for region_key in region_keys:
+            region = _require_key(nodes, region_key, "Public Resource Source Hint Region")
+            if region.node_type_key != locality.region_node_type_key:
+                raise ValueError("Public Resource Source Hint must target a Region Node")
+            if region.initial_visibility != Visibility.KNOWN:
+                raise ValueError("Public Resource Source Hint Region must be publicly known")
+
+
 def _static_facility_region(definition: ScenarioDefinitionV2, facility_key: str) -> str | None:
     locality = definition.metadata.locality
     relation_key = locality.located_in_relation_type_key
@@ -2062,12 +2142,14 @@ __all__ = [
     "EffectKind",
     "EngineCapability",
     "LocalityContractV2",
+    "PublicKnowledgeDefinitionV2",
     "RegionResourceKnowledgeInitialStateV2",
     "ResourceAvailabilityRequirementV2",
     "ResourceInitialStateV2",
     "ResourcePoolDefinitionV2",
     "ResourceScopeKind",
     "ResourceScopeV2",
+    "ResourceSourceHintV2",
     "RulePhase",
     "ScenarioDefinitionV2",
     "knowledge_gate_is_revealed",
