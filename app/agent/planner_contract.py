@@ -7,6 +7,7 @@ Planner.  It deliberately does not bind every Action to every Target.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 from app.domain.enums import CommandReachability
@@ -71,6 +72,7 @@ def action_planner_constraints(
     *,
     known_preconditions: tuple[dict[str, object], ...] = (),
     source_preconditions: tuple[dict[str, object], ...] = (),
+    resource_requirements: tuple[dict[str, object], ...] = (),
 ) -> dict[str, object]:
     """Build the generic Action-level constraint contract.
 
@@ -201,7 +203,182 @@ def action_planner_constraints(
         contract["source_preconditions"] = [dict(item) for item in source_preconditions]
     if known_preconditions:
         contract["known_preconditions"] = [dict(item) for item in known_preconditions]
+    if resource_requirements:
+        contract["resource_requirements"] = [dict(item) for item in resource_requirements]
     return contract
+
+
+def planner_resource_requirements(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    *,
+    known_resources: Mapping[str, object] | None = None,
+    known_resource_knowledge: Mapping[str, object] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Project generic minimum Resource requirements from public Rules.
+
+    A PREFLIGHT ``RESOURCE_COMPARE`` is a public Action requirement when its
+    failure predicate says that the available amount is below a minimum.
+    This helper is deliberately independent of any Action behavior name, so
+    repair, generation, treatment, and future Actions share one contract.
+    Target-qualified Rules stay on ``PlannerTargetBinding``; callers that
+    need those rows use :func:`planner_resource_requirement_from_condition`
+    while iterating the already matched target.
+    """
+
+    result: dict[tuple[str, str], dict[str, object]] = {}
+    for rule in definition.rules:
+        if rule.action_key != action.key or rule.phase != RulePhase.PREFLIGHT:
+            continue
+        if _has_current_target_condition(rule.condition):
+            continue
+        for condition, positive in _condition_leaves_with_polarity(rule.condition):
+            if not positive:
+                continue
+            requirement = planner_resource_requirement_from_condition(
+                condition,
+                known_resources=known_resources,
+                known_resource_knowledge=known_resource_knowledge,
+            )
+            if requirement is None:
+                continue
+            resource_key = str(requirement["resource_key"])
+            scope = requirement.get("scope")
+            scope_key = json_scope_identity(scope)
+            identity = (resource_key, scope_key)
+            previous = result.get(identity)
+            minimum = requirement.get("minimum")
+            previous_minimum = previous.get("minimum") if previous is not None else None
+            if not isinstance(minimum, int) or isinstance(minimum, bool):
+                continue
+            if (
+                previous is None
+                or not isinstance(previous_minimum, int)
+                or minimum > previous_minimum
+            ):
+                result[identity] = requirement
+    return tuple(result[key] for key in sorted(result, key=lambda item: (item[0], item[1])))
+
+
+def planner_resource_requirement_from_condition(
+    condition: Any,
+    *,
+    target_key: str | None = None,
+    known_resources: Mapping[str, object] | None = None,
+    known_resource_knowledge: Mapping[str, object] | None = None,
+) -> dict[str, object] | None:
+    """Convert one positive minimum ``RESOURCE_COMPARE`` to public JSON."""
+
+    if (
+        condition is None
+        or condition.kind != ConditionKind.RESOURCE_COMPARE
+        or condition.resource_key is None
+        or condition.operator is None
+        or type(condition.value) is not int
+        or condition.operator.value not in {"LT", "LTE"}
+    ):
+        return None
+    minimum = int(condition.value) + (1 if condition.operator.value == "LTE" else 0)
+    if minimum <= 0:
+        return None
+    scope = (
+        condition.resource_scope.model_dump(mode="json")
+        if condition.resource_scope is not None
+        else {}
+    )
+    if target_key is not None and scope.get("kind") == "CURRENT_TARGET_REGION":
+        scope["target_key"] = target_key
+    result: dict[str, object] = {
+        "resource_key": condition.resource_key,
+        "scope": scope,
+        "minimum": minimum,
+    }
+    known_status, known_available = _known_resource_scope_state(
+        condition.resource_key,
+        scope,
+        known_resources=known_resources,
+        known_resource_knowledge=known_resource_knowledge,
+    )
+    if known_status is not None:
+        result["known_status"] = known_status
+    if known_available is not None:
+        result["known_available"] = known_available
+    return result
+
+
+def json_scope_identity(scope: object) -> str:
+    """Return a stable identity for deduplicating a JSON Resource scope."""
+
+    if not isinstance(scope, dict):
+        return ""
+    kind = scope.get("kind")
+    node_key = scope.get("node_key")
+    target_key = scope.get("target_key")
+    return ":".join(str(item) for item in (kind or "", node_key or "", target_key or ""))
+
+
+def _known_resource_scope_state(
+    resource_key: str,
+    scope: dict[str, object],
+    *,
+    known_resources: Mapping[str, object] | None,
+    known_resource_knowledge: Mapping[str, object] | None,
+) -> tuple[str | None, int | None]:
+    """Return public status/amount for an explicitly identified scope only."""
+
+    if known_resources is None:
+        return None, None
+    raw_resource = known_resources.get(resource_key)
+    if not isinstance(raw_resource, dict):
+        return None, None
+    scope_kind = scope.get("kind")
+    if scope_kind == "EXPLICIT":
+        scope_key = scope.get("node_key")
+    elif scope_kind == "GLOBAL":
+        scope_key = "global"
+    else:
+        # Actor and target scopes are resolved only after the Planner chooses
+        # the Actor/Target.  Do not claim that an aggregate is a known local
+        # amount for those symbolic scopes.
+        return None, None
+    scopes = raw_resource.get("scopes")
+    entry = scopes.get(scope_key) if isinstance(scopes, dict) else None
+    region_knowledge = (
+        known_resource_knowledge.get(str(scope_key))
+        if isinstance(known_resource_knowledge, Mapping) and scope_key is not None
+        else None
+    )
+    if isinstance(entry, dict):
+        entry_status = entry.get("knowledge_status")
+        if entry_status == "UNKNOWN":
+            return "UNKNOWN", None
+        if entry_status in {"KNOWN", "KNOWN_ZERO"}:
+            amount = entry.get("known_available")
+            return (
+                "KNOWN",
+                amount if isinstance(amount, int) and not isinstance(amount, bool) else 0,
+            )
+        if isinstance(region_knowledge, dict):
+            visibility = region_knowledge.get("resource_inventory_visibility")
+            survey_completed = region_knowledge.get("resource_survey_completed")
+            if visibility == "VISIBLE" and survey_completed is True:
+                amount = entry.get("known_available")
+                return (
+                    "KNOWN",
+                    amount if isinstance(amount, int) and not isinstance(amount, bool) else 0,
+                )
+        return "UNKNOWN", None
+    if isinstance(region_knowledge, dict):
+        visibility = region_knowledge.get("resource_inventory_visibility")
+        survey_completed = region_knowledge.get("resource_survey_completed")
+        if visibility == "VISIBLE" and survey_completed is True:
+            return "KNOWN", 0
+        return "UNKNOWN", None
+    if scope_key == "global":
+        amount = raw_resource.get("known_available")
+        if isinstance(amount, int) and not isinstance(amount, bool):
+            return "KNOWN", max(0, amount)
+    return None, None
 
 
 def planner_known_preconditions(
@@ -678,6 +855,26 @@ def _condition_leaves(condition: Any) -> tuple[Any, ...]:
     if condition.kind == ConditionKind.NOT:
         return _condition_leaves(condition.condition)
     return (condition,)
+
+
+def _condition_leaves_with_polarity(
+    condition: Any,
+    *,
+    positive: bool = True,
+) -> tuple[tuple[Any, bool], ...]:
+    if condition is None:
+        return ()
+    if condition.kind in {ConditionKind.ALL, ConditionKind.ANY}:
+        leaves: list[tuple[Any, bool]] = []
+        for item in condition.conditions:
+            leaves.extend(_condition_leaves_with_polarity(item, positive=positive))
+        return tuple(leaves)
+    if condition.kind == ConditionKind.NOT:
+        return _condition_leaves_with_polarity(
+            condition.condition,
+            positive=not positive,
+        )
+    return ((condition, positive),)
 
 
 def _source_condition_projection(condition: Any) -> dict[str, object] | None:

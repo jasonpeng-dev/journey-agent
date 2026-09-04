@@ -263,14 +263,25 @@ def test_linjiang_v2_0_planning_context_uses_sparse_target_requirements(
         for item in context.current_knowledge["known_action_requirements"]
     }
 
-    assert requirements["central_telecom_hub"]["repair_communications"] == {
-        "action_key": "repair_communications",
-        "required_actor_role_key": "communications_repair_team",
-        "cost": {
-            "communication_equipment": 10,
-            "general_engineering_parts": 15,
-        },
+    central_repair = requirements["central_telecom_hub"]["repair_communications"]
+    assert central_repair["action_key"] == "repair_communications"
+    assert central_repair["required_actor_role_key"] == "communications_repair_team"
+    assert central_repair["cost"] == {
+        "communication_equipment": 10,
+        "general_engineering_parts": 15,
     }
+    assert central_repair["resource_requirements"] == [
+        {
+            "resource_key": "communication_equipment",
+            "scope": {"kind": "ACTOR_CURRENT_REGION", "node_key": None},
+            "minimum": 10,
+        },
+        {
+            "resource_key": "general_engineering_parts",
+            "scope": {"kind": "ACTOR_CURRENT_REGION", "node_key": None},
+            "minimum": 15,
+        },
+    ]
     water_repair = requirements["water_treatment_plant"]["repair_water_facility"]
     assert water_repair["cost"] == {
         "water_system_parts": 15,

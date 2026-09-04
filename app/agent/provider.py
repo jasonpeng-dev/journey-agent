@@ -208,6 +208,29 @@ class PlannerActorState(ProviderModel):
     execution_state: dict[str, object] = Field(default_factory=dict)
 
 
+class PlannerResourceRequirement(ProviderModel):
+    """One public minimum Resource requirement for an Action contract.
+
+    ``scope`` is intentionally JSON-shaped: Scenario authors may use an
+    explicit Region or a symbolic runtime scope without making the Planner
+    schema scenario-specific.  ``known_available`` is emitted only when that
+    scoped amount is public Knowledge; an UNKNOWN scope never becomes zero.
+    """
+
+    resource_key: StrictStr = Field(min_length=1, max_length=160)
+    scope: dict[str, object] = Field(default_factory=dict)
+    minimum: StrictInt = Field(gt=0)
+    known_status: Literal["KNOWN", "UNKNOWN"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    known_available: StrictInt | None = Field(
+        default=None,
+        ge=0,
+        exclude_if=lambda value: value is None,
+    )
+
+
 class PlannerActionContract(ProviderModel):
     """One authoritative Planner-facing contract for an Action."""
 
@@ -222,6 +245,10 @@ class PlannerActionContract(ProviderModel):
     locality: dict[str, object] = Field(default_factory=dict)
     parameters: tuple[dict[str, object], ...] = ()
     known_preconditions: tuple[dict[str, object], ...] = ()
+    resource_requirements: tuple[PlannerResourceRequirement, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     deterministic_effects: tuple[dict[str, object], ...] = ()
     knowledge_semantics: tuple[dict[str, object], ...] = ()
 
@@ -232,6 +259,10 @@ class PlannerTargetBinding(ProviderModel):
     action_key: str
     target_key: str
     requirements: tuple[dict[str, object], ...] = ()
+    resource_requirements: tuple[PlannerResourceRequirement, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     deterministic_effects: tuple[dict[str, object], ...] = ()
 
 
@@ -2727,6 +2758,7 @@ __all__ = [
     "PlannerActorState",
     "PlannerInput",
     "PlannerKnownWorldSlice",
+    "PlannerResourceRequirement",
     "PlannerResourceSourceHint",
     "PlannerTargetBinding",
     "PlanningActionCandidate",

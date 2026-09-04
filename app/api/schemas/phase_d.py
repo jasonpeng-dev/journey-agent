@@ -608,6 +608,7 @@ class PublicActionRequirementResponse(ApiModel):
     required_actor_role_name: str | None = None
     source_relation_type_key: str | None = None
     known_preconditions: list[dict[str, Any]] = Field(default_factory=list)
+    resource_requirements: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PublicTargetActionContractResponse(ApiModel):
@@ -618,6 +619,7 @@ class PublicTargetActionContractResponse(ApiModel):
     required_actor_role_name: str | None = None
     source_relation_type_key: str | None = None
     cost: dict[str, int] = Field(default_factory=dict)
+    resource_requirements: list[dict[str, Any]] = Field(default_factory=list)
     special_requirements: list[dict[str, Any]] = Field(default_factory=list)
     effects: list[dict[str, Any]] = Field(default_factory=list)
 
