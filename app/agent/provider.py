@@ -31,6 +31,7 @@ from pydantic import (
 
 from app.core.config import Settings
 from app.domain.formal_goal import AdHocGoalRequirementCandidateV1
+from app.domain.scenario_v2 import StrictScalar
 
 log = structlog.get_logger(__name__)
 
@@ -234,6 +235,133 @@ class PlannerTargetBinding(ProviderModel):
     deterministic_effects: tuple[dict[str, object], ...] = ()
 
 
+class GoalDependencyProjection(ProviderModel):
+    """One public, currently active dependency of the frozen Goal.
+
+    This is a projection of the dependency closure, not a second completion
+    contract.  It carries the stable typed identity and only the current
+    public Knowledge needed for planning.  In particular, UNKNOWN values are
+    represented by omitted scalar fields rather than guessed zero/false
+    values.
+    """
+
+    dependency_id: StrictStr = Field(min_length=1, max_length=200)
+    parent_dependency_id: StrictStr | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    kind: Literal["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"]
+    knowledge_status: Literal["UNKNOWN", "KNOWN"]
+    satisfaction_status: Literal["UNKNOWN", "UNSATISFIED"]
+
+    node_key: StrictStr | None = Field(default=None, exclude_if=lambda value: value is None)
+    fact_key: StrictStr | None = Field(default=None, exclude_if=lambda value: value is None)
+    accepted_values: tuple[StrictScalar, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    region_key: StrictStr | None = Field(default=None, exclude_if=lambda value: value is None)
+    resource_key: StrictStr | None = Field(default=None, exclude_if=lambda value: value is None)
+    minimum: StrictInt | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    current_known_available: StrictInt | None = Field(
+        default=None,
+        ge=0,
+        exclude_if=lambda value: value is None,
+    )
+    deficit: StrictInt | None = Field(
+        default=None,
+        ge=0,
+        exclude_if=lambda value: value is None,
+    )
+
+    derived_key: StrictStr | None = Field(default=None, exclude_if=lambda value: value is None)
+    current_known_value: StrictScalar | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def validate_projection_shape(self) -> GoalDependencyProjection:
+        if self.knowledge_status == "UNKNOWN":
+            if self.satisfaction_status != "UNKNOWN":
+                raise ValueError("UNKNOWN Goal dependency must have UNKNOWN satisfaction")
+            if any(
+                value is not None
+                for value in (
+                    self.current_known_value,
+                    self.current_known_available,
+                    self.deficit,
+                )
+            ):
+                raise ValueError("UNKNOWN Goal dependency cannot expose current values")
+        elif self.satisfaction_status != "UNSATISFIED":
+            raise ValueError("Known active Goal dependency must be unsatisfied")
+
+        if self.kind == "FACT":
+            if self.node_key is None or self.fact_key is None or not self.accepted_values:
+                raise ValueError("FACT Goal dependency needs node/fact/accepted_values")
+            if any(
+                value is not None
+                for value in (
+                    self.region_key,
+                    self.resource_key,
+                    self.minimum,
+                    self.current_known_available,
+                    self.deficit,
+                    self.derived_key,
+                )
+            ):
+                raise ValueError("FACT Goal dependency cannot declare Resource/Derived fields")
+        elif self.kind == "RESOURCE_AT_LEAST":
+            if (
+                self.region_key is None
+                or self.resource_key is None
+                or self.minimum is None
+                or self.accepted_values
+            ):
+                raise ValueError("RESOURCE_AT_LEAST Goal dependency needs region/resource/minimum")
+            if any(
+                value is not None
+                for value in (
+                    self.node_key,
+                    self.fact_key,
+                    self.current_known_value,
+                    self.derived_key,
+                )
+            ):
+                raise ValueError(
+                    "RESOURCE_AT_LEAST Goal dependency cannot declare Fact/Derived fields"
+                )
+            if self.current_known_available is not None and self.deficit is not None:
+                expected_deficit = max(0, self.minimum - self.current_known_available)
+                if self.deficit != expected_deficit:
+                    raise ValueError(
+                        "Resource Goal dependency deficit does not match public amount"
+                    )
+        elif self.kind == "DERIVED_STATE":
+            if self.derived_key is None or not self.accepted_values:
+                raise ValueError("DERIVED_STATE Goal dependency needs derived_key/accepted_values")
+            if any(
+                value is not None
+                for value in (
+                    self.node_key,
+                    self.fact_key,
+                    self.region_key,
+                    self.resource_key,
+                    self.minimum,
+                    self.current_known_available,
+                    self.deficit,
+                )
+            ):
+                raise ValueError(
+                    "DERIVED_STATE Goal dependency cannot declare Fact/Resource fields"
+                )
+        else:
+            raise ValueError("Unsupported Goal dependency kind")
+        return self
+
+
 class PlannerResourceSourceHint(ProviderModel):
     """Quantity-free public guidance for discovering a Resource source."""
 
@@ -292,6 +420,10 @@ class PlannerInput(ProviderModel):
     actors: tuple[PlannerActorState, ...] = ()
     action_contracts: tuple[PlannerActionContract, ...] = ()
     target_bindings: tuple[PlannerTargetBinding, ...] = ()
+    active_goal_dependencies: tuple[GoalDependencyProjection, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     known_world: PlannerKnownWorldSlice = Field(default_factory=PlannerKnownWorldSlice)
     execution_context: dict[str, object] = Field(default_factory=dict)
 
@@ -2582,6 +2714,7 @@ __all__ = [
     "DynamicGoalRecoveryFeedback",
     "GenericModelProvider",
     "GenericProviderError",
+    "GoalDependencyProjection",
     "GoalSelection",
     "GoalSelectionRequest",
     "OpenAICompatibleGenericProvider",
