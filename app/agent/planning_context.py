@@ -20,6 +20,7 @@ from app.agent.planner_contract import (
     actor_execution_state,
     declarative_action_effects,
     planner_known_preconditions,
+    planner_resource_requirements,
     planner_source_preconditions,
     planner_target_contracts,
 )
@@ -260,6 +261,11 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
                     for item in cast(list[object], contract.get("known_preconditions", []))
                     if isinstance(item, dict)
                 ),
+                resource_requirements=tuple(
+                    dict(item)
+                    for item in cast(list[object], contract.get("resource_requirements", []))
+                    if isinstance(item, dict)
+                ),
                 deterministic_effects=tuple(
                     dict(item)
                     for item in cast(list[object], effects or [])
@@ -311,6 +317,13 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
             action_key=action_key,
             target_key=target_key,
             requirements=tuple(value["requirements"]),
+            resource_requirements=tuple(
+                dict(item)
+                for requirement in value["requirements"]
+                if isinstance(requirement.get("resource_requirements"), (list, tuple))
+                for item in cast(list[object], requirement["resource_requirements"])
+                if isinstance(item, dict)
+            ),
             deterministic_effects=tuple(value["effects"]),
         )
         for (action_key, target_key), value in sorted(bindings.items())
@@ -902,6 +915,18 @@ class PlanningContextBuilder:
             for item in relation_rows
             if isinstance(item, dict) and isinstance(item.get("relation_key"), str)
         }
+        raw_known_resources = known_world.get("resources")
+        known_resources = (
+            cast(dict[str, object], raw_known_resources)
+            if isinstance(raw_known_resources, dict)
+            else None
+        )
+        raw_resource_knowledge = known_world.get("region_resource_knowledge")
+        known_resource_knowledge = (
+            cast(dict[str, object], raw_resource_knowledge)
+            if isinstance(raw_resource_knowledge, dict)
+            else None
+        )
         result: list[dict[str, object]] = []
         for action in sorted(definition.actions, key=lambda item: item.key):
             if action.key not in action_keys:
@@ -971,6 +996,12 @@ class PlanningContextBuilder:
                     action,
                     known_preconditions=known_preconditions_by_action.get(action.key, ()),
                     source_preconditions=planner_source_preconditions(definition, action),
+                    resource_requirements=planner_resource_requirements(
+                        definition,
+                        action,
+                        known_resources=known_resources,
+                        known_resource_knowledge=known_resource_knowledge,
+                    ),
                 ),
             }
             planner_effects = action_planner_effects(action)

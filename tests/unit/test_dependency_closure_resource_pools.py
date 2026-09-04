@@ -375,11 +375,17 @@ def test_unlock_fact_expansion_reaches_actor_and_resource_prerequisites() -> Non
     assert "unlock_material" in result.planner_input.known_world.resources
 
 
-def test_unknown_unlock_requirement_is_not_expanded_or_leaked() -> None:
+def test_unknown_unlock_requirement_expands_public_dependency_without_truth_leak() -> None:
     result = _run_closure(known_facts={"goal_node.complete": False})
-    assert "unlock_facility" not in _action_keys(result)
-    assert "unlock_facility_a" not in _node_keys(result)
+    assert "unlock_facility" in _action_keys(result)
+    assert "unlock_facility_a" in _node_keys(result)
     assert "unlock_facility_a.operational" not in result.planner_input.known_world.facts
+    assert any(
+        item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
+        and item.get("subject_key") == "unlock_facility_a"
+        and item.get("fact_key") == "operational"
+        for item in result.planner_input.known_world.unknown_dependencies
+    )
 
     unknown_status_pool = (
         {

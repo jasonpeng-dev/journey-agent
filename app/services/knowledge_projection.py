@@ -10,7 +10,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.agent.planner_contract import planner_target_contracts
+from app.agent.planner_contract import (
+    planner_resource_requirement_from_condition,
+    planner_resource_requirements,
+    planner_target_contracts,
+)
 from app.domain.enums import (
     RelationVisibility,
     ResourceInventoryVisibility,
@@ -200,9 +204,20 @@ class SharedKnowledgeProjection:
         known_facts = {
             (row.node_key, row.fact_key): row.truth_value for row in self.known_fact_rows()
         }
+        resource_projection = self.planner_resources()
+        known_resources = resource_projection.get("resources", {})
+        known_resource_knowledge = resource_projection.get("regions", {})
         role_names = {role.key: role.name for role in self.definition.actors.roles}
         result: list[dict[str, Any]] = []
         for action in sorted(self.definition.actions, key=lambda item: item.key):
+            resource_requirements = planner_resource_requirements(
+                self.definition,
+                action,
+                known_resources=known_resources if isinstance(known_resources, dict) else None,
+                known_resource_knowledge=known_resource_knowledge
+                if isinstance(known_resource_knowledge, dict)
+                else None,
+            )
             if not (
                 action.required_actor_role_key is not None
                 or action.source_relation_type_key is not None
@@ -211,6 +226,7 @@ class SharedKnowledgeProjection:
                     ActionBehavior.SUPPLY_POWER,
                     ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT,
                 }
+                or resource_requirements
             ):
                 continue
             entry: dict[str, Any] = {
@@ -258,6 +274,8 @@ class SharedKnowledgeProjection:
                             known_preconditions.append(projection)
             if known_preconditions:
                 entry["known_preconditions"] = known_preconditions
+            if resource_requirements:
+                entry["resource_requirements"] = [dict(item) for item in resource_requirements]
             result.append(entry)
         return tuple(result)
 
@@ -281,6 +299,9 @@ class SharedKnowledgeProjection:
         known_facts = {
             (row.node_key, row.fact_key): row.truth_value for row in self.known_fact_rows()
         }
+        resource_projection = self.planner_resources()
+        known_resources = resource_projection.get("resources", {})
+        known_resource_knowledge = resource_projection.get("regions", {})
         by_target: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
 
         for action in sorted(self.definition.actions, key=lambda item: item.key):
@@ -331,6 +352,21 @@ class SharedKnowledgeProjection:
                                 resource_key, amount = cost
                                 previous = costs.get(resource_key)
                                 costs[resource_key] = max(previous or 0, amount)
+                            resource_requirement = planner_resource_requirement_from_condition(
+                                condition,
+                                target_key=target_key,
+                                known_resources=known_resources
+                                if isinstance(known_resources, dict)
+                                else None,
+                                known_resource_knowledge=known_resource_knowledge
+                                if isinstance(known_resource_knowledge, dict)
+                                else None,
+                            )
+                            if resource_requirement is not None:
+                                requirements = requirement.setdefault("resource_requirements", [])
+                                assert isinstance(requirements, list)
+                                if resource_requirement not in requirements:
+                                    requirements.append(resource_requirement)
                             continue
                         special = self._planner_fact_requirement(
                             condition,
@@ -417,7 +453,7 @@ class SharedKnowledgeProjection:
                     )
                 if action.source_relation_type_key is not None:
                     entry["source_relation_type_key"] = action.source_relation_type_key
-                for key in ("cost", "special_requirements"):
+                for key in ("cost", "resource_requirements", "special_requirements"):
                     value = raw_requirement.get(key)
                     if value:
                         entry[key] = value

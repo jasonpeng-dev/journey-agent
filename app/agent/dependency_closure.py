@@ -888,6 +888,11 @@ def build_dependency_closure(
         action_key: str,
         demand_group: str,
     ) -> None:
+        pending: dict[tuple[str, str], int] = {}
+        for requirement in contract.resource_requirements:
+            target_key = _resource_requirement_target_key(requirement.scope)
+            identity = (requirement.resource_key, target_key)
+            pending[identity] = max(pending.get(identity, 0), requirement.minimum)
         for effect in contract.deterministic_effects:
             resource_key = effect.get("resource_key")
             amount = effect.get("amount")
@@ -899,10 +904,20 @@ def build_dependency_closure(
                 or amount >= 0
             ):
                 continue
+            matching_targets = {
+                target_key
+                for required_resource, target_key in pending
+                if required_resource == resource_key
+            }
+            target_keys = matching_targets or {""}
+            for target_key in target_keys:
+                identity = (resource_key, target_key)
+                pending[identity] = max(pending.get(identity, 0), -amount)
+        for (resource_key, target_key), required_amount in sorted(pending.items()):
             _queue_resource_dependency(
                 resource_key,
-                -amount,
-                "",
+                required_amount,
+                target_key,
                 path,
                 action_key,
                 demand_group,
@@ -916,8 +931,21 @@ def build_dependency_closure(
     ) -> None:
         """Queue source knowledge for one selected target binding only."""
 
-        for requirement in binding.requirements:
-            cost = requirement.get("cost")
+        pending: dict[tuple[str, str], int] = {}
+        legacy_pending: dict[tuple[str, str], set[int]] = {}
+        typed_resources = {item.resource_key for item in binding.resource_requirements}
+        for typed_requirement in binding.resource_requirements:
+            target_key = _resource_requirement_target_key(
+                typed_requirement.scope,
+                fallback_target_key=binding.target_key,
+            )
+            resource_identity = (typed_requirement.resource_key, target_key)
+            pending[resource_identity] = max(
+                pending.get(resource_identity, 0), typed_requirement.minimum
+            )
+
+        for raw_requirement in binding.requirements:
+            cost = raw_requirement.get("cost")
             if isinstance(cost, dict):
                 for resource_key, required_amount in cost.items():
                     if (
@@ -925,19 +953,13 @@ def build_dependency_closure(
                         or isinstance(required_amount, bool)
                         or not isinstance(required_amount, int)
                         or required_amount <= 0
+                        or resource_key in typed_resources
                     ):
                         continue
-                    _queue_resource_dependency(
-                        resource_key,
-                        required_amount,
-                        binding.target_key,
-                        path,
-                        action_key,
-                        demand_group,
-                        binding.target_key,
-                    )
+                    identity = (resource_key, binding.target_key)
+                    legacy_pending.setdefault(identity, set()).add(required_amount)
 
-            special_requirements = requirement.get("special_requirements")
+            special_requirements = raw_requirement.get("special_requirements")
             if not isinstance(special_requirements, (list, tuple)):
                 continue
             for special in special_requirements:
@@ -949,14 +971,14 @@ def build_dependency_closure(
                 value = special.get("value")
                 if not isinstance(node_key, str) or not isinstance(fact_key, str):
                     continue
-                identity = f"{node_key}.{fact_key}"
-                current = known_facts.get(identity)
+                fact_identity = f"{node_key}.{fact_key}"
+                current = known_facts.get(fact_identity)
                 if operator == "EQ":
                     accepted_values = (value,)
-                    satisfied = identity in known_facts and current == value
+                    satisfied = fact_identity in known_facts and current == value
                 elif operator == "IN" and isinstance(value, (list, tuple)):
                     accepted_values = tuple(value)
-                    satisfied = identity in known_facts and current in value
+                    satisfied = fact_identity in known_facts and current in value
                 else:
                     continue
                 if satisfied:
@@ -985,15 +1007,30 @@ def build_dependency_closure(
                 or amount >= 0
             ):
                 continue
+            identity = (resource_key, binding.target_key)
+            pending[identity] = max(pending.get(identity, 0), -amount)
+
+        for (resource_key, target_key), required_amount in sorted(pending.items()):
             _queue_resource_dependency(
                 resource_key,
-                -amount,
-                binding.target_key,
+                required_amount,
+                target_key,
                 path,
                 action_key,
                 demand_group,
                 binding.target_key,
             )
+        for (resource_key, target_key), amounts in sorted(legacy_pending.items()):
+            for required_amount in sorted(amounts):
+                _queue_resource_dependency(
+                    resource_key,
+                    required_amount,
+                    target_key,
+                    path,
+                    action_key,
+                    demand_group,
+                    binding.target_key,
+                )
 
     def expand_source_dependencies(
         contract: PlannerActionContract,
@@ -1820,6 +1857,22 @@ def _known_available_resource_amount(raw: object) -> int:
     )
 
 
+def _resource_requirement_target_key(
+    scope: dict[str, object],
+    *,
+    fallback_target_key: str = "",
+) -> str:
+    """Resolve only the public identity of a Resource requirement scope."""
+
+    kind = scope.get("kind")
+    if kind == "EXPLICIT":
+        node_key = scope.get("node_key")
+        return node_key if isinstance(node_key, str) else ""
+    if kind in {"ACTOR_CURRENT_REGION", "CURRENT_TARGET_REGION"}:
+        return fallback_target_key
+    return ""
+
+
 def _resource_source_knowledge_status(
     definition: ScenarioDefinitionV2,
     dependency: TypedDependency,
@@ -1857,12 +1910,11 @@ def _known_linked_pool_unlock_dependencies(
 ) -> tuple[TypedDependency, ...]:
     """Return public, unsatisfied unlock Facts for known unavailable Pools.
 
-    ``PlannerInput`` contains only the public Pool projection.  A requirement
-    is safe to expand only when its referenced Fact is also present in the
-    public Fact projection; a requirement definition alone must not reveal a
-    hidden Fact.  The helper deliberately returns Facts only.  Existing
-    producer/binding expansion remains the sole authority for deciding which
-    Action can satisfy them.
+    The requirement identity itself is authored public metadata.  It is safe
+    to expose the referenced Fact as an UNKNOWN dependency even before its
+    value is known; only the value remains hidden.  The helper deliberately
+    returns Facts only.  Existing producer/binding expansion remains the sole
+    authority for deciding which Action can satisfy them.
     """
 
     if not isinstance(raw_resource, dict):
@@ -1905,10 +1957,8 @@ def _known_linked_pool_unlock_dependencies(
             if operator not in {None, "EQ"}:
                 continue
             identity = f"{node_key}.{fact_key}"
-            if identity not in known_facts:
-                continue
             required_value = requirement.get("value")
-            if known_facts[identity] == required_value:
+            if identity in known_facts and known_facts[identity] == required_value:
                 continue
             dependencies.add(
                 TypedDependency(
