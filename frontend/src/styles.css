@@ -148,6 +148,8 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .knowledge-facility-attribute { display: flex; align-items: baseline; gap: 4px; min-width: 0; padding: 2px 0; color: var(--console-soft); font-size: 10px; line-height: 1.35; }
 .knowledge-facility-attribute-label { flex: 0 0 auto; font-weight: 700; }
 .knowledge-facility-attribute-value { min-width: 0; color: var(--console-soft); }
+.knowledge-action-requirements { display: grid; gap: 3px; margin-bottom: 8px; padding: 8px 10px; border: 1px solid #e4eee9; border-radius: 8px; background: #f7fbf8; }
+.knowledge-action-requirements > strong { color: var(--console-jade); font-size: 11px; }
 .knowledge-region-facts { display: grid; margin-bottom: 8px; }
 .knowledge-node-details .knowledge-entry { min-height: 32px; padding-left: 0; padding-right: 0; }
 .knowledge-fact-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

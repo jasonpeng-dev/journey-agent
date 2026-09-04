@@ -10,10 +10,12 @@ import {
   factDisplayValue,
   facilityStatusDisplayValue,
   generationCapabilityDisplayValue,
+  publicFactRequirementText,
   resourceDisplayName,
   resourceAvailabilityRequirementText,
   knownRelationDescription,
   meaningfulKnownRelations,
+  publicFactIdentity,
   relationDisplayKey,
 } from "../knowledgePresentation";
 import type {
@@ -24,6 +26,7 @@ import type {
   PublicPlanDisplayStatus,
   PublicPlanningAttempt,
   PublicPlanningCycle,
+  PublicActionResourceRequirement,
   PublicResourceUsage,
   MissionRoadmapRequirement,
   MissionRoadmapStage,
@@ -148,10 +151,144 @@ type MissionRoadmapNames = {
   regionNames?: Record<string, string>;
   resourceNames?: Record<string, string>;
   nodeNames?: Record<string, string>;
+  factNames?: Record<string, string>;
+  factValues?: Record<string, string | number | boolean>;
 };
 
 function taskObjectiveLabel(goal: string, objectiveNames: string[]): string {
   return objectiveNames.length > 0 ? objectiveNames.join(" · ") : goal;
+}
+
+function derivedStateDisplayValue(requirement: MissionRoadmapRequirement): string {
+  if (requirement.knowledge_status === "UNKNOWN" || requirement.current_known_value == null) {
+    return "未知";
+  }
+  if (requirement.current_known_value === "AVAILABLE" || requirement.current_known_value === true) {
+    return "可用";
+  }
+  if (requirement.current_known_value === "UNAVAILABLE" || requirement.current_known_value === false) {
+    return "不可用";
+  }
+  return String(requirement.current_known_value);
+}
+
+function publicResourceRequirementParts(
+  requirements: PublicActionResourceRequirement[] | undefined,
+  resourceName: (key: string) => string,
+): string[] {
+  return (requirements ?? []).flatMap((requirement) => (
+    typeof requirement.resource_key === "string" && typeof requirement.minimum === "number"
+      ? [`${resourceName(requirement.resource_key)} ×${String(requirement.minimum)}`]
+      : []
+  ));
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+function publicResourceRequirementIdentity(
+  actionKey: string,
+  requirement: PublicActionResourceRequirement,
+  targetKey?: string,
+): string {
+  const scope = requirement.scope ?? {};
+  const scopedTargetKey = typeof scope.target_key === "string" ? scope.target_key : undefined;
+  return canonicalJson({
+    action_key: actionKey,
+    target_key: scopedTargetKey ?? targetKey ?? null,
+    resource_key: requirement.resource_key,
+    scope,
+    minimum: requirement.minimum,
+  });
+}
+
+function uniquePublicResourceRequirements(
+  actionKey: string,
+  requirements: PublicActionResourceRequirement[] | undefined,
+  targetKey?: string,
+): PublicActionResourceRequirement[] {
+  const identities = new Set<string>();
+  return (requirements ?? []).filter((requirement) => {
+    if (typeof requirement.resource_key !== "string" || typeof requirement.minimum !== "number") {
+      return false;
+    }
+    const identity = publicResourceRequirementIdentity(actionKey, requirement, targetKey);
+    if (identities.has(identity)) return false;
+    identities.add(identity);
+    return true;
+  });
+}
+
+function targetKeyForPublicActionRequirement(
+  action: NonNullable<PlayerGameState["known_action_requirements"]>[number],
+  visibleNodes: PlayerGameState["visible_nodes"],
+): string | null {
+  const resourceRequirements = action.resource_requirements ?? [];
+  if (resourceRequirements.length === 0) return null;
+
+  const candidateKeys = new Set<string>();
+  resourceRequirements.forEach((requirement) => {
+    const scope = requirement.scope;
+    if (scope && typeof scope.target_key === "string") candidateKeys.add(scope.target_key);
+  });
+  action.known_preconditions.forEach((precondition) => {
+    if (precondition.selector === "EXPLICIT" && typeof precondition.node_key === "string") {
+      candidateKeys.add(precondition.node_key);
+    }
+  });
+  if (candidateKeys.size !== 1) return null;
+
+  const [targetKey] = candidateKeys;
+  const target = visibleNodes.find((node) => node.key === targetKey);
+  if (!target || !["facility", "transport"].includes(target.node_type_key ?? "")) return null;
+
+  const hasIncompatibleExplicitScope = resourceRequirements.some((requirement) => {
+    const scope = requirement.scope;
+    if (!scope || scope.kind !== "EXPLICIT" || typeof scope.node_key !== "string") return false;
+    return scope.node_key !== targetKey && scope.node_key !== target.region_key;
+  });
+  return hasIncompatibleExplicitScope ? null : targetKey;
+}
+
+function mergeTargetActionContracts(
+  contracts: PublicTargetActionContract[],
+): PublicTargetActionContract[] {
+  const merged = new Map<string, PublicTargetActionContract>();
+  contracts.forEach((contract) => {
+    const identity = canonicalJson({ action_key: contract.action_key, target_key: contract.target_key });
+    const current = merged.get(identity);
+    if (!current) {
+      merged.set(identity, {
+        ...contract,
+        resource_requirements: uniquePublicResourceRequirements(
+          contract.action_key,
+          contract.resource_requirements,
+          contract.target_key,
+        ),
+      });
+      return;
+    }
+    merged.set(identity, {
+      ...current,
+      resource_requirements: uniquePublicResourceRequirements(
+        contract.action_key,
+        [...(current.resource_requirements ?? []), ...(contract.resource_requirements ?? [])],
+        contract.target_key,
+      ),
+    });
+  });
+  return Array.from(merged.values());
 }
 
 const FACT_GOAL_LABELS: Record<string, string> = {
@@ -171,10 +308,41 @@ const FACT_GOAL_SUFFIXES: Record<string, string> = {
   external_relief_supply_ready: "建立外援供应能力",
 };
 
+function factStateDisplayText(
+  factKey: string,
+  factName: string,
+  currentValue: string | number | boolean | undefined,
+  acceptedValues: Array<string | number | boolean>,
+): string {
+  const stateName = factName === "目标状态" ? "状态" : factName;
+  if (currentValue === true) {
+    if (factKey === "operational" || factName.includes("运行")) return "正在运行";
+    if (factKey === "power_supply" || factName.includes("供电")) return "已供电";
+    if (factKey === "passable" || factName.includes("通行")) return "可通行";
+    if (factName.includes("发电")) return "正在发电";
+    return `${stateName}已达到目标状态`;
+  }
+  if (currentValue === false) {
+    if (factKey === "operational" || factName.includes("运行")) return "尚未恢复运行";
+    if (factKey === "power_supply" || factName.includes("供电")) return "尚未供电";
+    if (factKey === "passable" || factName.includes("通行")) return "尚未恢复通行";
+    if (factName.includes("发电")) return "尚未发电";
+    return `${stateName}尚未达到目标状态`;
+  }
+  if (currentValue === "AVAILABLE") return `${stateName}可用`;
+  if (currentValue === "UNAVAILABLE") return `${stateName}不可用`;
+  if (acceptedValues.some((value) => value === currentValue)) return `${stateName}已达到目标状态`;
+  return `${stateName}待确认`;
+}
+
 function missionRoadmapRequirementText(
   requirement: MissionRoadmapRequirement,
   names: MissionRoadmapNames,
 ): string {
+  if (requirement.kind === "DERIVED_STATE") {
+    return `世界能力：当前${derivedStateDisplayValue(requirement)}`;
+  }
+
   if (
     requirement.kind === "RESOURCE_AT_LEAST"
     && requirement.region_key
@@ -195,17 +363,28 @@ function missionRoadmapRequirementText(
   if (requirement.fact_key) {
     const accepted = requirement.accepted_values ?? [];
     const positive = accepted.some((value) => value === true || value === "AVAILABLE");
+    const targetName = requirement.node_key
+      ? names.nodeNames?.[requirement.node_key] ?? "目标设施"
+      : "目标设施";
+    const factName = requirement.node_key
+      ? names.factNames?.[publicFactIdentity(requirement.node_key, requirement.fact_key)] ?? "目标状态"
+      : "目标状态";
+    const currentValue = requirement.node_key
+      ? names.factValues?.[publicFactIdentity(requirement.node_key, requirement.fact_key)]
+      : undefined;
     if (positive) {
       const directLabel = FACT_GOAL_LABELS[requirement.fact_key];
-      if (directLabel) return directLabel;
+      if (directLabel && currentValue === undefined) return directLabel;
       const suffix = FACT_GOAL_SUFFIXES[requirement.fact_key];
-      if (suffix) {
-        const nodeName = requirement.node_key
-          ? names.nodeNames?.[requirement.node_key] ?? "目标设施"
-          : "目标设施";
-        return nodeName + suffix;
-      }
+      if (suffix && currentValue === undefined) return targetName + suffix;
     }
+    const stateText = factStateDisplayText(
+      requirement.fact_key,
+      factName,
+      currentValue,
+      accepted,
+    );
+    return `${targetName}：${stateText}`;
   }
 
   return requirement.description;
@@ -217,12 +396,16 @@ export function MissionRoadmap({
   regionNames,
   resourceNames,
   nodeNames,
+  factNames,
+  factValues,
 }: {
   stages: MissionRoadmapStage[];
   summary?: string;
   regionNames?: Record<string, string>;
   resourceNames?: Record<string, string>;
   nodeNames?: Record<string, string>;
+  factNames?: Record<string, string>;
+  factValues?: Record<string, string | number | boolean>;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   if (stages.length === 0) return null;
@@ -247,8 +430,17 @@ export function MissionRoadmap({
               <div>
                 <strong>{stage.name}</strong>
                 {stage.requirements.map((requirement) => (
-                  <small key={requirement.key}>
-                    {missionRoadmapRequirementText(requirement, { regionNames, resourceNames, nodeNames })}
+                  <small
+                    key={requirement.key}
+                    data-requirement-kind={requirement.kind ?? "FACT"}
+                  >
+                    {missionRoadmapRequirementText(requirement, {
+                      regionNames,
+                      resourceNames,
+                      nodeNames,
+                      factNames,
+                      factValues,
+                    })}
                   </small>
                 ))}
               </div>
@@ -263,12 +455,16 @@ export function MissionRoadmap({
 function planningHeadline(
   event: PublicTimelineEvent,
   cycle: PublicPlanningCycle | null,
+  acceptedPlan: PublicPlanHistory | null,
 ): string {
   if (cycle) {
     const status = cycle.status.toUpperCase();
     if (status === "RUNNING") return "Agent 正在规划";
     if (status === "ACCEPTED") {
-      return cycle.cycle_type === "INITIAL" ? "Agent 已完成计划" : "Agent 已重新规划";
+      if (cycle.cycle_type === "INITIAL") {
+        return `Agent 已完成计划${acceptedPlan ? ` · 执行方案 ${acceptedPlan.ordinal}` : ""}`;
+      }
+      return `Agent 已重新规划${acceptedPlan ? ` · 执行方案 ${acceptedPlan.ordinal}` : ""}`;
     }
     return "Agent 未能完成计划";
   }
@@ -465,7 +661,10 @@ export function Timeline({ task }: { task: PublicTask | null }) {
         const planningCycle = event.planning_cycle_id
           ? (task.planning_process ?? []).find((cycle) => cycle.id === event.planning_cycle_id) ?? null
           : null;
-        const headline = planningHeadline(event, planningCycle);
+        const acceptedPlan = planningCycle?.status.toUpperCase() === "ACCEPTED"
+          ? task.plan_history.find((plan) => plan.planning_cycle_id === planningCycle.id) ?? null
+          : null;
+        const headline = planningHeadline(event, planningCycle, acceptedPlan);
         const planReason = replanReason(task, event);
         const planDuration = formatDuration(
           planningCycle?.wall_clock_duration_ms ?? event.duration_ms,
@@ -551,7 +750,11 @@ export function PlanHistory({ task }: { task: PublicTask }) {
       const next = initializedTaskId.current === task.id ? { ...current } : {};
       initializedTaskId.current = task.id;
       task.plan_history.forEach((plan) => {
-        if (!next[plan.id]) next[plan.id] = plan.id === latestId ? "COMPACT" : "COLLAPSED";
+        if (!next[plan.id]) {
+          next[plan.id] = plan.total_steps >= 6 && plan.id === latestId
+            ? "COMPACT"
+            : plan.id === latestId ? "FULL" : "COLLAPSED";
+        }
       });
       return next;
     });
@@ -560,7 +763,13 @@ export function PlanHistory({ task }: { task: PublicTask }) {
   return (
     <div className="plan-history">
       {task.plan_history.map((plan) => {
-        const state = displayStates[plan.id] ?? (plan.id === latestId ? "COMPACT" : "COLLAPSED");
+        const isLongPlan = plan.total_steps >= 6;
+        const storedState = displayStates[plan.id];
+        const state = !isLongPlan && storedState === "COMPACT"
+          ? "COLLAPSED"
+          : storedState ?? (isLongPlan
+            ? plan.id === latestId ? "COMPACT" : "COLLAPSED"
+            : plan.id === latestId ? "FULL" : "COLLAPSED");
         const open = state !== "COLLAPSED";
         const markerSequence = interruptionMarkerSequence(plan);
         const interruption = plan.interruption;
@@ -587,12 +796,14 @@ export function PlanHistory({ task }: { task: PublicTask }) {
               aria-expanded={open}
               onClick={() =>
                 setDisplayStates((current) => {
-                  const currentState = current[plan.id] ?? state;
-                  const nextState = currentState === "COLLAPSED"
-                    ? "COMPACT"
-                    : currentState === "COMPACT"
-                      ? "FULL"
-                      : "COLLAPSED";
+                    const currentState = current[plan.id] ?? state;
+                  const nextState = !isLongPlan
+                    ? currentState === "FULL" ? "COLLAPSED" : "FULL"
+                    : currentState === "COLLAPSED"
+                      ? "COMPACT"
+                      : currentState === "COMPACT"
+                        ? "FULL"
+                        : "COLLAPSED";
                   return { ...current, [plan.id]: nextState };
                 })
               }
@@ -608,7 +819,7 @@ export function PlanHistory({ task }: { task: PublicTask }) {
               </span>
             </button>
             {open && (
-              <div className={state === "COMPACT" ? "plan-history-step-viewport compact" : undefined}>
+              <div className={isLongPlan && state === "COMPACT" ? "plan-history-step-viewport compact" : undefined}>
                 <ol className="plan-history-steps">
                   {steps.map((step) => (
                     <Fragment key={step.id}>
@@ -758,11 +969,13 @@ export function KnowledgeAccordion({
 
 type KnownWorldAccordionsProps = {
   resources: PlayerGameState["resources"];
+  publicResourceNames?: Record<string, string>;
   resourceIntelligence?: ResourceIntelligence;
   visibleNodes: PlayerGameState["visible_nodes"];
   actors: PlayerGameState["actors"];
   knownFacts: PlayerGameState["known_facts"];
   knownRelations?: NonNullable<PlayerGameState["known_relations"]>;
+  knownActionRequirements?: NonNullable<PlayerGameState["known_action_requirements"]>;
   knownTargetActionContracts?: PublicTargetActionContract[];
   task?: PublicTask | null;
   resourceTask?: PublicTask | null;
@@ -770,11 +983,13 @@ type KnownWorldAccordionsProps = {
 
 export function KnownWorldAccordions({
   resources,
+  publicResourceNames = {},
   resourceIntelligence,
   visibleNodes,
   actors,
   knownFacts,
   knownRelations = [],
+  knownActionRequirements = [],
   knownTargetActionContracts = [],
   task = null,
   resourceTask,
@@ -870,21 +1085,91 @@ export function KnownWorldAccordions({
     (relation) => !assignedRelationKeys.has(relationDisplayKey(relation)),
   );
   const fallbackFactGroups = groupFactsByRegion(fallbackFacts);
+  const targetBoundActionContracts = knownActionRequirements.flatMap((action) => {
+    const targetKey = targetKeyForPublicActionRequirement(action, visibleNodes);
+    if (!targetKey) return [];
+    const resourceRequirements = uniquePublicResourceRequirements(
+      action.action_key,
+      action.resource_requirements,
+      targetKey,
+    );
+    return resourceRequirements.length > 0
+      ? [{
+          target_key: targetKey,
+          action_key: action.action_key,
+          action_name: action.action_name,
+          required_actor_role_key: action.required_actor_role_key,
+          required_actor_role_name: action.required_actor_role_name,
+          source_relation_type_key: action.source_relation_type_key,
+          resource_requirements: resourceRequirements,
+        } satisfies PublicTargetActionContract]
+      : [];
+  });
+  const targetActionContracts = mergeTargetActionContracts([
+    ...knownTargetActionContracts,
+    ...targetBoundActionContracts,
+  ]);
   const contractsByTarget = new Map<string, PublicTargetActionContract[]>();
-  knownTargetActionContracts.forEach((contract) => {
+  targetActionContracts.forEach((contract) => {
     const contracts = contractsByTarget.get(contract.target_key) ?? [];
     contracts.push(contract);
     contractsByTarget.set(contract.target_key, contracts);
   });
-  const resourceNames = new Map<string, string>(resources.map((resource) => [resource.key, resource.name]));
+  const resourceNames = new Map<string, string>();
+  const isPublicResourceName = (key: string, candidate: unknown): candidate is string =>
+    typeof candidate === "string"
+    && candidate.trim().length > 0
+    && candidate !== key
+    && !/^[a-z0-9_]+$/.test(candidate);
+  const setResourceName = (key: string, candidate: unknown) => {
+    if (!isPublicResourceName(key, candidate) || resourceNames.has(key)) return;
+    resourceNames.set(key, candidate);
+  };
+  Object.entries(publicResourceNames).forEach(([key, name]) => setResourceName(key, name));
+  resources.forEach((resource) => setResourceName(resource.key, resource.name));
   if (resourceIntelligence) {
     Object.values(resourceIntelligence.regions).forEach((region) => {
-      Object.entries(region.resources).forEach(([key, resource]) => resourceNames.set(key, resource.resource_name));
+      Object.entries(region.resources).forEach(([key, resource]) => setResourceName(key, resource.resource_name));
     });
-    Object.entries(resourceIntelligence.global_resources).forEach(([key, resource]) => resourceNames.set(key, resource.resource_name));
+    Object.entries(resourceIntelligence.global_resources).forEach(([key, resource]) => setResourceName(key, resource.resource_name));
   }
+  visibleNodes.forEach((node) => {
+    (node.associated_known_resources ?? []).forEach((resource) => {
+      if (typeof resource.resource_key !== "string" || typeof resource.resource_name !== "string") return;
+      setResourceName(resource.resource_key, resource.resource_name);
+    });
+  });
   const resourceName = (key: string, candidate?: string) =>
-    resourceDisplayName(key, candidate ?? resourceNames.get(key));
+    resourceDisplayName(key, isPublicResourceName(key, candidate) ? candidate : resourceNames.get(key));
+  const targetResourceRequirementIdentities = new Set(
+    targetActionContracts.flatMap((contract) =>
+      uniquePublicResourceRequirements(
+        contract.action_key,
+        contract.resource_requirements,
+        contract.target_key,
+      ).map((requirement) => publicResourceRequirementIdentity(
+        contract.action_key,
+        requirement,
+        contract.target_key,
+      )),
+    ),
+  );
+  const actionResourceRequirementRows = knownActionRequirements.flatMap((action) => {
+    const targetKey = targetKeyForPublicActionRequirement(action, visibleNodes);
+    const requirements = uniquePublicResourceRequirements(
+      action.action_key,
+      action.resource_requirements,
+      targetKey ?? undefined,
+    ).filter(
+      (requirement) => !targetResourceRequirementIdentities.has(
+        publicResourceRequirementIdentity(action.action_key, requirement, targetKey ?? undefined),
+      ),
+    );
+    const parts = publicResourceRequirementParts(requirements, resourceName);
+    return parts.length > 0
+      ? [{ key: action.action_key, actionName: action.action_name, value: parts.join("、") }]
+      : [];
+  });
   const reserveTask = resourceTask === undefined ? task : resourceTask;
   const resourceReserveRequirements = new Map<string, number>();
   if (
@@ -942,7 +1227,6 @@ export function KnownWorldAccordions({
     value === false || value === 0 || value === "false" || value === "UNKNOWN" || value === "UNAVAILABLE" || value === "BLOCKED"
       ? "neutral"
       : "success";
-  const facilityFactsFor = (nodeKey: string) => factsByNode.get(nodeKey) ?? [];
   const targetContractsFor = (nodeKey: string) => contractsByTarget.get(nodeKey) ?? [];
   const facilityMetadataFacts = new Set(["operational", "power_supply", "power_generation_capable", "generation_capable", "repair_profile"]);
 
@@ -1013,23 +1297,85 @@ export function KnownWorldAccordions({
                     || hasGenerationSemantics
                     || additionalFacts.length > 0
                     || nodeRelations.length > 0;
-                  const repairRequirementRows = targetContracts.map((contract) => {
-                    const parts = [
-                      ...Object.entries(contract.cost ?? {}).map(
-                        ([resourceKey, amount]) => `${resourceName(resourceKey)} ×${String(amount)}`,
-                      ),
-                      ...(contract.special_requirements ?? []).map((requirement) => {
-                        const fact = facilityFactsFor(contract.target_key).find(
-                          (item) => item.fact_key === requirement.fact_key,
+                  const targetActionRequirementRows = targetContracts.map((contract) => {
+                    const typedRequirements = uniquePublicResourceRequirements(
+                      contract.action_key,
+                      contract.resource_requirements,
+                      contract.target_key,
+                    );
+                    const representedTypedIdentities = new Set<string>();
+                    const resourceParts = Object.entries(contract.cost ?? {}).flatMap(
+                      ([resourceKey, amount]) => {
+                        // ``cost`` predates typed requirements and has no scope
+                        // field.  When its Action/resource/amount is represented
+                        // by a typed requirement, keep the typed row as the
+                        // canonical display and suppress only this legacy copy.
+                        const matchingRequirements = typedRequirements.filter(
+                          (requirement) =>
+                            requirement.resource_key === resourceKey
+                            && requirement.minimum === amount,
                         );
-                        return `前置条件：${fact ? factDisplayLabel(fact) : "已知状态"}`;
+                        if (matchingRequirements.length === 0) {
+                          return [`${resourceName(resourceKey)} ×${String(amount)}`];
+                        }
+                        return matchingRequirements.map((requirement) => {
+                          representedTypedIdentities.add(
+                            publicResourceRequirementIdentity(
+                              contract.action_key,
+                              requirement,
+                              contract.target_key,
+                            ),
+                          );
+                          return `${resourceName(requirement.resource_key)} ×${String(requirement.minimum)}`;
+                        });
+                      },
+                    );
+                    const parts = [
+                      ...resourceParts,
+                      ...publicResourceRequirementParts(
+                        typedRequirements.filter(
+                          (requirement) => !representedTypedIdentities.has(
+                            publicResourceRequirementIdentity(
+                              contract.action_key,
+                              requirement,
+                              contract.target_key,
+                            ),
+                          ),
+                        ),
+                        resourceName,
+                      ),
+                      ...(contract.special_requirements ?? []).flatMap((requirement) => {
+                        const nodeKey = typeof requirement.node_key === "string"
+                          ? requirement.node_key
+                          : null;
+                        const factKey = typeof requirement.fact_key === "string"
+                          ? requirement.fact_key
+                          : null;
+                        if (!nodeKey || !factKey || !nodeByKey.has(nodeKey)) return [];
+                        const fact = factsByNode.get(nodeKey)?.find(
+                          (item) => item.fact_key === factKey,
+                        );
+                        if (!fact) return [];
+                        const text = publicFactRequirementText(
+                          requirement,
+                          fact,
+                          nodeDisplayName(nodeKey, nodeByKey.get(nodeKey)?.name),
+                        );
+                        return text ? [`前置条件：${text}`] : [];
                       }),
                     ];
                     return {
                       key: node.key + ":requirement:" + contract.action_key,
+                      label: contract.action_key.startsWith("repair_") ? "修复需求：" : `${contract.action_name}：`,
                       value: parts.length > 0 ? parts.join("、") : contract.action_name,
                     };
                   });
+                  const renderTargetActionRequirementRows = () => targetActionRequirementRows.map((row) => (
+                    <div className="knowledge-facility-attribute" key={row.key}>
+                      <span className="knowledge-facility-attribute-label">{row.label}</span>
+                      <span className="knowledge-facility-attribute-value">{row.value}</span>
+                    </div>
+                  ));
                   const repairTeamNames = [
                     ...new Set(
                       targetContracts
@@ -1084,6 +1430,11 @@ export function KnownWorldAccordions({
                           </span>
                           <span className="knowledge-transport-column-spacer" aria-hidden="true" />
                         </div>
+                        {targetActionRequirementRows.length > 0 && (
+                          <div className="knowledge-node-details">
+                            {renderTargetActionRequirementRows()}
+                          </div>
+                        )}
                       </div>
                     );
                   }
@@ -1122,12 +1473,7 @@ export function KnownWorldAccordions({
                           </span>
                         </summary>
                         <div className="knowledge-facility-details">
-                          {repairRequirementRows.map((row) => (
-                            <div className="knowledge-facility-attribute" key={row.key}>
-                              <span className="knowledge-facility-attribute-label">{"修复需求："}</span>
-                              <span className="knowledge-facility-attribute-value">{row.value}</span>
-                            </div>
-                          ))}
+                          {renderTargetActionRequirementRows()}
                           {repairTeamNames.map((name) => (
                             <div className="knowledge-facility-attribute" key={node.key + ":team:" + name}>
                               <span className="knowledge-facility-attribute-label">{"执行队伍："}</span>
@@ -1186,6 +1532,7 @@ export function KnownWorldAccordions({
                         </span>
                       </summary>
                       <div className="knowledge-node-details">
+                        {targetActionRequirementRows.length > 0 && renderTargetActionRequirementRows()}
                         {nodeFacts.map((fact) => (
                           <div className="knowledge-entry" key={"node-fact:" + factIdentity(fact)}>
                             <span>{factDisplayLabel(fact)}</span>
@@ -1228,6 +1575,17 @@ export function KnownWorldAccordions({
         open={expanded.locations}
         onToggle={() => toggle("locations")}
       >
+        {actionResourceRequirementRows.length > 0 && (
+          <div className="knowledge-action-requirements" data-testid="known-action-requirements">
+            <strong>公开行动资源要求</strong>
+            {actionResourceRequirementRows.map((row) => (
+              <div className="knowledge-facility-attribute" key={row.key}>
+                <span className="knowledge-facility-attribute-label">{row.actionName}：</span>
+                <span className="knowledge-facility-attribute-value">{row.value}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {renderKnownLocations()}
       </KnowledgeAccordion>
       <KnowledgeAccordion
@@ -1881,6 +2239,12 @@ export function GamePage() {
       )),
     ),
   };
+  const roadmapFactNames = Object.fromEntries(
+    play.data.known_facts.map((fact) => [publicFactIdentity(fact.node_key, fact.fact_key), factDisplayLabel(fact)]),
+  );
+  const roadmapFactValues = Object.fromEntries(
+    play.data.known_facts.map((fact) => [publicFactIdentity(fact.node_key, fact.fact_key), fact.value]),
+  );
   const selectedTaskLoading = Boolean(
     selectedTaskId !== null && loadedTask?.id !== selectedTaskId,
   );
@@ -1962,11 +2326,13 @@ export function GamePage() {
           <header className="command-panel-heading"><div><p>01 · 世界</p><h1>已知世界</h1></div><span className="console-pill success">玩家可见</span></header>
           <KnownWorldAccordions
             resources={play.data.resources}
+            publicResourceNames={definitionNameMap(scenarioWorld.resources)}
             resourceIntelligence={play.data.resource_intelligence}
             visibleNodes={play.data.visible_nodes}
             actors={play.data.actors}
             knownFacts={play.data.known_facts}
             knownRelations={play.data.known_relations}
+            knownActionRequirements={play.data.known_action_requirements}
             knownTargetActionContracts={play.data.known_target_action_contracts}
             task={task}
             resourceTask={selectedTaskActive ? task : null}
@@ -2123,6 +2489,8 @@ export function GamePage() {
                   regionNames={roadmapRegionNames}
                   resourceNames={roadmapResourceNames}
                   nodeNames={roadmapNodeNames}
+                  factNames={roadmapFactNames}
+                  factValues={roadmapFactValues}
                 />
               )}
             </div>
