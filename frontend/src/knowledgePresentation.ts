@@ -143,6 +143,59 @@ export function factDisplayValue(
   return /^[a-z0-9_]+$/i.test(value) ? "当前状态已知" : uiLabel(value);
 }
 
+type PublicFactValue = PlayerGameState["known_facts"][number]["value"];
+
+function isPublicFactValue(value: unknown): value is PublicFactValue {
+  return typeof value === "boolean" || typeof value === "number" || typeof value === "string";
+}
+
+export function publicFactRequirementText(
+  requirement: Record<string, unknown>,
+  fact: PlayerGameState["known_facts"][number],
+  subjectName: string,
+): string | null {
+  // A prerequisite is only player-visible when its current Fact is known.
+  // Treat an explicit UNKNOWN value defensively as non-displayable too.
+  if (fact.value === "UNKNOWN") return null;
+
+  const operator = typeof requirement.operator === "string" ? requirement.operator : "EQ";
+  const expected = requirement.value;
+  if (operator === "EQ" && isPublicFactValue(expected)) {
+    const usesSpecializedPresentation = (
+      (fact.fact_key === "operational" && typeof expected === "boolean")
+      || (
+        fact.fact_key === "power_supply"
+        && (expected === true || expected === false || expected === "AVAILABLE" || expected === "UNAVAILABLE")
+      )
+      || (fact.fact_key === "passable" && typeof expected === "boolean")
+    );
+    if (usesSpecializedPresentation) {
+      return resourceAvailabilityRequirementText(requirement, subjectName);
+    }
+  }
+
+  if (operator === "IN" || operator === "NOT_IN") {
+    if (!Array.isArray(expected) || expected.length === 0 || !expected.every(isPublicFactValue)) {
+      return null;
+    }
+    const expectedText = expected.map((value) => factDisplayValue(fact, value)).join("、");
+    return `${subjectName}：${factDisplayLabel(fact)}${operator === "IN" ? "为" : "不为"}${expectedText}`;
+  }
+
+  if (!isPublicFactValue(expected)) return null;
+  const operatorText: Record<string, string> = {
+    EQ: "为",
+    NE: "不为",
+    GT: "大于",
+    GTE: "至少",
+    LT: "小于",
+    LTE: "至多",
+  };
+  const relation = operatorText[operator];
+  if (!relation) return null;
+  return `${subjectName}：${factDisplayLabel(fact)}${relation}${factDisplayValue(fact, expected)}`;
+}
+
 export function facilityStatusDisplayValue(
   fact: PlayerGameState["known_facts"][number],
 ): string {
