@@ -12,6 +12,7 @@ from typing import Any
 
 from app.agent.formal_goal_projection import formal_goal_planning_objectives
 from app.agent.provider import (
+    GoalDependencyProjection,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
@@ -48,6 +49,17 @@ class TypedDependency:
 class DependencyClosureResult:
     planner_input: PlannerInput
     relevance_reason: dict[str, tuple[dict[str, object], ...]]
+
+
+@dataclass(frozen=True)
+class _GoalDependencySpec:
+    """Typed public identity collected while walking the Goal dependency graph."""
+
+    dependency: TypedDependency
+    kind: str
+    dependency_id: str
+    parent_dependency_id: str | None
+    accepted_values: tuple[object, ...] = ()
 
 
 def _scope_actor_actions_to_contracts(
@@ -415,6 +427,115 @@ def build_dependency_closure(
             repr(tuple(requirement.accepted_values)),
         )
 
+    goal_dependency_specs: dict[TypedDependency, _GoalDependencySpec] = {}
+    expanded_goal_derived: set[str] = set()
+
+    def register_goal_dependency(
+        dependency: TypedDependency,
+        *,
+        kind: str,
+        accepted_values: tuple[object, ...] = (),
+        parent_dependency_id: str | None = None,
+    ) -> str:
+        dependency_id = _goal_dependency_id(dependency)
+        if dependency not in goal_dependency_specs:
+            goal_dependency_specs[dependency] = _GoalDependencySpec(
+                dependency=dependency,
+                kind=kind,
+                dependency_id=dependency_id,
+                parent_dependency_id=parent_dependency_id,
+                accepted_values=accepted_values,
+            )
+        return goal_dependency_specs[dependency].dependency_id
+
+    def register_derived_children(
+        derived_key: str,
+        parent_dependency_id: str,
+    ) -> None:
+        if derived_key in expanded_goal_derived:
+            return
+        state = definition.derived_state_definitions.get(derived_key)
+        if state is None:
+            return
+        expanded_goal_derived.add(derived_key)
+        for nested in state.dependencies:
+            gate = nested.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+            ):
+                continue
+            if nested.kind == DerivedDependencyKind.FACT:
+                assert nested.node_key is not None and nested.fact_key is not None
+                child = TypedDependency(
+                    "FACT",
+                    nested.node_key,
+                    nested.fact_key,
+                    repr(tuple(nested.accepted_values)),
+                )
+                register_goal_dependency(
+                    child,
+                    kind="FACT",
+                    accepted_values=tuple(nested.accepted_values),
+                    parent_dependency_id=parent_dependency_id,
+                )
+            elif nested.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+                assert nested.region_key is not None and nested.resource_key is not None
+                assert nested.minimum is not None
+                child = TypedDependency(
+                    "RESOURCE_SOURCE",
+                    nested.resource_key,
+                    nested.region_key,
+                    nested.minimum,
+                )
+                register_goal_dependency(
+                    child,
+                    kind="RESOURCE_AT_LEAST",
+                    parent_dependency_id=parent_dependency_id,
+                )
+            elif nested.kind == DerivedDependencyKind.DERIVED_STATE:
+                assert nested.derived_key is not None
+                child = TypedDependency(
+                    "DERIVED_STATE",
+                    nested.derived_key,
+                    required=repr(tuple(nested.accepted_values)),
+                )
+                child_id = register_goal_dependency(
+                    child,
+                    kind="DERIVED_STATE",
+                    accepted_values=tuple(nested.accepted_values),
+                    parent_dependency_id=parent_dependency_id,
+                )
+                register_derived_children(nested.derived_key, child_id)
+
+    def register_goal_requirement(requirement: ObjectiveRequirementV2) -> None:
+        gate = getattr(requirement, "knowledge_gate", None)
+        if not knowledge_gate_is_revealed(
+            gate,
+            known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+        ):
+            return
+        dependency = root_dependency(requirement)
+        kind = getattr(getattr(requirement, "kind", ObjectiveRequirementKind.FACT), "value", None)
+        if kind is None:
+            kind = str(getattr(requirement, "kind", ObjectiveRequirementKind.FACT))
+        dependency_id = register_goal_dependency(
+            dependency,
+            kind=kind,
+            accepted_values=(
+                tuple(requirement.accepted_values)
+                if kind
+                in {
+                    ObjectiveRequirementKind.FACT.value,
+                    ObjectiveRequirementKind.DERIVED_STATE.value,
+                }
+                else ()
+            ),
+        )
+        if kind == ObjectiveRequirementKind.DERIVED_STATE.value:
+            assert requirement.derived_key is not None
+            register_derived_children(requirement.derived_key, dependency_id)
+
     for objective in objectives:
         requirements = (
             *objective.completion_requirements,
@@ -431,6 +552,7 @@ def build_dependency_closure(
                 known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
             ):
                 continue
+            register_goal_requirement(requirement)
             dependency = root_dependency(requirement)
             queue.append(
                 (
@@ -1419,6 +1541,12 @@ def build_dependency_closure(
         tuple(unknowns.values()),
         relevant_resource_source_hint_resources,
     )
+    active_goal_dependencies = _active_goal_dependency_projections(
+        definition,
+        planner_input,
+        goal_dependency_specs,
+        visited,
+    )
     sliced_action_contracts = tuple(
         item for item in planner_input.action_contracts if item.action_key in selected_actions
     )
@@ -1437,6 +1565,7 @@ def build_dependency_closure(
                 for binding_key, item in sorted(bindings.items())
                 if binding_key in selected_bindings
             ),
+            "active_goal_dependencies": active_goal_dependencies,
             "known_world": known_world,
         }
     )
@@ -2085,6 +2214,260 @@ def _dependency_id(dimension: str, **identity: object) -> str:
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     return f"dependency-{dimension.lower().replace('_', '-')}-{digest}"
+
+
+def _goal_dependency_id(dependency: TypedDependency) -> str:
+    """Use the existing closure identity for an active Goal projection."""
+
+    if dependency.dimension == "FACT":
+        return _dependency_id(
+            "OBJECTIVE_FACT_KNOWLEDGE",
+            subject_key=dependency.subject,
+            fact_key=dependency.key,
+        )
+    if dependency.dimension == "RESOURCE_SOURCE":
+        return _dependency_id(
+            "RESOURCE_SOURCE",
+            resource_key=dependency.subject,
+            target_key=dependency.key,
+            required_amount=int(dependency.required or 0),
+        )
+    if dependency.dimension == "DERIVED_STATE":
+        return _dependency_id(
+            "DERIVED_STATE",
+            derived_key=dependency.subject,
+            accepted_values=dependency.required,
+        )
+    return _dependency_id(
+        dependency.dimension,
+        subject_key=dependency.subject,
+        key=dependency.key,
+        required=dependency.required,
+    )
+
+
+def _public_resource_amount_at(
+    planner_input: PlannerInput,
+    resource_key: str,
+    region_key: str,
+) -> int | None:
+    """Return a scoped Resource amount only when that scope is public Knowledge."""
+
+    raw_resource = planner_input.known_world.resources.get(resource_key)
+    if not isinstance(raw_resource, dict):
+        return None
+    scopes = raw_resource.get("scopes")
+    if not isinstance(scopes, dict):
+        return None
+    raw_scope = scopes.get(region_key)
+    if not isinstance(raw_scope, dict):
+        raw_scope = {}
+    if raw_scope.get("knowledge_status") == "UNKNOWN":
+        return None
+
+    knowledge = next(
+        (
+            item
+            for item in planner_input.known_world.resource_knowledge
+            if isinstance(item, dict) and item.get("region_key") == region_key
+        ),
+        None,
+    )
+    visibility = (
+        knowledge.get("resource_inventory_visibility")
+        if knowledge is not None
+        else raw_scope.get("resource_inventory_visibility")
+    )
+    survey_completed = (
+        knowledge.get("resource_survey_completed")
+        if knowledge is not None
+        else raw_scope.get("resource_survey_completed")
+    )
+    visibility = getattr(visibility, "value", visibility)
+    if visibility != ResourceInventoryVisibility.VISIBLE.value or survey_completed is not True:
+        return None
+
+    amount = raw_scope.get("known_available")
+    if isinstance(amount, int) and not isinstance(amount, bool):
+        return max(0, amount)
+    # A visible, completed Region with no scoped entry is public known zero;
+    # normally the canonical projection materializes this entry explicitly.
+    return 0
+
+
+def _public_derived_knowledge_values(
+    definition: ScenarioDefinitionV2,
+    planner_input: PlannerInput,
+) -> dict[str, object | None]:
+    """Evaluate Derived values from the same public typed dependency inputs.
+
+    This is intentionally a projection helper, not an authoritative evaluator:
+    it never reads Truth or writes state, and it returns UNKNOWN when any public
+    dependency or its gate is unknown.  Runtime completion remains owned by
+    ``DerivedStateEvaluator``.
+    """
+
+    states = getattr(definition, "derived_state_definitions", {})
+    if not isinstance(states, dict):
+        return {}
+    known_facts = planner_input.known_world.facts
+    cache: dict[str, object | None] = {}
+    visiting: set[str] = set()
+
+    def evaluate(derived_key: str) -> object | None:
+        if derived_key in cache:
+            return cache[derived_key]
+        if derived_key in visiting:
+            # Valid Scenario definitions are DAGs; retain a safe projection if
+            # a lightweight synthetic definition violates that contract.
+            return None
+        state = states.get(derived_key)
+        if state is None:
+            cache[derived_key] = None
+            return None
+        visiting.add(derived_key)
+        statuses: list[bool | None] = []
+        for dependency in state.dependencies:
+            gate = dependency.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+            ):
+                statuses.append(None)
+                continue
+            kind = getattr(dependency.kind, "value", dependency.kind)
+            if kind == DerivedDependencyKind.FACT.value:
+                assert dependency.node_key is not None and dependency.fact_key is not None
+                identity = f"{dependency.node_key}.{dependency.fact_key}"
+                statuses.append(
+                    known_facts[identity] in dependency.accepted_values
+                    if identity in known_facts
+                    else None
+                )
+            elif kind == DerivedDependencyKind.RESOURCE_AT_LEAST.value:
+                assert dependency.region_key is not None and dependency.resource_key is not None
+                assert dependency.minimum is not None
+                amount = _public_resource_amount_at(
+                    planner_input,
+                    dependency.resource_key,
+                    dependency.region_key,
+                )
+                statuses.append(None if amount is None else amount >= dependency.minimum)
+            elif kind == DerivedDependencyKind.DERIVED_STATE.value:
+                assert dependency.derived_key is not None
+                child_value = evaluate(dependency.derived_key)
+                statuses.append(
+                    None if child_value is None else child_value in dependency.accepted_values
+                )
+            else:
+                statuses.append(None)
+        if any(status is False for status in statuses):
+            derived_value: object | None = state.unavailable_value
+        elif all(status is True for status in statuses):
+            derived_value = state.available_value
+        else:
+            derived_value = None
+        visiting.remove(derived_key)
+        cache[derived_key] = derived_value
+        return derived_value
+
+    for derived_key in sorted(states):
+        evaluate(derived_key)
+    return cache
+
+
+def _active_goal_dependency_projections(
+    definition: ScenarioDefinitionV2,
+    planner_input: PlannerInput,
+    goal_dependency_specs: dict[TypedDependency, _GoalDependencySpec],
+    visited: set[TypedDependency],
+) -> tuple[GoalDependencyProjection, ...]:
+    """Project only active unknown/known-unsatisfied Goal dependencies."""
+
+    derived_values = _public_derived_knowledge_values(definition, planner_input)
+    result: list[GoalDependencyProjection] = []
+    for spec in goal_dependency_specs.values():
+        if spec.dependency not in visited:
+            continue
+        dependency = spec.dependency
+        base: dict[str, object] = {
+            "dependency_id": spec.dependency_id,
+            "kind": spec.kind,
+            "parent_dependency_id": spec.parent_dependency_id,
+            "knowledge_status": "UNKNOWN",
+            "satisfaction_status": "UNKNOWN",
+        }
+        if spec.kind == ObjectiveRequirementKind.FACT.value:
+            identity = f"{dependency.subject}.{dependency.key}"
+            base.update(
+                {
+                    "node_key": dependency.subject,
+                    "fact_key": dependency.key,
+                    "accepted_values": spec.accepted_values,
+                }
+            )
+            if identity in planner_input.known_world.facts:
+                current = planner_input.known_world.facts[identity]
+                if current in spec.accepted_values:
+                    continue
+                base.update(
+                    {
+                        "knowledge_status": "KNOWN",
+                        "satisfaction_status": "UNSATISFIED",
+                        "current_known_value": current,
+                    }
+                )
+        elif spec.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST.value:
+            minimum = int(dependency.required or 0)
+            base.update(
+                {
+                    "region_key": dependency.key,
+                    "resource_key": dependency.subject,
+                    "minimum": minimum,
+                }
+            )
+            current = _public_resource_amount_at(
+                planner_input,
+                dependency.subject,
+                dependency.key,
+            )
+            if current is None:
+                pass
+            elif current >= minimum:
+                continue
+            else:
+                base.update(
+                    {
+                        "knowledge_status": "KNOWN",
+                        "satisfaction_status": "UNSATISFIED",
+                        "current_known_available": current,
+                        "deficit": minimum - current,
+                    }
+                )
+        elif spec.kind == ObjectiveRequirementKind.DERIVED_STATE.value:
+            base.update(
+                {
+                    "derived_key": dependency.subject,
+                    "accepted_values": spec.accepted_values,
+                }
+            )
+            current = derived_values.get(dependency.subject)
+            if current is None:
+                pass
+            elif current in spec.accepted_values:
+                continue
+            else:
+                base.update(
+                    {
+                        "knowledge_status": "KNOWN",
+                        "satisfaction_status": "UNSATISFIED",
+                        "current_known_value": current,
+                    }
+                )
+        else:
+            continue
+        result.append(GoalDependencyProjection(**base))
+    return tuple(result)
 
 
 def _slice_known_world(
