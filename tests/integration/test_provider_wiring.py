@@ -117,7 +117,12 @@ class RecordingProvider:
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
-        return PlanProposal(steps=self.proposals.popleft())
+        return PlanProposal(
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="continue the unfinished objective mainline",
+            steps=self.proposals.popleft(),
+        )
 
 
 class FailingPlanProvider(RecordingProvider):
@@ -893,7 +898,11 @@ def test_generic_planner_prompt_defines_local_and_risk_frontier_tie_breakers() -
                     {
                         "message": {
                             "content": (
-                                '{"plan_summary":"complete","steps":['
+                                '{"plan_summary":"complete",'
+                                '"segment_goal":"advance the current objective",'
+                                '"goal_link":"supports the frozen objective",'
+                                '"continuation_intent":"continue the objective mainline",'
+                                '"steps":['
                                 '{"purpose":"known task step",'
                                 '"action_key":"known_action",'
                                 '"actor_key":"known_actor",'
@@ -1267,6 +1276,10 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     assert continuity is not None
     assert len(continuity.prior_plans) == 1
     assert continuity.latest_replan_trigger == "TEST_REPLAN"
+    prior_segment = continuity.prior_plans[0]
+    assert prior_segment.segment_goal == "advance the current objective"
+    assert prior_segment.goal_link == "supports the frozen objective"
+    assert prior_segment.continuation_intent == "continue the unfinished objective mainline"
 
     orchestrator.agent.plan(
         task,
@@ -1278,7 +1291,21 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     assert replan_requests[0].planning_continuity == replan_requests[1].planning_continuity
     assert replan_requests[0].planning_continuity is not None
     assert len(replan_requests[0].planning_continuity.prior_plans) == 1
+    assert replan_requests[0].planner_input is not None
+    previous_segment = replan_requests[0].planner_input.execution_context["previous_segment"]
+    assert isinstance(previous_segment, dict)
+    assert previous_segment["segment_goal"] == prior_segment.segment_goal
+    assert previous_segment["goal_link"] == prior_segment.goal_link
+    assert previous_segment["continuation_intent"] == prior_segment.continuation_intent
+    assert previous_segment["stop_reason"] == prior_segment.stop_reason
+    assert replan_requests[0].planner_input.execution_context["latest_replan_trigger"] == (
+        "TEST_REPLAN"
+    )
     assert replan_requests[1].planning_continuity is not None
+    assert replan_requests[1].planner_input is not None
+    assert replan_requests[1].planner_input.execution_context["previous_segment"] == (
+        previous_segment
+    )
     assert replan_requests[1].planning_continuity.prior_plans[0].steps[0].purpose
     repair_payload = replan_requests[1].provider_payload()
     assert "planning_continuity" in repair_payload

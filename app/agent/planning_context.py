@@ -60,6 +60,7 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     GameInstanceNodeState,
     GameInstanceResourceState,
+    PlanningAttempt,
     WorldOperation,
 )
 from app.services.derived_state import evaluate_derived_states
@@ -378,6 +379,52 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
     )
 
 
+_SEGMENT_INTENT_MAX_LENGTH = 240
+
+
+def _bounded_intent_text(value: object, fallback: str) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text[:_SEGMENT_INTENT_MAX_LENGTH]
+    return fallback[:_SEGMENT_INTENT_MAX_LENGTH]
+
+
+def _plan_intent(
+    plan: AgentPlan,
+    proposal: dict[str, object] | None,
+) -> tuple[str, str, str]:
+    """Read short intent from the accepted proposal with legacy fallbacks."""
+
+    fallback_goal = _bounded_intent_text(
+        plan.strategy_summary,
+        "Advance the frozen Objective",
+    )
+    fallback_link = "Re-evaluate against the frozen Formal Goal and active dependency"
+    if plan.stop_reason == "OBJECTIVE_COMPLETION":
+        fallback_continuation = "No continuation; the frozen Objective was completed"
+    elif plan.stop_reason == "INFORMATION_BOUNDARY":
+        fallback_continuation = "Re-evaluate the unresolved dependency after new Knowledge"
+    elif plan.stop_reason == "BLOCKED":
+        fallback_continuation = "Resume when a legal progress or Knowledge path appears"
+    else:
+        fallback_continuation = "Continue the unfinished mainline toward the frozen Objective"
+    return (
+        _bounded_intent_text(
+            proposal.get("segment_goal") if proposal is not None else None,
+            fallback_goal,
+        ),
+        _bounded_intent_text(
+            proposal.get("goal_link") if proposal is not None else None,
+            fallback_link,
+        ),
+        _bounded_intent_text(
+            proposal.get("continuation_intent") if proposal is not None else None,
+            fallback_continuation,
+        ),
+    )
+
+
 class PlanningContinuityBuilder:
     """Project compact public history for one task's next REPLAN."""
 
@@ -419,7 +466,30 @@ class PlanningContinuityBuilder:
             for operation in operations
             if operation.source_step_id is not None
         }
-        prior_plans = tuple(self._plan_projection(plan, operations_by_step) for plan in plans)
+        accepted_attempts: dict[object, dict[str, object]] = {}
+        cycle_ids = tuple(
+            plan.planning_cycle_id for plan in plans if plan.planning_cycle_id is not None
+        )
+        if cycle_ids:
+            for attempt in self.db.scalars(
+                select(PlanningAttempt)
+                .where(
+                    PlanningAttempt.cycle_id.in_(cycle_ids),
+                    PlanningAttempt.status == "ACCEPTED",
+                )
+                .order_by(PlanningAttempt.attempt_index.desc())
+            ):
+                proposal = attempt.proposal
+                if isinstance(proposal, dict) and attempt.cycle_id not in accepted_attempts:
+                    accepted_attempts[attempt.cycle_id] = proposal
+        prior_plans = tuple(
+            self._plan_projection(
+                plan,
+                operations_by_step,
+                proposal=accepted_attempts.get(plan.planning_cycle_id),
+            )
+            for plan in plans
+        )
         latest_new_knowledge = self._trigger_knowledge(
             task,
             trigger_step_id=trigger_step_id,
@@ -438,6 +508,8 @@ class PlanningContinuityBuilder:
         self,
         plan: AgentPlan,
         operations_by_step: dict[object, WorldOperation],
+        *,
+        proposal: dict[str, object] | None = None,
     ) -> ContinuityPlan:
         steps: list[ContinuityStep] = []
         for step in self.db.scalars(
@@ -490,9 +562,13 @@ class PlanningContinuityBuilder:
                     knowledge_changes=knowledge_changes,
                 )
             )
+        segment_goal, goal_link, continuation_intent = _plan_intent(plan, proposal)
         return ContinuityPlan(
             plan_summary=plan.strategy_summary,
             stop_reason=plan.stop_reason,
+            segment_goal=segment_goal,
+            goal_link=goal_link,
+            continuation_intent=continuation_intent,
             steps=tuple(steps),
         )
 

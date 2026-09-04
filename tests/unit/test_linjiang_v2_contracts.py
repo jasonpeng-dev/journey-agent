@@ -203,7 +203,13 @@ class _RepeatingPlanProvider:
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.requests.append(request)
-        return PlanProposal(plan_summary=request.call_type, steps=self.steps)
+        return PlanProposal(
+            plan_summary=request.call_type,
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="continue the unfinished objective mainline",
+            steps=self.steps,
+        )
 
 
 class _InspectBoundaryProvider:
@@ -227,6 +233,9 @@ class _InspectBoundaryProvider:
         )
         return PlanProposal(
             plan_summary="Inspect the unknown communication hub state.",
+            segment_goal="acquire the unresolved facility state",
+            goal_link="supports the active communication dependency",
+            continuation_intent="continue the dependency after new Knowledge",
             stop_reason="INFORMATION_BOUNDARY",
             boundary_dependency_id=str(dependency["dependency_id"]),
             steps=(

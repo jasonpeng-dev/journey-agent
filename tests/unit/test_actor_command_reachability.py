@@ -310,6 +310,9 @@ class _RelayPlanProvider:
         )
         return PlanProposal(
             plan_summary="relay before ordinary action",
+            segment_goal="restore the patient's care path",
+            goal_link="supports the frozen treatment objective",
+            continuation_intent="continue with the dependent treatment action",
             steps=(relay, diagnose) if self.relay_first else (diagnose, relay),
         )
 

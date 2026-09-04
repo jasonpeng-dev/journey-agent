@@ -23,6 +23,7 @@ from app.agent.planner_contract import action_planner_effects
 from app.agent.planning_context import (
     PlanningActionCatalogBuilder,
     PlanningContextBuilder,
+    PlanningContinuityBuilder,
     _known_world_facts,
     _objective_refs,
     objective_context,
@@ -102,6 +103,7 @@ from app.domain.scenario_v2 import (
     NodeSelectorV2,
     ObjectiveDefinitionV2,
     ObjectiveRequirementKind,
+    ObjectiveRequirementV2,
     RuleDefinitionV2,
     RulePhase,
     ScenarioDefinitionV2,
@@ -2388,6 +2390,11 @@ class GenericAgentService:
         formal_goal: FormalGoalContractV1 | None = None,
     ) -> list[dict[str, object]]:
         assert self.provider is not None
+        if planning_continuity is None and reason is not None:
+            planning_continuity = PlanningContinuityBuilder(self.db, self.scope).build(
+                task,
+                replan_reason=reason,
+            )
         call_type = "INITIAL_PLAN" if reason is None else "REPLAN"
         created_cycle = planning_cycle is None
         if planning_cycle is None:
@@ -2418,6 +2425,31 @@ class GenericAgentService:
             )
             if planner_input_override is not None:
                 planner_input = planner_input_override
+            if planning_continuity is not None and planning_continuity.prior_plans:
+                previous_segment = planning_continuity.prior_plans[-1].model_dump(mode="json")
+                continuity_execution_context: dict[str, object] = {
+                    **planner_input.execution_context,
+                    "previous_segment": previous_segment,
+                }
+                if planning_continuity.latest_replan_trigger is not None:
+                    continuity_execution_context["latest_replan_trigger"] = (
+                        planning_continuity.latest_replan_trigger
+                    )
+                if planning_continuity.latest_new_knowledge:
+                    continuity_execution_context["latest_new_knowledge"] = list(
+                        planning_continuity.latest_new_knowledge
+                    )
+                planner_input = planner_input.model_copy(
+                    update={"execution_context": continuity_execution_context}
+                )
+                planning_context = planning_context.model_copy(
+                    update={
+                        "previous_execution_context": {
+                            **planning_context.previous_execution_context,
+                            "previous_segment": previous_segment,
+                        }
+                    }
+                )
             # The old catalog is retained only as a compatibility projection for
             # existing in-process FakeProviders. It is never serialized by the
             # OpenAI-compatible provider when ``planner_input`` is present.
@@ -3046,6 +3078,18 @@ class GenericAgentService:
         if diagnostics:
             return [], tuple(_diagnostic_with_step_id(item, proposed_steps) for item in diagnostics)
 
+        if stop_reason == "OBJECTIVE_COMPLETION":
+            completion_violation = self._projected_objective_completion_violation(
+                definition,
+                objectives,
+                projected_known_facts=projected_known_facts,
+                projected_pools=projected_resource_pools,
+                projected_region_knowledge=projected_region_resource_knowledge,
+                projected_known_resource_balance=projected_known_resource_balance,
+            )
+            if completion_violation is not None:
+                return [], (completion_violation,)
+
         covered_before: set[tuple[str, str]] = set()
         covered_resource_before: set[tuple[str, str]] = set()
         for index, (effects, resource_effects) in enumerate(
@@ -3169,6 +3213,170 @@ class GenericAgentService:
                 },
             )
         return result, ()
+
+    @staticmethod
+    def _projected_objective_completion_violation(
+        definition: ScenarioDefinitionV2,
+        objectives: tuple[ObjectiveDefinitionV2, ...],
+        *,
+        projected_known_facts: dict[tuple[str, str], _ProjectedFact],
+        projected_pools: dict[str, _ProjectedResourcePool],
+        projected_region_knowledge: dict[str, _ProjectedRegionResourceKnowledge],
+        projected_known_resource_balance: dict[tuple[str | None, str], int],
+    ) -> dict[str, object] | None:
+        """Prove an OBJECTIVE_COMPLETION stop from the projected public state."""
+
+        if not objectives:
+            # Lightweight legacy callers may validate a segment without an
+            # objective projection.  The full Agent path always supplies the
+            # frozen Formal Goal's planning projection.
+            return None
+
+        def gate_status(gate: object) -> bool | None:
+            if gate is None:
+                return True
+            node_key = getattr(gate, "node_key", None)
+            fact_key = getattr(gate, "fact_key", None)
+            fact = (
+                projected_known_facts.get((node_key, fact_key))
+                if isinstance(node_key, str) and isinstance(fact_key, str)
+                else None
+            )
+            if fact is None or fact.visibility != Visibility.KNOWN:
+                return None
+            accepted_values = getattr(gate, "accepted_values", ())
+            return True if fact.value in accepted_values else None
+
+        def resource_status(
+            region_key: str,
+            resource_key: str,
+            minimum: int,
+        ) -> tuple[bool | None, int]:
+            known_amount = projected_known_resource_balance.get(
+                (region_key, resource_key),
+                0,
+            )
+            available_pools = [
+                pool
+                for pool in projected_pools.values()
+                if pool.resource_key == resource_key
+                and pool.region_key == region_key
+                and pool.visibility == ResourcePoolVisibility.VISIBLE
+                and pool.availability == ResourcePoolAvailability.AVAILABLE
+            ]
+            known_amount += sum(
+                pool.quantity for pool in available_pools if pool.quantity is not None
+            )
+            if known_amount >= minimum:
+                return True, known_amount
+            knowledge = projected_region_knowledge.get(region_key)
+            inventory_unknown = (
+                knowledge is None
+                or knowledge.visibility != ResourceInventoryVisibility.VISIBLE
+                or not knowledge.survey_completed
+                or any(pool.quantity is None for pool in available_pools)
+            )
+            return (None if inventory_unknown else False), known_amount
+
+        derived_cache: dict[str, StrictScalar | None] = {}
+        derived_in_progress: set[str] = set()
+
+        def derived_value(derived_key: str) -> StrictScalar | None:
+            if derived_key in derived_cache:
+                return derived_cache[derived_key]
+            state = definition.derived_state_definitions.get(derived_key)
+            if state is None or derived_key in derived_in_progress:
+                return None
+            derived_in_progress.add(derived_key)
+            statuses: list[bool | None] = []
+            for dependency in state.dependencies:
+                if gate_status(dependency.knowledge_gate) is not True:
+                    statuses.append(None)
+                    continue
+                if dependency.kind.value == "FACT":
+                    assert dependency.node_key is not None and dependency.fact_key is not None
+                    fact = projected_known_facts.get((dependency.node_key, dependency.fact_key))
+                    statuses.append(
+                        None
+                        if fact is None or fact.visibility != Visibility.KNOWN
+                        else fact.value in dependency.accepted_values
+                    )
+                elif dependency.kind.value == "RESOURCE_AT_LEAST":
+                    assert dependency.region_key is not None
+                    assert dependency.resource_key is not None
+                    assert dependency.minimum is not None
+                    status, _amount = resource_status(
+                        dependency.region_key,
+                        dependency.resource_key,
+                        dependency.minimum,
+                    )
+                    statuses.append(status)
+                else:
+                    assert dependency.derived_key is not None
+                    child = derived_value(dependency.derived_key)
+                    statuses.append(None if child is None else child in dependency.accepted_values)
+            value: StrictScalar | None
+            if any(status is False for status in statuses):
+                value = state.unavailable_value
+            elif statuses and all(status is True for status in statuses):
+                value = state.available_value
+            else:
+                value = None
+            derived_in_progress.remove(derived_key)
+            derived_cache[derived_key] = value
+            return value
+
+        def requirement_status(
+            requirement: ObjectiveRequirementV2,
+        ) -> bool | None:
+            if gate_status(requirement.knowledge_gate) is not True:
+                return None
+            if requirement.kind == ObjectiveRequirementKind.FACT:
+                assert requirement.node_key is not None and requirement.fact_key is not None
+                fact = projected_known_facts.get((requirement.node_key, requirement.fact_key))
+                if fact is None or fact.visibility != Visibility.KNOWN:
+                    return None
+                return fact.value in requirement.accepted_values
+            if requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+                assert requirement.region_key is not None and requirement.resource_key is not None
+                assert requirement.minimum is not None
+                status, _amount = resource_status(
+                    requirement.region_key,
+                    requirement.resource_key,
+                    requirement.minimum,
+                )
+                return status
+            assert requirement.derived_key is not None
+            value = derived_value(requirement.derived_key)
+            return None if value is None else value in requirement.accepted_values
+
+        missing: list[dict[str, object]] = []
+        for objective in objectives:
+            for requirement in objective.completion_requirements:
+                status = requirement_status(requirement)
+                if status is True:
+                    continue
+                missing.append(
+                    {
+                        "objective_key": objective.key,
+                        "requirement_key": requirement.key,
+                        "kind": requirement.kind.value,
+                        "status": "UNKNOWN" if status is None else "UNSATISFIED",
+                    }
+                )
+        if not missing:
+            return None
+        return {
+            "code": "OBJECTIVE_COMPLETION_NOT_PROVEN",
+            "failure_code": "OBJECTIVE_COMPLETION_NOT_PROVEN",
+            "dimension": "OBJECTIVE_COMPLETION",
+            "required": "ALL_FROZEN_FORMAL_GOAL_REQUIREMENTS_SATISFIED",
+            "actual": missing,
+            "message": (
+                "OBJECTIVE_COMPLETION requires the frozen Formal Goal to be satisfied "
+                "by the current projected public state."
+            ),
+        }
 
     def _start_planning_cycle(
         self,
@@ -6945,7 +7153,7 @@ def _validate_plan_segment_contract(
                 step_ids=tuple(step_ids),
             ),
         )
-    if segment.stop_reason == "OBJECTIVE_COMPLETION":
+    if segment.stop_reason in {"OBJECTIVE_COMPLETION", "SEGMENT_COMPLETE"}:
         if segment.boundary_dependency_id is not None:
             return (
                 PlanViolation(

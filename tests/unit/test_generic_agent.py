@@ -140,6 +140,9 @@ class _RecordingProvider:
 
 def _accepted_proposal(parameters: dict[str, int] | None = None) -> PlanProposal:
     return PlanProposal(
+        segment_goal="stabilize the patient",
+        goal_link="advances the frozen patient-care objective",
+        continuation_intent="no continuation after treatment succeeds",
         steps=(
             PlanStepProposal(
                 action_key="treat_patient",
@@ -147,7 +150,7 @@ def _accepted_proposal(parameters: dict[str, int] | None = None) -> PlanProposal
                 target_key="patient_one",
                 parameters=parameters or {"dosage": 2},
             ),
-        )
+        ),
     )
 
 
@@ -401,6 +404,9 @@ def test_failed_plan_retires_unreachable_suffix_before_generic_replan(
 ) -> None:
     provider = _RecordingProvider(
         PlanProposal(
+            segment_goal="retry patient treatment",
+            goal_link="advances the frozen patient-care objective",
+            continuation_intent="continue the unfinished treatment sequence",
             steps=(
                 PlanStepProposal(
                     action_key="treat_patient",
@@ -414,7 +420,7 @@ def test_failed_plan_retires_unreachable_suffix_before_generic_replan(
                     target_key="patient_one",
                     parameters={"dosage": 2},
                 ),
-            )
+            ),
         )
     )
     agent, runtime = _agent(session, preflight=True, provider=provider)

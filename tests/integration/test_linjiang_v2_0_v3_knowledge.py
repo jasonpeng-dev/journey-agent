@@ -55,6 +55,9 @@ class _KnowledgeReplanProvider:
                 item for item in dependencies if item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
             )
             return PlanProposal(
+                segment_goal="acquire the unresolved facility state",
+                goal_link="supports the frozen communication objective",
+                continuation_intent="continue source discovery after new Knowledge",
                 stop_reason="INFORMATION_BOUNDARY",
                 boundary_dependency_id=str(objective_dependency["dependency_id"]),
                 steps=(
@@ -73,6 +76,9 @@ class _KnowledgeReplanProvider:
                 and item.get("resource_key") == "communication_equipment"
             )
             return PlanProposal(
+                segment_goal="acquire the unresolved source state",
+                goal_link="supports the active communication resource dependency",
+                continuation_intent="continue source transport after new Knowledge",
                 stop_reason="INFORMATION_BOUNDARY",
                 boundary_dependency_id=str(resource_dependency["dependency_id"]),
                 steps=(
@@ -91,6 +97,9 @@ class _KnowledgeReplanProvider:
             and item.get("destination_region") == "central_district"
         )
         return PlanProposal(
+            segment_goal="reach and survey the relevant source region",
+            goal_link="advances the active communication resource dependency",
+            continuation_intent="continue the transport and repair mainline",
             stop_reason="INFORMATION_BOUNDARY",
             boundary_dependency_id=str(resource_dependency["dependency_id"]),
             steps=(

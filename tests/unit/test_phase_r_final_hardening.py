@@ -56,7 +56,12 @@ class FakeProvider:
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_request = request
-        return PlanProposal(steps=self.proposed)
+        return PlanProposal(
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="continue the unfinished objective mainline",
+            steps=self.proposed,
+        )
 
 
 def _provider_step(
