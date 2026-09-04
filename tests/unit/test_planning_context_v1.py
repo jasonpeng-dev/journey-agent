@@ -50,6 +50,9 @@ class DirectBindingProvider:
         self.requests.append(request)
         return PlanProposal(
             plan_summary="Diagnose and stabilize the patient.",
+            segment_goal="stabilize the patient",
+            goal_link="advances the frozen patient-care objective",
+            continuation_intent="no continuation after treatment succeeds",
             steps=(
                 PlanStepProposal(
                     purpose="Diagnose the patient",
@@ -428,6 +431,9 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
     response_content = json.dumps(
         {
             "plan_summary": "test",
+            "segment_goal": "inspect the current target",
+            "goal_link": "supports the frozen objective",
+            "continuation_intent": "continue the objective mainline",
             "steps": [
                 {
                     "purpose": "inspect",
@@ -666,13 +672,22 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         target_key="region",
     )
     valid = PlanProposal(
+        segment_goal="acquire the unresolved resource state",
+        goal_link="supports the active resource dependency",
+        continuation_intent="continue resource selection after new Knowledge",
         stop_reason="INFORMATION_BOUNDARY",
         boundary_dependency_id=dependency_id,
         steps=(acquisition,),
     )
     assert _validate_plan_segment_contract(valid, planner_input) == ()
     objective_completion_bypass = _validate_plan_segment_contract(
-        PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=(acquisition,)),
+        PlanProposal(
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="continue the unfinished objective mainline",
+            stop_reason="OBJECTIVE_COMPLETION",
+            steps=(acquisition,),
+        ),
         planner_input,
     )
     assert objective_completion_bypass == ()
@@ -744,6 +759,9 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     )
     result_dependent_clear = _validate_plan_segment_contract(
         PlanProposal(
+            segment_goal="acquire the unresolved bridge state",
+            goal_link="supports the active transport dependency",
+            continuation_intent="continue bridge work after new Knowledge",
             stop_reason="INFORMATION_BOUNDARY",
             boundary_dependency_id="dependency-passability-test",
             steps=(
@@ -819,6 +837,9 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     assert supporting_actions_before_acquisition == ()
     boundary_not_allowed = _validate_plan_segment_contract(
         PlanProposal(
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="continue the unfinished objective mainline",
             stop_reason="OBJECTIVE_COMPLETION",
             boundary_dependency_id=dependency_id,
             steps=(acquisition,),
@@ -831,6 +852,9 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     assert boundary_not_allowed.actual == dependency_id
 
     missing_acquisition = PlanProposal(
+        segment_goal="acquire the unresolved resource state",
+        goal_link="supports the active resource dependency",
+        continuation_intent="continue resource selection after new Knowledge",
         stop_reason="INFORMATION_BOUNDARY",
         boundary_dependency_id=dependency_id,
         steps=(
@@ -847,6 +871,9 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     )
     non_resolver_knowledge_action = _validate_plan_segment_contract(
         PlanProposal(
+            segment_goal="acquire the unresolved resource state",
+            goal_link="supports the active resource dependency",
+            continuation_intent="continue resource selection after new Knowledge",
             stop_reason="INFORMATION_BOUNDARY",
             boundary_dependency_id=dependency_id,
             steps=(
@@ -906,7 +933,13 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     assert not_relevant.required == "ACTIVE_UNKNOWN_BLOCKING_DEPENDENCY"
     assert not_relevant.actual == dependency_id
 
-    blocked = PlanProposal(stop_reason="BLOCKED", steps=())
+    blocked = PlanProposal(
+        segment_goal="find a legal progress path",
+        goal_link="supports the frozen objective",
+        continuation_intent="resume when a legal progress or Knowledge path appears",
+        stop_reason="BLOCKED",
+        steps=(),
+    )
     assert _validate_plan_segment_contract(blocked, PlannerInput()) == ()
     assert _validate_plan_segment_contract(blocked, planner_input) == ()
     direct_progress = PlannerInput(
@@ -1075,6 +1108,9 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         }
     )
     route_boundary = PlanProposal(
+        segment_goal="acquire the unresolved route state",
+        goal_link="supports the active transport dependency",
+        continuation_intent="continue route traversal after new Knowledge",
         stop_reason="INFORMATION_BOUNDARY",
         boundary_dependency_id="dependency-route-test",
         steps=(acquisition,),
@@ -1083,10 +1119,13 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
         "INFORMATION_BOUNDARY_NOT_RELEVANT"
     )
     duplicate = PlanProposal(
+        segment_goal="advance the current objective",
+        goal_link="supports the frozen objective",
+        continuation_intent="continue the unfinished objective mainline",
         steps=(
             acquisition,
             acquisition.model_copy(update={"action_key": "another"}),
-        )
+        ),
     )
     assert _validate_plan_segment_contract(duplicate, planner_input)[0].code == (
         "STEP_ID_DUPLICATE"
@@ -1096,14 +1135,27 @@ def test_plan_segment_information_boundary_and_step_ids_are_strict() -> None:
     assert duplicate_violation.required == "UNIQUE"
     assert duplicate_violation.actual == "DUPLICATE"
     blank = acquisition.model_copy(update={"step_id": ""})
-    blank_violation = _validate_plan_segment_contract(PlanProposal(steps=(blank,)), planner_input)[
-        0
-    ]
+    blank_violation = _validate_plan_segment_contract(
+        PlanProposal(
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="continue the unfinished objective mainline",
+            steps=(blank,),
+        ),
+        planner_input,
+    )[0]
     assert blank_violation.code == "STEP_ID_INVALID"
     assert blank_violation.required == "NON_BLANK"
     assert blank_violation.actual == "BLANK"
     no_steps = _validate_plan_segment_contract(
-        PlanProposal(stop_reason="OBJECTIVE_COMPLETION", steps=()), planner_input
+        PlanProposal(
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="no continuation after projected completion",
+            stop_reason="OBJECTIVE_COMPLETION",
+            steps=(),
+        ),
+        planner_input,
     )[0]
     assert no_steps.code == "NO_STEPS"
     assert no_steps.required == "AT_LEAST_ONE_STEP"

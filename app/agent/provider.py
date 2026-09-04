@@ -478,6 +478,25 @@ class ContinuityPlan(ProviderModel):
 
     plan_summary: str
     stop_reason: str
+    # Defaults keep persisted/fixture projections from before the intent
+    # labels were introduced readable.  New Planner responses are still
+    # instructed to provide explicit labels, and PlanningContinuityBuilder
+    # supplies richer plan-derived fallbacks when they are absent.
+    segment_goal: StrictStr = Field(
+        default="Advance the current Objective segment",
+        min_length=1,
+        max_length=240,
+    )
+    goal_link: StrictStr = Field(
+        default="Re-evaluate against the frozen Formal Goal and active dependency",
+        min_length=1,
+        max_length=240,
+    )
+    continuation_intent: StrictStr = Field(
+        default="Continue the unfinished mainline toward the frozen Objective",
+        min_length=1,
+        max_length=240,
+    )
     steps: tuple[ContinuityStep, ...] = ()
 
 
@@ -665,9 +684,18 @@ class PlanRequest(ProviderModel):
 
 
 class PlanSegment(ProviderModel):
-    stop_reason: Literal["OBJECTIVE_COMPLETION", "INFORMATION_BOUNDARY", "BLOCKED"] = (
-        "OBJECTIVE_COMPLETION"
-    )
+    # These are short, auditable planning labels.  They are historical intent
+    # only: Validator legality remains derived from PlannerInput and Runtime
+    # Truth, and the next REPLAN must re-check them against fresh Knowledge.
+    segment_goal: StrictStr = Field(min_length=1, max_length=240)
+    goal_link: StrictStr = Field(min_length=1, max_length=240)
+    continuation_intent: StrictStr = Field(min_length=1, max_length=240)
+    stop_reason: Literal[
+        "OBJECTIVE_COMPLETION",
+        "SEGMENT_COMPLETE",
+        "INFORMATION_BOUNDARY",
+        "BLOCKED",
+    ] = "OBJECTIVE_COMPLETION"
     boundary_dependency_id: str | None = None
     plan_summary: str = ""
     steps: tuple[PlanStepProposal, ...]
@@ -1789,9 +1817,25 @@ class OpenAICompatibleGenericProvider:
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         try:
-            return PlanProposal.model_validate(
-                self._invoke(request.call_type.lower(), request.provider_payload())
-            )
+            raw = self._invoke(request.call_type.lower(), request.provider_payload())
+            # Keep the canonical PlanSegment model strict while accepting a
+            # response shape produced by providers configured before the
+            # auditable intent labels were introduced.  New responses are
+            # still required by the prompt to include all three labels; this
+            # narrow boundary normalization prevents old fixtures and stored
+            # provider responses from becoming unparsable during rollout.
+            if isinstance(raw, dict) and not any(
+                field in raw for field in ("segment_goal", "goal_link", "continuation_intent")
+            ):
+                raw = {
+                    **raw,
+                    "segment_goal": "Advance the current Objective segment",
+                    "goal_link": "Re-evaluate against the frozen Formal Goal and active dependency",
+                    "continuation_intent": (
+                        "Continue the unfinished mainline toward the frozen Objective"
+                    ),
+                }
+            return PlanProposal.model_validate(raw)
         except ValidationError as exc:
             raise GenericProviderError(
                 "MODEL_PROVIDER_RESPONSE_INVALID",
@@ -1834,7 +1878,10 @@ class OpenAICompatibleGenericProvider:
         else:
             response_contract = (
                 '{"plan_summary":"short summary",'
-                '"stop_reason":"OBJECTIVE_COMPLETION|INFORMATION_BOUNDARY|BLOCKED",'
+                '"segment_goal":"short current segment goal",'
+                '"goal_link":"short link to the frozen Goal or active dependency",'
+                '"continuation_intent":"short next mainline intent or no continuation",'
+                '"stop_reason":"OBJECTIVE_COMPLETION|SEGMENT_COMPLETE|INFORMATION_BOUNDARY|BLOCKED",'
                 '"boundary_dependency_id":null,'
                 '"steps":[{"step_id":"segment-local-stable-id",'
                 '"purpose":"goal-directed step",'
@@ -2036,6 +2083,15 @@ class OpenAICompatibleGenericProvider:
             "legal candidate catalog, and do not require surveying a hinted Region before a "
             "legal MAY_ATTEMPT. Do not infer hidden quantities, availability, facilities, or "
             "observation results from a hint. "
+            "Every returned PlanSegment must include short, non-empty "
+            "segment_goal, goal_link, and continuation_intent strings, each at most 240 "
+            "characters. segment_goal states the direct unresolved dependency or Objective "
+            "progress advanced by this segment; goal_link states its relation to the frozen "
+            "Formal Goal or active dependency; continuation_intent states the unfinished "
+            "mainline to reconsider next, or says that there is no continuation when the "
+            "Objective is projected complete. These are user-auditable intent labels, not "
+            "chain-of-thought, a second Objective, a Scope mutation, or a commitment to copy "
+            "the prior plan. "
             "Use OBJECTIVE_COMPLETION only when current Known state plus projected deterministic "
             "effects legally satisfy the frozen Objective completion requirements; partial "
             "progress is not completion. Use INFORMATION_BOUNDARY only when an UNKNOWN "

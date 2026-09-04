@@ -206,22 +206,30 @@ class _Task6ReplanProvider:
         self.plan_requests.append(request)
         if len(self.plan_requests) == 1:
             return PlanProposal(
+                segment_goal="generate power with the repaired plant",
+                goal_link="advances the frozen emergency power objective",
+                continuation_intent="continue with staged requirements after generation",
+                stop_reason="SEGMENT_COMPLETE",
                 steps=(
                     PlanStepProposal(
                         action_key="generate_power",
                         actor_key="electrical_repair_team_alpha",
                         target_key="southeast_fuel_emergency_power_plant",
                     ),
-                )
+                ),
             )
         return PlanProposal(
+            segment_goal="continue the staged power recovery mainline",
+            goal_link="advances the frozen emergency power objective",
+            continuation_intent="continue toward sustained emergency generation",
+            stop_reason="SEGMENT_COMPLETE",
             steps=(
                 PlanStepProposal(
                     action_key="travel",
                     actor_key="electrical_repair_team_alpha",
                     target_key="south_waterfront_district",
                 ),
-            )
+            ),
         )
 
 
@@ -929,7 +937,7 @@ def test_task6_generate_power_reveal_rebuilds_real_replan_input(
     session.flush()
 
     first_plan = agent.plan(task)
-    assert first_plan.stop_reason == "OBJECTIVE_COMPLETION"
+    assert first_plan.stop_reason == "SEGMENT_COMPLETE"
     executed = agent.execute_next(task, replan_on_failure=False)
     assert executed is not None and executed.status == "SUCCEEDED"
     assert provider.plan_requests[0].call_type == "INITIAL_PLAN"
@@ -945,7 +953,7 @@ def test_task6_generate_power_reveal_rebuilds_real_replan_input(
     assert gate is not None and gate.truth_value is True and gate.visibility == Visibility.KNOWN
 
     second_plan = agent.plan(task, reason="INFORMATION_BOUNDARY")
-    assert second_plan.stop_reason == "OBJECTIVE_COMPLETION"
+    assert second_plan.stop_reason == "SEGMENT_COMPLETE"
     assert provider.plan_requests[1].call_type == "REPLAN"
     replanned_dependencies = provider.plan_requests[1].planner_input
     assert replanned_dependencies is not None
