@@ -22,6 +22,7 @@ import {
   syncPlayStateCaches,
 } from "./playPresentation";
 import { goalSubmissionErrorText, taskExplanationLabel, uiLabel } from "./ui";
+import { publicFactIdentity } from "./knowledgePresentation";
 import type {
   PlayerGameState,
   PublicPlanStep,
@@ -317,6 +318,134 @@ describe("Formal Play player projections", () => {
     fireEvent.click(screen.getByRole("button"));
     expect(screen.getByText("设施状态已恢复")).toBeVisible();
     expect(screen.getByText(/0.*30/)).toBeVisible();
+  });
+
+  it("renders a public Derived State status and reveals staged children only after projection", () => {
+    const root = {
+      key: "sustained_generation",
+      kind: "DERIVED_STATE" as const,
+      derived_key: "southeast_sustained_emergency_generation",
+      accepted_values: ["AVAILABLE"],
+      current_known_value: "UNAVAILABLE" as const,
+      knowledge_status: "KNOWN" as const,
+      description: "东南区域的持续应急发电保障能力状态。",
+    };
+    const { rerender } = render(
+      <MissionRoadmap
+        nodeNames={{ river_port: "临江港", south_fuel_terminal: "南部燃料终端" }}
+        regionNames={{ southeast_heights_district: "东南高地区" }}
+        resourceNames={{ emergency_fuel: "应急燃料" }}
+        stages={[{
+          key: "objective:generation",
+          name: "东南持续应急发电保障",
+          description: "公开目标",
+          status: "CURRENT",
+          objective_key: "generation",
+          requirements: [root],
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("东南持续应急发电保障")).toBeVisible();
+    expect(screen.getByText("世界能力：当前不可用")).toHaveAttribute(
+      "data-requirement-kind",
+      "DERIVED_STATE",
+    );
+    expect(screen.queryByText("临江港恢复运行")).not.toBeInTheDocument();
+    expect(screen.queryByText("南部燃料终端恢复运行")).not.toBeInTheDocument();
+    expect(screen.queryByText(/应急燃料储备/)).not.toBeInTheDocument();
+
+    rerender(
+      <MissionRoadmap
+        nodeNames={{ river_port: "临江港", south_fuel_terminal: "南部燃料终端" }}
+        regionNames={{ southeast_heights_district: "东南高地区" }}
+        resourceNames={{ emergency_fuel: "应急燃料" }}
+        stages={[{
+          key: "objective:generation",
+          name: "东南持续应急发电保障",
+          description: "公开目标",
+          status: "CURRENT",
+          objective_key: "generation",
+          requirements: [
+            root,
+            {
+              key: "river-port-operational",
+              kind: "FACT",
+              node_key: "river_port",
+              fact_key: "operational",
+              accepted_values: [true],
+              description: "river port",
+            },
+            {
+              key: "south-terminal-operational",
+              kind: "FACT",
+              node_key: "south_fuel_terminal",
+              fact_key: "operational",
+              accepted_values: [true],
+              description: "south terminal",
+            },
+            {
+              key: "southeast-fuel-reserve",
+              kind: "RESOURCE_AT_LEAST",
+              region_key: "southeast_heights_district",
+              resource_key: "emergency_fuel",
+              minimum: 100,
+              current_known_available: 50,
+              knowledge_status: "KNOWN",
+              description: "fuel reserve",
+            },
+          ],
+        }]}
+      />,
+    );
+    expect(screen.getByText("临江港恢复运行")).toBeVisible();
+    expect(screen.getByText("南部燃料终端恢复运行")).toBeVisible();
+    expect(screen.getByText("东南高地区：应急燃料储备 50 / 100")).toBeVisible();
+    expect(screen.queryByText("river_port")).not.toBeInTheDocument();
+    expect(screen.queryByText("south_fuel_terminal")).not.toBeInTheDocument();
+  });
+
+  it("renders synthetic FACT roadmap state in player language", () => {
+    const factIdentity = publicFactIdentity("synthetic_facility", "generating");
+    const requirement = {
+      key: "synthetic-generating",
+      kind: "FACT" as const,
+      node_key: "synthetic_facility",
+      fact_key: "generating",
+      accepted_values: [true],
+      description: "Synthetic Facility: generating reaches the requested state.",
+    };
+    const stage = {
+      key: "objective:synthetic",
+      name: "建立持续发电保障",
+      description: "公开目标",
+      status: "CURRENT" as const,
+      objective_key: "synthetic",
+      requirements: [requirement],
+    };
+    const view = render(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "测试发电设施" }}
+        factNames={{ [factIdentity]: "发电状态" }}
+        factValues={{ [factIdentity]: false }}
+        stages={[stage]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("测试发电设施：尚未发电")).toBeVisible();
+    expect(screen.queryByText(/reaches the requested state|accepted_values|fact_key/)).not.toBeInTheDocument();
+
+    view.rerender(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "测试发电设施" }}
+        factNames={{ [factIdentity]: "发电状态" }}
+        factValues={{ [factIdentity]: true }}
+        stages={[stage]}
+      />,
+    );
+    expect(screen.getByText("测试发电设施：正在发电")).toBeVisible();
   });
 
   it("keeps objective details closed when the task identity changes", () => {

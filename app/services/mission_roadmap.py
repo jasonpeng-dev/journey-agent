@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 
 from app.domain.formal_goal import FormalGoalContractV1, FormalGoalSourceKind
 from app.domain.scenario_v2 import (
+    DerivedStateDependencyV2,
     ObjectiveDefinitionV2,
     ObjectiveRequirementKind,
     ObjectiveRequirementV2,
@@ -125,7 +127,15 @@ class MissionRoadmapProjector:
             )
             in item.requirement.knowledge_gate.accepted_values
         )
-        visible_requirements = tuple(item.requirement for item in visible)
+        visible_requirements = self._visible(
+            self._expand_derived_requirements(
+                definition,
+                tuple(item.requirement for item in visible),
+                known_facts,
+            ),
+            known_facts,
+        )
+        identities_by_requirement_key = {item.requirement.key: item.identity for item in visible}
         resources = known_resources or {}
         completed = self._satisfied(
             visible_requirements,
@@ -147,13 +157,16 @@ class MissionRoadmapProjector:
                     objective_key=None,
                     requirements=tuple(
                         self._project_requirement(
-                            item.requirement,
+                            requirement,
                             resources,
-                            identity=item.identity,
+                            identity=identities_by_requirement_key.get(
+                                requirement.key,
+                                f"planning/goal/{requirement.key}",
+                            ),
                             definition=definition,
                             known_derived=known_derived or {},
                         )
-                        for item in visible
+                        for requirement in visible_requirements
                     ),
                 ),
             )
@@ -223,7 +236,13 @@ class MissionRoadmapProjector:
                 add_objective(objective)
 
         resources = known_resources or {}
-        visible = [self._visible(item.requirements, known_facts) for item in ordered]
+        visible = [
+            self._visible(
+                self._expand_derived_requirements(definition, item.requirements, known_facts),
+                known_facts,
+            )
+            for item in ordered
+        ]
         completed = [
             self._satisfied(item, known_facts, resources, known_derived or {}) for item in visible
         ]
@@ -280,6 +299,99 @@ class MissionRoadmapProjector:
             ):
                 matches.append(candidate)
         return min(matches, key=lambda item: len(item.completion_requirements), default=None)
+
+    @classmethod
+    def _expand_derived_requirements(
+        cls,
+        definition: ScenarioDefinitionV2,
+        requirements: tuple[ObjectiveRequirementV2, ...],
+        known_facts: dict[tuple[str, str], StrictScalar],
+    ) -> tuple[ObjectiveRequirementV2, ...]:
+        """Add public Derived State inputs whose own Knowledge gates are open.
+
+        A roadmap may show a public Derived State before all of its inputs are
+        known.  Its authored dependencies become player-facing only when the
+        dependency gate is satisfied in Knowledge.  This mirrors the planner
+        relevance boundary without exposing a gated Scenario input early.
+        """
+
+        expanded: list[ObjectiveRequirementV2] = []
+        emitted: set[tuple[object, ...]] = set()
+        visiting: set[str] = set()
+
+        def requirement_identity(requirement: ObjectiveRequirementV2) -> tuple[object, ...]:
+            gate = requirement.knowledge_gate
+            return (
+                requirement.kind,
+                requirement.node_key,
+                requirement.fact_key,
+                requirement.accepted_values,
+                requirement.region_key,
+                requirement.resource_key,
+                requirement.minimum,
+                requirement.derived_key,
+                (
+                    (gate.node_key, gate.fact_key, gate.accepted_values)
+                    if gate is not None
+                    else None
+                ),
+            )
+
+        def is_visible(requirement: ObjectiveRequirementV2) -> bool:
+            gate = requirement.knowledge_gate
+            return (
+                gate is None
+                or known_facts.get((gate.node_key, gate.fact_key)) in gate.accepted_values
+            )
+
+        def append(requirement: ObjectiveRequirementV2) -> None:
+            identity = requirement_identity(requirement)
+            if identity in emitted:
+                return
+            emitted.add(identity)
+            expanded.append(requirement)
+            if (
+                requirement.kind != ObjectiveRequirementKind.DERIVED_STATE
+                or not is_visible(requirement)
+                or requirement.derived_key is None
+            ):
+                return
+            state = definition.derived_state_definitions.get(requirement.derived_key)
+            if state is None or state.key in visiting:
+                return
+            visiting.add(state.key)
+            for index, dependency in enumerate(state.dependencies):
+                append(cls._derived_dependency_requirement(state.key, index, dependency))
+            visiting.remove(state.key)
+
+        for requirement in requirements:
+            append(requirement)
+        return tuple(expanded)
+
+    @staticmethod
+    def _derived_dependency_requirement(
+        derived_key: str,
+        index: int,
+        dependency: DerivedStateDependencyV2,
+    ) -> ObjectiveRequirementV2:
+        """Convert one authored Derived input to the public roadmap shape."""
+
+        digest = hashlib.sha256(
+            repr((derived_key, index, dependency.model_dump(mode="json"))).encode()
+        ).hexdigest()[:16]
+        return ObjectiveRequirementV2(
+            key=f"derived_dependency_{digest}",
+            kind=ObjectiveRequirementKind(dependency.kind.value),
+            node_key=dependency.node_key,
+            fact_key=dependency.fact_key,
+            accepted_values=dependency.accepted_values,
+            region_key=dependency.region_key,
+            resource_key=dependency.resource_key,
+            minimum=dependency.minimum,
+            derived_key=dependency.derived_key,
+            knowledge_gate=dependency.knowledge_gate,
+            description="Derived State dependency.",
+        )
 
     @staticmethod
     def _satisfied(
@@ -381,10 +493,10 @@ class MissionRoadmapProjector:
         known_derived: dict[str, StrictScalar | None] | None = None,
     ) -> dict[str, object]:
         result = requirement.model_dump(mode="json", exclude={"knowledge_gate"})
+        result["kind"] = requirement.kind.value
         if identity is not None:
             result["identity"] = identity
             result["key"] = identity
-            result["kind"] = requirement.kind.value
         if definition is not None:
             result["description"] = MissionRoadmapProjector._dynamic_requirement_description(
                 definition,

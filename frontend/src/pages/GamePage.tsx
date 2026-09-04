@@ -14,6 +14,7 @@ import {
   resourceAvailabilityRequirementText,
   knownRelationDescription,
   meaningfulKnownRelations,
+  publicFactIdentity,
   relationDisplayKey,
 } from "../knowledgePresentation";
 import type {
@@ -148,10 +149,25 @@ type MissionRoadmapNames = {
   regionNames?: Record<string, string>;
   resourceNames?: Record<string, string>;
   nodeNames?: Record<string, string>;
+  factNames?: Record<string, string>;
+  factValues?: Record<string, string | number | boolean>;
 };
 
 function taskObjectiveLabel(goal: string, objectiveNames: string[]): string {
   return objectiveNames.length > 0 ? objectiveNames.join(" · ") : goal;
+}
+
+function derivedStateDisplayValue(requirement: MissionRoadmapRequirement): string {
+  if (requirement.knowledge_status === "UNKNOWN" || requirement.current_known_value == null) {
+    return "未知";
+  }
+  if (requirement.current_known_value === "AVAILABLE" || requirement.current_known_value === true) {
+    return "可用";
+  }
+  if (requirement.current_known_value === "UNAVAILABLE" || requirement.current_known_value === false) {
+    return "不可用";
+  }
+  return String(requirement.current_known_value);
 }
 
 const FACT_GOAL_LABELS: Record<string, string> = {
@@ -171,10 +187,41 @@ const FACT_GOAL_SUFFIXES: Record<string, string> = {
   external_relief_supply_ready: "建立外援供应能力",
 };
 
+function factStateDisplayText(
+  factKey: string,
+  factName: string,
+  currentValue: string | number | boolean | undefined,
+  acceptedValues: Array<string | number | boolean>,
+): string {
+  const stateName = factName === "目标状态" ? "状态" : factName;
+  if (currentValue === true) {
+    if (factKey === "operational" || factName.includes("运行")) return "正在运行";
+    if (factKey === "power_supply" || factName.includes("供电")) return "已供电";
+    if (factKey === "passable" || factName.includes("通行")) return "可通行";
+    if (factName.includes("发电")) return "正在发电";
+    return `${stateName}已达到目标状态`;
+  }
+  if (currentValue === false) {
+    if (factKey === "operational" || factName.includes("运行")) return "尚未恢复运行";
+    if (factKey === "power_supply" || factName.includes("供电")) return "尚未供电";
+    if (factKey === "passable" || factName.includes("通行")) return "尚未恢复通行";
+    if (factName.includes("发电")) return "尚未发电";
+    return `${stateName}尚未达到目标状态`;
+  }
+  if (currentValue === "AVAILABLE") return `${stateName}可用`;
+  if (currentValue === "UNAVAILABLE") return `${stateName}不可用`;
+  if (acceptedValues.some((value) => value === currentValue)) return `${stateName}已达到目标状态`;
+  return `${stateName}待确认`;
+}
+
 function missionRoadmapRequirementText(
   requirement: MissionRoadmapRequirement,
   names: MissionRoadmapNames,
 ): string {
+  if (requirement.kind === "DERIVED_STATE") {
+    return `世界能力：当前${derivedStateDisplayValue(requirement)}`;
+  }
+
   if (
     requirement.kind === "RESOURCE_AT_LEAST"
     && requirement.region_key
@@ -195,17 +242,28 @@ function missionRoadmapRequirementText(
   if (requirement.fact_key) {
     const accepted = requirement.accepted_values ?? [];
     const positive = accepted.some((value) => value === true || value === "AVAILABLE");
+    const targetName = requirement.node_key
+      ? names.nodeNames?.[requirement.node_key] ?? "目标设施"
+      : "目标设施";
+    const factName = requirement.node_key
+      ? names.factNames?.[publicFactIdentity(requirement.node_key, requirement.fact_key)] ?? "目标状态"
+      : "目标状态";
+    const currentValue = requirement.node_key
+      ? names.factValues?.[publicFactIdentity(requirement.node_key, requirement.fact_key)]
+      : undefined;
     if (positive) {
       const directLabel = FACT_GOAL_LABELS[requirement.fact_key];
-      if (directLabel) return directLabel;
+      if (directLabel && currentValue === undefined) return directLabel;
       const suffix = FACT_GOAL_SUFFIXES[requirement.fact_key];
-      if (suffix) {
-        const nodeName = requirement.node_key
-          ? names.nodeNames?.[requirement.node_key] ?? "目标设施"
-          : "目标设施";
-        return nodeName + suffix;
-      }
+      if (suffix && currentValue === undefined) return targetName + suffix;
     }
+    const stateText = factStateDisplayText(
+      requirement.fact_key,
+      factName,
+      currentValue,
+      accepted,
+    );
+    return `${targetName}：${stateText}`;
   }
 
   return requirement.description;
@@ -217,12 +275,16 @@ export function MissionRoadmap({
   regionNames,
   resourceNames,
   nodeNames,
+  factNames,
+  factValues,
 }: {
   stages: MissionRoadmapStage[];
   summary?: string;
   regionNames?: Record<string, string>;
   resourceNames?: Record<string, string>;
   nodeNames?: Record<string, string>;
+  factNames?: Record<string, string>;
+  factValues?: Record<string, string | number | boolean>;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   if (stages.length === 0) return null;
@@ -247,8 +309,17 @@ export function MissionRoadmap({
               <div>
                 <strong>{stage.name}</strong>
                 {stage.requirements.map((requirement) => (
-                  <small key={requirement.key}>
-                    {missionRoadmapRequirementText(requirement, { regionNames, resourceNames, nodeNames })}
+                  <small
+                    key={requirement.key}
+                    data-requirement-kind={requirement.kind ?? "FACT"}
+                  >
+                    {missionRoadmapRequirementText(requirement, {
+                      regionNames,
+                      resourceNames,
+                      nodeNames,
+                      factNames,
+                      factValues,
+                    })}
                   </small>
                 ))}
               </div>
@@ -1881,6 +1952,12 @@ export function GamePage() {
       )),
     ),
   };
+  const roadmapFactNames = Object.fromEntries(
+    play.data.known_facts.map((fact) => [publicFactIdentity(fact.node_key, fact.fact_key), factDisplayLabel(fact)]),
+  );
+  const roadmapFactValues = Object.fromEntries(
+    play.data.known_facts.map((fact) => [publicFactIdentity(fact.node_key, fact.fact_key), fact.value]),
+  );
   const selectedTaskLoading = Boolean(
     selectedTaskId !== null && loadedTask?.id !== selectedTaskId,
   );
@@ -2123,6 +2200,8 @@ export function GamePage() {
                   regionNames={roadmapRegionNames}
                   resourceNames={roadmapResourceNames}
                   nodeNames={roadmapNodeNames}
+                  factNames={roadmapFactNames}
+                  factValues={roadmapFactValues}
                 />
               )}
             </div>

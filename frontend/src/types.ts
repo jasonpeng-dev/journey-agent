@@ -79,7 +79,7 @@ export type PublicPlanningCycle = { id: string; cycle_type: "INITIAL" | "REPLAN"
 export type MissionRoadmapRequirement = {
   identity?: string;
   key: string;
-  kind?: "FACT" | "RESOURCE_AT_LEAST";
+  kind?: "FACT" | "RESOURCE_AT_LEAST" | "DERIVED_STATE";
   description: string;
   node_key?: string;
   fact_key?: string;
@@ -87,7 +87,9 @@ export type MissionRoadmapRequirement = {
   region_key?: string;
   resource_key?: string;
   minimum?: number;
-  current_known_available?: number;
+  derived_key?: string;
+  current_known_value?: string | number | boolean | null;
+  current_known_available?: number | null;
   knowledge_status?: "KNOWN" | "KNOWN_ZERO" | "UNKNOWN";
 };
 export type MissionRoadmapStage = { key: string; name: string; description: string; status: "COMPLETED" | "CURRENT" | "PENDING"; objective_key: string | null; requirements: MissionRoadmapRequirement[] };

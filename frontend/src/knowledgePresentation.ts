@@ -160,6 +160,10 @@ export function generationCapabilityDisplayValue(
   return factDisplayValue(fact);
 }
 
+export function publicFactIdentity(nodeKey: string, factKey: string): string {
+  return `${nodeKey}:${factKey}`;
+}
+
 function factLookupKey(nodeKey: string, factKey: string): string {
   return `${nodeKey}:${factKey}`;
 }
