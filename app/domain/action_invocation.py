@@ -180,6 +180,9 @@ def action_invocation_from_operation(
     parameters: Mapping[str, object],
     outcome: Mapping[str, object] | None = None,
     actor_start_region: str | None = None,
+    bindings: Mapping[str, object]
+    | Iterable[ActionInvocationBindingInput]
+    | None = None,
 ) -> ActionInvocation:
     """Adapt an authoritative WorldOperation row into the canonical value."""
 
@@ -188,10 +191,14 @@ def action_invocation_from_operation(
         actor_key=actor_key,
         target_key=target_key,
         parameters=parameters,
-        bindings=transport_bindings_from_outcome(
-            action,
-            outcome,
-            actor_start_region=actor_start_region,
+        bindings=(
+            bindings
+            if bindings is not None
+            else transport_bindings_from_outcome(
+                action,
+                outcome,
+                actor_start_region=actor_start_region,
+            )
         ),
     )
 

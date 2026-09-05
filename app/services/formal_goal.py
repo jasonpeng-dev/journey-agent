@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.agent.objective_scope import ObjectiveScope, ObjectiveScopeError
+from app.domain.completion import CompletionEvidence, CompletionStatus
 from app.domain.formal_goal import (
     FormalGoalContractV1,
     FormalGoalError,
@@ -17,6 +18,7 @@ from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import AgentTask
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.completion_kernel import evaluate_state_requirement
 from app.services.derived_state import evaluate_derived_states
 from app.services.objective_requirements import (
     known_requirement_satisfied,
@@ -30,6 +32,9 @@ class FormalGoalRequirementEvaluation:
     value: object
     satisfied: bool
     player_visible_satisfied: bool | None = None
+    kind: str = "STATE"
+    status: CompletionStatus = CompletionStatus.UNSATISFIED
+    authoritative_evidence: CompletionEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,12 +90,21 @@ class FormalGoalCompletionEvaluator:
                 if definition is not None
                 else None
             )
+            completion = evaluate_state_requirement(
+                item.identity,
+                value=value,
+                satisfied=satisfied,
+                player_visible_satisfied=player_visible_satisfied,
+            )
             evaluations.append(
                 FormalGoalRequirementEvaluation(
                     identity=item.identity,
                     value=value,
                     satisfied=satisfied,
                     player_visible_satisfied=player_visible_satisfied,
+                    kind=completion.requirement_kind,
+                    status=completion.status,
+                    authoritative_evidence=completion.authoritative_evidence,
                 )
             )
         authoritative_completed = bool(evaluations) and all(item.satisfied for item in evaluations)
