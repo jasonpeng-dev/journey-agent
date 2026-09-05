@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
+from app.domain.action_invocation import canonical_action_invocation
 from app.domain.enums import AuthorityOutcome, DecisionStatus, WorldOperationStatus
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
@@ -84,9 +86,15 @@ class GenericActionService:
             )
         action = self._action(action_key)
         try:
-            parameters = normalize_action_parameters(action, parameters)
+            invocation = canonical_action_invocation(
+                action,
+                actor_key=actor_key,
+                target_key=target_key,
+                parameters=parameters,
+            )
         except ValueError as exc:
             raise GenericActionError("ACTION_PARAMETERS_INVALID", str(exc)) from exc
+        parameters = cast(ActionParameters, dict(invocation.parameters))
         existing = self.db.scalar(
             select(WorldOperation).where(
                 WorldOperation.game_instance_id == self.scope.game_instance_id,
@@ -96,15 +104,16 @@ class GenericActionService:
         if existing is not None:
             existing_parameters = dict(existing.parameters or {})
             try:
-                existing_parameters = normalize_action_parameters(action, existing_parameters)
+                existing_invocation = canonical_action_invocation(
+                    action,
+                    actor_key=existing.actor_key,
+                    target_key=existing.target_key,
+                    parameters=existing_parameters,
+                )
             except ValueError:
                 existing_parameters = {}
-            if (
-                existing.action_key != action_key
-                or existing.actor_key != actor_key
-                or existing.target_key != target_key
-                or existing_parameters != parameters
-            ):
+                existing_invocation = None
+            if existing_invocation != invocation:
                 raise GenericActionError(
                     "ACTION_IDEMPOTENCY_CONFLICT",
                     "The idempotency key is already bound to different Action input",

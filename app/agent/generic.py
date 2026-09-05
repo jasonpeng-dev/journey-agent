@@ -56,6 +56,7 @@ from app.agent.provider import (
     provider_call_start_metadata,
     provider_validation_diagnostics,
 )
+from app.domain.action_invocation import canonical_action_invocation
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
@@ -2021,8 +2022,14 @@ class GenericAgentService:
             parameters_value = step.tool_arguments.get("parameters", {})
             parameters = dict(parameters_value) if isinstance(parameters_value, dict) else {}
             try:
-                parameters = normalize_action_parameters(action, parameters)
-            except ValueError as exc:
+                invocation = canonical_action_invocation(
+                    action,
+                    actor_key=actor_key,
+                    target_key=target_key,
+                    parameters=parameters,
+                )
+                parameters = cast(ActionParameters, dict(invocation.parameters))
+            except (TypeError, ValueError) as exc:
                 return (
                     {
                         "code": "PARAMETER_INVALID",
@@ -2284,7 +2291,13 @@ class GenericAgentService:
                     action_key=action.key,
                 ),
             }
-            signature = proposal_signature(actor.actor_key, action.key, target_key, parameters)
+            signature = proposal_signature(
+                actor.actor_key,
+                action.key,
+                target_key,
+                parameters,
+                action=action,
+            )
             if signature in rejected_signatures:
                 continue
             # A historical success is only used together with the current
@@ -2898,7 +2911,13 @@ class GenericAgentService:
                 projected_known_relations,
             )
             try:
-                signature = proposal_signature(actor_key, action_key, target_key, parameters)
+                signature = proposal_signature(
+                    actor_key,
+                    action_key,
+                    target_key,
+                    parameters,
+                    action=action,
+                )
                 if signature in successful_signatures and self._historical_success_is_redundant(
                     definition=definition,
                     action=action,
@@ -3652,8 +3671,14 @@ class GenericAgentService:
                 continue
             raw_parameters = dict(getattr(raw_step, "parameters", {}) or {})
             try:
-                parameters = normalize_action_parameters(action, raw_parameters)
-            except ValueError as exc:
+                invocation = canonical_action_invocation(
+                    action,
+                    actor_key=actor_key,
+                    target_key=target_key,
+                    parameters=raw_parameters,
+                )
+                parameters = cast(ActionParameters, dict(invocation.parameters))
+            except (TypeError, ValueError) as exc:
                 diagnostics.append(
                     {
                         "code": "PARAMETER_INVALID",
@@ -3687,7 +3712,13 @@ class GenericAgentService:
                     )
                 )
                 continue
-            signature = proposal_signature(actor_key, action_key, target_key, parameters)
+            signature = proposal_signature(
+                actor_key,
+                action_key,
+                target_key,
+                parameters,
+                action=action,
+            )
             effect_refs = self._objective_effect_refs(
                 planning_context,
                 action_key,
@@ -5609,6 +5640,7 @@ class GenericAgentService:
         self.db.flush()
 
     def _successful_proposal_signatures(self, task: AgentTask) -> set[str]:
+        actions = {item.key: item for item in self._definition().actions}
         operations = self.db.scalars(
             select(WorldOperation).where(
                 WorldOperation.game_instance_id == self.scope.game_instance_id,
@@ -5627,6 +5659,7 @@ class GenericAgentService:
                     operation.action_key,
                     operation.target_key,
                     dict(operation.parameters),
+                    action=actions.get(operation.action_key),
                 )
             )
         return signatures
@@ -5651,8 +5684,14 @@ class GenericAgentService:
         if action is None or actor is None:
             raise GenericAgentError("GENERIC_PROVIDER_PLAN_INVALID", "Unknown Action or Actor")
         try:
-            parameters = normalize_action_parameters(action, parameters)
-        except ValueError as exc:
+            invocation = canonical_action_invocation(
+                action,
+                actor_key=actor.actor_key,
+                target_key=candidate.target_key,
+                parameters=parameters,
+            )
+            parameters = cast(ActionParameters, dict(invocation.parameters))
+        except (TypeError, ValueError) as exc:
             raise GenericAgentError(
                 "GENERIC_PLAN_PARAMETER_INVALID",
                 str(exc),
@@ -8263,14 +8302,16 @@ def proposal_signature(
     action_key: str,
     target_key: str,
     parameters: ActionParameters,
+    *,
+    action: ActionDefinitionV2 | None = None,
 ) -> str:
-    payload = json.dumps(
-        [actor_key, action_key, target_key, parameters],
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()
+    return canonical_action_invocation(
+        action,
+        action_key=action_key,
+        actor_key=actor_key,
+        target_key=target_key,
+        parameters=parameters,
+    ).signature
 
 
 __all__ = [
