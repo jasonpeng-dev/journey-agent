@@ -279,13 +279,15 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .current-report-terminal.danger { color: #953a33; background: var(--console-danger-soft); }
 .current-report-terminal p { margin: 6px 0 0; font-size: 12px; }
 .task-brief { display: grid; gap: 8px; margin-bottom: 17px; padding: 15px; border: 1px solid #e4ddcf; border-radius: 14px; background: #fffdf9; }
-.task-brief > strong { font: 18px Georgia, serif; }
+.task-goal-heading { display: flex; flex-wrap: nowrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.task-goal-heading > strong { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; font: 18px Georgia, serif; }
+.task-goal-heading > .console-pill { flex: 0 0 auto; }
 .task-brief p { margin: 0; color: var(--console-soft); font-size: 12px; }
 .task-brief code { color: #9c3d36; font-size: 10px; }
 .mission-roadmap-details { margin-top: 2px; }
 .mission-roadmap-toggle { display: flex; width: 100%; min-height: 40px; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 0; border-radius: 6px; color: var(--console-jade); background: transparent; cursor: pointer; text-align: left; }
 .mission-roadmap-toggle:hover { background: #f3f8f5; }
-.mission-roadmap-toggle-summary { min-width: 0; color: var(--console-soft); font-size: 12px; }
+.mission-roadmap-toggle-summary { min-width: 0; color: var(--console-jade); font-size: 12px; font-weight: 700; }
 .mission-roadmap-toggle-label { flex: 0 0 auto; font-size: 10px; white-space: nowrap; }
 .mission-roadmap-details .mission-roadmap { margin-top: 8px; }
 .execution-plan { padding: 0; list-style: none; }
@@ -300,14 +302,17 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .execution-plan details { margin-top: 6px; color: var(--console-soft); font-size: 11px; }
 .execution-plan details p { margin: 5px 0; }
 .mission-roadmap { margin: 0; padding: 0; list-style: none; }
-.mission-roadmap li { display: flex; gap: 11px; padding: 10px 6px; border-bottom: 1px solid #eee8dd; }
-.mission-roadmap li > b { width: 18px; color: #7a8580; }
-.mission-roadmap li.completed > b { color: #197052; }
-.mission-roadmap li.current { border-radius: 8px; background: #edf4f0; }
-.mission-roadmap li.current > b { color: var(--console-gold); }
-.mission-roadmap strong, .mission-roadmap small { display: block; }
-.mission-roadmap strong { font-size: 12px; }
-.mission-roadmap small { margin-top: 4px; color: var(--console-gold); font-size: 10px; }
+.mission-roadmap li { padding: 8px 6px; border-bottom: 1px solid #eee8dd; }
+.mission-roadmap li.current { border-radius: 0; background: transparent; }
+.mission-roadmap-row-list { display: grid; gap: 7px; min-width: 0; }
+.mission-roadmap-row, .mission-roadmap-text-row { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; min-height: 27px; }
+.mission-roadmap-row-primary { min-width: 0; color: var(--console-soft); font-size: 11px; line-height: 1.4; }
+.mission-roadmap-status-badge { flex: 0 0 auto; padding: 3px 8px; border-radius: 999px; font-size: 10px; line-height: 1.2; white-space: nowrap; }
+.mission-roadmap-status-badge.success { color: #216b52; background: var(--console-jade-soft); }
+.mission-roadmap-status-badge.warning { color: #80561b; background: var(--console-gold-soft); }
+.mission-roadmap-action-row { display: grid; grid-template-columns: 4.5em minmax(0, 1fr); gap: 10px; min-height: 25px; align-items: baseline; color: var(--console-soft); font-size: 11px; line-height: 1.4; }
+.mission-roadmap-action-label { color: var(--console-ink); font-weight: 700; }
+.mission-roadmap-action-value { min-width: 0; overflow-wrap: anywhere; }
 .current-plan-section { margin-top: 22px; padding-top: 2px; border-top: 1px solid var(--console-line); }
 .plan-reason { margin: -2px 0 8px; padding: 8px 10px; border-radius: 8px; color: #7b541a; background: var(--console-gold-soft); font-size: 10px; }
 .plan-history { display: grid; gap: 10px; }

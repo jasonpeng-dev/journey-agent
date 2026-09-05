@@ -36,7 +36,15 @@ import type {
   PublicTimelineEvent,
   ScenarioVersionDetail,
 } from "../types";
-import { errorText, goalSubmissionErrorText, resultLabel, stepDescription, taskExplanationLabel, uiLabel } from "../ui";
+import {
+  errorText,
+  goalResolutionPresentationText,
+  goalSubmissionErrorText,
+  resultLabel,
+  stepDescription,
+  taskExplanationLabel,
+  uiLabel,
+} from "../ui";
 import {
   debriefButtonLabel,
   formatDuration,
@@ -104,6 +112,15 @@ export function ActionLocationLine({ location }: { location?: ActionLocation | n
   return (
     <div className="action-location-line" data-testid="action-location">
       <strong>{text}</strong>
+    </div>
+  );
+}
+
+export function TaskGoalHeading({ goal, status }: { goal: string; status: string }) {
+  return (
+    <div className="task-goal-heading" data-testid="task-goal-heading">
+      <strong>{goal}</strong>
+      <span className={`console-pill ${taskTone[status] ?? "neutral"}`}>{uiLabel(status)}</span>
     </div>
   );
 }
@@ -335,6 +352,59 @@ function factStateDisplayText(
   return `${stateName}待确认`;
 }
 
+function publicActionParameterResources(
+  requirement: MissionRoadmapRequirement,
+): Array<{ resourceKey: string; amount: number }> {
+  const parameters = requirement.parameter_constraints;
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return [];
+  const rawResources = parameters.resources;
+  if (Array.isArray(rawResources)) {
+    return rawResources.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const resource = item as Record<string, unknown>;
+      return typeof resource.resource_key === "string" && typeof resource.amount === "number"
+        ? [{ resourceKey: resource.resource_key, amount: resource.amount }]
+        : [];
+    });
+  }
+  return typeof parameters.resource_key === "string" && typeof parameters.amount === "number"
+    ? [{ resourceKey: parameters.resource_key, amount: parameters.amount }]
+    : [];
+}
+
+function publicActionCompletedRequirementText(
+  requirement: MissionRoadmapRequirement,
+  names: MissionRoadmapNames,
+): string | null {
+  if (requirement.kind !== "ACTION_COMPLETED" && !requirement.action_key) return null;
+  const actionName = requirement.action_name ?? "执行操作";
+  const targetName = requirement.target_key
+    ? requirement.target_name
+      ?? names.nodeNames?.[requirement.target_key]
+      ?? names.regionNames?.[requirement.target_key]
+    : undefined;
+  const sourceBinding = (requirement.binding_constraints ?? []).find(
+    (binding) => binding.role === "source_region" && typeof binding.value === "string",
+  );
+  const sourceKey = typeof sourceBinding?.value === "string" ? sourceBinding.value : undefined;
+  const sourceName = sourceKey
+    ? names.regionNames?.[sourceKey] ?? names.nodeNames?.[sourceKey]
+    : undefined;
+  const resourceLines = publicActionParameterResources(requirement).map(({ resourceKey, amount }) => (
+    `${resourceDisplayName(resourceKey, names.resourceNames?.[resourceKey])} ×${amount}`
+  ));
+  const actorPrefix = requirement.actor_name ? `由${requirement.actor_name} ` : "";
+  if (sourceName && targetName && resourceLines.length > 0) {
+    return `要求操作：${actorPrefix}${actionName}：从${sourceName}到${targetName}，${resourceLines.join("、")}`;
+  }
+  const details = [
+    sourceName ? `起点：${sourceName}` : null,
+    targetName ? `目标：${targetName}` : null,
+    resourceLines.length > 0 ? `资源：${resourceLines.join("、")}` : null,
+  ].filter((value): value is string => value !== null);
+  return `要求操作：${actorPrefix}${actionName}${details.length > 0 ? `：${details.join("，")}` : ""}`;
+}
+
 function missionRoadmapRequirementText(
   requirement: MissionRoadmapRequirement,
   names: MissionRoadmapNames,
@@ -342,6 +412,9 @@ function missionRoadmapRequirementText(
   if (requirement.kind === "DERIVED_STATE") {
     return `世界能力：当前${derivedStateDisplayValue(requirement)}`;
   }
+
+  const actionText = publicActionCompletedRequirementText(requirement, names);
+  if (actionText !== null) return actionText;
 
   if (
     requirement.kind === "RESOURCE_AT_LEAST"
@@ -390,9 +463,243 @@ function missionRoadmapRequirementText(
   return requirement.description;
 }
 
+type MissionRoadmapRequirementKind =
+  | "FACT"
+  | "RESOURCE_AT_LEAST"
+  | "DERIVED_STATE"
+  | "ACTION_COMPLETED";
+
+const MISSION_ROADMAP_REQUIREMENT_KIND_LABELS: Record<MissionRoadmapRequirementKind, string> = {
+  FACT: "状态要求",
+  RESOURCE_AT_LEAST: "资源要求",
+  DERIVED_STATE: "综合状态要求",
+  ACTION_COMPLETED: "操作要求",
+};
+
+function missionRoadmapRequirementKind(
+  requirement: MissionRoadmapRequirement,
+): MissionRoadmapRequirementKind {
+  if (requirement.kind) return requirement.kind;
+  if (requirement.action_key) return "ACTION_COMPLETED";
+  if (requirement.derived_key) return "DERIVED_STATE";
+  if (
+    requirement.region_key
+    && requirement.resource_key
+    && typeof requirement.minimum === "number"
+  ) {
+    return "RESOURCE_AT_LEAST";
+  }
+  return "FACT";
+}
+
+function missionRoadmapRequirementKindLabel(stages: MissionRoadmapStage[]): string {
+  const kinds: MissionRoadmapRequirementKind[] = [];
+  stages.forEach((stage) => {
+    const stageKinds: MissionRoadmapRequirementKind[] = stage.requirements.map(
+      missionRoadmapRequirementKind,
+    );
+    // A Derived State is the public heading for its expanded children.  Do
+    // not turn those children into a second top-level requirement kind.
+    const visibleStageKinds: MissionRoadmapRequirementKind[] = stageKinds.includes("DERIVED_STATE")
+      ? ["DERIVED_STATE"]
+      : stageKinds;
+    visibleStageKinds.forEach((kind) => {
+      if (!kinds.includes(kind)) kinds.push(kind);
+    });
+  });
+  const displayedKinds: MissionRoadmapRequirementKind[] = kinds.length > 0 ? kinds : ["FACT"];
+  return displayedKinds.map(
+    (kind) => MISSION_ROADMAP_REQUIREMENT_KIND_LABELS[kind],
+  ).join(" · ");
+}
+
+function publicFactExpectedValue(
+  factKey: string,
+  factName: string,
+  value: string | number | boolean,
+): string {
+  return factDisplayValue({
+    node_key: "",
+    fact_key: factKey,
+    name: factName,
+    value,
+  }, value);
+}
+
+function publicFactRequirementStatus(
+  requirement: MissionRoadmapRequirement,
+  names: MissionRoadmapNames,
+): string {
+  const currentValue = requirement.node_key
+    ? names.factValues?.[publicFactIdentity(requirement.node_key, requirement.fact_key ?? "")]
+      ?? requirement.current_known_value
+    : requirement.current_known_value;
+  if (
+    requirement.knowledge_status === "UNKNOWN"
+    || currentValue === undefined
+    || currentValue === null
+    || currentValue === "UNKNOWN"
+  ) {
+    return "未知";
+  }
+  return (requirement.accepted_values ?? []).some((value) => value === currentValue)
+    ? "已满足"
+    : "未满足";
+}
+
+type MissionRoadmapDisplayRow =
+  | {
+    kind: MissionRoadmapRequirementKind;
+    type: "status";
+    primary: string;
+    status: string;
+    tone: "success" | "warning";
+  }
+  | {
+    kind: MissionRoadmapRequirementKind;
+    type: "field";
+    label: string;
+    value: string;
+  }
+  | {
+    kind: MissionRoadmapRequirementKind;
+    type: "text";
+    primary: string;
+  };
+
+function publicFactRequirementRow(
+  requirement: MissionRoadmapRequirement,
+  names: MissionRoadmapNames,
+): MissionRoadmapDisplayRow {
+  const nodeName = requirement.node_key
+    ? names.nodeNames?.[requirement.node_key] ?? "相关对象"
+    : "相关对象";
+  const acceptedValues = requirement.accepted_values ?? [];
+  const factKey = requirement.fact_key ?? "";
+  const factName = requirement.node_key && requirement.fact_key
+    ? names.factNames?.[publicFactIdentity(requirement.node_key, requirement.fact_key)]
+      ?? factDisplayLabel({
+        node_key: requirement.node_key,
+        fact_key: requirement.fact_key,
+        name: "",
+        value: acceptedValues[0] ?? requirement.current_known_value ?? "",
+      })
+    : "目标状态";
+  const expected = acceptedValues.length > 0
+    ? acceptedValues.map((value) => publicFactExpectedValue(factKey, factName, value)).join(" 或 ")
+    : "目标状态";
+  const status = publicFactRequirementStatus(requirement, names);
+  return {
+    kind: "FACT",
+    type: "status",
+    primary: `${nodeName} · ${factName}：${expected}`,
+    status,
+    tone: status === "已满足" ? "success" : "warning",
+  };
+}
+
+function publicResourceRequirementRow(
+  requirement: MissionRoadmapRequirement,
+  names: MissionRoadmapNames,
+): MissionRoadmapDisplayRow {
+  const regionName = requirement.region_key
+    ? names.regionNames?.[requirement.region_key]
+      ?? names.nodeNames?.[requirement.region_key]
+      ?? "相关区域"
+    : "相关区域";
+  const resourceName = requirement.resource_key
+    ? resourceDisplayName(
+      requirement.resource_key,
+      names.resourceNames?.[requirement.resource_key],
+    )
+    : "相关资源";
+  const current = requirement.knowledge_status !== "UNKNOWN"
+    && typeof requirement.current_known_available === "number"
+    ? requirement.current_known_available
+    : null;
+  const minimum = requirement.minimum ?? 0;
+  return {
+    kind: "RESOURCE_AT_LEAST",
+    type: "status",
+    primary: `${regionName} · ${resourceName} ≥ ${requirement.minimum ?? "—"}`,
+    status: current === null ? "未知" : `${current} / ${minimum}`,
+    tone: current !== null && current >= minimum ? "success" : "warning",
+  };
+}
+
+function publicActionRequirementRows(
+  requirement: MissionRoadmapRequirement,
+  names: MissionRoadmapNames,
+): MissionRoadmapDisplayRow[] {
+  const rows: MissionRoadmapDisplayRow[] = [{
+    kind: "ACTION_COMPLETED",
+    type: "field",
+    label: "操作",
+    value: requirement.action_name ?? "执行操作",
+  }];
+  const sourceBinding = (requirement.binding_constraints ?? []).find(
+    (binding) => binding.role === "source_region" && typeof binding.value === "string",
+  );
+  const sourceKey = typeof sourceBinding?.value === "string" ? sourceBinding.value : undefined;
+  const sourceName = sourceKey
+    ? names.regionNames?.[sourceKey] ?? names.nodeNames?.[sourceKey]
+    : undefined;
+  const targetName = requirement.target_key
+    ? requirement.target_name
+      ?? names.nodeNames?.[requirement.target_key]
+      ?? names.regionNames?.[requirement.target_key]
+    : undefined;
+  if (sourceName) rows.push({ kind: "ACTION_COMPLETED", type: "field", label: "起点", value: sourceName });
+  if (targetName) rows.push({ kind: "ACTION_COMPLETED", type: "field", label: "目标", value: targetName });
+
+  const resources = publicActionParameterResources(requirement);
+  if (resources.length > 0) {
+    rows.push({
+      kind: "ACTION_COMPLETED",
+      type: "field",
+      label: "资源",
+      value: resources.map(({ resourceKey }) => resourceDisplayName(
+        resourceKey,
+        names.resourceNames?.[resourceKey],
+      )).join("、"),
+    });
+    rows.push({
+      kind: "ACTION_COMPLETED",
+      type: "field",
+      label: "数量",
+      value: resources.map(({ amount }) => String(amount)).join("、"),
+    });
+  }
+  if (requirement.actor_name) {
+    rows.push({ kind: "ACTION_COMPLETED", type: "field", label: "执行者", value: requirement.actor_name });
+  }
+  return rows;
+}
+
+function missionRoadmapRequirementRows(
+  requirement: MissionRoadmapRequirement,
+  names: MissionRoadmapNames,
+): MissionRoadmapDisplayRow[] {
+  switch (missionRoadmapRequirementKind(requirement)) {
+    case "DERIVED_STATE":
+      return [];
+    case "ACTION_COMPLETED":
+      return publicActionRequirementRows(requirement, names);
+    case "RESOURCE_AT_LEAST":
+      return [publicResourceRequirementRow(requirement, names)];
+    case "FACT":
+      return requirement.fact_key
+        ? [publicFactRequirementRow(requirement, names)]
+        : [{
+          kind: "FACT",
+          type: "text",
+          primary: missionRoadmapRequirementText(requirement, names),
+        }];
+  }
+}
+
 export function MissionRoadmap({
   stages,
-  summary,
   regionNames,
   resourceNames,
   nodeNames,
@@ -417,35 +724,59 @@ export function MissionRoadmap({
         aria-expanded={detailsOpen}
         onClick={() => setDetailsOpen((current) => !current)}
       >
-        {summary && <span className="mission-roadmap-toggle-summary">{summary}</span>}
+        <span className="mission-roadmap-toggle-summary">
+          {missionRoadmapRequirementKindLabel(stages)}
+        </span>
         <span className="mission-roadmap-toggle-label">{detailsOpen ? "收起详情" : "查看详情"}</span>
       </button>
       {detailsOpen && (
         <ol className="mission-roadmap" aria-label="任务路线图">
-          {stages.map((stage) => (
-            <li key={stage.key} className={stage.status.toLowerCase()}>
-              <b aria-hidden="true">
-                {stage.status === "COMPLETED" ? "✓" : stage.status === "CURRENT" ? "→" : "·"}
-              </b>
-              <div>
-                <strong>{stage.name}</strong>
-                {stage.requirements.map((requirement) => (
-                  <small
-                    key={requirement.key}
-                    data-requirement-kind={requirement.kind ?? "FACT"}
-                  >
-                    {missionRoadmapRequirementText(requirement, {
-                      regionNames,
-                      resourceNames,
-                      nodeNames,
-                      factNames,
-                      factValues,
-                    })}
-                  </small>
-                ))}
-              </div>
-            </li>
-          ))}
+          {stages.flatMap((stage) => {
+            const rows = stage.requirements.flatMap((requirement) => (
+              missionRoadmapRequirementRows(requirement, {
+                regionNames,
+                resourceNames,
+                nodeNames,
+                factNames,
+                factValues,
+              })
+            ));
+            if (rows.length === 0) return [];
+            return [(
+              <li key={stage.key} className={stage.status.toLowerCase()}>
+                <div className="mission-roadmap-row-list">
+                  {rows.map((row, index) => {
+                    if (row.type === "field") {
+                      return (
+                        <div
+                          className="mission-roadmap-action-row"
+                          key={`${stage.key}:${row.kind}:${row.label}:${index}`}
+                          data-requirement-kind={row.kind}
+                        >
+                          <span className="mission-roadmap-action-label">{row.label}</span>
+                          <span className="mission-roadmap-action-value">{row.value}</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        className={row.type === "status" ? "mission-roadmap-row" : "mission-roadmap-text-row"}
+                        key={`${stage.key}:${row.kind}:${index}`}
+                        data-requirement-kind={row.kind}
+                      >
+                        <span className="mission-roadmap-row-primary">{row.primary}</span>
+                        {row.type === "status" && (
+                          <span className={`mission-roadmap-status-badge ${row.tone}`}>
+                            {row.status}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </li>
+            )];
+          })}
         </ol>
       )}
     </div>
@@ -2118,7 +2449,11 @@ export function GamePage() {
         );
       } else {
         setGoalFeedback(
-          result.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。",
+          goalResolutionPresentationText(
+            result.status,
+            goal,
+            result.clarification_prompt,
+          ),
         );
       }
       void refresh();
@@ -2256,6 +2591,9 @@ export function GamePage() {
       : acceptedTask && loadedTask?.id !== acceptedTask.id
         ? acceptedTask
         : loadedTask ?? acceptedTask;
+  const taskExplanation = task
+    ? taskExplanationLabel(task.status, task.explanation)
+    : null;
   // The live projection is the authoritative GameInstance-level source for
   // whether any Task is still active.  Do not infer this from acceptedTask:
   // that local response remains in memory after the Task reaches a terminal
@@ -2283,7 +2621,11 @@ export function GamePage() {
     startPlanning.error ?? abandon.error ?? archive.error ?? checkpoint.error ?? fork.error ?? decision.error ?? pacing.error ?? continuous.error ?? replan.error;
   const resolutionMessage =
     submit.data && submit.data.status !== "ACCEPTED"
-      ? submit.data.clarification_prompt ?? "输入的目标无法映射到当前精确场景版本定义的目标。"
+      ? goalResolutionPresentationText(
+        submit.data.status,
+        pendingGoal ?? goal,
+        submit.data.clarification_prompt,
+      )
       : null;
   const goalSubmissionFeedback = goalFeedback !== null ? goalFeedback : resolutionMessage;
   const viewedTaskId =
@@ -2478,14 +2820,12 @@ export function GamePage() {
           {task && (
             <div className="task-brief">
               <small>当前目标</small>
-              <strong>{task.goal}</strong>
-              <span className={`console-pill ${taskTone[task.status] ?? "neutral"}`}>{uiLabel(task.status)}</span>
-              {taskExplanationLabel(task.status, task.explanation) && <code>{taskExplanationLabel(task.status, task.explanation)}</code>}
+              <TaskGoalHeading goal={task.goal} status={task.status} />
+              {taskExplanation && taskExplanation !== task.goal && <code>{taskExplanation}</code>}
               {task.roadmap.stages.length > 0 && (
                 <MissionRoadmap
                   key={task.id}
                   stages={task.roadmap.stages}
-                  summary={taskObjectiveLabel(task.goal, task.objective_names)}
                   regionNames={roadmapRegionNames}
                   resourceNames={roadmapResourceNames}
                   nodeNames={roadmapNodeNames}

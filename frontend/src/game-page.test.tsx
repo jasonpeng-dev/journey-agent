@@ -8,6 +8,7 @@ import {
   MissionRoadmap,
   MissionLogPanel,
   PlanHistory,
+  TaskGoalHeading,
   TaskTabs,
   Timeline,
   WaitingStatus,
@@ -21,7 +22,12 @@ import {
   segmentCompletionMessage,
   syncPlayStateCaches,
 } from "./playPresentation";
-import { goalSubmissionErrorText, taskExplanationLabel, uiLabel } from "./ui";
+import {
+  goalResolutionPresentationText,
+  goalSubmissionErrorText,
+  taskExplanationLabel,
+  uiLabel,
+} from "./ui";
 import { publicFactIdentity } from "./knowledgePresentation";
 import type {
   PlayerGameState,
@@ -216,11 +222,12 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText("中央应急救援物资（当前：20，要求：≥30）")).not.toBeInTheDocument();
     const detailsToggle = screen.getByRole("button");
     expect(detailsToggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("Objective summary")).toBeVisible();
-    fireEvent.click(screen.getByText("Objective summary"));
-    expect(screen.getByText("建立持续保障")).toBeVisible();
+    expect(screen.getByText("资源要求")).toBeVisible();
+    expect(screen.queryByText("Objective summary")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("资源要求"));
     expect(screen.getByText(/20.*30/)).toBeVisible();
-    expect(screen.getByText("Central District\uFF1ARelief Supplies\u50A8\u5907 20 / 30")).toBeVisible();
+    expect(screen.getByText("Central District · Relief Supplies ≥ 30")).toBeVisible();
+    expect(screen.getByText("20 / 30")).toHaveClass("warning");
     expect(detailsToggle).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(screen.getByText("收起详情"));
     expect(detailsToggle).toHaveAttribute("aria-expanded", "false");
@@ -257,9 +264,12 @@ describe("Formal Play player projections", () => {
     );
 
     fireEvent.click(screen.getByRole("button"));
-    expect(screen.getByText("Central District\uFF1AEmergency Relief Supplies\u50A8\u5907 0 / 30")).toBeVisible();
-    expect(screen.getByText("East Residential District\uFF1AEmergency Relief Supplies\u50A8\u5907 12 / 30")).toBeVisible();
-    expect(screen.getByText("Southeast Heights\uFF1AEmergency Relief Supplies\u50A8\u5907 30 / 30")).toBeVisible();
+    expect(screen.getByText("Central District · Emergency Relief Supplies ≥ 30")).toBeVisible();
+    expect(screen.getByText("East Residential District · Emergency Relief Supplies ≥ 30")).toBeVisible();
+    expect(screen.getByText("Southeast Heights · Emergency Relief Supplies ≥ 30")).toBeVisible();
+    expect(screen.getByText("0 / 30")).toHaveClass("warning");
+    expect(screen.getByText("12 / 30")).toHaveClass("warning");
+    expect(screen.getByText("30 / 30")).toHaveClass("success");
     expect(screen.queryByText("Generic reserve description")).not.toBeInTheDocument();
     expect(screen.queryByText(/central_district|east_residential|southeast_heights/)).not.toBeInTheDocument();
   });
@@ -286,7 +296,8 @@ describe("Formal Play player projections", () => {
     );
 
     fireEvent.click(screen.getByRole("button"));
-    expect(screen.getByText("建立持续人道物流能力")).toBeVisible();
+    expect(screen.getByText("City Distribution Center · 已知状态：可用")).toBeVisible();
+    expect(screen.getByText("未知")).toHaveClass("warning");
     expect(screen.queryByText("持续人道物流能力已建立。")).not.toBeInTheDocument();
   });
 
@@ -317,7 +328,19 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText("设施状态已恢复")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button"));
     expect(screen.getByText("设施状态已恢复")).toBeVisible();
-    expect(screen.getByText(/0.*30/)).toBeVisible();
+    expect(screen.getByText("相关区域 · 已知资源 ≥ 30")).toBeVisible();
+    expect(screen.getByText("未知")).toHaveClass("warning");
+  });
+
+  it("renders the player Goal once with its status badge in the same heading", () => {
+    const goal = "从南部滨水区运30个电力部件到东南高地区";
+    render(<TaskGoalHeading goal={goal} status="ACTIVE" />);
+
+    const heading = screen.getByTestId("task-goal-heading");
+    expect(within(heading).getByText(goal)).toBeVisible();
+    expect(within(heading).getByText("进行中")).toHaveClass("warning");
+    expect(heading.querySelectorAll("strong")).toHaveLength(1);
+    expect(heading.querySelectorAll(".console-pill")).toHaveLength(1);
   });
 
   it("renders a public Derived State status and reveals staged children only after projection", () => {
@@ -347,11 +370,9 @@ describe("Formal Play player projections", () => {
     );
 
     fireEvent.click(screen.getByRole("button"));
-    expect(screen.getByText("东南持续应急发电保障")).toBeVisible();
-    expect(screen.getByText("世界能力：当前不可用")).toHaveAttribute(
-      "data-requirement-kind",
-      "DERIVED_STATE",
-    );
+    expect(screen.queryByText("东南持续应急发电保障")).not.toBeInTheDocument();
+    expect(screen.getByText("综合状态要求")).toBeVisible();
+    expect(screen.getAllByRole("button")).toHaveLength(1);
     expect(screen.queryByText("临江港恢复运行")).not.toBeInTheDocument();
     expect(screen.queryByText("南部燃料终端恢复运行")).not.toBeInTheDocument();
     expect(screen.queryByText(/应急燃料储备/)).not.toBeInTheDocument();
@@ -361,6 +382,7 @@ describe("Formal Play player projections", () => {
         nodeNames={{ river_port: "临江港", south_fuel_terminal: "南部燃料终端" }}
         regionNames={{ southeast_heights_district: "东南高地区" }}
         resourceNames={{ emergency_fuel: "应急燃料" }}
+        factValues={{ "river_port:operational": true, "south_fuel_terminal:operational": true }}
         stages={[{
           key: "objective:generation",
           name: "东南持续应急发电保障",
@@ -399,9 +421,11 @@ describe("Formal Play player projections", () => {
         }]}
       />,
     );
-    expect(screen.getByText("临江港恢复运行")).toBeVisible();
-    expect(screen.getByText("南部燃料终端恢复运行")).toBeVisible();
-    expect(screen.getByText("东南高地区：应急燃料储备 50 / 100")).toBeVisible();
+    expect(screen.getByText("临江港 · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("南部燃料终端 · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("东南高地区 · 应急燃料 ≥ 100")).toBeVisible();
+    expect(screen.getAllByText("已满足")).toHaveLength(2);
+    expect(screen.getByText("50 / 100")).toHaveClass("warning");
     expect(screen.queryByText("river_port")).not.toBeInTheDocument();
     expect(screen.queryByText("south_fuel_terminal")).not.toBeInTheDocument();
   });
@@ -568,7 +592,8 @@ describe("Formal Play player projections", () => {
     );
 
     fireEvent.click(screen.getByRole("button"));
-    expect(screen.getByText("测试发电设施：尚未发电")).toBeVisible();
+    expect(screen.getByText("测试发电设施 · 发电状态：是")).toBeVisible();
+    expect(screen.getByText("未满足")).toHaveClass("warning");
     expect(screen.queryByText(/reaches the requested state|accepted_values|fact_key/)).not.toBeInTheDocument();
 
     view.rerender(
@@ -579,7 +604,157 @@ describe("Formal Play player projections", () => {
         stages={[stage]}
       />,
     );
-    expect(screen.getByText("测试发电设施：正在发电")).toBeVisible();
+    expect(screen.getByText("测试发电设施 · 发电状态：是")).toBeVisible();
+    expect(screen.getByText("已满足")).toHaveClass("success");
+  });
+
+  it("keeps FACT wording fixed while exposing unknown, unmet, and satisfied status", () => {
+    const requirement: MissionRoadmapStage["requirements"][number] = {
+      key: "synthetic-operational",
+      kind: "FACT",
+      node_key: "synthetic_facility",
+      fact_key: "operational",
+      accepted_values: [true],
+      description: "Internal description must not be rendered",
+    };
+    const stage: MissionRoadmapStage = {
+      key: "objective:fact-status",
+      name: "Synthetic objective",
+      description: "Public objective",
+      status: "CURRENT",
+      objective_key: "fact-status",
+      requirements: [requirement],
+    };
+    const view = render(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "Synthetic Facility" }}
+        factNames={{ [publicFactIdentity("synthetic_facility", "operational")]: "运行状态" }}
+        stages={[stage]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Synthetic Facility · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("未知")).toHaveClass("warning");
+
+    view.rerender(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "Synthetic Facility" }}
+        factNames={{ [publicFactIdentity("synthetic_facility", "operational")]: "运行状态" }}
+        factValues={{ [publicFactIdentity("synthetic_facility", "operational")]: false }}
+        stages={[stage]}
+      />,
+    );
+    expect(screen.getByText("Synthetic Facility · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("未满足")).toHaveClass("warning");
+
+    view.rerender(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "Synthetic Facility" }}
+        factNames={{ [publicFactIdentity("synthetic_facility", "operational")]: "运行状态" }}
+        factValues={{ [publicFactIdentity("synthetic_facility", "operational")]: true }}
+        stages={[stage]}
+      />,
+    );
+    expect(screen.getByText("Synthetic Facility · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("已满足")).toHaveClass("success");
+    expect(screen.queryByText("Internal description must not be rendered")).not.toBeInTheDocument();
+  });
+
+  it("renders a public ACTION_COMPLETED requirement as a complete operation summary", () => {
+    render(
+      <MissionRoadmap
+        regionNames={{ source_region: "Source Region", target_region: "Target Region" }}
+        resourceNames={{ cargo_alpha: "Cargo Alpha" }}
+        stages={[{
+          key: "objective:operation",
+          name: "Complete operation",
+          description: "Public objective",
+          status: "CURRENT",
+          objective_key: "operation",
+          requirements: [{
+            key: "transport-operation",
+            kind: "ACTION_COMPLETED",
+            description: "Complete: Transport Resource: Target Region",
+            action_key: "transport_resource",
+            action_name: "Transport Resource",
+            actor_key: null,
+            actor_name: null,
+            target_key: "target_region",
+            target_name: "Target Region",
+            binding_constraints: [{ role: "source_region", value: "source_region" }],
+            parameter_constraints: {
+              resources: [{ resource_key: "cargo_alpha", amount: 30 }],
+            },
+            operation_status: "PENDING",
+          }],
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Transport Resource")).toBeVisible();
+    expect(screen.getByText("Source Region")).toBeVisible();
+    expect(screen.getByText("Target Region")).toBeVisible();
+    expect(screen.getByText("Cargo Alpha")).toBeVisible();
+    expect(screen.getByText("30")).toBeVisible();
+    expect(screen.queryByText("Complete: Transport Resource: Target Region")).not.toBeInTheDocument();
+    expect(screen.queryByText(/transport_resource|source_region|UNSPECIFIED/)).not.toBeInTheDocument();
+  });
+
+  it("omits unfrozen action fields and keeps explicit actor in schema order", () => {
+    render(
+      <MissionRoadmap
+        regionNames={{ target_region: "Target Region" }}
+        resourceNames={{ cargo_alpha: "Cargo Alpha" }}
+        stages={[{
+          key: "objective:operation-optional",
+          name: "Optional operation fields",
+          description: "Public objective",
+          status: "CURRENT",
+          objective_key: "operation-optional",
+          requirements: [{
+            key: "transport-operation-optional",
+            kind: "ACTION_COMPLETED",
+            description: "Internal operation description",
+            action_key: "transport_resource",
+            action_name: "Transport Resource",
+            actor_key: "logistics_team",
+            actor_name: "Logistics Team",
+            target_key: "target_region",
+            target_name: "Target Region",
+            parameter_constraints: {
+              resource_key: "cargo_alpha",
+              amount: 30,
+            },
+          }],
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    const lines = Array.from(screen.getByRole("list").querySelectorAll(".mission-roadmap-action-row"))
+      .map((line) => line.textContent);
+    expect(lines).toEqual([
+      "操作Transport Resource",
+      "目标Target Region",
+      "资源Cargo Alpha",
+      "数量30",
+      "执行者Logistics Team",
+    ]);
+    expect(screen.queryByText(/起点：|未指定|Internal operation description/)).not.toBeInTheDocument();
+  });
+
+  it("does not expose raw Goal Resolver clarification text", () => {
+    const message = goalResolutionPresentationText(
+      "NEEDS_CLARIFICATION",
+      "transport 30 cargo alpha from source to target",
+      "the actor key and source region are ambiguous",
+    );
+
+    expect(message).toContain("\u8d77\u70b9");
+    expect(message).not.toContain("actor key");
+    expect(message).not.toContain("ambiguous");
   });
 
   it("keeps objective details closed when the task identity changes", () => {
