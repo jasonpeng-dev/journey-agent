@@ -30,7 +30,8 @@ from pydantic import (
 )
 
 from app.core.config import Settings
-from app.domain.formal_goal import AdHocGoalRequirementCandidateV1
+from app.domain.action_invocation import ActionInvocationBinding
+from app.domain.formal_goal import AdHocGoalRequirementCandidateV2
 from app.domain.scenario_v2 import StrictScalar
 
 log = structlog.get_logger(__name__)
@@ -61,7 +62,7 @@ class DynamicGoalEntityGroundingRequest(ProviderModel):
 class DynamicGoalCandidateReference(ProviderModel):
     """One public Scenario definition that Stage 1 may ground."""
 
-    ref_type: Literal["NODE", "REGION", "RESOURCE", "DERIVED_STATE"]
+    ref_type: Literal["NODE", "REGION", "RESOURCE", "DERIVED_STATE", "ACTION", "ACTOR"]
     key: StrictStr = Field(min_length=1, max_length=160)
 
 
@@ -69,7 +70,7 @@ class DynamicGoalRecoveryFeedback(ProviderModel):
     """Safe, structured schema feedback for one bounded interpretation retry."""
 
     requirement_index: StrictInt = Field(ge=0)
-    kind: Literal["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"] | None = None
+    kind: Literal["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE", "ACTION_COMPLETED"] | None = None
     issue: Literal["MISSING_REQUIRED_FIELD", "INVALID_FIELD", "INVALID_REQUIREMENT_SHAPE"]
     field: (
         Literal[
@@ -81,6 +82,13 @@ class DynamicGoalRecoveryFeedback(ProviderModel):
             "resource_key",
             "minimum",
             "derived_key",
+            "action_key",
+            "actor_key",
+            "target_key",
+            "binding_constraints",
+            "parameter_constraints",
+            "match_mode",
+            "boundary",
             "target_value",
             "<extra_field>",
         ]
@@ -152,7 +160,7 @@ class DynamicGoalInterpretation(ProviderModel):
     """
 
     status: Literal["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"] = "RESOLVED"
-    requirements: tuple[AdHocGoalRequirementCandidateV1, ...] = ()
+    requirements: tuple[AdHocGoalRequirementCandidateV2, ...] = ()
     clarification_prompt: str | None = None
 
     @model_validator(mode="after")
@@ -183,6 +191,10 @@ class PlanningContext(ProviderModel):
     relevant_actions: tuple[dict[str, object], ...] = ()
     relevant_actors: tuple[dict[str, object], ...] = ()
     relevant_targets: tuple[dict[str, object], ...] = ()
+    operation_goal: OperationGoalProjection | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     previous_execution_context: dict[str, object] = Field(default_factory=dict)
     scenario_planning_hints: dict[str, object] = Field(default_factory=dict)
 
@@ -393,6 +405,33 @@ class GoalDependencyProjection(ProviderModel):
         return self
 
 
+class OperationGoalProjection(ProviderModel):
+    """Frozen ACTION_COMPLETED constraint exposed to the Planner."""
+
+    requirement_identity: StrictStr | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    kind: Literal["ACTION_COMPLETED"] = "ACTION_COMPLETED"
+    action_key: StrictStr = Field(min_length=1, max_length=100)
+    actor_key: StrictStr | None = Field(default=None, max_length=100)
+    target_key: StrictStr | None = Field(default=None, max_length=160)
+    binding_constraints: tuple[ActionInvocationBinding, ...] = ()
+    parameter_constraints: dict[str, JsonValue] | None = None
+    match_mode: Literal["ONE_SUCCESSFUL_INVOCATION"] = "ONE_SUCCESSFUL_INVOCATION"
+    boundary: Literal["TASK_OWNED_OPERATION"] = "TASK_OWNED_OPERATION"
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> OperationGoalProjection:
+        roles = tuple(item.role for item in self.binding_constraints)
+        if len(set(roles)) != len(roles):
+            raise ValueError("Operation Goal binding roles must be unique")
+        ordered = tuple(sorted(self.binding_constraints, key=lambda item: item.role))
+        if ordered != self.binding_constraints:
+            object.__setattr__(self, "binding_constraints", ordered)
+        return self
+
+
 class PlannerResourceSourceHint(ProviderModel):
     """Quantity-free public guidance for discovering a Resource source."""
 
@@ -451,6 +490,10 @@ class PlannerInput(ProviderModel):
     actors: tuple[PlannerActorState, ...] = ()
     action_contracts: tuple[PlannerActionContract, ...] = ()
     target_bindings: tuple[PlannerTargetBinding, ...] = ()
+    operation_goal: OperationGoalProjection | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     active_goal_dependencies: tuple[GoalDependencyProjection, ...] = Field(
         default=(),
         exclude_if=lambda value: not value,
@@ -898,14 +941,35 @@ def _safe_json_type(value: object) -> str | None:
     return None
 
 
-_DYNAMIC_GOAL_REQUIREMENT_KINDS = frozenset({"FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"})
+_DYNAMIC_GOAL_REQUIREMENT_KINDS = frozenset(
+    {"FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE", "ACTION_COMPLETED"}
+)
 _DYNAMIC_GOAL_REQUIREMENT_FIELDS = {
     "FACT": ("node_key", "fact_key", "accepted_values"),
     "RESOURCE_AT_LEAST": ("region_key", "resource_key", "minimum"),
     "DERIVED_STATE": ("derived_key", "accepted_values"),
+    "ACTION_COMPLETED": ("action_key",),
 }
 _DYNAMIC_GOAL_REQUIREMENT_ALLOWED_FIELDS = {
-    kind: frozenset({"kind", *fields}) for kind, fields in _DYNAMIC_GOAL_REQUIREMENT_FIELDS.items()
+    kind: frozenset(
+        {
+            "kind",
+            *fields,
+            *(
+                {
+                    "actor_key",
+                    "target_key",
+                    "binding_constraints",
+                    "parameter_constraints",
+                    "match_mode",
+                    "boundary",
+                }
+                if kind == "ACTION_COMPLETED"
+                else set()
+            ),
+        }
+    )
+    for kind, fields in _DYNAMIC_GOAL_REQUIREMENT_FIELDS.items()
 }
 
 
@@ -934,7 +998,7 @@ def dynamic_goal_recovery_feedback(
                     requirement_index=index,
                     issue="INVALID_REQUIREMENT_SHAPE",
                     expected_shape={
-                        "kind": "FACT|RESOURCE_AT_LEAST|DERIVED_STATE",
+                        "kind": "FACT|RESOURCE_AT_LEAST|DERIVED_STATE|ACTION_COMPLETED",
                     },
                 )
             )
@@ -953,7 +1017,7 @@ def dynamic_goal_recovery_feedback(
                     issue="INVALID_FIELD" if "kind" in item else "MISSING_REQUIRED_FIELD",
                     field="kind",
                     expected_shape={
-                        "kind": "FACT|RESOURCE_AT_LEAST|DERIVED_STATE",
+                        "kind": "FACT|RESOURCE_AT_LEAST|DERIVED_STATE|ACTION_COMPLETED",
                     },
                 )
             )
@@ -1079,6 +1143,17 @@ def _dynamic_goal_expected_shape(
             "resource_key": "<allowed resource key>",
             "minimum": 0,
         }
+    if kind == "ACTION_COMPLETED":
+        return {
+            "kind": "ACTION_COMPLETED",
+            "action_key": "<allowed action key>",
+            "actor_key": None,
+            "target_key": None,
+            "binding_constraints": [],
+            "parameter_constraints": None,
+            "match_mode": "ONE_SUCCESSFUL_INVOCATION",
+            "boundary": "TASK_OWNED_OPERATION",
+        }
     derived_key = item.get("derived_key")
     public_target = _dynamic_goal_target_value(kind, item, public_ontology)
     return {
@@ -1159,6 +1234,7 @@ def goal_provider_request_snapshot(
     if purpose not in _GOAL_PROVIDER_PURPOSES:
         return {}
     snapshot = _safe_goal_snapshot(payload, depth=0)
+    snapshot = _compact_goal_catalog_snapshot(snapshot)
     return _bounded_goal_snapshot(snapshot, max_bytes=_GOAL_REQUEST_SNAPSHOT_MAX_BYTES)
 
 
@@ -1200,6 +1276,13 @@ def goal_provider_response_snapshot(
             "resource_key",
             "minimum",
             "derived_key",
+            "action_key",
+            "actor_key",
+            "target_key",
+            "binding_constraints",
+            "parameter_constraints",
+            "match_mode",
+            "boundary",
         }
     snapshot = _safe_goal_response_mapping(raw, allowed=allowed, nested_allowed=nested_allowed)
     return _bounded_goal_snapshot(snapshot, max_bytes=_GOAL_RESPONSE_SNAPSHOT_MAX_BYTES)
@@ -1263,9 +1346,12 @@ def _redact_goal_interpretation_identities(
     world = public_ontology.get("world")
     if not isinstance(world, dict):
         return value
+    node_keys = _public_ontology_string_keys(world.get("nodes"), key_name="key")
     region_keys = _public_ontology_string_keys(world.get("regions"), key_name="key")
     resource_keys = _public_ontology_string_keys(world.get("resources"), key_name="key")
     derived_keys = _public_ontology_string_keys(world.get("derived_states"), key_name="key")
+    action_keys = _public_ontology_string_keys(world.get("actions"), key_name="key")
+    actor_keys = _public_ontology_string_keys(world.get("actors"), key_name="key")
     fact_keys: set[tuple[str, str]] = set()
     facts = world.get("facts")
     if isinstance(facts, (list, tuple)):
@@ -1315,6 +1401,34 @@ def _redact_goal_interpretation_identities(
             if not isinstance(derived_key, str) or derived_key not in derived_keys:
                 item["derived_key"] = _redacted_goal_identity(derived_key)
                 _omit_goal_requirement_value(item)
+        elif kind == "ACTION_COMPLETED":
+            action_key = item.get("action_key")
+            actor_key = item.get("actor_key")
+            target_key = item.get("target_key")
+            is_public = (
+                isinstance(action_key, str)
+                and action_key in action_keys
+                and (actor_key is None or actor_key in actor_keys)
+                and (target_key is None or target_key in {*node_keys, *region_keys, *actor_keys})
+            )
+            raw_bindings = item.get("binding_constraints", [])
+            bindings_public = isinstance(raw_bindings, list) and all(
+                isinstance(binding, dict)
+                and binding.get("role") in {"source_region", "destination_region"}
+                and binding.get("value") in region_keys
+                for binding in raw_bindings
+            )
+            is_public = is_public and bindings_public
+            if not is_public:
+                for field in (
+                    "action_key",
+                    "actor_key",
+                    "target_key",
+                    "binding_constraints",
+                    "parameter_constraints",
+                ):
+                    if field in item:
+                        item[field] = _redacted_goal_identity(item[field])
         safe_requirements.append(item)
     result["requirements"] = safe_requirements
     return result
@@ -1379,6 +1493,37 @@ def _bounded_goal_snapshot(value: object, *, max_bytes: int) -> dict[str, object
             break
         truncated["stored_size"] = stored_size
     return truncated
+
+
+def _compact_goal_catalog_snapshot(value: object) -> object:
+    """Keep public catalog identities visible when a debug snapshot is large.
+
+    The live grounding request retains the full public descriptions.  Debug
+    telemetry only needs the stable catalog identity and shape to explain a
+    grounding decision, so omit descriptive text before applying the hard
+    snapshot byte bound.  Oversized arbitrary caller payloads still use the
+    existing whole-snapshot truncation behavior.
+    """
+
+    if not isinstance(value, dict):
+        return value
+    catalog = value.get("public_catalog")
+    if not isinstance(catalog, dict):
+        return value
+    compact_catalog = dict(catalog)
+    for collection_key in ("entities", "regions", "references"):
+        collection = compact_catalog.get(collection_key)
+        if not isinstance(collection, list):
+            continue
+        compact_catalog[collection_key] = [
+            {key: item_value for key, item_value in item.items() if key != "description"}
+            if isinstance(item, dict)
+            else item
+            for item in collection
+        ]
+    compact = dict(value)
+    compact["public_catalog"] = compact_catalog
+    return compact
 
 
 def _safe_goal_snapshot(value: object, *, depth: int) -> object:
@@ -1855,7 +2000,7 @@ class OpenAICompatibleGenericProvider:
         elif purpose == "dynamic_goal_grounding":
             response_contract = (
                 '{"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
-                '"candidate_refs":[{"ref_type":"NODE|REGION|RESOURCE|DERIVED_STATE",'
+                '"candidate_refs":[{"ref_type":"NODE|REGION|RESOURCE|DERIVED_STATE|ACTION|ACTOR",'
                 '"key":"public_scenario_reference_key"}],'
                 '"clarification_prompt":null}'
             )
@@ -1873,7 +2018,13 @@ class OpenAICompatibleGenericProvider:
                 '"resource_key":"<allowed resource key>","minimum":0}; '
                 'DERIVED_STATE {"kind":"DERIVED_STATE",'
                 '"derived_key":"<allowed derived key>",'
-                '"accepted_values":["AVAILABLE"]}'
+                '"accepted_values":["AVAILABLE"]}; '
+                'ACTION_COMPLETED {"kind":"ACTION_COMPLETED",'
+                '"action_key":"<allowed action key>","actor_key":null,'
+                '"target_key":null,"binding_constraints":[],'
+                '"parameter_constraints":null,'
+                '"match_mode":"ONE_SUCCESSFUL_INVOCATION",'
+                '"boundary":"TASK_OWNED_OPERATION"}'
             )
         else:
             response_contract = (
@@ -1893,7 +2044,8 @@ class OpenAICompatibleGenericProvider:
         if purpose == "dynamic_goal_grounding":
             planning_prompt = (
                 "Ground only public Scenario references mentioned by the player's Goal. Return "
-                "candidate_refs with ref_type NODE, REGION, RESOURCE, or DERIVED_STATE and a "
+                "candidate_refs with ref_type NODE, REGION, RESOURCE, DERIVED_STATE, ACTION, "
+                "or ACTOR and a "
                 "key copied exactly from the supplied public_catalog. Multiple plausible public "
                 "references are allowed. If no public reference can be grounded, return "
                 "clarification or unsupported with no candidate_refs. Use canonical names, "
@@ -1905,10 +2057,11 @@ class OpenAICompatibleGenericProvider:
             )
         elif purpose == "dynamic_goal":
             planning_prompt = (
-                "Interpret the player's Goal only into the closed V1 typed requirement "
+                "Interpret the player's Goal only into the closed V2 typed requirement "
                 "vocabulary. Return one or more requirements with implicit AND semantics. "
-                "Use only FACT, RESOURCE_AT_LEAST, or DERIVED_STATE. Use only node, fact, "
-                "region, resource, and derived keys present in the public ontology supplied "
+                "Use only FACT, RESOURCE_AT_LEAST, DERIVED_STATE, or ACTION_COMPLETED. Use only "
+                "node, fact, region, resource, derived, action, and actor keys present in the "
+                "public ontology supplied "
                 "by the user payload. "
                 "Use only the grounded candidate references and the explicit projection in "
                 "the focused ontology. Do not select a reference merely because it exists in "
@@ -1925,8 +2078,17 @@ class OpenAICompatibleGenericProvider:
                 "A natural-language repair, restore, reopen, or make-usable request for a "
                 "public entity may map to a compatible terminal-state FACT such as passable=true; "
                 "do not require the player to say the machine key. Pure inspect, survey, or "
-                "view requests are information/action intent, not automatically a terminal "
-                "FACT goal. "
+                "view requests should be expressed as ACTION_COMPLETED when the public Action "
+                "and target are grounded; they are not automatically a terminal FACT goal. "
+                "For ACTION_COMPLETED, preserve the player's explicit operation semantics "
+                "losslessly: emit the public action_key and any explicitly named actor_key, "
+                "target_key, Action-defined binding_constraints, and exact schema-valid "
+                "parameter_constraints. Use ONE_SUCCESSFUL_INVOCATION and "
+                "TASK_OWNED_OPERATION. An omitted actor or target remains unconstrained; do "
+                "not invent wildcard values. Do not weaken an explicit operation, source, "
+                "destination, resource, or amount into a state or resource threshold. If the "
+                "public Action contract cannot represent an explicit binding or parameter, "
+                "return clarification or unsupported. "
                 "Do not invent keys, values outside a supplied Fact domain, Action plans, "
                 "prerequisites, routes, knowledge gates, hidden requirements, completion "
                 "rules, or any other Scenario semantics. The backend assigns requirement "
@@ -2805,6 +2967,7 @@ __all__ = [
     "GoalSelection",
     "GoalSelectionRequest",
     "OpenAICompatibleGenericProvider",
+    "OperationGoalProjection",
     "PlanProposal",
     "PlanRequest",
     "PlanSegment",

@@ -6,8 +6,18 @@ import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 
-from app.domain.formal_goal import FormalGoalContractV1, FormalGoalSourceKind
+from app.domain.formal_goal import (
+    FormalGoalActionCompletedRequirementV1,
+    FormalGoalContract,
+    FormalGoalContractV1,
+    FormalGoalContractV2,
+    FormalGoalRequirementV1,
+    FormalGoalRequirementV2,
+    FormalGoalSourceKind,
+)
 from app.domain.scenario_v2 import (
+    ActionTargetKind,
+    ActorProfileV2,
     DerivedStateDependencyV2,
     ObjectiveDefinitionV2,
     ObjectiveRequirementKind,
@@ -53,12 +63,13 @@ class MissionRoadmapProjector:
     def project_formal_goal(
         self,
         definition: ScenarioDefinitionV2,
-        contract: FormalGoalContractV1,
+        contract: FormalGoalContract,
         known_facts: dict[tuple[str, str], StrictScalar],
         known_resources: dict[str, object] | None = None,
         known_derived: dict[str, StrictScalar | None] | None = None,
         *,
         goal_description: str = "",
+        operation_status_by_identity: dict[str, bool] | None = None,
     ) -> MissionRoadmap:
         """Project one frozen contract without making the roadmap authoritative.
 
@@ -69,7 +80,10 @@ class MissionRoadmapProjector:
         ordinary Objective roadmap.
         """
 
-        if contract.source_kind == FormalGoalSourceKind.PREDEFINED:
+        if (
+            isinstance(contract, FormalGoalContractV1)
+            and contract.source_kind == FormalGoalSourceKind.PREDEFINED
+        ):
             roadmap = self.project(
                 definition,
                 tuple(item.objective_key for item in contract.predefined_objectives),
@@ -114,35 +128,74 @@ class MissionRoadmapProjector:
                 )
             return MissionRoadmap(stages=tuple(stages))
 
-        requirements = tuple(contract.completion_requirements)
-        visible = tuple(
-            item
-            for item in requirements
-            if item.requirement.knowledge_gate is None
-            or known_facts.get(
-                (
-                    item.requirement.knowledge_gate.node_key,
-                    item.requirement.knowledge_gate.fact_key,
-                )
+        state_items: tuple[FormalGoalRequirementV1 | FormalGoalRequirementV2, ...]
+        operation_items: tuple[FormalGoalRequirementV2, ...]
+        if isinstance(contract, FormalGoalContractV2):
+            state_items = tuple(
+                item
+                for item in contract.completion_requirements
+                if isinstance(item.requirement, ObjectiveRequirementV2)
             )
-            in item.requirement.knowledge_gate.accepted_values
+            operation_items = tuple(
+                item
+                for item in contract.completion_requirements
+                if isinstance(item.requirement, FormalGoalActionCompletedRequirementV1)
+            )
+        else:
+            state_items = contract.completion_requirements
+            operation_items = ()
+        visible = tuple(
+            item for item in state_items if _state_requirement_is_visible(item, known_facts)
         )
         visible_requirements = self._visible(
             self._expand_derived_requirements(
                 definition,
-                tuple(item.requirement for item in visible),
+                tuple(_state_requirement(item) for item in visible),
                 known_facts,
             ),
             known_facts,
         )
-        identities_by_requirement_key = {item.requirement.key: item.identity for item in visible}
+        identities_by_requirement_key = {
+            _state_requirement(item).key: item.identity for item in visible
+        }
         resources = known_resources or {}
-        completed = self._satisfied(
-            visible_requirements,
-            known_facts,
-            resources,
-            known_derived or {},
+        state_completed = (
+            self._satisfied(
+                visible_requirements,
+                known_facts,
+                resources,
+                known_derived or {},
+            )
+            if state_items
+            else True
         )
+        operation_status_by_identity = operation_status_by_identity or {}
+        operation_completed = all(
+            operation_status_by_identity.get(item.identity, False) for item in operation_items
+        )
+        projected_requirements = [
+            self._project_requirement(
+                requirement,
+                resources,
+                identity=identities_by_requirement_key.get(
+                    requirement.key,
+                    f"planning/goal/{requirement.key}",
+                ),
+                definition=definition,
+                known_derived=known_derived or {},
+            )
+            for requirement in visible_requirements
+        ]
+        projected_requirements.extend(
+            self._project_operation_requirement(
+                _operation_requirement(item),
+                definition,
+                identity=item.identity,
+                completed=operation_status_by_identity.get(item.identity, False),
+            )
+            for item in operation_items
+        )
+        completed = state_completed and operation_completed
         return MissionRoadmap(
             stages=(
                 MissionRoadmapStage(
@@ -155,19 +208,7 @@ class MissionRoadmapProjector:
                         else MissionRoadmapStageStatus.CURRENT
                     ),
                     objective_key=None,
-                    requirements=tuple(
-                        self._project_requirement(
-                            requirement,
-                            resources,
-                            identity=identities_by_requirement_key.get(
-                                requirement.key,
-                                f"planning/goal/{requirement.key}",
-                            ),
-                            definition=definition,
-                            known_derived=known_derived or {},
-                        )
-                        for requirement in visible_requirements
-                    ),
+                    requirements=tuple(projected_requirements),
                 ),
             )
         )
@@ -521,6 +562,76 @@ class MissionRoadmapProjector:
         return result
 
     @staticmethod
+    def _project_operation_requirement(
+        requirement: FormalGoalActionCompletedRequirementV1,
+        definition: ScenarioDefinitionV2,
+        *,
+        identity: str,
+        completed: bool,
+    ) -> dict[str, object]:
+        """Project an operation Goal using public Action/Actor metadata only."""
+
+        action = next(
+            (item for item in definition.actions if item.key == requirement.action_key),
+            None,
+        )
+        if action is None:
+            raise ValueError(f"ACTION_COMPLETED references unknown Action {requirement.action_key}")
+        actor: ActorProfileV2 | None = next(
+            (
+                item
+                for item in definition.actors.actor_profiles
+                if item.key == requirement.actor_key
+            ),
+            None,
+        )
+        target_name: str | None = None
+        if requirement.target_key is not None:
+            if action.target_kind == ActionTargetKind.ACTOR:
+                target_actor = next(
+                    (
+                        item
+                        for item in definition.actors.actor_profiles
+                        if item.key == requirement.target_key
+                    ),
+                    None,
+                )
+                target_name = (
+                    target_actor.name if target_actor is not None else requirement.target_key
+                )
+            else:
+                target_node = definition.world.node(requirement.target_key)
+                target_name = (
+                    target_node.name if target_node is not None else requirement.target_key
+                )
+        action_description = action.name
+        if target_name is not None:
+            action_description = f"{action_description} · {target_name}"
+        return {
+            "identity": identity,
+            "key": identity,
+            "kind": "ACTION_COMPLETED",
+            "description": (
+                f"Completed: {action_description}"
+                if completed
+                else f"Complete: {action_description}"
+            ),
+            "action_key": requirement.action_key,
+            "action_name": action.name,
+            "actor_key": requirement.actor_key,
+            "actor_name": actor.name if actor is not None else None,
+            "target_key": requirement.target_key,
+            "target_name": target_name,
+            "binding_constraints": [
+                item.model_dump(mode="json") for item in requirement.binding_constraints
+            ],
+            "parameter_constraints": requirement.parameter_constraints,
+            "match_mode": requirement.match_mode,
+            "boundary": requirement.boundary,
+            "operation_status": "COMPLETED" if completed else "PENDING",
+        }
+
+    @staticmethod
     def _dynamic_requirement_description(
         definition: ScenarioDefinitionV2,
         requirement: ObjectiveRequirementV2,
@@ -555,6 +666,35 @@ class MissionRoadmapProjector:
             if region is not None and resource is not None and requirement.minimum is not None:
                 return f"{region.name}: {resource.name} reaches at least {requirement.minimum}."
         return "The requested resource reserve reaches its target."
+
+
+def _state_requirement(
+    item: FormalGoalRequirementV1 | FormalGoalRequirementV2,
+) -> ObjectiveRequirementV2:
+    requirement = item.requirement
+    if not isinstance(requirement, ObjectiveRequirementV2):
+        raise AssertionError("Expected a state requirement")
+    return requirement
+
+
+def _operation_requirement(
+    item: FormalGoalRequirementV2,
+) -> FormalGoalActionCompletedRequirementV1:
+    requirement = item.requirement
+    if not isinstance(requirement, FormalGoalActionCompletedRequirementV1):
+        raise AssertionError("Expected an operation requirement")
+    return requirement
+
+
+def _state_requirement_is_visible(
+    item: FormalGoalRequirementV1 | FormalGoalRequirementV2,
+    known_facts: dict[tuple[str, str], StrictScalar],
+) -> bool:
+    requirement = _state_requirement(item)
+    gate = requirement.knowledge_gate
+    if gate is None:
+        return True
+    return known_facts.get((gate.node_key, gate.fact_key)) in gate.accepted_values
 
 
 __all__ = [

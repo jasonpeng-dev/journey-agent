@@ -17,13 +17,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.authority import actor_binding_matches, evaluate_authority
-from app.agent.formal_goal_projection import formal_goal_planning_objectives
+from app.agent.formal_goal_projection import (
+    formal_goal_planning_objectives,
+)
 from app.agent.objective_scope import ObjectiveScope
 from app.agent.planner_contract import action_planner_effects
 from app.agent.planning_context import (
     PlanningActionCatalogBuilder,
     PlanningContextBuilder,
     PlanningContinuityBuilder,
+    _action_planning_is_public,
     _known_world_facts,
     _objective_refs,
     objective_context,
@@ -38,6 +41,7 @@ from app.agent.provider import (
     DynamicGoalRecoveryFeedback,
     GenericModelProvider,
     GenericProviderError,
+    OperationGoalProjection,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
@@ -73,18 +77,24 @@ from app.domain.enums import (
     WorldOperationStatus,
 )
 from app.domain.formal_goal import (
+    AdHocActionCompletedRequirementCandidateV1,
     AdHocDerivedStateRequirementCandidateV1,
     AdHocFactRequirementCandidateV1,
     AdHocGoalCandidateSetV1,
-    AdHocGoalRequirementCandidateV1,
+    AdHocGoalCandidateSetV2,
+    AdHocGoalRequirementCandidateV2,
     AdHocResourceAtLeastRequirementCandidateV1,
+    FormalGoalContract,
     FormalGoalContractV1,
+    FormalGoalContractV2,
     FormalGoalError,
     FormalGoalSourceKind,
-    canonicalize_ad_hoc_dynamic_candidates,
+    canonicalize_ad_hoc_dynamic_candidates_v2,
     compile_ad_hoc_dynamic_goal,
+    compile_ad_hoc_dynamic_goal_v2,
     compile_predefined_formal_goal,
     validate_ad_hoc_dynamic_candidates,
+    validate_ad_hoc_dynamic_candidates_v2,
 )
 from app.domain.resources import is_runtime_known_inflow_pool, resource_state_key
 from app.domain.runtime_scope import RuntimeScope
@@ -205,6 +215,63 @@ class _StaticProposalBinding:
     parameters: ActionParameters
 
 
+def _operation_goal_step_matches(
+    operation_goal: OperationGoalProjection,
+    binding: _StaticProposalBinding,
+    definition: ScenarioDefinitionV2,
+    projected_actor_locations: dict[str, str],
+) -> bool:
+    """Match a proposed concrete step to the frozen operation constraint."""
+
+    if binding.action.key != operation_goal.action_key:
+        return False
+    if operation_goal.actor_key is not None and binding.actor.actor_key != operation_goal.actor_key:
+        return False
+    if operation_goal.target_key is not None and binding.target_key != operation_goal.target_key:
+        return False
+
+    invocation_bindings: dict[str, str] = {}
+    if binding.action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+        source_node_key = projected_actor_locations.get(binding.actor.actor_key)
+        target_node_key = (
+            projected_actor_locations.get(binding.target_key)
+            if binding.action.target_kind == ActionTargetKind.ACTOR
+            else binding.target_key
+        )
+        if source_node_key is None or target_node_key is None:
+            return False
+        try:
+            invocation_bindings = {
+                "source_region": region_for_node(definition, source_node_key),
+                "destination_region": region_for_node(definition, target_node_key),
+            }
+        except LocalityEngineError:
+            return False
+
+    invocation = canonical_action_invocation(
+        binding.action,
+        actor_key=binding.actor.actor_key,
+        target_key=binding.target_key,
+        parameters=binding.parameters,
+        bindings=invocation_bindings,
+    )
+    expected_bindings = {item.role: item.value for item in operation_goal.binding_constraints}
+    actual_bindings = {item.role: item.value for item in invocation.bindings}
+    if any(actual_bindings.get(role) != value for role, value in expected_bindings.items()):
+        return False
+    if operation_goal.parameter_constraints is not None:
+        expected = canonical_action_invocation(
+            binding.action,
+            actor_key=binding.actor.actor_key,
+            target_key=binding.target_key,
+            parameters=operation_goal.parameter_constraints,
+            bindings=invocation_bindings,
+        )
+        if invocation.parameters != expected.parameters:
+            return False
+    return True
+
+
 _NON_TERMINAL_TASK_STATUSES = (
     AgentTaskStatus.ACTIVE,
     AgentTaskStatus.REQUIRES_PLAYER_DECISION,
@@ -262,7 +329,7 @@ class GenericGoalResolution:
     clarification_prompt: str | None = None
     source: str = "DETERMINISTIC"
     provider_observation: dict[str, object] | None = None
-    dynamic_requirements: tuple[AdHocGoalRequirementCandidateV1, ...] = ()
+    dynamic_requirements: tuple[AdHocGoalRequirementCandidateV2, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +356,8 @@ class _DynamicGoalProjection:
     allowed_resource_keys: tuple[str, ...] = ()
     allowed_derived_state_keys: tuple[str, ...] = ()
     allowed_fact_keys: tuple[tuple[str, str], ...] = ()
+    allowed_action_keys: tuple[str, ...] = ()
+    allowed_actor_keys: tuple[str, ...] = ()
 
 
 def _is_current_derived_objective(
@@ -442,7 +511,7 @@ class GenericGoalResolver:
             validation_result: dict[str, object] | None = None,
             rejection_code: str | None = None,
             validation_diagnostics: tuple[dict[str, object], ...] = (),
-            accepted_requirements: tuple[AdHocGoalRequirementCandidateV1, ...] = (),
+            accepted_requirements: tuple[AdHocGoalRequirementCandidateV2, ...] = (),
             candidate_refs: tuple[DynamicGoalCandidateReference, ...] = (),
             projection_for_call: _DynamicGoalProjection | None = None,
         ) -> None:
@@ -1118,11 +1187,17 @@ class GenericGoalResolver:
                     interpretation_failed = True
                     break
 
-                candidate_set = AdHocGoalCandidateSetV1(requirements=interpretation.requirements)
+                candidate_set = AdHocGoalCandidateSetV2(requirements=interpretation.requirements)
                 try:
-                    canonical_candidate_set = canonicalize_ad_hoc_dynamic_candidates(
+                    canonical_candidate_set = canonicalize_ad_hoc_dynamic_candidates_v2(
                         definition,
                         candidate_set,
+                    )
+                    _validate_dynamic_goal_lossless_operation_semantics(
+                        goal,
+                        definition,
+                        grounding,
+                        canonical_candidate_set,
                     )
                 except FormalGoalError as exc:
                     last_backend_rejection_code = exc.code
@@ -1343,6 +1418,7 @@ class GenericAgentService:
             )
         objective_keys: tuple[str, ...] = ()
         objective_scope: ObjectiveScope | None = None
+        formal_goal: FormalGoalContract
         try:
             if resolution.objective_keys and resolution.dynamic_requirements:
                 raise FormalGoalError(
@@ -1365,7 +1441,7 @@ class GenericAgentService:
                     f"scenario-version:{self.scope.scenario_version_id}",
                 )
             elif resolution.dynamic_requirements:
-                candidate_set = AdHocGoalCandidateSetV1(
+                candidate_set = AdHocGoalCandidateSetV2(
                     requirements=resolution.dynamic_requirements
                 )
                 _validate_dynamic_goal_publicity(
@@ -1374,7 +1450,18 @@ class GenericAgentService:
                     definition,
                     candidate_set,
                 )
-                formal_goal = compile_ad_hoc_dynamic_goal(snapshot, candidate_set)
+                if any(
+                    isinstance(item, AdHocActionCompletedRequirementCandidateV1)
+                    for item in candidate_set.requirements
+                ):
+                    formal_goal = compile_ad_hoc_dynamic_goal_v2(snapshot, candidate_set)
+                else:
+                    # Preserve the exact V1 contract/hash for state-only
+                    # dynamic Goals and their existing persisted payloads.
+                    formal_goal = compile_ad_hoc_dynamic_goal(
+                        snapshot,
+                        AdHocGoalCandidateSetV1(requirements=tuple(candidate_set.requirements)),
+                    )
             else:
                 raise FormalGoalError(
                     "FORMAL_GOAL_REQUIREMENTS_REQUIRED",
@@ -2171,6 +2258,7 @@ class GenericAgentService:
             result = FormalGoalCompletionEvaluator(self.db, self.scope).evaluate(
                 contract,
                 definition=definition,
+                task=task,
             )
         except LookupError:
             raise GenericAgentError(
@@ -2400,7 +2488,7 @@ class GenericAgentService:
         planning_cycle: PlanningCycle | None = None,
         planner_input_override: PlannerInput | None = None,
         planning_continuity: PlanningContinuity | None = None,
-        formal_goal: FormalGoalContractV1 | None = None,
+        formal_goal: FormalGoalContract | None = None,
     ) -> list[dict[str, object]]:
         assert self.provider is not None
         if planning_continuity is None and reason is not None:
@@ -2493,7 +2581,11 @@ class GenericAgentService:
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()
-        if not planning_context.relevant_actions and not self.evaluate(task).completed:
+        if (
+            not planning_context.relevant_actions
+            and planner_input.operation_goal is None
+            and not self.evaluate(task).completed
+        ):
             self._finish_planning_cycle(
                 planning_cycle,
                 status="REJECTED",
@@ -2881,6 +2973,8 @@ class GenericAgentService:
         if diagnostics:
             return [], tuple(_diagnostic_with_step_id(item, proposed_steps) for item in diagnostics)
 
+        operation_goal_covered = False
+
         public_known_facts = {
             identity: projected.value
             for identity, projected in projected_known_facts.items()
@@ -2986,6 +3080,16 @@ class GenericAgentService:
                 target_key,
                 planner_input=planner_input,
             )
+            operation_goal_matches = bool(
+                planner_input is not None
+                and planner_input.operation_goal is not None
+                and _operation_goal_step_matches(
+                    planner_input.operation_goal,
+                    static_binding,
+                    definition,
+                    projected_actor_locations,
+                )
+            )
             resource_effects = _action_resource_goal_effects(
                 definition,
                 action,
@@ -3045,6 +3149,7 @@ class GenericAgentService:
                     reason,
                     task.id,
                     allow_epistemic=True,
+                    matches_operation_goal=operation_goal_matches,
                 )
             except GenericAgentError as exc:
                 diagnostics.append(
@@ -3078,6 +3183,13 @@ class GenericAgentService:
                     objective_resource_refs,
                 )
             )
+            if (
+                stop_reason == "OBJECTIVE_COMPLETION"
+                and planner_input is not None
+                and planner_input.operation_goal is not None
+                and operation_goal_matches
+            ):
+                operation_goal_covered = True
             self._advance_projected_action_state(
                 definition,
                 action,
@@ -3096,6 +3208,34 @@ class GenericAgentService:
 
         if diagnostics:
             return [], tuple(_diagnostic_with_step_id(item, proposed_steps) for item in diagnostics)
+
+        if (
+            stop_reason == "OBJECTIVE_COMPLETION"
+            and planner_input is not None
+            and planner_input.operation_goal is not None
+            and not operation_goal_covered
+        ):
+            operation_goal = planner_input.operation_goal
+            return [], (
+                {
+                    "code": "ACTION_COMPLETED_NOT_COVERED",
+                    "failure_code": "ACTION_COMPLETED_NOT_COVERED",
+                    "dimension": "OBJECTIVE_COMPLETION",
+                    "required": {
+                        "kind": "ACTION_COMPLETED",
+                        "action_key": operation_goal.action_key,
+                        "actor_key": operation_goal.actor_key,
+                        "target_key": operation_goal.target_key,
+                        "match_mode": operation_goal.match_mode,
+                        "boundary": operation_goal.boundary,
+                    },
+                    "actual": "NO_MATCHING_CONCRETE_INVOCATION",
+                    "message": (
+                        "OBJECTIVE_COMPLETION requires one concrete successful-invocation "
+                        "step matching the frozen ACTION_COMPLETED Goal."
+                    ),
+                },
+            )
 
         if stop_reason == "OBJECTIVE_COMPLETION":
             completion_violation = self._projected_objective_completion_violation(
@@ -3523,6 +3663,9 @@ class GenericAgentService:
             if planner_input is not None
             else None
         )
+        projected_operation_actor_locations = {
+            actor_key: actor.current_node_key for actor_key, actor in actors.items()
+        }
         known_facts = _known_world_facts(planning_context.current_knowledge)
         objective_refs = _objective_refs(
             objectives,
@@ -3748,12 +3891,32 @@ class GenericAgentService:
                 )
                 continue
             projected_refs = effect_refs
+            binding = _StaticProposalBinding(
+                index=index,
+                raw_step=raw_step,
+                candidate=candidate,
+                action=action,
+                actor=actor,
+                target_key=target_key,
+                parameters=parameters,
+            )
+            operation_goal_matches = bool(
+                planner_input is not None
+                and planner_input.operation_goal is not None
+                and _operation_goal_step_matches(
+                    planner_input.operation_goal,
+                    binding,
+                    definition,
+                    projected_operation_actor_locations,
+                )
+            )
             actual_relevance = (
                 "NO_DECLARED_RELEVANT_EFFECT"
                 if objective_refs.isdisjoint(projected_refs)
                 and not resource_effects
                 and not action.planning.supporting_effects
                 and action_key not in context_action_keys
+                and not operation_goal_matches
                 else None
             )
             if actual_relevance is not None:
@@ -3771,17 +3934,7 @@ class GenericAgentService:
                     }
                 )
                 continue
-            bindings.append(
-                _StaticProposalBinding(
-                    index=index,
-                    raw_step=raw_step,
-                    candidate=candidate,
-                    action=action,
-                    actor=actor,
-                    target_key=target_key,
-                    parameters=parameters,
-                )
-            )
+            bindings.append(binding)
         return bindings, diagnostics
 
     @staticmethod
@@ -5676,6 +5829,7 @@ class GenericAgentService:
         task_id: UUID,
         *,
         allow_epistemic: bool = False,
+        matches_operation_goal: bool = False,
     ) -> list[dict[str, object]]:
         action = next(
             (item for item in definition.actions if item.key == candidate.action_key), None
@@ -5754,6 +5908,7 @@ class GenericAgentService:
             and not resource_effects
             and not action.planning.supporting_effects
             and not allow_epistemic
+            and not matches_operation_goal
         ):
             raise GenericAgentError(
                 "OBJECTIVE_IRRELEVANT",
@@ -5970,7 +6125,7 @@ class GenericAgentService:
     def _definition(self) -> ScenarioDefinitionV2:
         return self._snapshot().definition
 
-    def _formal_goal(self, task: AgentTask) -> FormalGoalContractV1:
+    def _formal_goal(self, task: AgentTask) -> FormalGoalContract:
         try:
             return load_formal_goal_for_task(self.db, self.scope, task)
         except FormalGoalPersistenceError as exc:
@@ -5997,7 +6152,12 @@ class GenericAgentService:
         keys = tuple(task.objective_scope_keys or ())
         if not keys and task.formal_goal_contract_json is not None:
             try:
-                contract = FormalGoalContractV1.model_validate(task.formal_goal_contract_json)
+                contract_model = (
+                    FormalGoalContractV2
+                    if task.formal_goal_contract_json.get("schema_version") == 2
+                    else FormalGoalContractV1
+                )
+                contract = contract_model.model_validate(task.formal_goal_contract_json)
             except (TypeError, ValueError) as exc:
                 raise GenericAgentError(
                     "FORMAL_GOAL_PERSISTENCE_INVALID",
@@ -6082,6 +6242,47 @@ def _dynamic_goal_public_keys(
     return public_nodes, public_facts, public_regions
 
 
+def _dynamic_goal_public_action_keys(
+    db: Session | None,
+    scope: RuntimeScope | None,
+    definition: ScenarioDefinitionV2,
+) -> set[str]:
+    """Return Actions whose authored planning gate is public in this Instance."""
+
+    if db is not None and scope is not None:
+        projection = SharedKnowledgeProjection(db, scope, definition)
+        known_facts = {
+            (row.node_key, row.fact_key): row.truth_value for row in projection.known_fact_rows()
+        }
+    else:
+        known_facts = {
+            (node.key, fact.key): fact.initial_value
+            for node in definition.world.nodes
+            if node.initial_visibility == Visibility.KNOWN
+            for fact in node.facts
+            if fact.initial_visibility == Visibility.KNOWN
+        }
+    return {
+        action.key
+        for action in definition.actions
+        if _action_planning_is_public(action, known_facts)
+    }
+
+
+def _dynamic_goal_public_actor_keys(
+    db: Session | None,
+    scope: RuntimeScope | None,
+    definition: ScenarioDefinitionV2,
+) -> set[str]:
+    """Return public Actor identities without exposing runtime Actor Truth."""
+
+    if db is not None and scope is not None:
+        return {
+            row.actor_key for row in SharedKnowledgeProjection(db, scope, definition).actor_rows()
+        }
+    return {actor.key for actor in definition.actors.actor_profiles}
+
+
 def _dynamic_goal_public_relations(
     db: Session | None,
     scope: RuntimeScope | None,
@@ -6129,6 +6330,8 @@ def _dynamic_goal_entity_catalog(
         scope,
         definition,
     )
+    public_action_keys = _dynamic_goal_public_action_keys(db, scope, definition)
+    public_actor_keys = _dynamic_goal_public_actor_keys(db, scope, definition)
     nodes_by_key = {node.key: node for node in definition.world.nodes}
     nodes = [
         {
@@ -6215,6 +6418,26 @@ def _dynamic_goal_entity_catalog(
         for state in sorted(definition.derived_states, key=lambda item: item.key)
         if state.goal_addressable
     )
+    references.extend(
+        {
+            "ref_type": "ACTION",
+            "key": action.key,
+            "name": action.name,
+            "description": action.description,
+        }
+        for action in sorted(definition.actions, key=lambda item: item.key)
+        if action.key in public_action_keys
+    )
+    references.extend(
+        {
+            "ref_type": "ACTOR",
+            "key": actor.key,
+            "name": actor.name,
+            "description": actor.persona,
+        }
+        for actor in sorted(definition.actors.actor_profiles, key=lambda item: item.key)
+        if actor.key in public_actor_keys
+    )
     return {
         "schema_version": 1,
         "entities": nodes,
@@ -6234,7 +6457,14 @@ def _dynamic_goal_entity_catalog(
         "references": references,
         "grounding_language": {
             "selection": "PUBLIC_CANDIDATE_REFERENCES_ONLY",
-            "reference_types": ["NODE", "REGION", "RESOURCE", "DERIVED_STATE"],
+            "reference_types": [
+                "NODE",
+                "REGION",
+                "RESOURCE",
+                "DERIVED_STATE",
+                "ACTION",
+                "ACTOR",
+            ],
             "outcomes": ["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"],
         },
     }
@@ -6258,6 +6488,8 @@ def _dynamic_goal_exact_public_matches(
     goal: str,
     definition: ScenarioDefinitionV2,
     public_nodes: set[str],
+    public_action_keys: set[str],
+    public_actor_keys: set[str],
 ) -> tuple[DynamicGoalCandidateReference, ...]:
     normalized_goal = _normalize(goal)
     matches: list[DynamicGoalCandidateReference] = []
@@ -6294,8 +6526,92 @@ def _dynamic_goal_exact_public_matches(
         )
         if any(_contains_public_term(normalized_goal, term) for term in state_terms):
             matches.append(DynamicGoalCandidateReference(ref_type="DERIVED_STATE", key=state.key))
+    for action in sorted(definition.actions, key=lambda item: item.key):
+        if action.key not in public_action_keys:
+            continue
+        action_terms = (_normalize(action.key), _normalize(action.name))
+        if any(_contains_public_term(normalized_goal, term) for term in action_terms):
+            matches.append(DynamicGoalCandidateReference(ref_type="ACTION", key=action.key))
+    for actor in sorted(definition.actors.actor_profiles, key=lambda item: item.key):
+        if actor.key not in public_actor_keys:
+            continue
+        actor_terms = (_normalize(actor.key), _normalize(actor.name))
+        if any(_contains_public_term(normalized_goal, term) for term in actor_terms):
+            matches.append(DynamicGoalCandidateReference(ref_type="ACTOR", key=actor.key))
     unique = {(item.ref_type, item.key): item for item in matches}
     return tuple(unique[key] for key in sorted(unique))
+
+
+def _augment_dynamic_goal_transport_action_refs(
+    goal: str,
+    definition: ScenarioDefinitionV2,
+    references: tuple[DynamicGoalCandidateReference, ...],
+    public_action_keys: set[str],
+) -> tuple[DynamicGoalCandidateReference, ...]:
+    """Ground public transport Actions for explicit source/target cargo language."""
+
+    region_keys = {item.key for item in references if item.ref_type == "REGION"}
+    resource_keys = {item.key for item in references if item.ref_type == "RESOURCE"}
+    if len(region_keys) < 2 or not resource_keys or re.search(r"\d+", goal) is None:
+        return references
+    transport_refs = tuple(
+        DynamicGoalCandidateReference(ref_type="ACTION", key=action.key)
+        for action in sorted(definition.actions, key=lambda item: item.key)
+        if action.key in public_action_keys and action.behavior == ActionBehavior.TRANSPORT_RESOURCE
+    )
+    if not transport_refs:
+        return references
+    unique = {(item.ref_type, item.key): item for item in (*references, *transport_refs)}
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _validate_dynamic_goal_lossless_operation_semantics(
+    goal: str,
+    definition: ScenarioDefinitionV2,
+    grounding: _DynamicGoalGrounding,
+    candidates: AdHocGoalCandidateSetV2,
+) -> None:
+    """Reject a state downgrade when public language names an operation."""
+
+    if any(
+        isinstance(item, AdHocActionCompletedRequirementCandidateV1)
+        for item in candidates.requirements
+    ):
+        return
+
+    grounded_action_keys = {
+        item.key for item in grounding.candidate_refs if item.ref_type == "ACTION"
+    }
+    if not grounded_action_keys:
+        return
+    grounded_entity_keys = {
+        item.key
+        for item in grounding.candidate_refs
+        if item.ref_type in {"NODE", "REGION", "ACTOR"}
+    }
+    grounded_region_keys = {
+        item.key for item in grounding.candidate_refs if item.ref_type == "REGION"
+    }
+    grounded_resource_keys = {
+        item.key for item in grounding.candidate_refs if item.ref_type == "RESOURCE"
+    }
+    has_explicit_amount = re.search(r"\d+", goal) is not None
+    operation_keys: set[str] = set()
+    for action in definition.actions:
+        if action.key not in grounded_action_keys:
+            continue
+        if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+            if len(grounded_region_keys) >= 2 and grounded_resource_keys and has_explicit_amount:
+                operation_keys.add(action.key)
+        elif action.behavior != ActionBehavior.RULE and grounded_entity_keys:
+            operation_keys.add(action.key)
+    if not operation_keys:
+        return
+    raise FormalGoalError(
+        "FORMAL_GOAL_OPERATION_SEMANTICS_LOST",
+        "The Goal names a concrete Action but the provider returned only a state requirement",
+        details={"action_keys": sorted(operation_keys)},
+    )
 
 
 def _dynamic_goal_topology_matches(
@@ -6410,7 +6726,20 @@ def _deterministic_dynamic_goal_grounding(
         scope,
         definition,
     )
-    reference_matches = _dynamic_goal_exact_public_matches(goal, definition, public_nodes)
+    public_action_keys = _dynamic_goal_public_action_keys(db, scope, definition)
+    reference_matches = _dynamic_goal_exact_public_matches(
+        goal,
+        definition,
+        public_nodes,
+        public_action_keys,
+        _dynamic_goal_public_actor_keys(db, scope, definition),
+    )
+    reference_matches = _augment_dynamic_goal_transport_action_refs(
+        goal,
+        definition,
+        reference_matches,
+        public_action_keys,
+    )
     direct_entity_matches = tuple(item.key for item in reference_matches if item.ref_type == "NODE")
     direct_region_matches = tuple(
         item.key for item in reference_matches if item.ref_type == "REGION"
@@ -6496,6 +6825,8 @@ def _validate_dynamic_goal_candidate_refs(
             "Dynamic Goal Entity Grounding returned duplicate references",
         )
     public_resources = {item.key for item in definition.world.resources}
+    public_actions = _dynamic_goal_public_action_keys(db, scope, definition)
+    public_actors = _dynamic_goal_public_actor_keys(db, scope, definition)
     public_derived = {item.key for item in definition.derived_states if item.goal_addressable}
     for reference in candidate_refs:
         if reference.ref_type == "NODE":
@@ -6515,6 +6846,18 @@ def _validate_dynamic_goal_candidate_refs(
                 raise FormalGoalError(
                     "FORMAL_GOAL_DYNAMIC_RESOURCE_NOT_PUBLIC",
                     "Dynamic Goal Grounding returned a non-public Resource",
+                )
+        elif reference.ref_type == "ACTION":
+            if reference.key not in public_actions:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_ACTION_NOT_PUBLIC",
+                    "Dynamic Goal Grounding returned a non-public Action",
+                )
+        elif reference.ref_type == "ACTOR":
+            if reference.key not in public_actors:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_ACTOR_NOT_PUBLIC",
+                    "Dynamic Goal Grounding returned a non-public Actor",
                 )
         elif reference.key not in public_derived:
             raise FormalGoalError(
@@ -6542,6 +6885,8 @@ def _dynamic_goal_projection(
         scope,
         definition,
     )
+    public_action_keys = _dynamic_goal_public_action_keys(db, scope, definition)
+    public_actor_keys = _dynamic_goal_public_actor_keys(db, scope, definition)
     public_relations = _dynamic_goal_public_relations(
         db,
         scope,
@@ -6550,6 +6895,20 @@ def _dynamic_goal_projection(
     )
     allowed_entity_keys = tuple(
         sorted(item.key for item in grounding.candidate_refs if item.ref_type == "NODE")
+    )
+    allowed_action_keys = tuple(
+        sorted(
+            item.key
+            for item in grounding.candidate_refs
+            if item.ref_type == "ACTION" and item.key in public_action_keys
+        )
+    )
+    allowed_actor_keys = tuple(
+        sorted(
+            item.key
+            for item in grounding.candidate_refs
+            if item.ref_type == "ACTOR" and item.key in public_actor_keys
+        )
     )
     allowed_region_keys = {
         item.key for item in grounding.candidate_refs if item.ref_type == "REGION"
@@ -6588,6 +6947,8 @@ def _dynamic_goal_projection(
             )
         ),
         allowed_fact_keys=allowed_fact_keys,
+        allowed_action_keys=allowed_action_keys,
+        allowed_actor_keys=allowed_actor_keys,
     )
 
 
@@ -6596,6 +6957,7 @@ def _dynamic_goal_grounding_has_semantics(projection: _DynamicGoalProjection) ->
         projection.allowed_fact_keys
         or (projection.allowed_region_keys and projection.allowed_resource_keys)
         or projection.allowed_derived_state_keys
+        or projection.allowed_action_keys
     )
 
 
@@ -6617,7 +6979,7 @@ def _dynamic_goal_grounding_observation(
 def _dynamic_goal_projection_observation(
     projection: _DynamicGoalProjection,
 ) -> dict[str, object]:
-    return {
+    observation: dict[str, object] = {
         "allowed_entity_keys": list(projection.allowed_entity_keys),
         "allowed_region_keys": list(projection.allowed_region_keys),
         "allowed_resource_keys": list(projection.allowed_resource_keys),
@@ -6626,6 +6988,11 @@ def _dynamic_goal_projection_observation(
             f"{node_key}.{fact_key}" for node_key, fact_key in projection.allowed_fact_keys
         ],
     }
+    if projection.allowed_action_keys:
+        observation["allowed_action_keys"] = list(projection.allowed_action_keys)
+    if projection.allowed_actor_keys:
+        observation["allowed_actor_keys"] = list(projection.allowed_actor_keys)
+    return observation
 
 
 def _dynamic_goal_payload_hash(payload: dict[str, object]) -> str:
@@ -6660,6 +7027,11 @@ def _dynamic_goal_response_observation(
         return payload
     assert projection is not None
     safe_requirements: list[object] = []
+    public_target_keys = {
+        *projection.allowed_entity_keys,
+        *projection.allowed_region_keys,
+        *projection.allowed_actor_keys,
+    }
     for raw in requirements:
         if not isinstance(raw, dict):
             safe_requirements.append(raw)
@@ -6685,6 +7057,35 @@ def _dynamic_goal_response_observation(
             is_public = item.get("derived_key") in projection.allowed_derived_state_keys
             if not is_public:
                 item["derived_key"] = {"json_type": "string", "value_omitted": True}
+        elif kind == "ACTION_COMPLETED":
+            is_public = (
+                item.get("action_key") in projection.allowed_action_keys
+                and (
+                    item.get("actor_key") is None
+                    or item.get("actor_key") in projection.allowed_actor_keys
+                )
+                and (item.get("target_key") is None or item.get("target_key") in public_target_keys)
+            )
+            raw_bindings = item.get("binding_constraints", [])
+            if isinstance(raw_bindings, list):
+                is_public = is_public and all(
+                    isinstance(binding, dict)
+                    and binding.get("role") in {"source_region", "destination_region"}
+                    and binding.get("value") in projection.allowed_region_keys
+                    for binding in raw_bindings
+                )
+            else:
+                is_public = False
+            if not is_public:
+                for field in (
+                    "action_key",
+                    "actor_key",
+                    "target_key",
+                    "binding_constraints",
+                    "parameter_constraints",
+                ):
+                    if field in item:
+                        item[field] = {"json_type": "value", "value_omitted": True}
         if not is_public and "accepted_values" in item:
             item["accepted_values"] = {"json_type": "array", "value_omitted": True}
         safe_requirements.append(item)
@@ -6706,6 +7107,8 @@ def _dynamic_goal_ontology(
         scope,
         definition,
     )
+    public_action_keys = _dynamic_goal_public_action_keys(db, scope, definition)
+    public_actor_keys = _dynamic_goal_public_actor_keys(db, scope, definition)
     public_relations = _dynamic_goal_public_relations(
         db,
         scope,
@@ -6732,6 +7135,16 @@ def _dynamic_goal_ontology(
         set(projection.allowed_derived_state_keys)
         if projection is not None and grounding is not None
         else {item.key for item in definition.derived_states if item.goal_addressable}
+    )
+    allowed_action_keys = (
+        set(projection.allowed_action_keys)
+        if projection is not None and grounding is not None
+        else public_action_keys
+    )
+    allowed_actor_keys = (
+        set(projection.allowed_actor_keys)
+        if projection is not None and grounding is not None
+        else public_actor_keys
     )
     nodes = [
         {
@@ -6784,6 +7197,33 @@ def _dynamic_goal_ontology(
         for state in sorted(definition.derived_states, key=lambda item: item.key)
         if state.key in allowed_derived_state_keys and state.goal_addressable
     ]
+    actions = [
+        {
+            "key": action.key,
+            "name": action.name,
+            "description": action.description,
+            "target_kind": action.target_kind.value,
+            "behavior": action.behavior.value,
+            "locality": action.locality.value,
+            **(
+                {"required_actor_role_key": action.required_actor_role_key}
+                if action.required_actor_role_key is not None
+                else {}
+            ),
+            "parameters": [item.model_dump(mode="json") for item in action.parameters],
+        }
+        for action in sorted(definition.actions, key=lambda item: item.key)
+        if action.key in public_action_keys and action.key in allowed_action_keys
+    ]
+    actors = [
+        {
+            "key": actor.key,
+            "name": actor.name,
+            "role_key": actor.role_key,
+        }
+        for actor in sorted(definition.actors.actor_profiles, key=lambda item: item.key)
+        if actor.key in public_actor_keys and actor.key in allowed_actor_keys
+    ]
     requirement_kinds: list[str] = []
     if facts:
         requirement_kinds.append("FACT")
@@ -6791,6 +7231,8 @@ def _dynamic_goal_ontology(
         requirement_kinds.append("RESOURCE_AT_LEAST")
     if derived_states:
         requirement_kinds.append("DERIVED_STATE")
+    if actions:
+        requirement_kinds.append("ACTION_COMPLETED")
     grounding_payload: dict[str, object]
     if grounding is not None:
         grounding_payload = {
@@ -6800,18 +7242,7 @@ def _dynamic_goal_ontology(
             "entity_keys": list(grounding.entity_keys),
             "scope_keys": list(grounding.scope_keys),
             "projection": (
-                {
-                    "allowed_entity_keys": list(projection.allowed_entity_keys),
-                    "allowed_region_keys": list(projection.allowed_region_keys),
-                    "allowed_resource_keys": list(projection.allowed_resource_keys),
-                    "allowed_derived_state_keys": list(projection.allowed_derived_state_keys),
-                    "allowed_fact_keys": [
-                        f"{node_key}.{fact_key}"
-                        for node_key, fact_key in projection.allowed_fact_keys
-                    ],
-                }
-                if projection is not None
-                else {}
+                _dynamic_goal_projection_observation(projection) if projection is not None else {}
             ),
         }
     else:
@@ -6835,6 +7266,8 @@ def _dynamic_goal_ontology(
             "facts": facts,
             "resources": resources,
             "derived_states": derived_states,
+            "actions": actions,
+            "actors": actors,
             "topology": [
                 relation
                 for relation in public_relations
@@ -6852,23 +7285,44 @@ def _dynamic_goal_ontology(
     }
 
 
+def _action_parameter_resource_keys(parameters: Mapping[str, object]) -> set[str]:
+    """Extract only public Resource identities from an Action parameter value."""
+
+    resource_keys: set[str] = set()
+    raw_resources = parameters.get("resources")
+    if isinstance(raw_resources, (list, tuple)):
+        for item in raw_resources:
+            if isinstance(item, Mapping) and isinstance(item.get("resource_key"), str):
+                resource_keys.add(item["resource_key"])
+    raw_resource_key = parameters.get("resource_key")
+    if isinstance(raw_resource_key, str):
+        resource_keys.add(raw_resource_key)
+    return resource_keys
+
+
 def _validate_dynamic_goal_publicity(
     db: Session | None,
     scope: RuntimeScope | None,
     definition: ScenarioDefinitionV2,
-    candidates: AdHocGoalCandidateSetV1,
+    candidates: AdHocGoalCandidateSetV1 | AdHocGoalCandidateSetV2,
     *,
     projection: _DynamicGoalProjection | None = None,
 ) -> None:
     """Reject a candidate that names a currently non-public ontology item."""
 
-    validate_ad_hoc_dynamic_candidates(definition, candidates)
+    if isinstance(candidates, AdHocGoalCandidateSetV2):
+        validate_ad_hoc_dynamic_candidates_v2(definition, candidates)
+    else:
+        validate_ad_hoc_dynamic_candidates(definition, candidates)
     public_nodes, goal_addressable_facts, public_regions = _dynamic_goal_public_keys(
         db,
         scope,
         definition,
     )
     public_resources = {item.key for item in definition.world.resources}
+    public_actions = _dynamic_goal_public_action_keys(db, scope, definition)
+    public_actors = _dynamic_goal_public_actor_keys(db, scope, definition)
+    public_target_keys = {*public_nodes, *public_regions, *public_actors}
     for candidate in candidates.requirements:
         if isinstance(candidate, AdHocFactRequirementCandidateV1):
             if candidate.node_key not in public_nodes:
@@ -6908,6 +7362,71 @@ def _validate_dynamic_goal_publicity(
                 raise FormalGoalError(
                     "FORMAL_GOAL_DYNAMIC_GROUNDING_MISMATCH",
                     "Dynamic Goal Derived State is outside the grounded public projection",
+                )
+            continue
+        if isinstance(candidate, AdHocActionCompletedRequirementCandidateV1):
+            action = next(
+                (item for item in definition.actions if item.key == candidate.action_key),
+                None,
+            )
+            if action is None or candidate.action_key not in public_actions:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_ACTION_NOT_PUBLIC",
+                    "Dynamic Goal references a non-public Action",
+                )
+            if candidate.actor_key is not None and candidate.actor_key not in public_actors:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_ACTOR_NOT_PUBLIC",
+                    "Dynamic Goal references a non-public Actor",
+                )
+            if candidate.target_key is not None:
+                if action.target_kind == ActionTargetKind.ACTOR:
+                    target_is_public = candidate.target_key in public_actors
+                else:
+                    target_is_public = candidate.target_key in public_target_keys
+                if not target_is_public:
+                    raise FormalGoalError(
+                        "FORMAL_GOAL_DYNAMIC_TARGET_NOT_PUBLIC",
+                        "Dynamic Goal references a non-public Action target",
+                    )
+            if any(item.value not in public_regions for item in candidate.binding_constraints):
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_BINDING_NOT_PUBLIC",
+                    "Dynamic Goal references a non-public Action binding",
+                )
+            raw_parameters = candidate.parameter_constraints
+            parameter_resources: set[str] = set()
+            if raw_parameters is not None:
+                parameter_resources = _action_parameter_resource_keys(raw_parameters)
+                if not parameter_resources.issubset(public_resources):
+                    raise FormalGoalError(
+                        "FORMAL_GOAL_DYNAMIC_RESOURCE_NOT_PUBLIC",
+                        "Dynamic Goal references a non-public Action Resource",
+                    )
+            if projection is not None and (
+                candidate.action_key not in projection.allowed_action_keys
+                or (
+                    candidate.actor_key is not None
+                    and candidate.actor_key not in projection.allowed_actor_keys
+                )
+                or (
+                    candidate.target_key is not None
+                    and candidate.target_key
+                    not in {
+                        *projection.allowed_entity_keys,
+                        *projection.allowed_region_keys,
+                        *projection.allowed_actor_keys,
+                    }
+                )
+                or any(
+                    item.value not in projection.allowed_region_keys
+                    for item in candidate.binding_constraints
+                )
+                or not parameter_resources.issubset(projection.allowed_resource_keys)
+            ):
+                raise FormalGoalError(
+                    "FORMAL_GOAL_DYNAMIC_GROUNDING_MISMATCH",
+                    "Dynamic Goal Action is outside the grounded public projection",
                 )
             continue
         assert isinstance(candidate, AdHocResourceAtLeastRequirementCandidateV1)

@@ -434,7 +434,7 @@ class PublicGoalRequirementResponse(ApiModel):
 
     identity: str
     key: str
-    kind: Literal["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"]
+    kind: Literal["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE", "ACTION_COMPLETED"]
     description: str
     node_key: str | None = None
     fact_key: str | None = None
@@ -446,6 +446,17 @@ class PublicGoalRequirementResponse(ApiModel):
     current_known_value: str | int | bool | None = None
     current_known_available: int | None = None
     knowledge_status: Literal["KNOWN", "KNOWN_ZERO", "UNKNOWN"] | None = None
+    action_key: str | None = None
+    action_name: str | None = None
+    actor_key: str | None = None
+    actor_name: str | None = None
+    target_key: str | None = None
+    target_name: str | None = None
+    binding_constraints: list[dict[str, object]] = Field(default_factory=list)
+    parameter_constraints: dict[str, object] | None = None
+    match_mode: Literal["ONE_SUCCESSFUL_INVOCATION"] | None = None
+    boundary: Literal["TASK_OWNED_OPERATION"] | None = None
+    operation_status: Literal["PENDING", "COMPLETED"] | None = None
 
 
 class MissionRoadmapStageResponse(ApiModel):

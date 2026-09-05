@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Any
 
-from app.agent.formal_goal_projection import formal_goal_planning_objectives
+from app.agent.formal_goal_projection import (
+    formal_goal_operation_goal,
+    formal_goal_planning_objectives,
+)
 from app.agent.provider import (
     GoalDependencyProjection,
     PlannerActionContract,
@@ -21,7 +24,7 @@ from app.agent.provider import (
     PlannerTargetBinding,
 )
 from app.domain.enums import ResourceInventoryVisibility
-from app.domain.formal_goal import FormalGoalContractV1
+from app.domain.formal_goal import FormalGoalContract
 from app.domain.scenario_v2 import (
     DerivedDependencyKind,
     ObjectiveDefinitionV2,
@@ -380,7 +383,7 @@ def build_dependency_closure(
     objectives: tuple[ObjectiveDefinitionV2, ...] | None,
     planner_input: PlannerInput,
     *,
-    formal_goal: FormalGoalContractV1 | None = None,
+    formal_goal: FormalGoalContract | None = None,
     dependency_limit: int = 128,
     action_limit: int = 64,
 ) -> DependencyClosureResult:
@@ -390,6 +393,9 @@ def build_dependency_closure(
         objectives = formal_goal_planning_objectives(formal_goal, definition)
     if objectives is None:
         raise ValueError("Dependency closure needs a Formal Goal or Objective projection")
+    operation_goal = planner_input.operation_goal
+    if operation_goal is None and formal_goal is not None:
+        operation_goal = formal_goal_operation_goal(formal_goal)
 
     contracts = {item.action_key: item for item in planner_input.action_contracts}
     bindings = {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
@@ -561,6 +567,19 @@ def build_dependency_closure(
                     None,
                 )
             )
+
+    if operation_goal is not None:
+        queue.append(
+            (
+                TypedDependency(
+                    "ACTION_COMPLETED",
+                    operation_goal.action_key,
+                    required=operation_goal.requirement_identity or "",
+                ),
+                ("operation_goal", operation_goal.action_key),
+                None,
+            )
+        )
 
     visited: set[TypedDependency] = set()
     selected_actions: set[str] = set()
@@ -1400,6 +1419,75 @@ def build_dependency_closure(
                             demand_group=demand_group,
                         )
 
+        elif dependency.dimension == "ACTION_COMPLETED":
+            if operation_goal is None or dependency.subject != operation_goal.action_key:
+                return
+            action = next(
+                (item for item in definition.actions if item.key == operation_goal.action_key),
+                None,
+            )
+            if action is None:
+                return
+            if (
+                not select_action(
+                    operation_goal.action_key,
+                    path,
+                    "ACTION_COMPLETED_GOAL",
+                    demand_group=demand_group,
+                )
+                and operation_goal.action_key not in selected_actions
+            ):
+                return
+
+            if operation_goal.target_key is not None:
+                binding_key = (operation_goal.action_key, operation_goal.target_key)
+                known_target = operation_goal.target_key in {
+                    str(item.get("key"))
+                    for item in planner_input.known_world.nodes
+                    if isinstance(item.get("key"), str)
+                } or operation_goal.target_key in {
+                    actor.actor_key for actor in planner_input.actors
+                }
+                if binding_key not in bindings and known_target:
+                    bindings[binding_key] = PlannerTargetBinding(
+                        action_key=operation_goal.action_key,
+                        target_key=operation_goal.target_key,
+                    )
+                if binding_key in bindings:
+                    select_binding(
+                        binding_key,
+                        (*path, f"target:{operation_goal.target_key}"),
+                        "ACTION_COMPLETED_GOAL",
+                        demand_group=demand_group,
+                    )
+            else:
+                for binding_key in sorted(bindings):
+                    if binding_key[0] != operation_goal.action_key:
+                        continue
+                    select_binding(
+                        binding_key,
+                        (*path, f"target_option:{binding_key[1]}"),
+                        "ACTION_COMPLETED_GOAL",
+                        demand_group=demand_group,
+                    )
+
+            for constraint_binding in operation_goal.binding_constraints:
+                if isinstance(constraint_binding.value, str):
+                    relevant_nodes.add(constraint_binding.value)
+            raw_parameters = operation_goal.parameter_constraints
+            if isinstance(raw_parameters, dict):
+                raw_resources = raw_parameters.get("resources")
+                if isinstance(raw_resources, list):
+                    for item in raw_resources:
+                        if isinstance(item, dict) and isinstance(item.get("resource_key"), str):
+                            resource_key = str(item["resource_key"])
+                            relevant_resources.add(resource_key)
+                            relevant_resource_source_hint_resources.add(resource_key)
+                elif isinstance(raw_parameters.get("resource_key"), str):
+                    resource_key = str(raw_parameters["resource_key"])
+                    relevant_resources.add(resource_key)
+                    relevant_resource_source_hint_resources.add(resource_key)
+
     selected_actor_keys: set[str] = set()
     actor_states = {item.actor_key: item for item in planner_input.actors}
     passability_key = definition.metadata.locality.passability_fact_key
@@ -1418,6 +1506,14 @@ def build_dependency_closure(
             all_candidates = [
                 actor for actor in planner_input.actors if actor_matches_executor(actor, contract)
             ]
+            if (
+                operation_goal is not None
+                and operation_goal.action_key == action_key
+                and operation_goal.actor_key is not None
+            ):
+                all_candidates = [
+                    actor for actor in all_candidates if actor.actor_key == operation_goal.actor_key
+                ]
             candidates = all_candidates
             if contract.executor_requirements.get("command_reachability") == "ONLINE":
                 online = [
@@ -1602,6 +1698,7 @@ def build_dependency_closure(
                 for binding_key, item in sorted(bindings.items())
                 if binding_key in selected_bindings
             ),
+            "operation_goal": operation_goal,
             "active_goal_dependencies": active_goal_dependencies,
             "known_world": known_world,
         }

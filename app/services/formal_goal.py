@@ -7,18 +7,28 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.agent.objective_scope import ObjectiveScope, ObjectiveScopeError
-from app.domain.completion import CompletionEvidence, CompletionStatus
+from app.domain.completion import (
+    CompletionEvidence,
+    CompletionStatus,
+    OperationMatchConstraint,
+)
 from app.domain.formal_goal import (
+    FormalGoalActionCompletedRequirementV1,
+    FormalGoalContract,
     FormalGoalContractV1,
+    FormalGoalContractV2,
     FormalGoalError,
     compile_predefined_formal_goal,
 )
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario import ScenarioVersionSnapshot
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import ObjectiveRequirementV2, ScenarioDefinitionV2
 from app.infrastructure.db.models import AgentTask
 from app.scenarios.versions import ScenarioVersionRepository
-from app.services.completion_kernel import evaluate_state_requirement
+from app.services.completion_kernel import (
+    evaluate_operation_requirement,
+    evaluate_state_requirement,
+)
 from app.services.derived_state import evaluate_derived_states
 from app.services.objective_requirements import (
     known_requirement_satisfied,
@@ -62,9 +72,10 @@ class FormalGoalCompletionEvaluator:
 
     def evaluate(
         self,
-        contract: FormalGoalContractV1,
+        contract: FormalGoalContract,
         *,
         definition: ScenarioDefinitionV2 | None = None,
+        task: AgentTask | None = None,
     ) -> FormalGoalEvaluation:
         derived_evaluation = (
             evaluate_derived_states(self.db, self.scope, definition)
@@ -73,10 +84,45 @@ class FormalGoalCompletionEvaluator:
         )
         evaluations: list[FormalGoalRequirementEvaluation] = []
         for item in contract.completion_requirements:
+            if isinstance(item.requirement, FormalGoalActionCompletedRequirementV1):
+                if task is None or definition is None:
+                    raise ValueError(
+                        "ACTION_COMPLETED evaluation requires its Task and Scenario definition"
+                    )
+                constraint = OperationMatchConstraint(
+                    action_key=item.requirement.action_key,
+                    actor_key=item.requirement.actor_key,
+                    target_key=item.requirement.target_key,
+                    bindings=item.requirement.binding_constraints,
+                    parameters=item.requirement.parameter_constraints,
+                )
+                completion = evaluate_operation_requirement(
+                    self.db,
+                    self.scope,
+                    task,
+                    definition,
+                    requirement_identity=item.identity,
+                    constraint=constraint,
+                )
+                evaluations.append(
+                    FormalGoalRequirementEvaluation(
+                        identity=item.identity,
+                        value=completion.value,
+                        satisfied=completion.satisfied,
+                        player_visible_satisfied=completion.player_visible_satisfied,
+                        kind=completion.requirement_kind,
+                        status=completion.status,
+                        authoritative_evidence=completion.authoritative_evidence,
+                    )
+                )
+                continue
+            if not isinstance(item.requirement, ObjectiveRequirementV2):
+                raise ValueError("Unsupported Formal Goal requirement kind")
+            requirement = item.requirement
             value, satisfied = truth_requirement_satisfied(
                 self.db,
                 self.scope,
-                item.requirement,
+                requirement,
                 derived_evaluation=derived_evaluation,
             )
             player_visible_satisfied = (
@@ -84,7 +130,7 @@ class FormalGoalCompletionEvaluator:
                     self.db,
                     self.scope,
                     definition,
-                    item.requirement,
+                    requirement,
                     derived_evaluation=derived_evaluation,
                 )
                 if definition is not None
@@ -134,7 +180,7 @@ def load_formal_goal_for_task(
     db: Session,
     scope: RuntimeScope,
     task: AgentTask,
-) -> FormalGoalContractV1:
+) -> FormalGoalContract:
     """Load a stored contract or compile a legacy PREDEFINED Task transiently.
 
     The compatibility path is deliberately read-only. In particular, an
@@ -177,7 +223,7 @@ def load_formal_goal_for_task(
 def _load_persisted_formal_goal(
     task: AgentTask,
     snapshot: ScenarioVersionSnapshot,
-) -> FormalGoalContractV1:
+) -> FormalGoalContract:
     payload = task.formal_goal_contract_json
     if not isinstance(payload, dict):
         raise FormalGoalPersistenceError(
@@ -185,7 +231,10 @@ def _load_persisted_formal_goal(
             "Persisted Formal Goal contract must be a JSON object",
         )
     try:
-        contract = FormalGoalContractV1.model_validate(payload)
+        contract_model = (
+            FormalGoalContractV2 if payload.get("schema_version") == 2 else FormalGoalContractV1
+        )
+        contract = contract_model.model_validate(payload)
     except (TypeError, ValueError) as exc:
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_PERSISTENCE_INVALID",

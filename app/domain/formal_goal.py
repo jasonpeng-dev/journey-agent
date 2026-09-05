@@ -16,22 +16,28 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictBool,
     StrictInt,
     StrictStr,
     model_validator,
 )
 
+from app.domain.action_invocation import ActionInvocationBinding, canonical_action_parameters
 from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import (
+    ActionBehavior,
+    ActionDefinitionV2,
+    ActionTargetKind,
     FactDefinitionV2,
     ObjectiveDefinitionV2,
     ObjectivePrerequisiteV2,
@@ -245,6 +251,59 @@ class FormalGoalContractV1(FormalGoalModel):
             )
 
 
+class FormalGoalActionCompletedRequirementV1(FormalGoalModel):
+    """Frozen semantics for one task-owned successful Action invocation.
+
+    This is intentionally separate from ``ObjectiveRequirementV2``.  A state
+    requirement describes the current World State; this requirement is proved
+    only by a matching successful ``WorldOperation`` owned by the Task.
+    ``None`` for actor, target, or parameters means the corresponding part is
+    unconstrained, not a wildcard value inserted into the contract.
+    """
+
+    kind: Literal["ACTION_COMPLETED"]
+    action_key: StrictStr = Field(min_length=1, max_length=100)
+    actor_key: StrictStr | None = Field(default=None, max_length=100)
+    target_key: StrictStr | None = Field(default=None, max_length=160)
+    binding_constraints: tuple[ActionInvocationBinding, ...] = ()
+    parameter_constraints: dict[str, JsonValue] | None = None
+    match_mode: Literal["ONE_SUCCESSFUL_INVOCATION"] = "ONE_SUCCESSFUL_INVOCATION"
+    boundary: Literal["TASK_OWNED_OPERATION"] = "TASK_OWNED_OPERATION"
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> FormalGoalActionCompletedRequirementV1:
+        roles = tuple(item.role for item in self.binding_constraints)
+        if len(set(roles)) != len(roles):
+            raise ValueError("Action completion binding roles must be unique")
+        ordered = tuple(sorted(self.binding_constraints, key=lambda item: item.role))
+        if ordered != self.binding_constraints:
+            object.__setattr__(self, "binding_constraints", ordered)
+        return self
+
+
+class AdHocActionCompletedRequirementCandidateV1(FormalGoalModel):
+    """Provider-facing, lossless ACTION_COMPLETED candidate semantics."""
+
+    kind: Literal["ACTION_COMPLETED"]
+    action_key: StrictStr = Field(min_length=1, max_length=100)
+    actor_key: StrictStr | None = Field(default=None, max_length=100)
+    target_key: StrictStr | None = Field(default=None, max_length=160)
+    binding_constraints: tuple[ActionInvocationBinding, ...] = ()
+    parameter_constraints: dict[str, JsonValue] | None = None
+    match_mode: Literal["ONE_SUCCESSFUL_INVOCATION"] = "ONE_SUCCESSFUL_INVOCATION"
+    boundary: Literal["TASK_OWNED_OPERATION"] = "TASK_OWNED_OPERATION"
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> AdHocActionCompletedRequirementCandidateV1:
+        roles = tuple(item.role for item in self.binding_constraints)
+        if len(set(roles)) != len(roles):
+            raise ValueError("Action completion binding roles must be unique")
+        ordered = tuple(sorted(self.binding_constraints, key=lambda item: item.role))
+        if ordered != self.binding_constraints:
+            object.__setattr__(self, "binding_constraints", ordered)
+        return self
+
+
 class AdHocFactRequirementCandidateV1(FormalGoalModel):
     """Strict provider-facing FACT candidate semantics."""
 
@@ -279,8 +338,162 @@ type AdHocGoalRequirementCandidateV1 = Annotated[
 ]
 
 
+type AdHocGoalRequirementCandidateV2 = Annotated[
+    AdHocFactRequirementCandidateV1
+    | AdHocResourceAtLeastRequirementCandidateV1
+    | AdHocDerivedStateRequirementCandidateV1
+    | AdHocActionCompletedRequirementCandidateV1,
+    Field(discriminator="kind"),
+]
+
+
 class AdHocGoalCandidateSetV1(FormalGoalModel):
     requirements: tuple[AdHocGoalRequirementCandidateV1, ...] = Field(min_length=1)
+
+
+class AdHocGoalCandidateSetV2(FormalGoalModel):
+    requirements: tuple[AdHocGoalRequirementCandidateV2, ...] = Field(min_length=1)
+
+
+class FormalGoalRequirementV2(FormalGoalModel):
+    """One V2 contract identity around a state or operation requirement."""
+
+    identity: FormalGoalIdentity
+    requirement: ObjectiveRequirementV2 | FormalGoalActionCompletedRequirementV1
+    source_objective_key: StrictStr | None = Field(default=None, max_length=80)
+    source_requirement_key: StrictStr | None = Field(default=None, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> FormalGoalRequirementV2:
+        source_fields = (self.source_objective_key, self.source_requirement_key)
+        if (source_fields[0] is None) != (source_fields[1] is None):
+            raise ValueError(
+                "Formal Goal requirement provenance needs both Objective and requirement keys"
+            )
+        if source_fields[0] is not None and source_fields[1] is not None:
+            expected = f"{source_fields[0]}:{source_fields[1]}"
+            if self.identity != expected:
+                raise ValueError(
+                    "PREDEFINED Formal Goal requirement identity must match its source keys"
+                )
+        return self
+
+
+class FormalGoalContractV2(FormalGoalModel):
+    """Additive Formal Goal contract supporting exact operation completion.
+
+    V1 remains the persisted contract for existing STATE Goals.  V2 is used
+    for the first operation-backed vocabulary while retaining the same
+    Scenario proof, immutable hash, and task-owned completion boundary.
+    """
+
+    schema_version: Literal[2] = 2
+    source_kind: FormalGoalSourceKind
+    scenario: FormalGoalScenarioProofV1
+    completion_requirements: tuple[FormalGoalRequirementV2, ...] = Field(min_length=1)
+    predefined_objectives: tuple[FormalGoalObjectiveSourceV1, ...] = ()
+    planning_compatibility: FormalGoalPlanningCompatibilityV1 = Field(
+        default_factory=FormalGoalPlanningCompatibilityV1
+    )
+    compiler_version: StrictStr = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> FormalGoalContractV2:
+        identities = tuple(item.identity for item in self.completion_requirements)
+        if len(set(identities)) != len(identities):
+            raise ValueError("Formal Goal requirement identities must be unique")
+
+        objective_keys = tuple(item.objective_key for item in self.predefined_objectives)
+        if len(set(objective_keys)) != len(objective_keys):
+            raise ValueError("Formal Goal Objective provenance must be unique")
+
+        if self.source_kind == FormalGoalSourceKind.PREDEFINED:
+            if not objective_keys:
+                raise ValueError("PREDEFINED Formal Goal needs Objective provenance")
+            expected = set(objective_keys)
+            if any(
+                item.source_objective_key not in expected or item.source_requirement_key is None
+                for item in self.completion_requirements
+            ):
+                raise ValueError(
+                    "PREDEFINED Formal Goal requirements need matching Objective provenance"
+                )
+        elif self.source_kind == FormalGoalSourceKind.AD_HOC_DYNAMIC:
+            operation_count = sum(
+                isinstance(item.requirement, FormalGoalActionCompletedRequirementV1)
+                for item in self.completion_requirements
+            )
+            if operation_count > 1:
+                raise ValueError(
+                    "A Phase-1 Formal Goal supports at most one ACTION_COMPLETED requirement"
+                )
+            if objective_keys:
+                raise ValueError("AD_HOC_DYNAMIC cannot carry authored Objective provenance")
+            if self.planning_compatibility.prerequisites:
+                raise ValueError("AD_HOC_DYNAMIC cannot inject authored prerequisites")
+            if any(
+                isinstance(item.requirement, ObjectiveRequirementV2)
+                and item.requirement.knowledge_gate is not None
+                for item in self.completion_requirements
+            ):
+                raise ValueError("AD_HOC_DYNAMIC cannot declare a knowledge gate")
+            for item in self.completion_requirements:
+                expected_identity = (
+                    canonical_requirement_identity(item.requirement)
+                    if isinstance(item.requirement, ObjectiveRequirementV2)
+                    else canonical_action_completed_identity(item.requirement)
+                )
+                if item.identity != expected_identity:
+                    raise ValueError(
+                        "AD_HOC_DYNAMIC requirement identity must be derived from its semantics"
+                    )
+        return self
+
+    def canonical_semantics(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "source_kind": self.source_kind.value,
+            "scenario": self.scenario.model_dump(mode="json"),
+            "predefined_objectives": [
+                {"objective_key": item.objective_key}
+                for item in sorted(self.predefined_objectives, key=lambda item: item.objective_key)
+            ],
+            "completion_requirements": [
+                _formal_requirement_semantics_v2(item)
+                for item in sorted(self.completion_requirements, key=lambda item: item.identity)
+            ],
+            "planning_compatibility": _planning_compatibility_semantics(
+                self.planning_compatibility
+            ),
+        }
+
+    def canonical_json(self) -> str:
+        return json.dumps(
+            self.canonical_semantics(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @property
+    def content_hash(self) -> str:
+        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+    def assert_bound_to(self, snapshot: ScenarioVersionSnapshot) -> None:
+        _validate_scenario_snapshot(snapshot)
+        if self.scenario.scenario_version_id != snapshot.id:
+            raise FormalGoalError(
+                "FORMAL_GOAL_SCENARIO_VERSION_MISMATCH",
+                "Formal Goal is bound to a different ScenarioVersion",
+            )
+        if self.scenario.scenario_content_hash != snapshot.content_hash:
+            raise FormalGoalError(
+                "FORMAL_GOAL_SCENARIO_HASH_MISMATCH",
+                "Formal Goal Scenario content hash does not match the exact version",
+            )
+
+
+type FormalGoalContract = FormalGoalContractV1 | FormalGoalContractV2
 
 
 def compile_predefined_formal_goal(
@@ -392,6 +605,304 @@ def compile_ad_hoc_dynamic_goal(
         completion_requirements=tuple(sorted(requirements, key=lambda item: item.identity)),
         compiler_version=compiler_version,
     )
+
+
+def compile_ad_hoc_dynamic_goal_v2(
+    snapshot: ScenarioVersionSnapshot,
+    candidates: AdHocGoalCandidateSetV2 | tuple[AdHocGoalRequirementCandidateV2, ...],
+    *,
+    compiler_version: str = "formal-goal-interpreter@2",
+) -> FormalGoalContractV2:
+    """Compile a dynamic Goal containing state and/or operation requirements."""
+
+    _validate_scenario_snapshot(snapshot)
+    candidate_set = (
+        candidates
+        if isinstance(candidates, AdHocGoalCandidateSetV2)
+        else AdHocGoalCandidateSetV2(requirements=candidates)
+    )
+    typed_requirements = validate_ad_hoc_dynamic_candidates_v2(
+        snapshot.definition,
+        candidate_set,
+    )
+    requirements = [
+        FormalGoalRequirementV2(
+            identity=(
+                canonical_requirement_identity(requirement)
+                if isinstance(requirement, ObjectiveRequirementV2)
+                else canonical_action_completed_identity(requirement)
+            ),
+            requirement=requirement,
+        )
+        for requirement in typed_requirements
+    ]
+    return FormalGoalContractV2(
+        source_kind=FormalGoalSourceKind.AD_HOC_DYNAMIC,
+        scenario=FormalGoalScenarioProofV1(
+            scenario_version_id=snapshot.id,
+            scenario_content_hash=snapshot.content_hash,
+            scenario_schema_version=snapshot.schema_version,
+        ),
+        completion_requirements=tuple(sorted(requirements, key=lambda item: item.identity)),
+        compiler_version=compiler_version,
+    )
+
+
+def validate_ad_hoc_dynamic_candidates_v2(
+    definition: ScenarioDefinitionV2,
+    candidates: AdHocGoalCandidateSetV2 | tuple[AdHocGoalRequirementCandidateV2, ...],
+) -> tuple[ObjectiveRequirementV2 | FormalGoalActionCompletedRequirementV1, ...]:
+    """Validate state and exact operation candidates against one Version."""
+
+    candidate_set = (
+        candidates
+        if isinstance(candidates, AdHocGoalCandidateSetV2)
+        else AdHocGoalCandidateSetV2(requirements=candidates)
+    )
+    canonicalized = canonicalize_ad_hoc_dynamic_candidates_v2(definition, candidate_set)
+    state_candidates = tuple(
+        item
+        for item in canonicalized.requirements
+        if not isinstance(item, AdHocActionCompletedRequirementCandidateV1)
+    )
+    state_by_identity: dict[str, ObjectiveRequirementV2] = {}
+    if state_candidates:
+        state_requirements = validate_ad_hoc_dynamic_candidates(
+            definition,
+            AdHocGoalCandidateSetV1(requirements=state_candidates),
+        )
+        state_by_identity = {
+            canonical_requirement_identity(item): item for item in state_requirements
+        }
+
+    requirements: list[ObjectiveRequirementV2 | FormalGoalActionCompletedRequirementV1] = []
+    seen: set[str] = set()
+    for candidate in canonicalized.requirements:
+        requirement: ObjectiveRequirementV2 | FormalGoalActionCompletedRequirementV1
+        if isinstance(candidate, AdHocActionCompletedRequirementCandidateV1):
+            requirement = _action_completed_candidate_to_requirement(candidate, definition)
+            identity = canonical_action_completed_identity(requirement)
+        else:
+            # The state subset was deterministically validated above, so this
+            # lookup cannot be absent unless a future candidate kind is added
+            # without updating this adapter.
+            state_requirement = _candidate_state_requirement(candidate, definition)
+            identity = canonical_requirement_identity(state_requirement)
+            requirement = state_by_identity[identity]
+        if identity in seen:
+            raise FormalGoalError(
+                "FORMAL_GOAL_REQUIREMENT_DUPLICATE",
+                "Dynamic Goal requirements must have unique canonical semantics",
+            )
+        seen.add(identity)
+        requirements.append(requirement)
+    return tuple(requirements)
+
+
+def canonicalize_ad_hoc_dynamic_candidates_v2(
+    definition: ScenarioDefinitionV2,
+    candidates: AdHocGoalCandidateSetV2 | tuple[AdHocGoalRequirementCandidateV2, ...],
+) -> AdHocGoalCandidateSetV2:
+    """Apply lossless state normalization and Action-schema normalization."""
+
+    candidate_set = (
+        candidates
+        if isinstance(candidates, AdHocGoalCandidateSetV2)
+        else AdHocGoalCandidateSetV2(requirements=candidates)
+    )
+    state_candidates = tuple(
+        item
+        for item in candidate_set.requirements
+        if not isinstance(item, AdHocActionCompletedRequirementCandidateV1)
+    )
+    normalized_states: list[AdHocGoalRequirementCandidateV1] = []
+    if state_candidates:
+        normalized_state_set = canonicalize_ad_hoc_dynamic_candidates(
+            definition,
+            AdHocGoalCandidateSetV1(requirements=state_candidates),
+        )
+        normalized_states.extend(normalized_state_set.requirements)
+
+    normalized: list[AdHocGoalRequirementCandidateV2] = []
+    state_index = 0
+    for candidate in candidate_set.requirements:
+        if isinstance(candidate, AdHocActionCompletedRequirementCandidateV1):
+            _validate_action_completed_candidate(candidate, definition)
+            parameters = (
+                None
+                if candidate.parameter_constraints is None
+                else _canonical_action_parameters_for_goal(
+                    definition,
+                    candidate.action_key,
+                    candidate.parameter_constraints,
+                )
+            )
+            normalized.append(candidate.model_copy(update={"parameter_constraints": parameters}))
+            continue
+        normalized.append(normalized_states[state_index])
+        state_index += 1
+    return AdHocGoalCandidateSetV2(requirements=tuple(normalized))
+
+
+def canonical_action_completed_identity(
+    requirement: FormalGoalActionCompletedRequirementV1,
+) -> str:
+    """Return a stable identity for one exact operation-match contract."""
+
+    digest = hashlib.sha256(
+        _canonical_json(_action_completed_semantics(requirement)).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"action_completed/{requirement.action_key}/{digest}"
+
+
+def _candidate_identity(
+    candidate: AdHocGoalRequirementCandidateV1,
+    definition: ScenarioDefinitionV2,
+) -> str:
+    return canonical_requirement_identity(_candidate_to_requirement(candidate, definition))
+
+
+def _candidate_state_requirement(
+    candidate: AdHocGoalRequirementCandidateV1,
+    definition: ScenarioDefinitionV2,
+) -> ObjectiveRequirementV2:
+    return _candidate_to_requirement(candidate, definition)
+
+
+def _action_completed_candidate_to_requirement(
+    candidate: AdHocActionCompletedRequirementCandidateV1,
+    definition: ScenarioDefinitionV2,
+) -> FormalGoalActionCompletedRequirementV1:
+    _validate_action_completed_candidate(candidate, definition)
+    parameters = (
+        None
+        if candidate.parameter_constraints is None
+        else _canonical_action_parameters_for_goal(
+            definition,
+            candidate.action_key,
+            candidate.parameter_constraints,
+        )
+    )
+    return FormalGoalActionCompletedRequirementV1(
+        kind="ACTION_COMPLETED",
+        action_key=candidate.action_key,
+        actor_key=candidate.actor_key,
+        target_key=candidate.target_key,
+        binding_constraints=candidate.binding_constraints,
+        parameter_constraints=parameters,
+        match_mode=candidate.match_mode,
+        boundary=candidate.boundary,
+    )
+
+
+def _validate_action_completed_candidate(
+    candidate: AdHocActionCompletedRequirementCandidateV1,
+    definition: ScenarioDefinitionV2,
+) -> ActionDefinitionV2:
+    action = next((item for item in definition.actions if item.key == candidate.action_key), None)
+    if action is None:
+        raise FormalGoalError(
+            "FORMAL_GOAL_UNKNOWN_ACTION",
+            f"Dynamic Goal references unknown Action {candidate.action_key}",
+        )
+
+    if candidate.actor_key is not None:
+        actor = next(
+            (item for item in definition.actors.actor_profiles if item.key == candidate.actor_key),
+            None,
+        )
+        if actor is None:
+            raise FormalGoalError(
+                "FORMAL_GOAL_UNKNOWN_ACTOR",
+                f"Dynamic Goal references unknown Actor {candidate.actor_key}",
+            )
+
+    if candidate.target_key is not None:
+        if not candidate.target_key:
+            raise FormalGoalError(
+                "FORMAL_GOAL_TARGET_INVALID",
+                "ACTION_COMPLETED target_key cannot be blank",
+            )
+        if action.target_kind == ActionTargetKind.NODE:
+            target = definition.world.node(candidate.target_key)
+            if target is None:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_UNKNOWN_TARGET",
+                    f"Dynamic Goal references unknown Node target {candidate.target_key}",
+                )
+        else:
+            actor_target = next(
+                (
+                    item
+                    for item in definition.actors.actor_profiles
+                    if item.key == candidate.target_key
+                ),
+                None,
+            )
+            if actor_target is None:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_UNKNOWN_TARGET",
+                    f"Dynamic Goal references unknown Actor target {candidate.target_key}",
+                )
+
+    if candidate.binding_constraints:
+        if action.behavior != ActionBehavior.TRANSPORT_RESOURCE:
+            raise FormalGoalError(
+                "FORMAL_GOAL_ACTION_BINDING_UNSUPPORTED",
+                "This Action does not declare public operation binding roles",
+            )
+        allowed_roles = {"source_region", "destination_region"}
+        for binding in candidate.binding_constraints:
+            if binding.role not in allowed_roles:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_ACTION_BINDING_INVALID",
+                    f"Unsupported transport binding role {binding.role}",
+                )
+            if not isinstance(binding.value, str) or not binding.value:
+                raise FormalGoalError(
+                    "FORMAL_GOAL_ACTION_BINDING_INVALID",
+                    "Transport operation bindings must name public Regions",
+                )
+            region = definition.world.node(binding.value)
+            locality = definition.metadata.locality
+            if (
+                region is None
+                or not locality.enabled
+                or region.node_type_key != locality.region_node_type_key
+            ):
+                raise FormalGoalError(
+                    "FORMAL_GOAL_ACTION_BINDING_INVALID",
+                    "Transport operation bindings must name Scenario Regions",
+                )
+
+    if candidate.parameter_constraints is not None:
+        _canonical_action_parameters_for_goal(
+            definition,
+            candidate.action_key,
+            candidate.parameter_constraints,
+        )
+    return action
+
+
+def _canonical_action_parameters_for_goal(
+    definition: ScenarioDefinitionV2,
+    action_key: str,
+    parameters: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    action = next((item for item in definition.actions if item.key == action_key), None)
+    if action is None:
+        raise FormalGoalError(
+            "FORMAL_GOAL_UNKNOWN_ACTION",
+            f"Dynamic Goal references unknown Action {action_key}",
+        )
+    try:
+        normalized = canonical_action_parameters(action, parameters)
+    except (TypeError, ValueError) as exc:
+        raise FormalGoalError(
+            "FORMAL_GOAL_ACTION_PARAMETERS_INVALID",
+            "ACTION_COMPLETED parameter constraints do not match the Action schema",
+        ) from exc
+    return cast(dict[str, JsonValue], {str(key): value for key, value in normalized.items()})
 
 
 def validate_ad_hoc_dynamic_candidates(
@@ -768,6 +1279,54 @@ def _formal_requirement_semantics(item: FormalGoalRequirementV1) -> dict[str, ob
     }
 
 
+def _formal_requirement_semantics_v2(item: FormalGoalRequirementV2) -> dict[str, object]:
+    requirement = item.requirement
+    if isinstance(requirement, ObjectiveRequirementV2):
+        semantics = _objective_requirement_semantics(requirement)
+    else:
+        semantics = _action_completed_semantics(requirement)
+    return {
+        "identity": item.identity,
+        "requirement": semantics,
+        **(
+            {"source_objective_key": item.source_objective_key}
+            if item.source_objective_key is not None
+            else {}
+        ),
+        **(
+            {"source_requirement_key": item.source_requirement_key}
+            if item.source_requirement_key is not None
+            else {}
+        ),
+    }
+
+
+def _action_completed_semantics(
+    requirement: FormalGoalActionCompletedRequirementV1,
+) -> dict[str, object]:
+    return {
+        "kind": requirement.kind,
+        "action_key": requirement.action_key,
+        **({"actor_key": requirement.actor_key} if requirement.actor_key is not None else {}),
+        **({"target_key": requirement.target_key} if requirement.target_key is not None else {}),
+        "binding_constraints": [
+            item.model_dump(mode="json")
+            for item in sorted(requirement.binding_constraints, key=lambda item: item.role)
+        ],
+        **(
+            {
+                "parameter_constraints": json.loads(
+                    _canonical_json(requirement.parameter_constraints)
+                )
+            }
+            if requirement.parameter_constraints is not None
+            else {}
+        ),
+        "match_mode": requirement.match_mode,
+        "boundary": requirement.boundary,
+    }
+
+
 def _objective_requirement_semantics(requirement: ObjectiveRequirementV2) -> dict[str, object]:
     payload: dict[str, object] = {"kind": requirement.kind.value}
     if requirement.kind == ObjectiveRequirementKind.FACT:
@@ -856,22 +1415,33 @@ def _canonical_json(value: object) -> str:
 
 
 __all__ = [
+    "AdHocActionCompletedRequirementCandidateV1",
     "AdHocDerivedStateRequirementCandidateV1",
     "AdHocFactRequirementCandidateV1",
     "AdHocGoalCandidateSetV1",
+    "AdHocGoalCandidateSetV2",
     "AdHocGoalRequirementCandidateV1",
+    "AdHocGoalRequirementCandidateV2",
     "AdHocResourceAtLeastRequirementCandidateV1",
+    "FormalGoalActionCompletedRequirementV1",
+    "FormalGoalContract",
     "FormalGoalContractV1",
+    "FormalGoalContractV2",
     "FormalGoalError",
     "FormalGoalObjectiveSourceV1",
     "FormalGoalPlanningCompatibilityV1",
     "FormalGoalPlanningPrerequisiteV1",
     "FormalGoalRequirementV1",
+    "FormalGoalRequirementV2",
     "FormalGoalScenarioProofV1",
     "FormalGoalSourceKind",
+    "canonical_action_completed_identity",
     "canonical_requirement_identity",
     "canonicalize_ad_hoc_dynamic_candidates",
+    "canonicalize_ad_hoc_dynamic_candidates_v2",
     "compile_ad_hoc_dynamic_goal",
+    "compile_ad_hoc_dynamic_goal_v2",
     "compile_predefined_formal_goal",
     "validate_ad_hoc_dynamic_candidates",
+    "validate_ad_hoc_dynamic_candidates_v2",
 ]

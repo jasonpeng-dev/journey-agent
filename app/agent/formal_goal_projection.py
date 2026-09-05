@@ -10,17 +10,30 @@ already present in the frozen contract.
 from __future__ import annotations
 
 import hashlib
+from typing import TYPE_CHECKING
 
-from app.domain.formal_goal import FormalGoalContractV1, FormalGoalSourceKind
+from app.domain.formal_goal import (
+    FormalGoalActionCompletedRequirementV1,
+    FormalGoalContract,
+    FormalGoalContractV1,
+    FormalGoalContractV2,
+    FormalGoalRequirementV1,
+    FormalGoalRequirementV2,
+    FormalGoalSourceKind,
+)
 from app.domain.scenario_v2 import (
     ObjectiveDefinitionV2,
     ObjectivePrerequisiteV2,
+    ObjectiveRequirementV2,
     ScenarioDefinitionV2,
 )
 
+if TYPE_CHECKING:
+    from app.agent.provider import OperationGoalProjection
+
 
 def formal_goal_planning_objectives(
-    contract: FormalGoalContractV1,
+    contract: FormalGoalContract,
     definition: ScenarioDefinitionV2 | None = None,
     *,
     goal_description: str = "Formal Goal",
@@ -35,7 +48,10 @@ def formal_goal_planning_objectives(
     persisted authority and are not replaced by these local keys.
     """
 
-    if contract.source_kind == FormalGoalSourceKind.PREDEFINED:
+    if (
+        isinstance(contract, FormalGoalContractV1)
+        and contract.source_kind == FormalGoalSourceKind.PREDEFINED
+    ):
         authored = definition.objective_definitions if definition is not None else {}
         prerequisites_by_objective: dict[str, list[ObjectivePrerequisiteV2]] = {}
         for item in contract.planning_compatibility.prerequisites:
@@ -71,14 +87,24 @@ def formal_goal_planning_objectives(
             )
         return tuple(result)
 
-    requirements = tuple(
-        item.requirement
-        for item in sorted(contract.completion_requirements, key=lambda item: item.identity)
-    )
+    state_items: tuple[FormalGoalRequirementV1 | FormalGoalRequirementV2, ...]
+    if isinstance(contract, FormalGoalContractV2):
+        state_items = tuple(
+            item
+            for item in sorted(contract.completion_requirements, key=lambda item: item.identity)
+            if isinstance(item.requirement, ObjectiveRequirementV2)
+        )
+    else:
+        state_items = tuple(
+            sorted(contract.completion_requirements, key=lambda item: item.identity)
+        )
+    if not state_items:
+        return ()
+    requirements = tuple(_state_requirement(item) for item in state_items)
     projected_requirements = tuple(
         requirement.model_copy(update={"key": _local_requirement_key(identity)})
         for identity, requirement in zip(
-            sorted(item.identity for item in contract.completion_requirements),
+            (item.identity for item in state_items),
             requirements,
             strict=True,
         )
@@ -93,9 +119,52 @@ def formal_goal_planning_objectives(
     )
 
 
+def formal_goal_operation_goal(
+    contract: FormalGoalContract,
+) -> OperationGoalProjection | None:
+    """Project the single frozen operation requirement for planning only."""
+
+    # Keep this import local so the domain contract remains below the Provider
+    # boundary and importing the projection module cannot create a cycle.
+    from app.agent.provider import OperationGoalProjection
+
+    operation_requirements = [
+        item
+        for item in contract.completion_requirements
+        if isinstance(item.requirement, FormalGoalActionCompletedRequirementV1)
+    ]
+    if not operation_requirements:
+        return None
+    if len(operation_requirements) != 1:
+        raise ValueError("PlannerInput supports one ACTION_COMPLETED requirement per Goal")
+    item = operation_requirements[0]
+    requirement = item.requirement
+    assert isinstance(requirement, FormalGoalActionCompletedRequirementV1)
+    return OperationGoalProjection(
+        requirement_identity=item.identity,
+        kind="ACTION_COMPLETED",
+        action_key=requirement.action_key,
+        actor_key=requirement.actor_key,
+        target_key=requirement.target_key,
+        binding_constraints=requirement.binding_constraints,
+        parameter_constraints=requirement.parameter_constraints,
+        match_mode=requirement.match_mode,
+        boundary=requirement.boundary,
+    )
+
+
 def _local_requirement_key(identity: str) -> str:
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     return f"dynamic_requirement_{digest}"
 
 
-__all__ = ["formal_goal_planning_objectives"]
+def _state_requirement(
+    item: FormalGoalRequirementV1 | FormalGoalRequirementV2,
+) -> ObjectiveRequirementV2:
+    requirement = item.requirement
+    if not isinstance(requirement, ObjectiveRequirementV2):
+        raise AssertionError("Expected a state requirement")
+    return requirement
+
+
+__all__ = ["formal_goal_operation_goal", "formal_goal_planning_objectives"]

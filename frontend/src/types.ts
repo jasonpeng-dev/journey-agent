@@ -80,7 +80,7 @@ export type PublicPlanningCycle = { id: string; cycle_type: "INITIAL" | "REPLAN"
 export type MissionRoadmapRequirement = {
   identity?: string;
   key: string;
-  kind?: "FACT" | "RESOURCE_AT_LEAST" | "DERIVED_STATE";
+  kind?: "FACT" | "RESOURCE_AT_LEAST" | "DERIVED_STATE" | "ACTION_COMPLETED";
   description: string;
   node_key?: string;
   fact_key?: string;
@@ -92,6 +92,17 @@ export type MissionRoadmapRequirement = {
   current_known_value?: string | number | boolean | null;
   current_known_available?: number | null;
   knowledge_status?: "KNOWN" | "KNOWN_ZERO" | "UNKNOWN";
+  action_key?: string;
+  action_name?: string;
+  actor_key?: string | null;
+  actor_name?: string | null;
+  target_key?: string | null;
+  target_name?: string | null;
+  binding_constraints?: Array<Record<string, unknown>>;
+  parameter_constraints?: Record<string, unknown> | null;
+  match_mode?: "ONE_SUCCESSFUL_INVOCATION";
+  boundary?: "TASK_OWNED_OPERATION";
+  operation_status?: "PENDING" | "COMPLETED";
 };
 export type MissionRoadmapStage = { key: string; name: string; description: string; status: "COMPLETED" | "CURRENT" | "PENDING"; objective_key: string | null; requirements: MissionRoadmapRequirement[] };
 export type TimelineEventKind = "GOAL_ACCEPTED" | "PLAN_CREATED" | "TASK_STARTED" | "ACTION_BRIEFING" | "ACTION_RESULT" | "PLAN_UPDATED" | "APPROVAL_REQUIRED" | "APPROVAL_APPROVED" | "APPROVAL_REJECTED" | "TASK_COMPLETED" | "TASK_BLOCKED" | "TASK_ABORTED";

@@ -82,7 +82,7 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.derived_state import evaluate_derived_states
-from app.services.formal_goal import load_formal_goal_for_task
+from app.services.formal_goal import FormalGoalCompletionEvaluator, load_formal_goal_for_task
 from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
 from app.services.knowledge_projection import SharedKnowledgeProjection
@@ -607,6 +607,19 @@ class PlayerProjectionService:
             if definition.derived_states
             else None
         )
+        completion_evaluation = FormalGoalCompletionEvaluator(
+            self.db,
+            task_scope,
+        ).evaluate(
+            formal_goal,
+            definition=definition,
+            task=task,
+        )
+        operation_status_by_identity = {
+            item.identity: item.satisfied
+            for item in completion_evaluation.requirements
+            if item.kind == "OPERATION"
+        }
         roadmap = MissionRoadmapProjector().project_formal_goal(
             definition,
             formal_goal,
@@ -614,6 +627,7 @@ class PlayerProjectionService:
             known_resources,
             derived_evaluation.knowledge_values if derived_evaluation is not None else None,
             goal_description=task.goal_description,
+            operation_status_by_identity=operation_status_by_identity,
         )
         formal_requirement_ids = {item.identity for item in formal_goal.completion_requirements}
         goal_requirements = [

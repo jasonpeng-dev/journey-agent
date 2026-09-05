@@ -226,13 +226,14 @@ def test_dynamic_goal_payloads_use_separate_public_grounding_and_interpretation_
 def test_dynamic_goal_requirement_schema_is_strict_and_discriminated() -> None:
     schema = DynamicGoalInterpretation.model_json_schema()
     definitions = schema["$defs"]
-    union = definitions["AdHocGoalRequirementCandidateV1"]
+    union = definitions["AdHocGoalRequirementCandidateV2"]
 
     assert union["discriminator"] == {
         "mapping": {
             "DERIVED_STATE": "#/$defs/AdHocDerivedStateRequirementCandidateV1",
             "FACT": "#/$defs/AdHocFactRequirementCandidateV1",
             "RESOURCE_AT_LEAST": "#/$defs/AdHocResourceAtLeastRequirementCandidateV1",
+            "ACTION_COMPLETED": "#/$defs/AdHocActionCompletedRequirementCandidateV1",
         },
         "propertyName": "kind",
     }
@@ -249,6 +250,7 @@ def test_dynamic_goal_requirement_schema_is_strict_and_discriminated() -> None:
             "derived_key",
             "accepted_values",
         },
+        "AdHocActionCompletedRequirementCandidateV1": {"kind", "action_key"},
     }
     for definition_name, required in expected_required.items():
         definition = definitions[definition_name]

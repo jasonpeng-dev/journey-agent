@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -139,9 +139,15 @@ def _operation_is_after_task_start(operation: WorldOperation, task: AgentTask) -
     operation_created_at = getattr(operation, "created_at", None)
     if not isinstance(task_created_at, datetime) or not isinstance(operation_created_at, datetime):
         return True
-    if task_created_at.tzinfo is None or operation_created_at.tzinfo is None:
-        return operation_created_at >= task_created_at
-    return operation_created_at >= task_created_at
+    return _as_utc(operation_created_at) >= _as_utc(task_created_at)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Make persisted aware/naive UTC timestamps comparable across DB drivers."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 __all__ = [
