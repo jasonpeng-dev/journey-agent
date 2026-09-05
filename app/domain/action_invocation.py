@@ -86,6 +86,35 @@ class ActionInvocation(ActionInvocationModel):
 ActionInvocationBindingInput = ActionInvocationBinding | Mapping[str, object]
 
 
+def action_operation_binding_contract(action: ActionDefinitionV2) -> dict[str, object]:
+    """Project Action-defined invocation bindings for public Goal grounding.
+
+    Some invocation roles are derived from execution context rather than
+    being literal Action parameters.  This public projection lets the Goal
+    Resolver preserve those roles without teaching it individual Action keys.
+    It is descriptive only; canonical invocation and Runtime remain the
+    authorities for the actual binding values.
+    """
+
+    if action.behavior != ActionBehavior.TRANSPORT_RESOURCE:
+        return {}
+    return {
+        "bindings": [
+            {
+                "role": "source_region",
+                "source": "EXECUTION_START_ACTOR_REGION",
+                "value_type": "REGION",
+            }
+        ],
+        "target": {
+            "field": "target_key",
+            "role": "destination_region",
+            "source": "ACTION_TARGET_KEY",
+            "value_type": "REGION",
+        },
+    }
+
+
 def canonical_action_parameters(
     action: ActionDefinitionV2,
     parameters: Mapping[str, object],
@@ -301,6 +330,7 @@ __all__ = [
     "ActionInvocationBinding",
     "action_invocation_from_operation",
     "action_invocation_from_tool_arguments",
+    "action_operation_binding_contract",
     "canonical_action_invocation",
     "canonical_action_parameters",
     "transport_bindings_from_outcome",

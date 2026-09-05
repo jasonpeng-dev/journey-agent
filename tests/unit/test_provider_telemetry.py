@@ -13,6 +13,7 @@ from pydantic import SecretStr, ValidationError
 from app.agent.provider import (
     DynamicGoalCandidateReference,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalGroundedOperation,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     GenericProviderError,
@@ -375,6 +376,79 @@ def test_dynamic_goal_recovery_feedback_contains_the_legal_derived_shape() -> No
     assert "DERIVED_STATE" in body["messages"][0]["content"]
     assert '"accepted_values":["AVAILABLE"]' in body["messages"][0]["content"]
     assert "target_value" in body["messages"][0]["content"]
+
+
+def test_dynamic_goal_prompt_explains_action_defined_derived_bindings() -> None:
+    ontology = {
+        "world": {
+            "actions": [
+                {
+                    "key": "move_cargo",
+                    "operation_binding_contract": {
+                        "bindings": [
+                            {
+                                "role": "source_region",
+                                "source": "EXECUTION_START_ACTOR_REGION",
+                                "value_type": "REGION",
+                            }
+                        ],
+                        "target": {
+                            "field": "target_key",
+                            "role": "destination_region",
+                            "source": "ACTION_TARGET_KEY",
+                            "value_type": "REGION",
+                        },
+                    },
+                }
+            ]
+        }
+    }
+    request = DynamicGoalInterpretationRequest(
+        goal="move 30 cargo from source to destination",
+        ontology=ontology,
+    )
+    provider = OpenAICompatibleGenericProvider(_settings())
+
+    body, _size = provider._build_request_body("dynamic_goal", request.model_dump(mode="json"))
+    payload = json.loads(body["messages"][1]["content"])
+    prompt = body["messages"][0]["content"]
+
+    assert payload["ontology"] == ontology
+    for term in (
+        "operation_binding_contract",
+        "binding role is a canonical invocation role",
+        "derived from execution context rather than a literal Action parameter",
+        "EXECUTION_START_ACTOR_REGION",
+        "ACTION_TARGET_KEY",
+        "explicit source Region",
+        "explicit destination in target_key",
+        "Do not require a literal source or destination parameter",
+    ):
+        assert term in prompt
+
+
+def test_dynamic_goal_prompt_locks_stage_one_explicit_operation() -> None:
+    request = DynamicGoalInterpretationRequest(
+        goal="move 30 cargo from source to destination",
+        ontology={"world": {"actions": [{"key": "move_cargo"}]}},
+        grounded_operation=DynamicGoalGroundedOperation(
+            action_key="move_cargo",
+            target_key="destination",
+            binding_constraints=({"role": "source_region", "value": "source"},),
+            parameter_constraints={"resource_key": "cargo", "amount": 30},
+        ),
+    )
+    provider = OpenAICompatibleGenericProvider(_settings())
+
+    body, _size = provider._build_request_body("dynamic_goal", request.model_dump(mode="json"))
+    payload = json.loads(body["messages"][1]["content"])
+    prompt = body["messages"][0]["content"]
+
+    assert payload["grounded_operation"]["action_key"] == "move_cargo"
+    assert payload["grounded_operation"]["target_key"] == "destination"
+    assert "locked, lossless public Stage 1 result" in prompt
+    assert "Do not return NEEDS_CLARIFICATION, UNSUPPORTED" in prompt
+    assert "actor_key null is intentional" in prompt
 
 
 def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:

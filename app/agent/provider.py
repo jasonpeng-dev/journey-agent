@@ -98,6 +98,23 @@ class DynamicGoalRecoveryFeedback(ProviderModel):
     focused_target_value: StrictStr | StrictInt | StrictBool | None = None
 
 
+class DynamicGoalGroundedOperation(ProviderModel):
+    """Stage 1's lossless public binding for an explicit operation Goal.
+
+    This is a semantic lock, not a Scenario-specific shortcut.  It contains
+    only public Action/Region/Resource identities and declared parameter
+    values.  Stage 2 may validate and serialize this operation, but may not
+    reinterpret it as another requirement kind or ask for an intentionally
+    unconstrained Actor.
+    """
+
+    action_key: StrictStr = Field(min_length=1, max_length=100)
+    actor_key: StrictStr | None = Field(default=None, max_length=100)
+    target_key: StrictStr = Field(min_length=1, max_length=160)
+    binding_constraints: tuple[ActionInvocationBinding, ...] = ()
+    parameter_constraints: dict[str, JsonValue] = Field(default_factory=dict)
+
+
 class DynamicGoalEntityGrounding(ProviderModel):
     """Closed provider output containing public heterogeneous candidates only.
 
@@ -147,6 +164,10 @@ class DynamicGoalInterpretationRequest(ProviderModel):
     # Kept for compatibility with existing provider integrations.  It is the
     # NODE subset of grounded_candidate_refs, never the complete Stage 1 scope.
     grounded_entity_keys: tuple[str, ...] = ()
+    grounded_operation: DynamicGoalGroundedOperation | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     recovery_attempt: int = Field(default=0, ge=0, le=1)
     recovery_feedback: tuple[DynamicGoalRecoveryFeedback, ...] = Field(default=(), max_length=4)
 
@@ -2041,6 +2062,25 @@ class OpenAICompatibleGenericProvider:
                 '"target_key":"existing_target_key",'
                 '"parameters":{},"short_actor_reason":"short reason"}]}'
             )
+        grounded_operation = payload.get("grounded_operation")
+        if purpose == "dynamic_goal" and isinstance(grounded_operation, dict):
+            locked_requirement = {
+                "kind": "ACTION_COMPLETED",
+                **grounded_operation,
+                "match_mode": "ONE_SUCCESSFUL_INVOCATION",
+                "boundary": "TASK_OWNED_OPERATION",
+            }
+            response_contract += (
+                " The generic alternatives above are overridden for this request because the "
+                "user payload contains grounded_operation. It is a locked, lossless public "
+                "Stage 1 result. Return status RESOLVED with exactly this one requirement: "
+                f"{json.dumps(locked_requirement, ensure_ascii=False, separators=(',', ':'))}. "
+                "Its action_key, actor_key, target_key, binding_constraints, and declared "
+                "parameter_constraints must match grounded_operation exactly. Do not return "
+                "NEEDS_CLARIFICATION, UNSUPPORTED, FACT, RESOURCE_AT_LEAST, DERIVED_STATE, "
+                "a different Action, or a partial binding; actor_key null is intentional and "
+                "must not trigger an actor clarification."
+            )
         if purpose == "dynamic_goal_grounding":
             planning_prompt = (
                 "Ground only public Scenario references mentioned by the player's Goal. Return "
@@ -2083,7 +2123,17 @@ class OpenAICompatibleGenericProvider:
                 "For ACTION_COMPLETED, preserve the player's explicit operation semantics "
                 "losslessly: emit the public action_key and any explicitly named actor_key, "
                 "target_key, Action-defined binding_constraints, and exact schema-valid "
-                "parameter_constraints. Use ONE_SUCCESSFUL_INVOCATION and "
+                "parameter_constraints. Read the selected Action's "
+                "operation_binding_contract: a binding role is a canonical invocation "
+                "role and may be derived from execution context rather than a literal "
+                "Action parameter. Map explicit user language to the declared role; for "
+                "example, a role sourced from EXECUTION_START_ACTOR_REGION receives the "
+                "explicit source Region, while a target contract sourced from "
+                "ACTION_TARGET_KEY receives the explicit destination in target_key. Do "
+                "not require a literal source or destination parameter when the contract "
+                "defines a derived binding. Keep resource and amount values in "
+                "parameter_constraints only when they are declared Action parameters, "
+                "using their exact schema types. Use ONE_SUCCESSFUL_INVOCATION and "
                 "TASK_OWNED_OPERATION. An omitted actor or target remains unconstrained; do "
                 "not invent wildcard values. Do not weaken an explicit operation, source, "
                 "destination, resource, or amount into a state or resource threshold. If the "
@@ -2957,6 +3007,7 @@ __all__ = [
     "DynamicGoalEntityGrounder",
     "DynamicGoalEntityGrounding",
     "DynamicGoalEntityGroundingRequest",
+    "DynamicGoalGroundedOperation",
     "DynamicGoalInterpretation",
     "DynamicGoalInterpretationRequest",
     "DynamicGoalInterpreter",

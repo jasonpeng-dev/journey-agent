@@ -22,8 +22,11 @@ from app.agent.provider import (
     PlanProposal,
     PlanRequest,
 )
+from app.domain.action_invocation import ActionInvocationBinding
 from app.domain.enums import AgentTaskStatus, ResourcePoolAvailability, ResourcePoolVisibility
 from app.domain.formal_goal import (
+    AdHocActionCompletedRequirementCandidateV1,
+    AdHocFactRequirementCandidateV1,
     FormalGoalSourceKind,
     compile_predefined_formal_goal,
 )
@@ -40,6 +43,7 @@ from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import GENERIC_TEST
+from tests.unit.test_transport_resource import _definition as transport_definition
 
 
 @dataclass
@@ -226,6 +230,243 @@ def test_unmatched_linjiang_goal_routes_to_dynamic_fact_not_task5() -> None:
     assert resolution.dynamic_requirements == (candidate,)
     assert provider.selection_requests == []
     assert len(provider.requests) == 1
+
+
+def test_explicit_transport_goal_preserves_action_defined_source_binding() -> None:
+    candidate = AdHocActionCompletedRequirementCandidateV1(
+        kind="ACTION_COMPLETED",
+        action_key="transport_resource",
+        target_key="south_waterfront_district",
+        binding_constraints=(
+            ActionInvocationBinding(
+                role="source_region",
+                value="southeast_heights_district",
+            ),
+        ),
+        parameter_constraints={
+            "resource_key": "emergency_fuel",
+            "amount": 30,
+        },
+    )
+    provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(candidate,)))
+    goal = (
+        "\u4ece\u4e1c\u5357\u9ad8\u5730\u533a\u8fd0 30 "
+        "\u4e2a\u5e94\u6025\u71c3\u6599\u5230\u5357\u90e8\u6ee8\u6c34\u533a"
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        goal,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(resolution.dynamic_requirements) == 1
+    requirement = resolution.dynamic_requirements[0]
+    assert requirement.action_key == candidate.action_key
+    assert requirement.target_key == candidate.target_key
+    assert requirement.binding_constraints == candidate.binding_constraints
+    assert requirement.parameter_constraints == {
+        "resources": [{"resource_key": "emergency_fuel", "amount": 30}]
+    }
+    assert provider.grounding_requests == []
+    request = provider.requests[0]
+    grounded_refs = set(request.grounded_candidate_refs)
+    assert {
+        DynamicGoalCandidateReference(ref_type="ACTION", key="transport_resource"),
+        DynamicGoalCandidateReference(ref_type="REGION", key="southeast_heights_district"),
+        DynamicGoalCandidateReference(ref_type="REGION", key="south_waterfront_district"),
+        DynamicGoalCandidateReference(ref_type="RESOURCE", key="emergency_fuel"),
+    }.issubset(grounded_refs)
+    transport = next(
+        item for item in request.ontology["world"]["actions"] if item["key"] == "transport_resource"
+    )
+    assert transport["operation_binding_contract"] == {
+        "bindings": [
+            {
+                "role": "source_region",
+                "source": "EXECUTION_START_ACTOR_REGION",
+                "value_type": "REGION",
+            }
+        ],
+        "target": {
+            "field": "target_key",
+            "role": "destination_region",
+            "source": "ACTION_TARGET_KEY",
+            "value_type": "REGION",
+        },
+    }
+    assert request.grounded_operation is not None
+    assert request.grounded_operation.model_dump(mode="json") == {
+        "action_key": "transport_resource",
+        "actor_key": None,
+        "target_key": "south_waterfront_district",
+        "binding_constraints": [{"role": "source_region", "value": "southeast_heights_district"}],
+        "parameter_constraints": {"resource_key": "emergency_fuel", "amount": 30},
+    }
+
+
+def test_explicit_operation_lock_rejects_provider_reinterpretation() -> None:
+    provider = _SequenceDynamicProvider(
+        (),
+        (
+            DynamicGoalInterpretation(
+                status="NEEDS_CLARIFICATION",
+                clarification_prompt="Please specify an actor.",
+            ),
+            DynamicGoalInterpretation(
+                requirements=(
+                    AdHocFactRequirementCandidateV1(
+                        kind="FACT",
+                        node_key="southeast_access_corridor",
+                        fact_key="passable",
+                        accepted_values=(True,),
+                    ),
+                )
+            ),
+        ),
+    )
+    goal = (
+        "\u4ece\u4e1c\u5357\u9ad8\u5730\u533a\u8fd030\u4e2a\u5e94\u6025\u71c3\u6599"
+        "\u5230\u5357\u90e8\u6ee8\u6c34\u533a"
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        goal,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    requirement = resolution.dynamic_requirements[0]
+    assert isinstance(requirement, AdHocActionCompletedRequirementCandidateV1)
+    assert requirement.action_key == "transport_resource"
+    assert requirement.actor_key is None
+    assert requirement.target_key == "south_waterfront_district"
+    assert requirement.binding_constraints == (
+        ActionInvocationBinding(
+            role="source_region",
+            value="southeast_heights_district",
+        ),
+    )
+    assert requirement.parameter_constraints == {
+        "resources": [{"resource_key": "emergency_fuel", "amount": 30}]
+    }
+    assert len(provider.requests) == 2
+    assert provider.requests[0].grounded_operation is not None
+    assert provider.requests[1].grounded_operation == provider.requests[0].grounded_operation
+    assert provider.requests[1].recovery_feedback
+    assert provider.requests[1].recovery_feedback[0].expected_shape["action_key"] == (
+        "transport_resource"
+    )
+    assert resolution.provider_observation is not None
+    assert resolution.provider_observation["result"] == "DETERMINISTIC_GROUNDED_OPERATION"
+
+
+def test_operation_without_directional_source_and_target_stays_clarifiable() -> None:
+    provider = _SequenceDynamicProvider(
+        (),
+        (
+            DynamicGoalInterpretation(
+                status="NEEDS_CLARIFICATION",
+                clarification_prompt="Which region is the source?",
+            ),
+        ),
+    )
+    goal = (
+        "\u8fd030\u4e2a\u5e94\u6025\u71c3\u6599\uff0c\u5728\u4e1c\u5357\u9ad8\u5730\u533a"
+        "\u548c\u5357\u90e8\u6ee8\u6c34\u533a\u4e4b\u95f4\u8fd0\u8f93"
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        goal,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert len(provider.requests) == 1
+    assert provider.requests[0].grounded_operation is None
+
+
+def test_explicit_operation_lock_is_generic_for_synthetic_transport() -> None:
+    definition = transport_definition()
+    definition = definition.model_copy(
+        update={
+            "goal_resolution": definition.goal_resolution.model_copy(
+                update={"allow_llm_fallback": True}
+            )
+        }
+    )
+    provider = _SequenceDynamicProvider(
+        (),
+        (
+            DynamicGoalInterpretation(
+                status="NEEDS_CLARIFICATION",
+                clarification_prompt="Please specify the source.",
+            ),
+            DynamicGoalInterpretation(status="UNSUPPORTED"),
+        ),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "transport 30 cargo alpha from region a to region b",
+        definition,
+    )
+
+    assert resolution.status == "RESOLVED"
+    requirement = resolution.dynamic_requirements[0]
+    assert isinstance(requirement, AdHocActionCompletedRequirementCandidateV1)
+    assert requirement.action_key == "transport_resource"
+    assert requirement.target_key == "region_b"
+    assert requirement.binding_constraints == (
+        ActionInvocationBinding(role="source_region", value="region_a"),
+    )
+    assert requirement.parameter_constraints == {
+        "resources": [{"resource_key": "cargo_alpha", "amount": 30}]
+    }
+
+
+def test_explicit_operation_lock_recovers_from_legacy_binding_shape() -> None:
+    provider = _SequenceDynamicProvider(
+        (),
+        (
+            {
+                "status": "RESOLVED",
+                "requirements": [
+                    {
+                        "kind": "ACTION_COMPLETED",
+                        "action_key": "transport_resource",
+                        "target_key": "south_waterfront_district",
+                        "binding_constraints": [
+                            {
+                                "role": "source_region",
+                                "source": "EXECUTION_START_ACTOR_REGION",
+                                "value_type": "REGION",
+                            }
+                        ],
+                        "parameter_constraints": {
+                            "resource_key": "emergency_fuel",
+                            "amount": 30,
+                        },
+                    }
+                ],
+            },
+            DynamicGoalInterpretation(status="UNSUPPORTED"),
+        ),
+    )
+    goal = (
+        "\u4ece\u4e1c\u5357\u9ad8\u5730\u533a\u8fd030\u4e2a\u5e94\u6025\u71c3\u6599"
+        "\u5230\u5357\u90e8\u6ee8\u6c34\u533a"
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        goal,
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.requests) == 2
+    assert provider.requests[1].recovery_feedback
+    assert resolution.provider_observation is not None
+    assert resolution.provider_observation["provider_fallback"] == "GROUNDED_OPERATION_LOCK"
 
 
 def test_exact_public_entity_uses_focused_ontology_and_one_recovery() -> None:

@@ -32,10 +32,13 @@ from pydantic import (
     model_validator,
 )
 
-from app.domain.action_invocation import ActionInvocationBinding, canonical_action_parameters
+from app.domain.action_invocation import (
+    ActionInvocationBinding,
+    action_operation_binding_contract,
+    canonical_action_parameters,
+)
 from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import (
-    ActionBehavior,
     ActionDefinitionV2,
     ActionTargetKind,
     FactDefinitionV2,
@@ -846,22 +849,32 @@ def _validate_action_completed_candidate(
                 )
 
     if candidate.binding_constraints:
-        if action.behavior != ActionBehavior.TRANSPORT_RESOURCE:
+        operation_contract = action_operation_binding_contract(action)
+        raw_bindings = operation_contract.get("bindings")
+        raw_target = operation_contract.get("target")
+        binding_specs = raw_bindings if isinstance(raw_bindings, (list, tuple)) else ()
+        allowed_roles = {
+            str(item["role"])
+            for item in binding_specs
+            if isinstance(item, Mapping) and isinstance(item.get("role"), str)
+        }
+        if isinstance(raw_target, Mapping) and isinstance(raw_target.get("role"), str):
+            allowed_roles.add(str(raw_target["role"]))
+        if not allowed_roles:
             raise FormalGoalError(
                 "FORMAL_GOAL_ACTION_BINDING_UNSUPPORTED",
                 "This Action does not declare public operation binding roles",
             )
-        allowed_roles = {"source_region", "destination_region"}
         for binding in candidate.binding_constraints:
             if binding.role not in allowed_roles:
                 raise FormalGoalError(
                     "FORMAL_GOAL_ACTION_BINDING_INVALID",
-                    f"Unsupported transport binding role {binding.role}",
+                    f"Unsupported Action binding role {binding.role}",
                 )
             if not isinstance(binding.value, str) or not binding.value:
                 raise FormalGoalError(
                     "FORMAL_GOAL_ACTION_BINDING_INVALID",
-                    "Transport operation bindings must name public Regions",
+                    "Region-valued Action bindings must name public Regions",
                 )
             region = definition.world.node(binding.value)
             locality = definition.metadata.locality
@@ -872,7 +885,7 @@ def _validate_action_completed_candidate(
             ):
                 raise FormalGoalError(
                     "FORMAL_GOAL_ACTION_BINDING_INVALID",
-                    "Transport operation bindings must name Scenario Regions",
+                    "Region-valued Action bindings must name Scenario Regions",
                 )
 
     if candidate.parameter_constraints is not None:

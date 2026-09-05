@@ -36,6 +36,7 @@ from app.agent.provider import (
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalGroundedOperation,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     DynamicGoalRecoveryFeedback,
@@ -60,7 +61,11 @@ from app.agent.provider import (
     provider_call_start_metadata,
     provider_validation_diagnostics,
 )
-from app.domain.action_invocation import canonical_action_invocation
+from app.domain.action_invocation import (
+    ActionInvocationBinding,
+    action_operation_binding_contract,
+    canonical_action_invocation,
+)
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
@@ -499,6 +504,8 @@ class GenericGoalResolver:
         interpretation_attempts: list[dict[str, object]] = []
         ontology: dict[str, object] | None = None
         projection: _DynamicGoalProjection | None = None
+        grounded_operation: DynamicGoalGroundedOperation | None = None
+        locked_candidate_set: AdHocGoalCandidateSetV2 | None = None
         grounding_rounds_used = 0
 
         def record_provider_call(
@@ -675,6 +682,8 @@ class GenericGoalResolver:
                 observation["validation_diagnostics"] = list(validation_diagnostics)
             if ontology is not None:
                 observation["ontology_hash"] = _dynamic_goal_payload_hash(ontology)
+            if grounded_operation is not None:
+                observation["grounded_operation"] = grounded_operation.model_dump(mode="json")
             return observation
 
         def raise_with_observation(
@@ -732,6 +741,8 @@ class GenericGoalResolver:
         for grounding_round in range(1, max_grounding_rounds + 1):
             ontology = None
             projection = None
+            grounded_operation = None
+            locked_candidate_set = None
             last_backend_rejection_code = None
             last_backend_value_type_diagnostics = []
             last_recovery_feedback = ()
@@ -1020,12 +1031,37 @@ class GenericGoalResolver:
                     ),
                 )
 
+            grounded_operation = _dynamic_goal_grounded_operation(
+                goal,
+                definition,
+                grounding,
+            )
+            locked_candidate_set = None
+            if grounded_operation is not None:
+                candidate = _dynamic_goal_grounded_operation_candidate(grounded_operation)
+                candidate_set = AdHocGoalCandidateSetV2(requirements=(candidate,))
+                try:
+                    locked_candidate_set = canonicalize_ad_hoc_dynamic_candidates_v2(
+                        definition,
+                        candidate_set,
+                    )
+                    _validate_dynamic_goal_publicity(
+                        self.db,
+                        self.scope,
+                        definition,
+                        locked_candidate_set,
+                        projection=projection,
+                    )
+                except FormalGoalError:
+                    grounded_operation = None
+                    locked_candidate_set = None
             ontology = _dynamic_goal_ontology(
                 self.db,
                 self.scope,
                 definition,
                 grounding=grounding,
                 projection=projection,
+                grounded_operation=grounded_operation,
             )
             for record in reversed(provider_call_records):
                 if (
@@ -1048,6 +1084,7 @@ class GenericGoalResolver:
                     ontology=ontology,
                     grounded_candidate_refs=grounding.candidate_refs,
                     grounded_entity_keys=grounding.entity_keys,
+                    grounded_operation=grounded_operation,
                     recovery_attempt=0 if interpretation_attempt_index == 1 else 1,
                     recovery_feedback=last_recovery_feedback,
                 )
@@ -1088,7 +1125,11 @@ class GenericGoalResolver:
                         interpretation_attempt_record["validation_diagnostics"] = list(
                             exc.validation_diagnostics
                         )
-                    last_recovery_feedback = exc.recovery_feedback
+                    last_recovery_feedback = (
+                        (_dynamic_goal_grounded_operation_feedback(grounded_operation),)
+                        if grounded_operation is not None
+                        else exc.recovery_feedback
+                    )
                     interpretation_attempts.append(interpretation_attempt_record)
                     record_provider_call(
                         purpose="dynamic_goal",
@@ -1133,6 +1174,40 @@ class GenericGoalResolver:
                 }
                 interpretation_attempts.append(interpretation_attempt_record)
                 if interpretation.status == "NEEDS_CLARIFICATION":
+                    if grounded_operation is not None and locked_candidate_set is not None:
+                        last_backend_rejection_code = "FORMAL_GOAL_GROUNDED_OPERATION_REQUIRED"
+                        last_recovery_feedback = (
+                            _dynamic_goal_grounded_operation_feedback(grounded_operation),
+                        )
+                        interpretation_attempt_record.update(
+                            {
+                                "validation": "REJECTED",
+                                "result": "BACKEND_VALIDATION_REJECTED",
+                                "rejection_code": last_backend_rejection_code,
+                            }
+                        )
+                        interpretation_attempts[-1] = interpretation_attempt_record
+                        record_provider_call(
+                            purpose="dynamic_goal",
+                            grounding_round=grounding_round,
+                            interpretation_attempt=interpretation_attempt_index,
+                            request=request,
+                            response=interpretation,
+                            projection_for_call=projection,
+                            candidate_refs=grounding.candidate_refs,
+                            validation_result={
+                                "pydantic": "ACCEPTED",
+                                "canonicalization": "REJECTED",
+                                "projection": "NOT_RUN",
+                                "exact_version_public": "REJECTED",
+                                "result": "REJECTED",
+                            },
+                            rejection_code=last_backend_rejection_code,
+                        )
+                        if interpretation_attempt_index < _DYNAMIC_GOAL_MAX_INTERPRETATION_ATTEMPTS:
+                            continue
+                        interpretation_failed = True
+                        break
                     record_provider_call(
                         purpose="dynamic_goal",
                         grounding_round=grounding_round,
@@ -1163,6 +1238,40 @@ class GenericGoalResolver:
                         },
                     )
                 if interpretation.status == "UNSUPPORTED":
+                    if grounded_operation is not None and locked_candidate_set is not None:
+                        last_backend_rejection_code = "FORMAL_GOAL_GROUNDED_OPERATION_REQUIRED"
+                        last_recovery_feedback = (
+                            _dynamic_goal_grounded_operation_feedback(grounded_operation),
+                        )
+                        interpretation_attempt_record.update(
+                            {
+                                "validation": "REJECTED",
+                                "result": "BACKEND_VALIDATION_REJECTED",
+                                "rejection_code": last_backend_rejection_code,
+                            }
+                        )
+                        interpretation_attempts[-1] = interpretation_attempt_record
+                        record_provider_call(
+                            purpose="dynamic_goal",
+                            grounding_round=grounding_round,
+                            interpretation_attempt=interpretation_attempt_index,
+                            request=request,
+                            response=interpretation,
+                            projection_for_call=projection,
+                            candidate_refs=grounding.candidate_refs,
+                            validation_result={
+                                "pydantic": "ACCEPTED",
+                                "canonicalization": "REJECTED",
+                                "projection": "NOT_RUN",
+                                "exact_version_public": "REJECTED",
+                                "result": "REJECTED",
+                            },
+                            rejection_code=last_backend_rejection_code,
+                        )
+                        if interpretation_attempt_index < _DYNAMIC_GOAL_MAX_INTERPRETATION_ATTEMPTS:
+                            continue
+                        interpretation_failed = True
+                        break
                     record_provider_call(
                         purpose="dynamic_goal",
                         grounding_round=grounding_round,
@@ -1193,6 +1302,23 @@ class GenericGoalResolver:
                         definition,
                         candidate_set,
                     )
+                    if (
+                        grounded_operation is not None
+                        and locked_candidate_set is not None
+                        and not _dynamic_goal_matches_grounded_operation(
+                            canonical_candidate_set,
+                            locked_candidate_set,
+                        )
+                    ):
+                        raise FormalGoalError(
+                            "FORMAL_GOAL_GROUNDED_OPERATION_MISMATCH",
+                            "The provider changed a deterministically grounded public operation",
+                            details={
+                                "expected": locked_candidate_set.requirements[0].model_dump(
+                                    mode="json"
+                                )
+                            },
+                        )
                     _validate_dynamic_goal_lossless_operation_semantics(
                         goal,
                         definition,
@@ -1201,6 +1327,10 @@ class GenericGoalResolver:
                     )
                 except FormalGoalError as exc:
                     last_backend_rejection_code = exc.code
+                    if grounded_operation is not None:
+                        last_recovery_feedback = (
+                            _dynamic_goal_grounded_operation_feedback(grounded_operation),
+                        )
                     if exc.details:
                         last_backend_value_type_diagnostics = [exc.details]
                     interpretation_attempt_record.update(
@@ -1245,6 +1375,10 @@ class GenericGoalResolver:
                     )
                 except FormalGoalError as exc:
                     last_backend_rejection_code = exc.code
+                    if grounded_operation is not None:
+                        last_recovery_feedback = (
+                            _dynamic_goal_grounded_operation_feedback(grounded_operation),
+                        )
                     if exc.details:
                         last_backend_value_type_diagnostics = [exc.details]
                     interpretation_attempt_record.update(
@@ -1320,6 +1454,20 @@ class GenericGoalResolver:
                 and grounding_round < max_grounding_rounds
             ):
                 continue
+            if grounded_operation is not None and locked_candidate_set is not None:
+                final_observation = build_observation(
+                    stage="DYNAMIC_GOAL_INTERPRETATION",
+                    status="RESOLVED",
+                    result="DETERMINISTIC_GROUNDED_OPERATION",
+                    validation="ACCEPTED",
+                )
+                final_observation["provider_fallback"] = "GROUNDED_OPERATION_LOCK"
+                return GenericGoalResolution(
+                    "RESOLVED",
+                    dynamic_requirements=locked_candidate_set.requirements,
+                    source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+                    provider_observation=final_observation,
+                )
             if last_interpretation_error is not None:
                 raise_with_observation(
                     last_interpretation_error,
@@ -6424,6 +6572,11 @@ def _dynamic_goal_entity_catalog(
             "key": action.key,
             "name": action.name,
             "description": action.description,
+            **(
+                {"operation_binding_contract": operation_contract}
+                if (operation_contract := action_operation_binding_contract(action))
+                else {}
+            ),
         }
         for action in sorted(definition.actions, key=lambda item: item.key)
         if action.key in public_action_keys
@@ -6542,27 +6695,248 @@ def _dynamic_goal_exact_public_matches(
     return tuple(unique[key] for key in sorted(unique))
 
 
-def _augment_dynamic_goal_transport_action_refs(
+def _action_supports_explicit_region_operation(action: ActionDefinitionV2) -> bool:
+    """Return whether an Action contract can express a region-to-region operation."""
+
+    operation_contract = action_operation_binding_contract(action)
+    raw_bindings = operation_contract.get("bindings")
+    target = operation_contract.get("target")
+    parameter_keys = {item.key for item in action.parameters}
+    return (
+        isinstance(raw_bindings, list)
+        and any(
+            isinstance(binding, dict)
+            and binding.get("role") == "source_region"
+            and binding.get("source") == "EXECUTION_START_ACTOR_REGION"
+            and binding.get("value_type") == "REGION"
+            for binding in raw_bindings
+        )
+        and isinstance(target, dict)
+        and target.get("field") == "target_key"
+        and target.get("role") == "destination_region"
+        and target.get("source") == "ACTION_TARGET_KEY"
+        and target.get("value_type") == "REGION"
+        and {"resource_key", "amount"}.issubset(parameter_keys)
+    )
+
+
+def _augment_dynamic_goal_action_refs(
     goal: str,
     definition: ScenarioDefinitionV2,
     references: tuple[DynamicGoalCandidateReference, ...],
     public_action_keys: set[str],
 ) -> tuple[DynamicGoalCandidateReference, ...]:
-    """Ground public transport Actions for explicit source/target cargo language."""
+    """Ground Action contracts for explicit source/target resource language."""
 
     region_keys = {item.key for item in references if item.ref_type == "REGION"}
     resource_keys = {item.key for item in references if item.ref_type == "RESOURCE"}
     if len(region_keys) < 2 or not resource_keys or re.search(r"\d+", goal) is None:
         return references
-    transport_refs = tuple(
+    operation_refs = tuple(
         DynamicGoalCandidateReference(ref_type="ACTION", key=action.key)
         for action in sorted(definition.actions, key=lambda item: item.key)
-        if action.key in public_action_keys and action.behavior == ActionBehavior.TRANSPORT_RESOURCE
+        if action.key in public_action_keys and _action_supports_explicit_region_operation(action)
     )
-    if not transport_refs:
+    if not operation_refs:
         return references
-    unique = {(item.ref_type, item.key): item for item in (*references, *transport_refs)}
+    unique = {(item.ref_type, item.key): item for item in (*references, *operation_refs)}
     return tuple(unique[key] for key in sorted(unique))
+
+
+_OPERATION_SOURCE_MARKERS = ("from", "source", "从", "起点", "来源", "源自")
+_OPERATION_TARGET_MARKERS = (
+    "to",
+    "destination",
+    "target",
+    "到",
+    "往",
+    "送往",
+    "运往",
+    "交付到",
+    "目的地",
+)
+
+
+def _dynamic_goal_term_positions(text: str, terms: tuple[str, ...]) -> tuple[int, ...]:
+    positions: set[int] = set()
+    for term in terms:
+        if not term:
+            continue
+        start = 0
+        while (position := text.find(term, start)) >= 0:
+            positions.add(position)
+            start = position + max(1, len(term))
+    return tuple(sorted(positions))
+
+
+def _dynamic_goal_marker_before(
+    text: str,
+    markers: tuple[str, ...],
+    position: int,
+    *,
+    lower_bound: int = 0,
+) -> bool:
+    """Return whether a directional marker grounds the nearby public term."""
+
+    for marker_position in _dynamic_goal_term_positions(text, markers):
+        if lower_bound <= marker_position < position:
+            return True
+    return False
+
+
+def _dynamic_goal_grounded_operation(
+    goal: str,
+    definition: ScenarioDefinitionV2,
+    grounding: _DynamicGoalGrounding,
+) -> DynamicGoalGroundedOperation | None:
+    """Freeze one explicitly directional operation after public grounding.
+
+    This deliberately requires public source/target language and one explicit
+    amount.  It does not infer a route, choose an Actor, read Truth, or turn an
+    ambiguous two-Region Goal into an operation.
+    """
+
+    if not grounding.source.startswith("DETERMINISTIC_"):
+        return None
+    action_keys = tuple(
+        sorted(item.key for item in grounding.candidate_refs if item.ref_type == "ACTION")
+    )
+    region_keys = tuple(
+        sorted(item.key for item in grounding.candidate_refs if item.ref_type == "REGION")
+    )
+    resource_keys = tuple(
+        sorted(item.key for item in grounding.candidate_refs if item.ref_type == "RESOURCE")
+    )
+    if len(action_keys) != 1 or len(region_keys) != 2 or len(resource_keys) != 1:
+        return None
+    amount_matches = re.findall(r"\d+", goal)
+    if len(amount_matches) != 1:
+        return None
+    try:
+        amount = int(amount_matches[0])
+    except ValueError:
+        return None
+
+    action = next((item for item in definition.actions if item.key == action_keys[0]), None)
+    if action is None or not _action_supports_explicit_region_operation(action):
+        return None
+    regions = {item.key: item for item in definition.world.nodes if item.key in region_keys}
+    if len(regions) != 2:
+        return None
+    normalized_goal = _normalize(goal)
+    region_positions: dict[str, tuple[int, ...]] = {}
+    for key, region in regions.items():
+        region_positions[key] = _dynamic_goal_term_positions(
+            normalized_goal,
+            (_normalize(key), _normalize(region.name)),
+        )
+        if not region_positions[key]:
+            return None
+    ordered_mentions = sorted(
+        (
+            position,
+            key,
+            index,
+        )
+        for key, positions in region_positions.items()
+        for index, position in enumerate(positions)
+    )
+    if len(ordered_mentions) != 2:
+        return None
+    source_position, source_key, _ = ordered_mentions[0]
+    target_position, target_key, _ = ordered_mentions[1]
+    if source_key == target_key or source_position >= target_position:
+        return None
+    if not _dynamic_goal_marker_before(
+        normalized_goal,
+        _OPERATION_SOURCE_MARKERS,
+        source_position,
+    ):
+        return None
+    if not _dynamic_goal_marker_before(
+        normalized_goal,
+        _OPERATION_TARGET_MARKERS,
+        target_position,
+        lower_bound=source_position + 1,
+    ):
+        return None
+
+    operation_contract = action_operation_binding_contract(action)
+    raw_bindings = operation_contract.get("bindings")
+    source_binding = (
+        next(
+            (
+                binding
+                for binding in raw_bindings
+                if isinstance(binding, dict)
+                and binding.get("source") == "EXECUTION_START_ACTOR_REGION"
+                and binding.get("value_type") == "REGION"
+                and isinstance(binding.get("role"), str)
+            ),
+            None,
+        )
+        if isinstance(raw_bindings, list)
+        else None
+    )
+    target = operation_contract.get("target")
+    if (
+        source_binding is None
+        or not isinstance(target, dict)
+        or target.get("field") != "target_key"
+        or target.get("source") != "ACTION_TARGET_KEY"
+    ):
+        return None
+    source_role = source_binding["role"]
+    assert isinstance(source_role, str)
+    return DynamicGoalGroundedOperation(
+        action_key=action.key,
+        actor_key=None,
+        target_key=target_key,
+        binding_constraints=(ActionInvocationBinding(role=source_role, value=source_key),),
+        parameter_constraints={
+            "resource_key": resource_keys[0],
+            "amount": amount,
+        },
+    )
+
+
+def _dynamic_goal_grounded_operation_candidate(
+    operation: DynamicGoalGroundedOperation,
+) -> AdHocActionCompletedRequirementCandidateV1:
+    return AdHocActionCompletedRequirementCandidateV1(
+        kind="ACTION_COMPLETED",
+        action_key=operation.action_key,
+        actor_key=operation.actor_key,
+        target_key=operation.target_key,
+        binding_constraints=operation.binding_constraints,
+        parameter_constraints=operation.parameter_constraints,
+    )
+
+
+def _dynamic_goal_grounded_operation_feedback(
+    operation: DynamicGoalGroundedOperation,
+) -> DynamicGoalRecoveryFeedback:
+    """Tell a retry to preserve the already grounded public operation."""
+
+    return DynamicGoalRecoveryFeedback(
+        requirement_index=0,
+        kind="ACTION_COMPLETED",
+        issue="INVALID_REQUIREMENT_SHAPE",
+        field="action_key",
+        expected_shape={
+            "kind": "ACTION_COMPLETED",
+            **operation.model_dump(mode="json"),
+            "match_mode": "ONE_SUCCESSFUL_INVOCATION",
+            "boundary": "TASK_OWNED_OPERATION",
+        },
+    )
+
+
+def _dynamic_goal_matches_grounded_operation(
+    candidates: AdHocGoalCandidateSetV2,
+    locked_candidates: AdHocGoalCandidateSetV2,
+) -> bool:
+    return candidates.requirements == locked_candidates.requirements
 
 
 def _validate_dynamic_goal_lossless_operation_semantics(
@@ -6600,7 +6974,7 @@ def _validate_dynamic_goal_lossless_operation_semantics(
     for action in definition.actions:
         if action.key not in grounded_action_keys:
             continue
-        if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+        if _action_supports_explicit_region_operation(action):
             if len(grounded_region_keys) >= 2 and grounded_resource_keys and has_explicit_amount:
                 operation_keys.add(action.key)
         elif action.behavior != ActionBehavior.RULE and grounded_entity_keys:
@@ -6734,7 +7108,7 @@ def _deterministic_dynamic_goal_grounding(
         public_action_keys,
         _dynamic_goal_public_actor_keys(db, scope, definition),
     )
-    reference_matches = _augment_dynamic_goal_transport_action_refs(
+    reference_matches = _augment_dynamic_goal_action_refs(
         goal,
         definition,
         reference_matches,
@@ -7099,6 +7473,7 @@ def _dynamic_goal_ontology(
     *,
     grounding: _DynamicGoalGrounding | None = None,
     projection: _DynamicGoalProjection | None = None,
+    grounded_operation: DynamicGoalGroundedOperation | None = None,
 ) -> dict[str, object]:
     """Build the interpreter's public ontology, excluding Truth and planning."""
 
@@ -7211,6 +7586,11 @@ def _dynamic_goal_ontology(
                 else {}
             ),
             "parameters": [item.model_dump(mode="json") for item in action.parameters],
+            **(
+                {"operation_binding_contract": operation_contract}
+                if (operation_contract := action_operation_binding_contract(action))
+                else {}
+            ),
         }
         for action in sorted(definition.actions, key=lambda item: item.key)
         if action.key in public_action_keys and action.key in allowed_action_keys
@@ -7247,7 +7627,7 @@ def _dynamic_goal_ontology(
         }
     else:
         grounding_payload = {"mode": "FULL_PUBLIC"}
-    return {
+    ontology: dict[str, object] = {
         "schema_version": 1,
         "grounding": grounding_payload,
         "scenario": {
@@ -7283,6 +7663,9 @@ def _dynamic_goal_ontology(
             "comparison": "AT_LEAST_FOR_RESOURCE",
         },
     }
+    if grounded_operation is not None:
+        ontology["grounded_operation"] = grounded_operation.model_dump(mode="json")
+    return ontology
 
 
 def _action_parameter_resource_keys(parameters: Mapping[str, object]) -> set[str]:
