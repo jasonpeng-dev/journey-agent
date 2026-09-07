@@ -6,14 +6,17 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.agent.generic import GenericGoalResolution
 from app.agent.provider import (
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
+    DynamicGoalSemanticRouting,
+    DynamicGoalSemanticRoutingRequest,
     GenericProviderError,
     ProviderCallMetadata,
 )
@@ -21,6 +24,7 @@ from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
 from app.infrastructure.db.models import GoalResolutionAttempt, Player
 from app.scenarios.builtin import require_builtin_v2_version
+from app.services.goal_resolution_observability import persist_goal_resolution_attempt
 from app.services.play import PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
 from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
@@ -129,6 +133,16 @@ class _HistoryResolutionProvider(_ResolutionProvider):
         self._record_call("DYNAMIC_GOAL")
         return super().interpret_dynamic_goal(request)
 
+
+class _StateRoutingHistoryProvider(_HistoryResolutionProvider):
+    def route_dynamic_goal(
+        self, _request: DynamicGoalSemanticRoutingRequest
+    ) -> DynamicGoalSemanticRouting:
+        self._record_call("DYNAMIC_GOAL_ROUTING")
+        return DynamicGoalSemanticRouting(family="STATE")
+
+    def ground_dynamic_goal_operation(self, _request: object) -> object:
+        raise AssertionError("STATE routing must not enter Operation Grounding")
 
 class _ErrorResolutionProvider(_ResolutionProvider):
     def interpret_dynamic_goal(
@@ -285,7 +299,13 @@ def test_resolved_dynamic_attempt_records_safe_provider_diagnostics(
             "validation": "ACCEPTED",
             "result": "BACKEND_ACCEPTED",
             "grounding_round": 1,
-            "candidate_refs": [{"ref_type": "NODE", "key": "patient_one"}],
+            "candidate_refs": [
+                {
+                    "ref_type": "NODE",
+                    "key": "patient_one",
+                    "provenance": "LLM_SUPPLEMENTED",
+                }
+            ],
         },
         {
             "stage": "DYNAMIC_GOAL_INTERPRETATION",
@@ -341,6 +361,63 @@ def test_resolution_attempt_persists_each_provider_call_in_order(
     session.rollback()
     persisted_calls = _attempt(session, game_id).provider_metadata["provider_calls"]
     assert all("debug_snapshot" not in call for call in persisted_calls)
+
+
+def test_routing_recovery_attempt_is_persisted_and_marks_recovery_used(
+    client: TestClient,
+    session: Session,
+) -> None:
+    game_id, version_id = _new_game(client, session)
+    factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False)
+
+    persist_goal_resolution_attempt(
+        factory,
+        game_instance_id=UUID(game_id),
+        scenario_version_id=version_id,
+        goal="move cargo",
+        resolution=GenericGoalResolution("UNSUPPORTED", source="ACTION_NO_MATCH"),
+        resolution_duration_ms=10,
+        provider_calls=(
+            {"call_type": "DYNAMIC_GOAL_ROUTING", "recovery_attempt": 0},
+            {"call_type": "DYNAMIC_GOAL_ROUTING", "recovery_attempt": 1},
+        ),
+    )
+
+    session.expire_all()
+    attempt = _attempt(session, game_id)
+    assert attempt.recovery_used is True
+    assert [
+        call["recovery_attempt"] for call in attempt.provider_metadata["provider_calls"]
+    ] == [0, 1]
+
+
+def test_state_recursive_observation_keeps_outer_routing_call(
+    client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _StateRoutingHistoryProvider(
+        DynamicGoalInterpretation(
+            status="NEEDS_CLARIFICATION",
+            clarification_prompt="Please clarify the desired state",
+        )
+    )
+    monkeypatch.setattr(
+        "app.services.composition.build_generic_provider", lambda _settings: provider
+    )
+    game_id, _version_id = _new_game(client, session)
+
+    submitted = client.post(
+        f"/api/v1/games/{game_id}/goals",
+        json={"goal": "make the patient stable", "idempotency_key": str(uuid4())},
+    )
+
+    assert submitted.status_code == 200, submitted.text
+    calls = _attempt(session, game_id).provider_metadata["provider_calls"]
+    assert [call["call_type"] for call in calls] == [
+        "DYNAMIC_GOAL_ROUTING",
+        "DYNAMIC_GOAL_INTERPRETATION",
+    ]
 
 
 def test_debug_resolution_attempt_persists_bounded_call_snapshots(

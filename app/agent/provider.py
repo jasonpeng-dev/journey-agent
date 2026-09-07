@@ -57,6 +57,49 @@ class DynamicGoalCandidateReference(ProviderModel):
 
     ref_type: Literal["NODE", "REGION", "RESOURCE", "DERIVED_STATE", "ACTION", "ACTOR"]
     key: StrictStr = Field(min_length=1, max_length=160)
+    provenance: Literal["EXACT_USER_MENTION", "TOPOLOGY_ENRICHED", "LLM_SUPPLEMENTED", "OTHER"] = (
+        "LLM_SUPPLEMENTED"
+    )
+
+
+class DynamicGoalSemanticRoutingRequest(ProviderModel):
+    """Small, closed routing request over public semantic candidates."""
+
+    goal: str = Field(min_length=1, max_length=4000)
+    action_catalog: tuple[dict[str, object], ...]
+    state_catalog: tuple[dict[str, object], ...] = ()
+    recovery_attempt: StrictInt = Field(default=0, ge=0, le=1)
+    recovery_feedback: tuple[dict[str, object], ...] = ()
+
+
+class DynamicGoalSemanticRouting(ProviderModel):
+    """One physical call with logically ordered Family then Action routing."""
+
+    family: Literal["STATE", "OPERATION", "AMBIGUOUS"]
+    action_match: Literal["MATCHED", "AMBIGUOUS", "NO_MATCH"] | None = None
+    action_key: StrictStr | None = Field(default=None, max_length=100)
+    candidate_keys: tuple[StrictStr, ...] = ()
+    clarification_prompt: StrictStr | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_routing(self) -> DynamicGoalSemanticRouting:
+        if self.family != "OPERATION":
+            if self.action_match is not None or self.action_key is not None or self.candidate_keys:
+                raise ValueError("STATE/AMBIGUOUS routing cannot carry Action selection")
+            return self
+        if self.action_match is None:
+            raise ValueError("OPERATION routing requires action_match")
+        if self.action_match == "MATCHED":
+            if self.action_key is None or self.candidate_keys:
+                raise ValueError("MATCHED routing requires only action_key")
+        elif self.action_match == "AMBIGUOUS":
+            if self.action_key is not None or len(self.candidate_keys) < 2:
+                raise ValueError("AMBIGUOUS routing requires at least two candidate_keys")
+        elif self.action_key is not None or self.candidate_keys:
+            raise ValueError("NO_MATCH routing cannot carry Action candidates")
+        if len(set(self.candidate_keys)) != len(self.candidate_keys):
+            raise ValueError("Routing candidate_keys must be unique")
+        return self
 
 
 class GoalFamilyMatchRequest(ProviderModel):
@@ -317,6 +360,10 @@ class DynamicGoalInterpretationRequest(ProviderModel):
         exclude_if=lambda value: value is None,
     )
     grounded_operation: DynamicGoalGroundedOperation | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    frozen_family: Literal["STATE"] | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )
@@ -967,6 +1014,7 @@ class ProviderCallMetadata(ProviderModel):
     focused_ontology_hash: str | None = None
     debug_snapshot: dict[str, object] | None = None
     response_validation: str | None = None
+    recovery_attempt: int | None = None
 
 
 class GenericModelProvider(Protocol):
@@ -996,6 +1044,10 @@ class DynamicGoalContractResolver(Protocol):
     """Provider capability for family-frozen, Action-contract Goal resolution."""
 
     def match_dynamic_goal_family(self, request: GoalFamilyMatchRequest) -> GoalFamilyMatch: ...
+
+    def route_dynamic_goal(
+        self, request: DynamicGoalSemanticRoutingRequest
+    ) -> DynamicGoalSemanticRouting: ...
 
     def match_dynamic_goal_action(
         self, request: DynamicGoalActionMatchRequest
@@ -1092,6 +1144,293 @@ def provider_validation_diagnostics(
         if len(diagnostics) >= 20:
             break
     return tuple(diagnostics)
+
+
+def _normalize_dynamic_goal_semantic_routing(raw: object) -> object:
+    """Normalize only the redundant singleton form of a matched Action."""
+
+    if not isinstance(raw, dict):
+        return raw
+    action_key = raw.get("action_key")
+    if (
+        raw.get("family") == "OPERATION"
+        and raw.get("action_match") == "MATCHED"
+        and isinstance(action_key, str)
+        and raw.get("candidate_keys") == [action_key]
+    ):
+        return {**raw, "candidate_keys": []}
+    return raw
+
+
+_OPERATION_REFERENCE_TYPES = frozenset({"NODE", "REGION", "FACILITY", "RESOURCE", "ACTOR"})
+_OPERATION_SLOT_METADATA_FIELDS = frozenset(
+    {"name", "description", "node_type_keys", "semantic_reference_type"}
+)
+
+
+def _normalized_reference_term(value: str) -> str:
+    return " ".join(value.strip().casefold().split())
+
+
+def _operation_reference_value_is_redundant(
+    *,
+    value: object,
+    key: object,
+    expected_type: object,
+    public_references: tuple[dict[str, object], ...],
+) -> bool:
+    """Prove that a natural-language value names the same canonical reference."""
+
+    if not isinstance(value, str) or not isinstance(key, str) or not isinstance(
+        expected_type, str
+    ):
+        return False
+    expected_ref_type = "NODE" if expected_type == "FACILITY" else expected_type
+    if expected_ref_type not in _OPERATION_REFERENCE_TYPES:
+        return False
+    normalized_value = _normalized_reference_term(value)
+    if normalized_value == _normalized_reference_term(key):
+        return True
+    reference = next(
+        (
+            item
+            for item in public_references
+            if item.get("ref_type") == expected_ref_type and item.get("key") == key
+        ),
+        None,
+    )
+    if reference is None:
+        return False
+    name = reference.get("name")
+    return isinstance(name, str) and normalized_value == _normalized_reference_term(name)
+
+
+def _normalize_operation_slot(
+    raw: object,
+    *,
+    public_references: tuple[dict[str, object], ...],
+) -> object:
+    if not isinstance(raw, dict):
+        return raw
+    slot = {
+        key: value
+        for key, value in raw.items()
+        if key not in _OPERATION_SLOT_METADATA_FIELDS
+    }
+    if (
+        slot.get("status") == "GROUNDED"
+        and slot.get("expected_type") in _OPERATION_REFERENCE_TYPES
+        and slot.get("key") is not None
+        and slot.get("value") is not None
+        and _operation_reference_value_is_redundant(
+            value=slot.get("value"),
+            key=slot.get("key"),
+            expected_type=slot.get("expected_type"),
+            public_references=public_references,
+        )
+    ):
+        slot.pop("value", None)
+    return slot
+
+
+def _normalize_dynamic_goal_operation_grounding(
+    raw: object,
+    request: DynamicGoalOperationGroundingRequest,
+) -> object:
+    """Remove only provably redundant wire fields before strict validation."""
+
+    if not isinstance(raw, dict):
+        return raw
+    normalized = dict(raw)
+    if normalized.get("action_key") == request.action_key:
+        normalized.pop("action_key", None)
+    intent = normalized.get("intent")
+    if not isinstance(intent, dict):
+        return normalized
+    normalized_intent = dict(intent)
+    for field in ("actor", "target"):
+        if field in normalized_intent:
+            normalized_intent[field] = _normalize_operation_slot(
+                normalized_intent[field],
+                public_references=request.public_references,
+            )
+    for field in ("bindings", "parameters"):
+        slots = normalized_intent.get(field)
+        if isinstance(slots, list):
+            normalized_intent[field] = [
+                _normalize_operation_slot(
+                    item,
+                    public_references=request.public_references,
+                )
+                for item in slots
+            ]
+    normalized["intent"] = normalized_intent
+    return normalized
+
+
+def _operation_path_value(payload: object, path: str) -> object:
+    current = payload
+    for field, index_text in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)(?:\[(\d+)\])?", path):
+        if not isinstance(current, dict) or field not in current:
+            return _MISSING_OPERATION_PATH
+        current = current[field]
+        if index_text:
+            index = int(index_text)
+            if not isinstance(current, (list, tuple)) or index >= len(current):
+                return _MISSING_OPERATION_PATH
+            current = current[index]
+    return current
+
+
+_MISSING_OPERATION_PATH = object()
+
+
+def _operation_recovery_preserve(
+    raw: object,
+    request: DynamicGoalOperationGroundingRequest,
+    invalid_paths: set[str],
+) -> dict[str, object]:
+    preserve: dict[str, object] = {"frozen_family": "OPERATION"}
+    if not isinstance(raw, dict) or raw.get("status") != "RESOLVED":
+        return preserve
+    preserve.update(
+        {
+            "intent.frozen_family": "OPERATION",
+            "intent.action_key": request.action_key,
+        }
+    )
+    for path in ("intent.actor", "intent.target"):
+        value = _operation_path_value(raw, path)
+        if value is _MISSING_OPERATION_PATH or any(
+            invalid == path or invalid.startswith(f"{path}.") for invalid in invalid_paths
+        ):
+            continue
+        try:
+            validated = OperationContractSlot.model_validate(value)
+        except ValidationError:
+            continue
+        preserve[path] = validated.model_dump(mode="json")
+    for collection in ("bindings", "parameters"):
+        values = _operation_path_value(raw, f"intent.{collection}")
+        if not isinstance(values, list):
+            continue
+        for index, value in enumerate(values):
+            path = f"intent.{collection}[{index}]"
+            if any(
+                invalid == path or invalid.startswith(f"{path}.")
+                for invalid in invalid_paths
+            ):
+                continue
+            try:
+                validated = OperationContractSlot.model_validate(value)
+            except ValidationError:
+                continue
+            preserve[path] = validated.model_dump(mode="json")
+    return preserve
+
+
+def _dynamic_goal_operation_validation_diagnostics(
+    raw: object,
+    error: ValidationError,
+    request: DynamicGoalOperationGroundingRequest,
+) -> tuple[dict[str, object], ...]:
+    base = provider_validation_diagnostics(error)
+    invalid_paths = {
+        str(item.get("field_path")) for item in base if item.get("field_path") is not None
+    }
+    preserve = _operation_recovery_preserve(raw, request, invalid_paths)
+    typed: list[dict[str, object]] = []
+    if isinstance(raw, dict):
+        status = raw.get("status")
+        if status not in {"RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"}:
+            typed.append(
+                {
+                    "code": "INVALID_OPERATION_STATUS",
+                    "field_path": "status",
+                    "allowed": ["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"],
+                    "preserve": preserve,
+                    "fix_only": ["status", "intent", "clarification_prompt"],
+                }
+            )
+        intent = raw.get("intent")
+        if isinstance(intent, dict):
+            slots: list[tuple[str, object]] = [
+                ("intent.actor", intent.get("actor")),
+                ("intent.target", intent.get("target")),
+            ]
+            for collection in ("bindings", "parameters"):
+                values = intent.get(collection)
+                if isinstance(values, list):
+                    slots.extend(
+                        (f"intent.{collection}[{index}]", value)
+                        for index, value in enumerate(values)
+                    )
+            for path, slot in slots:
+                if (
+                    isinstance(slot, dict)
+                    and slot.get("expected_type") in _OPERATION_REFERENCE_TYPES
+                    and slot.get("key") is not None
+                    and slot.get("value") is not None
+                ):
+                    typed.append(
+                        {
+                            "code": "REFERENCE_KEY_AND_VALUE_BOTH_SET",
+                            "field_path": path,
+                            "expected": "canonical key only",
+                            "preserve": preserve,
+                            "fix_only": [f"{path}.value"],
+                        }
+                    )
+    return tuple((*typed, *base))
+
+
+def _validate_dynamic_goal_operation_recovery_preservation(
+    result: DynamicGoalOperationGrounding,
+    recovery_feedback: tuple[dict[str, object], ...],
+) -> None:
+    payload = result.model_dump(mode="json")
+    for feedback in recovery_feedback:
+        preserve = feedback.get("preserve")
+        if not isinstance(preserve, dict):
+            continue
+        for path, expected in preserve.items():
+            if not isinstance(path, str):
+                continue
+            if _operation_path_value(payload, path) != expected:
+                raise ValueError(f"Operation recovery changed preserved field {path}")
+
+
+def _dynamic_goal_routing_validation_diagnostics(
+    raw: object,
+    error: ValidationError,
+) -> tuple[dict[str, object], ...]:
+    diagnostics = provider_validation_diagnostics(error)
+    if not isinstance(raw, dict):
+        return diagnostics
+    action_key = raw.get("action_key")
+    candidate_keys = raw.get("candidate_keys")
+    if (
+        raw.get("family") == "OPERATION"
+        and raw.get("action_match") == "MATCHED"
+        and isinstance(action_key, str)
+        and isinstance(candidate_keys, list)
+        and candidate_keys
+    ):
+        return (
+            {
+                "code": "MATCHED_HAS_CANDIDATE_KEYS",
+                "field_path": "candidate_keys",
+                "expected_candidate_keys": [],
+                "preserve": {
+                    "family": "OPERATION",
+                    "action_match": "MATCHED",
+                    "action_key": action_key,
+                },
+                "fix_only": ["candidate_keys"],
+            },
+            *diagnostics,
+        )
+    return diagnostics
 
 
 def _safe_validation_field_path(location: object) -> str:
@@ -1382,12 +1721,20 @@ def _dynamic_goal_target_value(
 
 
 _GOAL_PROVIDER_PURPOSES = frozenset(
-    {"dynamic_goal_grounding", "dynamic_goal", "dynamic_goal_interpretation"}
+    {
+        "dynamic_goal_grounding",
+        "dynamic_goal",
+        "dynamic_goal_interpretation",
+        "dynamic_goal_routing",
+        "dynamic_goal_operation",
+    }
 )
 _GOAL_PROMPT_TEMPLATE_VERSIONS = {
     "dynamic_goal_grounding": "dynamic-goal-grounding-v2",
     "dynamic_goal": "dynamic-goal-interpretation-v1",
     "dynamic_goal_interpretation": "dynamic-goal-interpretation-v1",
+    "dynamic_goal_routing": "dynamic-goal-routing-v2",
+    "dynamic_goal_operation": "dynamic-goal-operation-v2",
 }
 _GOAL_SNAPSHOT_MAX_DEPTH = 8
 _GOAL_SNAPSHOT_MAX_ITEMS = 200
@@ -1447,10 +1794,13 @@ def goal_provider_response_snapshot(
         raw = value.model_dump(mode="json")
     if not isinstance(raw, dict):
         return {"json_type": _safe_json_type(raw) or "unknown"}
+    if purpose in {"dynamic_goal_routing", "dynamic_goal_operation"}:
+        snapshot = _safe_goal_snapshot(raw, depth=0)
+        return _bounded_goal_snapshot(snapshot, max_bytes=_GOAL_RESPONSE_SNAPSHOT_MAX_BYTES)
     if purpose == "dynamic_goal_grounding":
         raw = _redact_goal_grounding_identities(raw, public_catalog)
         allowed = {"status", "candidate_refs", "candidate_keys", "intent", "clarification_prompt"}
-        nested_allowed = {"ref_type", "key"}
+        nested_allowed = {"ref_type", "key", "provenance"}
     else:
         raw = _redact_goal_interpretation_identities(raw, public_ontology)
         allowed = {"status", "requirements", "clarification_prompt"}
@@ -1577,7 +1927,16 @@ def _redact_goal_reference(
     ref_type = value.get("ref_type")
     key = value.get("key")
     if isinstance(ref_type, str) and isinstance(key, str) and (ref_type, key) in allowed:
-        return {"ref_type": ref_type, "key": key}
+        result = {"ref_type": ref_type, "key": key}
+        provenance = value.get("provenance")
+        if provenance in {
+            "EXACT_USER_MENTION",
+            "TOPOLOGY_ENRICHED",
+            "LLM_SUPPLEMENTED",
+            "OTHER",
+        }:
+            result["provenance"] = provenance
+        return result
     return {
         "ref_type": {"json_type": _safe_json_type(ref_type) or "unknown", "value_omitted": True},
         "key": {"json_type": _safe_json_type(key) or "unknown", "value_omitted": True},
@@ -1884,6 +2243,11 @@ def _goal_provider_metadata(
             if isinstance(ontology, dict)
             else None
         ),
+        "recovery_attempt": (
+            payload.get("recovery_attempt")
+            if isinstance(payload.get("recovery_attempt"), int)
+            else None
+        ),
     }
     if include_debug_snapshot:
         metadata["debug_snapshot"] = {
@@ -2038,6 +2402,7 @@ class OpenAICompatibleGenericProvider:
             "dynamic_goal_family": self._fast_semantic_profile,
             "dynamic_goal_action": self._fast_semantic_profile,
             "dynamic_goal_operation": self._fast_semantic_profile,
+            "dynamic_goal_routing": self._fast_semantic_profile,
         }
         self._transport = transport
         self._last_call_metadata: ProviderCallMetadata | None = None
@@ -2120,6 +2485,15 @@ class OpenAICompatibleGenericProvider:
         self._call_metadata_history[-1] = metadata
         self._last_call_metadata = metadata
 
+    def _record_response_validation(self, validation: str) -> None:
+        if not self._call_metadata_history:
+            return
+        metadata = self._call_metadata_history[-1].model_copy(
+            update={"response_validation": validation}
+        )
+        self._call_metadata_history[-1] = metadata
+        self._last_call_metadata = metadata
+
     def _next_call_sequence(self) -> int:
         self._call_sequence += 1
         return self._call_sequence
@@ -2150,6 +2524,35 @@ class OpenAICompatibleGenericProvider:
                 validation_diagnostics=provider_validation_diagnostics(exc),
             ) from exc
 
+    def route_dynamic_goal(
+        self, request: DynamicGoalSemanticRoutingRequest
+    ) -> DynamicGoalSemanticRouting:
+        raw = self._invoke("dynamic_goal_routing", request.model_dump(mode="json"))
+        raw = _normalize_dynamic_goal_semantic_routing(raw)
+        try:
+            result = DynamicGoalSemanticRouting.model_validate(raw)
+        except ValidationError as exc:
+            diagnostics = _dynamic_goal_routing_validation_diagnostics(raw, exc)
+            self._record_validation_diagnostics(diagnostics)
+            self._record_response_validation("REJECTED")
+            if self._goal_resolution_observability == "DEBUG":
+                self._record_goal_response_snapshot(
+                    goal_provider_response_snapshot("dynamic_goal_routing", raw),
+                    validation="REJECTED",
+                )
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "The model provider returned invalid semantic routing",
+                validation_diagnostics=diagnostics,
+            ) from exc
+        self._record_response_validation("ACCEPTED")
+        if self._goal_resolution_observability == "DEBUG":
+            self._record_goal_response_snapshot(
+                goal_provider_response_snapshot("dynamic_goal_routing", result),
+                validation="ACCEPTED",
+            )
+        return result
+
     def match_dynamic_goal_action(
         self, request: DynamicGoalActionMatchRequest
     ) -> DynamicGoalActionMatch:
@@ -2167,16 +2570,58 @@ class OpenAICompatibleGenericProvider:
     def ground_dynamic_goal_operation(
         self, request: DynamicGoalOperationGroundingRequest
     ) -> DynamicGoalOperationGrounding:
+        raw = self._invoke("dynamic_goal_operation", request.model_dump(mode="json"))
+        normalized = _normalize_dynamic_goal_operation_grounding(raw, request)
         try:
-            return DynamicGoalOperationGrounding.model_validate(
-                self._invoke("dynamic_goal_operation", request.model_dump(mode="json"))
+            result = DynamicGoalOperationGrounding.model_validate(normalized)
+            _validate_dynamic_goal_operation_recovery_preservation(
+                result,
+                request.recovery_feedback,
             )
         except ValidationError as exc:
+            diagnostics = _dynamic_goal_operation_validation_diagnostics(
+                normalized,
+                exc,
+                request,
+            )
+            self._record_validation_diagnostics(diagnostics)
+            self._record_response_validation("REJECTED")
+            if self._goal_resolution_observability == "DEBUG":
+                self._record_goal_response_snapshot(
+                    goal_provider_response_snapshot("dynamic_goal_operation", raw),
+                    validation="REJECTED",
+                )
             raise GenericProviderError(
                 "PROVIDER_SCHEMA_INVALID",
                 "The model provider returned invalid Action-contract grounding",
-                validation_diagnostics=provider_validation_diagnostics(exc),
+                validation_diagnostics=diagnostics,
             ) from exc
+        except ValueError as exc:
+            diagnostics = (
+                {
+                    "code": "RECOVERY_CHANGED_PRESERVED_FIELD",
+                    "expected": "preserve every field named by recovery_feedback.preserve",
+                },
+            )
+            self._record_validation_diagnostics(diagnostics)
+            self._record_response_validation("REJECTED")
+            if self._goal_resolution_observability == "DEBUG":
+                self._record_goal_response_snapshot(
+                    goal_provider_response_snapshot("dynamic_goal_operation", normalized),
+                    validation="REJECTED",
+                )
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "Operation recovery changed an already correct frozen field",
+                validation_diagnostics=diagnostics,
+            ) from exc
+        self._record_response_validation("ACCEPTED")
+        if self._goal_resolution_observability == "DEBUG":
+            self._record_goal_response_snapshot(
+                goal_provider_response_snapshot("dynamic_goal_operation", result),
+                validation="ACCEPTED",
+            )
+        return result
 
     def ground_dynamic_goal_entities(
         self, request: DynamicGoalEntityGroundingRequest
@@ -2281,11 +2726,24 @@ class OpenAICompatibleGenericProvider:
         self, purpose: str, payload: dict[str, object]
     ) -> tuple[dict[str, object], int]:
         profile = self._profile_for_purpose(purpose)
-        if purpose == "dynamic_goal_family":
+        if purpose == "dynamic_goal_routing":
             response_contract = (
-                '{"family":"STATE|OPERATION|AMBIGUOUS",'
-                '"clarification_prompt":null}'
+                "exactly one mutually exclusive variant: "
+                'MATCHED={"family":"OPERATION","action_match":"MATCHED",'
+                '"action_key":"exact_public_action_key","candidate_keys":[],'
+                '"clarification_prompt":null}; '
+                'AMBIGUOUS_ACTION={"family":"OPERATION","action_match":"AMBIGUOUS",'
+                '"action_key":null,"candidate_keys":['
+                '"public_action_key_1","public_action_key_2"],'
+                '"clarification_prompt":null}; '
+                'NO_MATCH={"family":"OPERATION","action_match":"NO_MATCH",'
+                '"action_key":null,"candidate_keys":[],"clarification_prompt":null}; '
+                'STATE_OR_AMBIGUOUS_FAMILY={"family":"STATE|AMBIGUOUS",'
+                '"action_match":null,"action_key":null,"candidate_keys":[],'
+                '"clarification_prompt":"string|null"}'
             )
+        elif purpose == "dynamic_goal_family":
+            response_contract = '{"family":"STATE|OPERATION|AMBIGUOUS","clarification_prompt":null}'
         elif purpose == "dynamic_goal_action":
             response_contract = (
                 '{"frozen_family":"OPERATION",'
@@ -2306,6 +2764,12 @@ class OpenAICompatibleGenericProvider:
                 '"key":null,"value":null,"surface":null},'
                 '"bindings":[],"parameters":[]},'
                 '"supplementary_candidate_refs":[],"clarification_prompt":null}'
+                ". Every slot object may contain only slot_key, expected_type, status, "
+                "ref_type, key, value, and surface. A GROUNDED semantic-reference slot uses "
+                "canonical ref_type/key and value=null. A GROUNDED scalar slot uses value and "
+                "ref_type/key=null. UNRESOLVED and NOT_SPECIFIED use ref_type/key/value=null. "
+                "UNRESOLVED is a slot status, never a top-level status. NEEDS_CLARIFICATION or "
+                "UNSUPPORTED must use intent=null"
             )
         elif purpose == "goal_selection":
             response_contract = (
@@ -2397,7 +2861,36 @@ class OpenAICompatibleGenericProvider:
                 "and target_key null are intentional unconstrained fields and must not trigger "
                 "an actor or target clarification."
             )
-        if purpose == "dynamic_goal_family":
+        if purpose == "dynamic_goal_routing":
+            planning_prompt = (
+                "Compare the finite action_catalog and state_catalog, then perform only two "
+                "logically ordered routing decisions. STATE means the player states a desired "
+                "public world state. OPERATION means the player explicitly requests one Action "
+                "invocation. AMBIGUOUS means both readings genuinely remain. Only for OPERATION, "
+                "match an Action from action_catalog; never return an Action outside it. Return "
+                "MATCHED with exactly one action_key, AMBIGUOUS with every equally plausible "
+                "candidate_key, or NO_MATCH. Do not return OPERATION or NO_MATCH merely because "
+                "a STATE Goal has no corresponding Action. STATE and AMBIGUOUS must not carry "
+                "Action data. Never ground entities, slots, parameters, Facts, "
+                "requirements, or a FormalGoal. Judge the player's semantic intent, not keyword "
+                "matching. OPERATION means the requested behavior or Action invocation itself "
+                "must happen; even when it produces a public terminal State, preserve OPERATION "
+                "and never rewrite it as STATE. STATE means the player only requires the world "
+                "to reach a public terminal State and does not require one specific invocation; "
+                "how to reach it remains HOW. Once the intent is OPERATION, if exactly one Action "
+                "in action_catalog semantically matches the requested invocation, return MATCHED "
+                "even when a corresponding terminal State candidate also exists. If multiple "
+                "Actions genuinely compete for an OPERATION intent, return OPERATION with "
+                "action_match AMBIGUOUS and every candidate_key; if no Action expresses the "
+                "requested invocation, return OPERATION with action_match NO_MATCH. Contrastive "
+                "intent examples (not lexical rules): 把30个燃料运到南部 => OPERATION; "
+                "南部至少有30个燃料 => STATE; "
+                "修复中央河底隧道 => OPERATION; 让中央河底隧道处于可通行状态 => STATE. "
+                "On recovery correct only the supplied structural validation errors. Preserve "
+                "every field named by recovery_feedback.preserve exactly, and change only fields "
+                "named by recovery_feedback.fix_only."
+            )
+        elif purpose == "dynamic_goal_family":
             planning_prompt = (
                 "Classify only the natural-language Goal family. OPERATION means the player "
                 "requires one Action invocation; STATE means a desired world state; AMBIGUOUS "
@@ -2422,7 +2915,15 @@ class OpenAICompatibleGenericProvider:
                 "scalars for scalar slots. Never change the family or Action, invent a slot, infer "
                 "an Actor/source/route, or produce STATE requirements. public_topology may support "
                 "a unique contract-compatible target. On recovery, correct only the typed schema "
-                "mistakes described by recovery_feedback."
+                "mistakes described by recovery_feedback. Do not copy contract-only fields such "
+                "as name, description, node_type_keys, or semantic_reference_type into response "
+                "slots. Keep every recovery_feedback.preserve path exactly unchanged and edit "
+                "only recovery_feedback.fix_only paths; never reselect a correct target, binding, "
+                "parameter, frozen_family, or action_key. References with provenance "
+                "EXACT_USER_MENTION are backend-owned identities: assign their semantic role "
+                "without replacing their key. TOPOLOGY_ENRICHED references are contextual "
+                "evidence, not player constraints and need not occupy a slot. public_references "
+                "has already been filtered to the selected contract; do not search beyond it."
             )
         elif purpose == "dynamic_goal_grounding":
             planning_prompt = (
@@ -2508,6 +3009,13 @@ class OpenAICompatibleGenericProvider:
                 "ACTION_COMPLETED requirement, and never expand the semantics. Do not expose "
                 "chain-of-thought."
             )
+            if payload.get("frozen_family") == "STATE":
+                planning_prompt += (
+                    " The Goal family is already frozen as STATE. Return only FACT, "
+                    "RESOURCE_AT_LEAST, or DERIVED_STATE requirements allowed by the focused "
+                    "ontology. Do not reclassify the family and never return ACTION_COMPLETED, "
+                    "an action_key, operation slots, or an operation intent."
+                )
             if payload.get("recovery_attempt"):
                 planning_prompt += (
                     " This is the one bounded recovery attempt. Re-read the focused public "
@@ -3125,6 +3633,7 @@ class OpenAICompatibleGenericProvider:
         debug_snapshot: dict[str, object] | None = None,
         debug_response_snapshot: dict[str, object] | None = None,
         response_validation: str | None = None,
+        recovery_attempt: int | None = None,
     ) -> None:
         if debug_snapshot is not None and debug_response_snapshot is not None:
             debug_snapshot = {
@@ -3158,6 +3667,7 @@ class OpenAICompatibleGenericProvider:
             focused_ontology_hash=focused_ontology_hash,
             debug_snapshot=debug_snapshot,
             response_validation=response_validation,
+            recovery_attempt=recovery_attempt,
         )
         self._record_call_metadata(metadata)
 
@@ -3379,6 +3889,8 @@ __all__ = [
     "DynamicGoalOperationGrounding",
     "DynamicGoalOperationGroundingRequest",
     "DynamicGoalRecoveryFeedback",
+    "DynamicGoalSemanticRouting",
+    "DynamicGoalSemanticRoutingRequest",
     "GenericModelProvider",
     "GenericProviderError",
     "GoalDependencyProjection",

@@ -63,6 +63,7 @@ _SAFE_PROVIDER_CALL_KEYS = frozenset(
         "call_order",
         "grounding_round",
         "interpretation_attempt",
+        "recovery_attempt",
         "request_hash",
         "public_catalog_hash",
         "focused_ontology_hash",
@@ -157,6 +158,7 @@ def persist_goal_resolution_attempt(
     recovery_used = bool(
         (attempt_count is not None and attempt_count > 1)
         or any(_is_recovery_attempt(item) for item in attempts)
+        or any(_is_recovery_attempt(item) for item in safe_provider_calls)
     )
     raw_provider_purpose = _safe_text(
         observation.get("call_type") or provider_metadata.get("call_type")
@@ -261,6 +263,7 @@ def _safe_provider_calls(value: object) -> list[dict[str, object]]:
                 "call_order",
                 "grounding_round",
                 "interpretation_attempt",
+                "recovery_attempt",
             }:
                 integer = _safe_int(candidate)
                 if integer is not None:
@@ -430,7 +433,13 @@ def _safe_candidate_refs(value: object) -> list[dict[str, str]]:
     if not isinstance(value, (list, tuple)):
         return []
     result: list[dict[str, str]] = []
-    allowed_types = {"NODE", "REGION", "RESOURCE", "DERIVED_STATE"}
+    allowed_types = {"NODE", "REGION", "RESOURCE", "DERIVED_STATE", "ACTION", "ACTOR"}
+    allowed_provenance = {
+        "EXACT_USER_MENTION",
+        "TOPOLOGY_ENRICHED",
+        "LLM_SUPPLEMENTED",
+        "OTHER",
+    }
     for raw in value:
         if not isinstance(raw, dict):
             continue
@@ -442,7 +451,11 @@ def _safe_candidate_refs(value: object) -> list[dict[str, str]]:
             and isinstance(key, str)
             and key.strip()
         ):
-            result.append({"ref_type": ref_type, "key": key[:160]})
+            item = {"ref_type": ref_type, "key": key[:160]}
+            provenance = raw.get("provenance")
+            if isinstance(provenance, str) and provenance in allowed_provenance:
+                item["provenance"] = provenance
+            result.append(item)
         if len(result) >= 50:
             break
     return result
@@ -535,10 +548,12 @@ def _is_recovery_attempt(item: dict[str, object]) -> bool:
     attempt = _safe_int(item.get("attempt"))
     grounding_round = _safe_int(item.get("grounding_round"))
     interpretation_attempt = _safe_int(item.get("interpretation_attempt"))
+    recovery_attempt = _safe_int(item.get("recovery_attempt"))
     return (
         (attempt is not None and attempt > 1)
         or (grounding_round is not None and grounding_round > 1)
         or (interpretation_attempt is not None and interpretation_attempt > 1)
+        or (recovery_attempt is not None and recovery_attempt > 0)
     )
 
 
