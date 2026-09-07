@@ -117,6 +117,26 @@ class ActionParameterType(StrEnum):
     BOOLEAN = "BOOLEAN"
 
 
+class ActionSemanticReferenceType(StrEnum):
+    """Public identity domain for an Action Goal slot.
+
+    Runtime scalar types and Goal identity types are deliberately separate:
+    a Resource key is transported as a string at execution time, while Goal
+    resolution must constrain it to a public Resource identity.
+    """
+
+    NODE = "NODE"
+    REGION = "REGION"
+    FACILITY = "FACILITY"
+    RESOURCE = "RESOURCE"
+    ACTOR = "ACTOR"
+
+
+class ActionOperationBindingSource(StrEnum):
+    EXPLICIT = "EXPLICIT"
+    EXECUTION_START_ACTOR_REGION = "EXECUTION_START_ACTOR_REGION"
+
+
 class RulePhase(StrEnum):
     PREFLIGHT = "PREFLIGHT"
     RESOLVE = "RESOLVE"
@@ -543,6 +563,10 @@ class ActionParameterV2(FrozenDefinitionModel):
     maximum: int | None = None
     allowed_values: tuple[StrictScalar, ...] = ()
     default: StrictScalar | None = None
+    semantic_reference_type: ActionSemanticReferenceType | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_parameter(self) -> ActionParameterV2:
@@ -562,6 +586,11 @@ class ActionParameterV2(FrozenDefinitionModel):
             raise ValueError("allowed_values are valid only for ENUM Action parameters")
         if self.default is not None:
             _validate_parameter_value(self, self.default, field="default")
+        if (
+            self.semantic_reference_type is not None
+            and self.value_type != ActionParameterType.STRING
+        ):
+            raise ValueError("Semantic reference Action parameters must use STRING values")
         if self.required and self.default is not None:
             raise ValueError("A required Action parameter cannot define a default")
         return self
@@ -748,6 +777,24 @@ class ActionPlanningProjectionV2(FrozenDefinitionModel):
     )
 
 
+class ActionOperationBindingV2(FrozenDefinitionModel):
+    """One author-declared Goal-visible invocation binding role."""
+
+    role: StableKey
+    value_type: ActionSemanticReferenceType
+    source: ActionOperationBindingSource = ActionOperationBindingSource.EXPLICIT
+    description: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_binding_source(self) -> ActionOperationBindingV2:
+        if (
+            self.source == ActionOperationBindingSource.EXECUTION_START_ACTOR_REGION
+            and self.value_type != ActionSemanticReferenceType.REGION
+        ):
+            raise ValueError("Execution-start Actor Region bindings must be REGION-valued")
+        return self
+
+
 class ActionDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -773,6 +820,12 @@ class ActionDefinitionV2(FrozenDefinitionModel):
         default=ActionTargetKind.NODE,
         exclude_if=lambda value: value == ActionTargetKind.NODE,
     )
+    target_semantic_reference_type: ActionSemanticReferenceType | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    target_node_type_keys: tuple[StableKey, ...] = ()
+    operation_bindings: tuple[ActionOperationBindingV2, ...] = ()
 
     @model_validator(mode="after")
     def validate_action(self) -> ActionDefinitionV2:
@@ -782,6 +835,27 @@ class ActionDefinitionV2(FrozenDefinitionModel):
             "Action allowed actor capabilities",
         )
         _require_unique((item.code for item in self.expected_outcomes), "Action outcome codes")
+        _require_unique(self.target_node_type_keys, "Action target Node types")
+        _require_unique((item.role for item in self.operation_bindings), "Action binding roles")
+        if self.target_kind != ActionTargetKind.NODE and self.target_node_type_keys:
+            raise ValueError("Only NODE-target Actions may constrain target Node types")
+        if (
+            self.target_kind == ActionTargetKind.NODE
+            and self.target_semantic_reference_type
+            not in {
+                None,
+                ActionSemanticReferenceType.NODE,
+                ActionSemanticReferenceType.REGION,
+                ActionSemanticReferenceType.FACILITY,
+            }
+        ):
+            raise ValueError("NODE-target Actions require a Node semantic target type")
+        if (
+            self.target_kind == ActionTargetKind.ACTOR
+            and self.target_semantic_reference_type
+            not in {None, ActionSemanticReferenceType.ACTOR}
+        ):
+            raise ValueError("ACTOR-target Actions require an ACTOR semantic target type")
         if not self.allowed_actor_capabilities:
             raise ValueError("An Action needs at least one allowed actor capability")
         if not self.expected_outcomes:
@@ -1513,6 +1587,12 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 )
 
     for action in definition.actions:
+        for node_type_key in action.target_node_type_keys:
+            _require_key(
+                node_types,
+                node_type_key,
+                f"Action {action.key} target Node type",
+            )
         if action.required_actor_role_key is not None:
             _require_key(
                 roles,
@@ -2132,8 +2212,11 @@ __all__ = [
     "ActionDefinitionV2",
     "ActionExecutionMode",
     "ActionLocality",
+    "ActionOperationBindingSource",
+    "ActionOperationBindingV2",
     "ActionParameterType",
     "ActionParameters",
+    "ActionSemanticReferenceType",
     "ConditionKind",
     "DerivedDependencyKind",
     "DerivedDependencyV2",

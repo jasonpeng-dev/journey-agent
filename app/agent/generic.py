@@ -33,16 +33,25 @@ from app.agent.planning_context import (
 )
 from app.agent.provider import (
     AntiRegressionMemoryItem,
+    DynamicGoalActionMatch,
+    DynamicGoalActionMatchRequest,
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
     DynamicGoalGroundedOperation,
+    DynamicGoalIntentDraft,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
+    DynamicGoalOperationGrounding,
+    DynamicGoalOperationGroundingRequest,
     DynamicGoalRecoveryFeedback,
     GenericModelProvider,
     GenericProviderError,
+    GoalFamilyMatch,
+    GoalFamilyMatchRequest,
+    OperationContractSlot,
     OperationGoalProjection,
+    OperationIntentDraft,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
@@ -468,14 +477,57 @@ class GenericGoalResolver:
         self,
         goal: str,
         definition: ScenarioDefinitionV2,
+        *,
+        frozen_family: Literal["STATE"] | None = None,
     ) -> GenericGoalResolution | None:
         if not definition.goal_resolution.allow_llm_fallback or self.provider is None:
             return None
-        interpreter = getattr(self.provider, "interpret_dynamic_goal", None)
-        if not callable(interpreter):
-            return None
         provider = self.provider
         assert provider is not None
+        family_matcher = getattr(provider, "match_dynamic_goal_family", None)
+        action_matcher = getattr(provider, "match_dynamic_goal_action", None)
+        operation_grounder = getattr(provider, "ground_dynamic_goal_operation", None)
+        if frozen_family is None and all(
+            callable(item) for item in (family_matcher, action_matcher, operation_grounder)
+        ):
+            assert callable(family_matcher)
+            try:
+                family = GoalFamilyMatch.model_validate(
+                    family_matcher(GoalFamilyMatchRequest(goal=goal))
+                )
+            except (GenericProviderError, ValidationError, TypeError, ValueError) as exc:
+                if isinstance(exc, GenericProviderError):
+                    raise
+                raise GenericProviderError(
+                    "PROVIDER_SCHEMA_INVALID",
+                    "The model provider returned an invalid Goal family match",
+                ) from exc
+            if family.family == "AMBIGUOUS":
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION",
+                    clarification_prompt=(
+                        family.clarification_prompt
+                        or definition.goal_resolution.clarification_prompt
+                    ),
+                    source="FAMILY_AMBIGUOUS",
+                    provider_observation={
+                        "stage": "DYNAMIC_GOAL_FAMILY",
+                        "frozen_family": "AMBIGUOUS",
+                        "rejection_code": "FAMILY_AMBIGUOUS",
+                    },
+                )
+            if family.family == "OPERATION":
+                assert callable(action_matcher) and callable(operation_grounder)
+                return self._resolve_contract_driven_operation(
+                    goal,
+                    definition,
+                    action_matcher=action_matcher,
+                    operation_grounder=operation_grounder,
+                )
+            return self._resolve_dynamic_goal(goal, definition, frozen_family="STATE")
+        interpreter = getattr(provider, "interpret_dynamic_goal", None)
+        if not callable(interpreter):
+            return None
         provider_history_start = len(provider_call_history_metadata(provider))
 
         # Keep one resolver-local record per logical call.  Provider history
@@ -499,6 +551,13 @@ class GenericGoalResolver:
             definition,
         )
         public_catalog_hash = _dynamic_goal_payload_hash(public_catalog)
+        deterministic_candidate_refs = (
+            grounding.candidate_refs if grounding.status == "RESOLVED" else ()
+        )
+        # Exact public identity matches are evidence for Stage 1.  They do not
+        # determine the sentence's operation/state intent or its semantic
+        # roles; those statuses must come from the typed Stage 1 result.
+        intent: DynamicGoalIntentDraft | None = None
 
         grounding_attempts: list[dict[str, object]] = []
         interpretation_attempts: list[dict[str, object]] = []
@@ -546,7 +605,7 @@ class GenericGoalResolver:
                     "grounding_round": grounding_round,
                     "request_hash": _dynamic_goal_payload_hash(request_payload),
                     "prompt_template_version": (
-                        "dynamic-goal-grounding-v1"
+                        "dynamic-goal-grounding-v2"
                         if purpose == "dynamic_goal_grounding"
                         else "dynamic-goal-interpretation-v1"
                     ),
@@ -684,6 +743,8 @@ class GenericGoalResolver:
                 observation["ontology_hash"] = _dynamic_goal_payload_hash(ontology)
             if grounded_operation is not None:
                 observation["grounded_operation"] = grounded_operation.model_dump(mode="json")
+            if intent is not None:
+                observation["intent"] = intent.model_dump(mode="json")
             return observation
 
         def raise_with_observation(
@@ -716,8 +777,8 @@ class GenericGoalResolver:
             )
 
         grounder = getattr(provider, "ground_dynamic_goal_entities", None)
-        needs_provider_grounding = grounding.status != "RESOLVED"
-        if needs_provider_grounding and not callable(grounder):
+        needs_provider_grounding = callable(grounder)
+        if not needs_provider_grounding:
             return GenericGoalResolution(
                 "UNSUPPORTED",
                 source="NO_PUBLIC_GROUNDING",
@@ -728,17 +789,14 @@ class GenericGoalResolver:
                 ),
             )
 
-        grounding_request = DynamicGoalEntityGroundingRequest(
-            goal=goal,
-            public_catalog=public_catalog,
-        )
-        max_grounding_rounds = _DYNAMIC_GOAL_MAX_GROUNDING_ROUNDS if needs_provider_grounding else 1
+        max_grounding_rounds = _DYNAMIC_GOAL_MAX_GROUNDING_ROUNDS
         last_interpretation_error: GenericProviderError | None = None
         last_backend_rejection_code: str | None = None
         last_backend_value_type_diagnostics: list[dict[str, object]] = []
         last_recovery_feedback: tuple[DynamicGoalRecoveryFeedback, ...] = ()
 
         for grounding_round in range(1, max_grounding_rounds + 1):
+            round_intent = intent
             ontology = None
             projection = None
             grounded_operation = None
@@ -750,6 +808,12 @@ class GenericGoalResolver:
                 grounding = _DynamicGoalGrounding(status="NONE")
                 grounding_rounds_used = grounding_round
                 assert callable(grounder)
+                grounding_request = DynamicGoalEntityGroundingRequest(
+                    goal=goal,
+                    public_catalog=public_catalog,
+                    deterministic_candidate_refs=deterministic_candidate_refs,
+                    intent=round_intent,
+                )
                 raw_grounding: object | None = None
                 try:
                     raw_grounding = grounder(grounding_request)
@@ -922,19 +986,39 @@ class GenericGoalResolver:
                         ),
                     )
                 try:
+                    stage1_intent = interpreted_grounding.intent
+                    if (
+                        frozen_family == "STATE"
+                        and stage1_intent is not None
+                        and stage1_intent.intent_kind != "STATE"
+                    ):
+                        raise FormalGoalError(
+                            "FROZEN_FAMILY_CONFLICT",
+                            "State grounding attempted to reopen the frozen Goal family",
+                        )
+                    intent_refs = _dynamic_goal_intent_candidate_refs(stage1_intent)
+                    candidate_refs = _merge_dynamic_goal_candidate_refs(
+                        deterministic_candidate_refs,
+                        (*interpreted_grounding.candidate_refs, *intent_refs),
+                    )
                     candidate_refs = _validate_dynamic_goal_candidate_refs(
                         definition,
                         self.db,
                         self.scope,
-                        interpreted_grounding.candidate_refs,
+                        candidate_refs,
                     )
                     grounding = _dynamic_goal_grounding_from_refs(
                         candidate_refs,
-                        "MODEL_ENTITY_GROUNDING",
+                        (
+                            "MODEL_ENTITY_GROUNDING_WITH_DETERMINISTIC_REFS"
+                            if deterministic_candidate_refs
+                            else "MODEL_ENTITY_GROUNDING"
+                        ),
                         self.db,
                         self.scope,
                         definition,
                     )
+                    intent = stage1_intent if stage1_intent is not None else round_intent
                 except FormalGoalError as exc:
                     grounding_attempt.update(
                         {
@@ -1031,11 +1115,46 @@ class GenericGoalResolver:
                     ),
                 )
 
-            grounded_operation = _dynamic_goal_grounded_operation(
-                goal,
-                definition,
-                grounding,
+            if intent is not None and _dynamic_goal_intent_has_unresolved_slots(intent):
+                if needs_provider_grounding and grounding_round < max_grounding_rounds:
+                    continue
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION",
+                    clarification_prompt=definition.goal_resolution.clarification_prompt,
+                    source="PUBLIC_OPERATION_GROUNDING_INCOMPLETE",
+                    provider_observation=build_observation(
+                        stage="DYNAMIC_GOAL_ENTITY_GROUNDING",
+                        status="NEEDS_CLARIFICATION",
+                        result="EXPLICIT_OPERATION_SLOT_UNRESOLVED",
+                        validation="ACCEPTED",
+                    ),
+                )
+
+            operation_intent_complete = (
+                intent is not None
+                and intent.intent_kind == "OPERATION"
+                and not _dynamic_goal_intent_has_unresolved_slots(intent)
             )
+            if intent is not None:
+                grounded_operation = _dynamic_goal_grounded_operation(
+                    goal,
+                    definition,
+                    grounding,
+                    intent,
+                )
+            if operation_intent_complete and grounded_operation is None:
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION",
+                    clarification_prompt=definition.goal_resolution.clarification_prompt,
+                    source="PUBLIC_OPERATION_LOCK_UNREPRESENTABLE",
+                    provider_observation=build_observation(
+                        stage="DYNAMIC_GOAL_INTERPRETATION",
+                        status="NEEDS_CLARIFICATION",
+                        result="EXPLICIT_OPERATION_LOCK_UNREPRESENTABLE",
+                        validation="REJECTED",
+                        rejection_code="OPERATION_LOCK_UNREPRESENTABLE",
+                    ),
+                )
             locked_candidate_set = None
             if grounded_operation is not None:
                 candidate = _dynamic_goal_grounded_operation_candidate(grounded_operation)
@@ -1052,9 +1171,41 @@ class GenericGoalResolver:
                         locked_candidate_set,
                         projection=projection,
                     )
-                except FormalGoalError:
-                    grounded_operation = None
-                    locked_candidate_set = None
+                except FormalGoalError as exc:
+                    return GenericGoalResolution(
+                        "NEEDS_CLARIFICATION",
+                        clarification_prompt=definition.goal_resolution.clarification_prompt,
+                        source="PUBLIC_OPERATION_LOCK_INVALID",
+                        provider_observation=build_observation(
+                            stage="DYNAMIC_GOAL_INTERPRETATION",
+                            status="NEEDS_CLARIFICATION",
+                            result="EXPLICIT_OPERATION_LOCK_INVALID",
+                            validation="REJECTED",
+                            rejection_code=exc.code,
+                        ),
+                    )
+            if grounded_operation is not None and locked_candidate_set is not None:
+                for record in reversed(provider_call_records):
+                    if (
+                        record.get("purpose") == "DYNAMIC_GOAL_GROUNDING"
+                        and record.get("grounding_round") == grounding_round
+                    ):
+                        record["projection"] = _dynamic_goal_projection_observation(projection)
+                        break
+                final_observation = build_observation(
+                    stage="DYNAMIC_GOAL_INTERPRETATION",
+                    status="RESOLVED",
+                    result="DETERMINISTIC_GROUNDED_OPERATION",
+                    validation="ACCEPTED",
+                )
+                final_observation["provider_fallback"] = "GROUNDED_OPERATION_LOCK"
+                final_observation["stage_2_skipped"] = True
+                return GenericGoalResolution(
+                    "RESOLVED",
+                    dynamic_requirements=locked_candidate_set.requirements,
+                    source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+                    provider_observation=final_observation,
+                )
             ontology = _dynamic_goal_ontology(
                 self.db,
                 self.scope,
@@ -1084,6 +1235,7 @@ class GenericGoalResolver:
                     ontology=ontology,
                     grounded_candidate_refs=grounding.candidate_refs,
                     grounded_entity_keys=grounding.entity_keys,
+                    intent=intent,
                     grounded_operation=grounded_operation,
                     recovery_attempt=0 if interpretation_attempt_index == 1 else 1,
                     recovery_feedback=last_recovery_feedback,
@@ -1298,32 +1450,29 @@ class GenericGoalResolver:
 
                 candidate_set = AdHocGoalCandidateSetV2(requirements=interpretation.requirements)
                 try:
+                    if frozen_family == "STATE" and any(
+                        isinstance(item, AdHocActionCompletedRequirementCandidateV1)
+                        for item in candidate_set.requirements
+                    ):
+                        raise FormalGoalError(
+                            "FROZEN_FAMILY_CONFLICT",
+                            "State composition cannot produce ACTION_COMPLETED",
+                        )
                     canonical_candidate_set = canonicalize_ad_hoc_dynamic_candidates_v2(
                         definition,
                         candidate_set,
                     )
-                    if (
-                        grounded_operation is not None
-                        and locked_candidate_set is not None
-                        and not _dynamic_goal_matches_grounded_operation(
+                    if grounded_operation is not None and locked_candidate_set is not None:
+                        _validate_dynamic_goal_operation_lock(
                             canonical_candidate_set,
                             locked_candidate_set,
-                        )
-                    ):
-                        raise FormalGoalError(
-                            "FORMAL_GOAL_GROUNDED_OPERATION_MISMATCH",
-                            "The provider changed a deterministically grounded public operation",
-                            details={
-                                "expected": locked_candidate_set.requirements[0].model_dump(
-                                    mode="json"
-                                )
-                            },
                         )
                     _validate_dynamic_goal_lossless_operation_semantics(
                         goal,
                         definition,
                         grounding,
                         canonical_candidate_set,
+                        intent=intent,
                     )
                 except FormalGoalError as exc:
                     last_backend_rejection_code = exc.code
@@ -1498,6 +1647,308 @@ class GenericGoalResolver:
             )
 
         return GenericGoalResolution("UNSUPPORTED", source="NO_PUBLIC_GROUNDING")
+
+    def _resolve_contract_driven_operation(
+        self,
+        goal: str,
+        definition: ScenarioDefinitionV2,
+        *,
+        action_matcher: Callable[[DynamicGoalActionMatchRequest], object],
+        operation_grounder: Callable[[DynamicGoalOperationGroundingRequest], object],
+    ) -> GenericGoalResolution:
+        """Resolve every Action through the same frozen, contract-owned pipeline."""
+
+        deterministic = _deterministic_dynamic_goal_grounding(
+            goal, self.db, self.scope, definition
+        )
+        deterministic_refs = (
+            deterministic.candidate_refs if deterministic.status == "RESOLVED" else ()
+        )
+        public_catalog = _dynamic_goal_entity_catalog(
+            self.db, self.scope, definition
+        )
+        raw_references = public_catalog.get("references", ())
+        references = (
+            tuple(item for item in raw_references if isinstance(item, dict))
+            if isinstance(raw_references, (list, tuple))
+            else ()
+        )
+        action_catalog = tuple(
+            item for item in references if item.get("ref_type") == "ACTION"
+        )
+        try:
+            action_match = DynamicGoalActionMatch.model_validate(
+                action_matcher(
+                    DynamicGoalActionMatchRequest(
+                        goal=goal,
+                        action_catalog=action_catalog,
+                        deterministic_candidate_refs=deterministic_refs,
+                    )
+                )
+            )
+        except GenericProviderError:
+            raise
+        except (ValidationError, TypeError, ValueError) as exc:
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "The model provider returned an invalid Action match",
+            ) from exc
+        if action_match.status != "GROUNDED" or action_match.action_key is None:
+            code = (
+                "ACTION_UNRESOLVED"
+                if action_match.status == "UNRESOLVED"
+                else "GOAL_UNREPRESENTABLE"
+            )
+            return GenericGoalResolution(
+                "NEEDS_CLARIFICATION"
+                if action_match.status == "UNRESOLVED"
+                else "UNSUPPORTED",
+                clarification_prompt=(
+                    action_match.clarification_prompt
+                    or definition.goal_resolution.clarification_prompt
+                ),
+                source=code,
+                provider_observation={
+                    "stage": "DYNAMIC_GOAL_ACTION_MATCHING",
+                    "frozen_family": "OPERATION",
+                    "rejection_code": code,
+                },
+            )
+        action = next(
+            (item for item in definition.actions if item.key == action_match.action_key),
+            None,
+        )
+        if action is None or not any(
+            item.get("key") == action_match.action_key for item in action_catalog
+        ):
+            return GenericGoalResolution(
+                "UNSUPPORTED",
+                source="CANONICAL_IDENTITY_CONFLICT",
+                provider_observation={
+                    "stage": "DYNAMIC_GOAL_ACTION_MATCHING",
+                    "frozen_family": "OPERATION",
+                    "rejection_code": "CANONICAL_IDENTITY_CONFLICT",
+                },
+            )
+        exact_actions = {
+            item.key for item in deterministic_refs if item.ref_type == "ACTION"
+        }
+        if exact_actions and action.key not in exact_actions:
+            return GenericGoalResolution(
+                "UNSUPPORTED",
+                source="CANONICAL_IDENTITY_CONFLICT",
+                provider_observation={
+                    "stage": "DYNAMIC_GOAL_ACTION_MATCHING",
+                    "frozen_family": "OPERATION",
+                    "rejection_code": "CANONICAL_IDENTITY_CONFLICT",
+                    "exact_action_keys": sorted(exact_actions),
+                    "action_key": action.key,
+                },
+            )
+
+        action_contract = _dynamic_goal_action_contract(action)
+        topology = public_catalog.get("public_topology", {})
+        recovery_feedback: tuple[dict[str, object], ...] = ()
+        last_error: GenericProviderError | None = None
+        for recovery_attempt in range(2):
+            request = DynamicGoalOperationGroundingRequest(
+                goal=goal,
+                action_key=action.key,
+                action_contract=action_contract,
+                public_references=references,
+                public_topology=topology if isinstance(topology, dict) else {},
+                deterministic_candidate_refs=deterministic_refs,
+                recovery_attempt=recovery_attempt,
+                recovery_feedback=recovery_feedback,
+            )
+            raw: object | None = None
+            try:
+                raw = operation_grounder(request)
+                grounded = DynamicGoalOperationGrounding.model_validate(raw)
+            except GenericProviderError as exc:
+                last_error = exc
+                if recovery_attempt == 0:
+                    recovery_feedback = tuple(exc.validation_diagnostics) or (
+                        {
+                            "code": "PROVIDER_SCHEMA_INVALID",
+                            "expected": "DynamicGoalOperationGrounding",
+                        },
+                    )
+                    continue
+                raise
+            except (ValidationError, TypeError, ValueError) as exc:
+                diagnostics = (
+                    provider_validation_diagnostics(exc)
+                    if isinstance(exc, ValidationError)
+                    else ()
+                )
+                last_error = GenericProviderError(
+                    "PROVIDER_SCHEMA_INVALID",
+                    "The model provider returned invalid Action-contract grounding",
+                    validation_diagnostics=diagnostics,
+                )
+                if recovery_attempt == 0:
+                    recovery_feedback = tuple(diagnostics) or (
+                        {
+                            "code": "PROVIDER_SCHEMA_INVALID",
+                            "expected": "DynamicGoalOperationGrounding",
+                        },
+                    )
+                    continue
+                raise last_error from exc
+
+            if grounded.status != "RESOLVED" or grounded.intent is None:
+                code = (
+                    "EXPLICIT_CONSTRAINT_UNRESOLVED"
+                    if grounded.status == "NEEDS_CLARIFICATION"
+                    else "GOAL_UNREPRESENTABLE"
+                )
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION"
+                    if grounded.status == "NEEDS_CLARIFICATION"
+                    else "UNSUPPORTED",
+                    clarification_prompt=(
+                        grounded.clarification_prompt
+                        or definition.goal_resolution.clarification_prompt
+                    ),
+                    source=code,
+                    provider_observation={
+                        "stage": "DYNAMIC_GOAL_OPERATION_GROUNDING",
+                        "frozen_family": "OPERATION",
+                        "action_key": action.key,
+                        "rejection_code": code,
+                        "recovery_used": bool(recovery_attempt),
+                    },
+                )
+            try:
+                merged_refs = _merge_dynamic_goal_candidate_refs(
+                    deterministic_refs,
+                    grounded.supplementary_candidate_refs,
+                )
+                merged_refs = _merge_dynamic_goal_candidate_refs(
+                    merged_refs,
+                    _operation_intent_candidate_refs(grounded.intent),
+                )
+                merged_refs = _merge_dynamic_goal_candidate_refs(
+                    merged_refs,
+                    (
+                        DynamicGoalCandidateReference(
+                            ref_type="ACTION", key=action.key
+                        ),
+                    ),
+                )
+                merged_refs = _validate_dynamic_goal_candidate_refs(
+                    definition, self.db, self.scope, merged_refs
+                )
+                operation = _compose_contract_driven_operation(
+                    definition,
+                    action,
+                    grounded.intent,
+                    merged_refs,
+                    deterministic_refs,
+                    topology if isinstance(topology, dict) else {},
+                )
+                if operation.target_key is not None:
+                    target_contract = cast(
+                        dict[str, object], action_contract["target"]
+                    )
+                    target_ref_type = _slot_expected_reference_type(
+                        str(target_contract["expected_type"])
+                    )
+                    if target_ref_type is not None:
+                        merged_refs = _merge_dynamic_goal_candidate_refs(
+                            merged_refs,
+                            (
+                                DynamicGoalCandidateReference(
+                                    ref_type=target_ref_type,
+                                    key=operation.target_key,
+                                ),
+                            ),
+                        )
+                        merged_refs = _validate_dynamic_goal_candidate_refs(
+                            definition, self.db, self.scope, merged_refs
+                        )
+                candidate_set = AdHocGoalCandidateSetV2(
+                    requirements=(
+                        _dynamic_goal_grounded_operation_candidate(operation),
+                    )
+                )
+                canonical = canonicalize_ad_hoc_dynamic_candidates_v2(
+                    definition, candidate_set
+                )
+                grounding = _dynamic_goal_grounding_from_refs(
+                    merged_refs,
+                    "CONTRACT_DRIVEN_OPERATION_GROUNDING",
+                    self.db,
+                    self.scope,
+                    definition,
+                )
+                projection = _dynamic_goal_projection(
+                    db=self.db,
+                    scope=self.scope,
+                    definition=definition,
+                    grounding=grounding,
+                )
+                _validate_dynamic_goal_publicity(
+                    self.db,
+                    self.scope,
+                    definition,
+                    canonical,
+                    projection=projection,
+                )
+            except FormalGoalError as exc:
+                if exc.code in {
+                    "PARAMETER_TYPE_INVALID",
+                    "BINDING_TYPE_INVALID",
+                    "CONTRACT_SCHEMA_MISMATCH",
+                } and recovery_attempt == 0:
+                    recovery_feedback = (
+                        {"code": exc.code, **dict(exc.details)},
+                    )
+                    continue
+                status = (
+                    "NEEDS_CLARIFICATION"
+                    if exc.code
+                    in {
+                        "TARGET_UNRESOLVED",
+                        "TARGET_AMBIGUOUS",
+                        "EXPLICIT_CONSTRAINT_UNRESOLVED",
+                    }
+                    else "UNSUPPORTED"
+                )
+                return GenericGoalResolution(
+                    status,
+                    clarification_prompt=(
+                        definition.goal_resolution.clarification_prompt
+                        if status == "NEEDS_CLARIFICATION"
+                        else None
+                    ),
+                    source=exc.code,
+                    provider_observation={
+                        "stage": "DYNAMIC_GOAL_OPERATION_COMPOSITION",
+                        "frozen_family": "OPERATION",
+                        "action_key": action.key,
+                        "rejection_code": exc.code,
+                        "diagnostics": dict(exc.details),
+                        "recovery_used": bool(recovery_attempt),
+                    },
+                )
+            return GenericGoalResolution(
+                "RESOLVED",
+                dynamic_requirements=canonical.requirements,
+                source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+                provider_observation={
+                    "stage": "DYNAMIC_GOAL_OPERATION_COMPOSITION",
+                    "frozen_family": "OPERATION",
+                    "action_key": action.key,
+                    "result": "CONTRACT_OPERATION_ACCEPTED",
+                    "validation": "ACCEPTED",
+                    "recovery_used": bool(recovery_attempt),
+                    "stage_2_skipped": True,
+                },
+            )
+        assert last_error is not None
+        raise last_error
 
 
 class GenericAgentService:
@@ -6572,11 +7023,11 @@ def _dynamic_goal_entity_catalog(
             "key": action.key,
             "name": action.name,
             "description": action.description,
-            **(
-                {"operation_binding_contract": operation_contract}
-                if (operation_contract := action_operation_binding_contract(action))
-                else {}
-            ),
+            "behavior": action.behavior.value,
+            "target_kind": action.target_kind.value,
+            "target_node_type_keys": list(action.target_node_type_keys),
+            "parameters": [item.model_dump(mode="json") for item in action.parameters],
+            "operation_binding_contract": action_operation_binding_contract(action),
         }
         for action in sorted(definition.actions, key=lambda item: item.key)
         if action.key in public_action_keys
@@ -6695,208 +7146,555 @@ def _dynamic_goal_exact_public_matches(
     return tuple(unique[key] for key in sorted(unique))
 
 
-def _action_supports_explicit_region_operation(action: ActionDefinitionV2) -> bool:
-    """Return whether an Action contract can express a region-to-region operation."""
-
-    operation_contract = action_operation_binding_contract(action)
-    raw_bindings = operation_contract.get("bindings")
-    target = operation_contract.get("target")
-    parameter_keys = {item.key for item in action.parameters}
-    return (
-        isinstance(raw_bindings, list)
-        and any(
-            isinstance(binding, dict)
-            and binding.get("role") == "source_region"
-            and binding.get("source") == "EXECUTION_START_ACTOR_REGION"
-            and binding.get("value_type") == "REGION"
-            for binding in raw_bindings
-        )
-        and isinstance(target, dict)
-        and target.get("field") == "target_key"
-        and target.get("role") == "destination_region"
-        and target.get("source") == "ACTION_TARGET_KEY"
-        and target.get("value_type") == "REGION"
-        and {"resource_key", "amount"}.issubset(parameter_keys)
-    )
-
-
-def _augment_dynamic_goal_action_refs(
-    goal: str,
-    definition: ScenarioDefinitionV2,
-    references: tuple[DynamicGoalCandidateReference, ...],
-    public_action_keys: set[str],
+def _merge_dynamic_goal_candidate_refs(
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    semantic_refs: tuple[DynamicGoalCandidateReference, ...],
 ) -> tuple[DynamicGoalCandidateReference, ...]:
-    """Ground Action contracts for explicit source/target resource language."""
+    """Retain exact public refs while adding semantically grounded refs."""
 
-    region_keys = {item.key for item in references if item.ref_type == "REGION"}
-    resource_keys = {item.key for item in references if item.ref_type == "RESOURCE"}
-    if len(region_keys) < 2 or not resource_keys or re.search(r"\d+", goal) is None:
-        return references
-    operation_refs = tuple(
-        DynamicGoalCandidateReference(ref_type="ACTION", key=action.key)
-        for action in sorted(definition.actions, key=lambda item: item.key)
-        if action.key in public_action_keys and _action_supports_explicit_region_operation(action)
-    )
-    if not operation_refs:
-        return references
-    unique = {(item.ref_type, item.key): item for item in (*references, *operation_refs)}
+    unique = {(item.ref_type, item.key): item for item in (*deterministic_refs, *semantic_refs)}
     return tuple(unique[key] for key in sorted(unique))
 
 
-_OPERATION_SOURCE_MARKERS = ("from", "source", "从", "起点", "来源", "源自")
-_OPERATION_TARGET_MARKERS = (
-    "to",
-    "destination",
-    "target",
-    "到",
-    "往",
-    "送往",
-    "运往",
-    "交付到",
-    "目的地",
-)
+def _dynamic_goal_intent_candidate_refs(
+    intent: DynamicGoalIntentDraft | None,
+) -> tuple[DynamicGoalCandidateReference, ...]:
+    """Project only Stage 1's grounded typed slots into public references."""
+
+    if intent is None:
+        return ()
+    slots = (
+        intent.action,
+        intent.actor,
+        intent.source,
+        intent.target,
+        intent.resource,
+    )
+    refs = tuple(
+        DynamicGoalCandidateReference(ref_type=slot.ref_type, key=slot.key)
+        for slot in slots
+        if slot.status == "GROUNDED" and slot.ref_type is not None and slot.key is not None
+    )
+    unique = {(item.ref_type, item.key): item for item in refs}
+    return tuple(unique[key] for key in sorted(unique))
 
 
-def _dynamic_goal_term_positions(text: str, terms: tuple[str, ...]) -> tuple[int, ...]:
-    positions: set[int] = set()
-    for term in terms:
-        if not term:
-            continue
-        start = 0
-        while (position := text.find(term, start)) >= 0:
-            positions.add(position)
-            start = position + max(1, len(term))
-    return tuple(sorted(positions))
+def _dynamic_goal_action_contract(action: ActionDefinitionV2) -> dict[str, object]:
+    """Project the one schema authority consumed by operation grounding."""
+
+    target_type = "ACTOR" if action.target_kind == ActionTargetKind.ACTOR else "NODE"
+    if action.target_kind == ActionTargetKind.NODE and len(action.target_node_type_keys) == 1:
+        node_type = action.target_node_type_keys[0]
+        if node_type.casefold() == "region":
+            target_type = "REGION"
+        elif node_type.casefold() == "facility":
+            target_type = "FACILITY"
+    return {
+        "action_key": action.key,
+        "target": {
+            "slot_key": "target",
+            "expected_type": target_type,
+            "node_type_keys": list(action.target_node_type_keys),
+        },
+        "actor": {"slot_key": "actor", "expected_type": "ACTOR"},
+        "bindings": [
+            {
+                "slot_key": item.role,
+                "expected_type": item.value_type.value,
+                "source": item.source.value,
+                "description": item.description,
+            }
+            for item in action.operation_bindings
+        ],
+        "parameters": [
+            {
+                "slot_key": item.key,
+                "name": item.name,
+                "expected_type": (
+                    item.semantic_reference_type.value
+                    if item.semantic_reference_type is not None
+                    else item.value_type.value
+                ),
+                "runtime_required": item.required,
+                "minimum": item.minimum,
+                "maximum": item.maximum,
+                "allowed_values": list(item.allowed_values),
+            }
+            for item in action.parameters
+        ],
+    }
 
 
-def _dynamic_goal_marker_before(
-    text: str,
-    markers: tuple[str, ...],
-    position: int,
+def _operation_intent_candidate_refs(
+    intent: OperationIntentDraft,
+) -> tuple[DynamicGoalCandidateReference, ...]:
+    slots = (intent.actor, intent.target, *intent.bindings, *intent.parameters)
+    refs = [
+        DynamicGoalCandidateReference(ref_type=slot.ref_type, key=slot.key)
+        for slot in slots
+        if slot.status == "GROUNDED" and slot.ref_type is not None and slot.key is not None
+    ]
+    unique = {(item.ref_type, item.key): item for item in refs}
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _slot_expected_reference_type(expected_type: str) -> str | None:
+    if expected_type in {"NODE", "FACILITY"}:
+        return "NODE"
+    if expected_type in {"REGION", "RESOURCE", "ACTOR"}:
+        return expected_type
+    return None
+
+
+def _validate_contract_slot_shape(
+    slot: OperationContractSlot,
     *,
-    lower_bound: int = 0,
-) -> bool:
-    """Return whether a directional marker grounds the nearby public term."""
+    slot_key: str,
+    expected_type: str,
+) -> None:
+    if slot.slot_key != slot_key or slot.expected_type != expected_type:
+        raise FormalGoalError(
+            "CONTRACT_SCHEMA_MISMATCH",
+            "Operation grounding changed an Action-declared slot",
+            details={
+                "slot": slot_key,
+                "expected_type": expected_type,
+                "actual_slot": slot.slot_key,
+                "actual_type": slot.expected_type,
+            },
+        )
+    if slot.status != "GROUNDED":
+        return
+    expected_ref = _slot_expected_reference_type(expected_type)
+    if expected_ref is not None:
+        if slot.ref_type != expected_ref or slot.key is None:
+            raise FormalGoalError(
+                "BINDING_TYPE_INVALID",
+                "A reference slot does not match its Action contract",
+                details={
+                    "slot": slot_key,
+                    "expected": expected_type,
+                    "actual": slot.ref_type,
+                },
+            )
+        return
+    value = slot.value
+    valid = (
+        (
+            expected_type == "INTEGER"
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        )
+        or (expected_type == "BOOLEAN" and isinstance(value, bool))
+        or (expected_type in {"STRING", "ENUM"} and isinstance(value, str))
+    )
+    if not valid:
+        raise FormalGoalError(
+            "PARAMETER_TYPE_INVALID",
+            "A parameter value does not match its Action contract",
+            details={
+                "slot": slot_key,
+                "expected": expected_type,
+                "actual": type(value).__name__,
+            },
+        )
 
-    for marker_position in _dynamic_goal_term_positions(text, markers):
-        if lower_bound <= marker_position < position:
-            return True
-    return False
+
+def _reference_matches_operation_type(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    reference: DynamicGoalCandidateReference,
+    expected_type: str,
+) -> bool:
+    expected_ref = _slot_expected_reference_type(expected_type)
+    if reference.ref_type != expected_ref:
+        return False
+    if expected_type in {"NODE", "FACILITY", "REGION"}:
+        node = definition.world.node(reference.key)
+        if node is None:
+            return False
+        if expected_type == "FACILITY":
+            facility_type = definition.metadata.locality.facility_node_type_key
+            return facility_type is not None and node.node_type_key == facility_type
+        if expected_type == "REGION":
+            region_type = definition.metadata.locality.region_node_type_key
+            return region_type is not None and node.node_type_key == region_type
+        return (
+            not action.target_node_type_keys
+            or node.node_type_key in action.target_node_type_keys
+        )
+    return True
+
+
+def _operation_target_from_public_topology(
+    action: ActionDefinitionV2,
+    expected_type: str,
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...],
+    public_topology: dict[str, object],
+) -> str | None:
+    """Compose a node target from grounded regions and public topology metadata."""
+
+    if expected_type != "NODE" or not action.target_node_type_keys:
+        return None
+    region_keys = {
+        item.key for item in candidate_refs if item.ref_type == "REGION"
+    }
+    pairs = public_topology.get("transport_endpoint_pairs", ())
+    if len(region_keys) < 2 or not isinstance(pairs, (list, tuple)):
+        return None
+    matches: list[str] = []
+    for item in pairs:
+        if not isinstance(item, dict):
+            continue
+        entity_key = item.get("entity_key")
+        endpoints = item.get("endpoint_region_keys")
+        if (
+            isinstance(entity_key, str)
+            and isinstance(endpoints, (list, tuple))
+            and set(endpoints) == region_keys
+        ):
+            matches.append(entity_key)
+    unique = tuple(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _validate_exact_operation_identities(
+    intent: OperationIntentDraft,
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    *,
+    target_ref_type: str | None,
+    target_key: str | None,
+    topology_region_keys_consumed: bool,
+) -> None:
+    grounded: set[tuple[str, str]] = {
+        (slot.ref_type, slot.key)
+        for slot in (intent.actor, *intent.bindings, *intent.parameters)
+        if slot.status == "GROUNDED" and slot.ref_type is not None and slot.key is not None
+    }
+    if target_ref_type is not None and target_key is not None:
+        grounded.add((target_ref_type, target_key))
+    missing = [
+        item
+        for item in deterministic_refs
+        if item.ref_type != "ACTION"
+        and (item.ref_type, item.key) not in grounded
+        and not (topology_region_keys_consumed and item.ref_type == "REGION")
+    ]
+    if missing:
+        raise FormalGoalError(
+            "CANONICAL_IDENTITY_CONFLICT",
+            "Semantic grounding replaced an exact canonical identity",
+            details={
+                "missing_exact_refs": [
+                    item.model_dump(mode="json") for item in missing
+                ]
+            },
+        )
+
+
+def _compose_contract_driven_operation(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    intent: OperationIntentDraft,
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...],
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    public_topology: dict[str, object],
+) -> DynamicGoalGroundedOperation:
+    if intent.frozen_family != "OPERATION" or intent.action_key != action.key:
+        raise FormalGoalError(
+            "CANONICAL_IDENTITY_CONFLICT",
+            "Operation grounding changed the frozen family or Action",
+        )
+    contract = _dynamic_goal_action_contract(action)
+    target_contract = cast(dict[str, object], contract["target"])
+    target_type = str(target_contract["expected_type"])
+    _validate_contract_slot_shape(
+        intent.actor, slot_key="actor", expected_type="ACTOR"
+    )
+    _validate_contract_slot_shape(
+        intent.target, slot_key="target", expected_type=target_type
+    )
+    binding_contracts = cast(list[dict[str, object]], contract["bindings"])
+    parameter_contracts = cast(list[dict[str, object]], contract["parameters"])
+    bindings = {item.slot_key: item for item in intent.bindings}
+    parameters = {item.slot_key: item for item in intent.parameters}
+    expected_bindings = {str(item["slot_key"]): item for item in binding_contracts}
+    expected_parameters = {str(item["slot_key"]): item for item in parameter_contracts}
+    if set(bindings) != set(expected_bindings) or set(parameters) != set(expected_parameters):
+        raise FormalGoalError(
+            "CONTRACT_SCHEMA_MISMATCH",
+            "Operation grounding slots do not equal the selected Action contract",
+            details={
+                "expected_bindings": sorted(expected_bindings),
+                "actual_bindings": sorted(bindings),
+                "expected_parameters": sorted(expected_parameters),
+                "actual_parameters": sorted(parameters),
+            },
+        )
+    all_slots = (intent.actor, intent.target, *intent.bindings, *intent.parameters)
+    unresolved = [item.slot_key for item in all_slots if item.status == "UNRESOLVED"]
+    for key, spec in expected_bindings.items():
+        _validate_contract_slot_shape(
+            bindings[key], slot_key=key, expected_type=str(spec["expected_type"])
+        )
+    for key, spec in expected_parameters.items():
+        slot = parameters[key]
+        expected_type = str(spec["expected_type"])
+        _validate_contract_slot_shape(slot, slot_key=key, expected_type=expected_type)
+        if slot.status == "GROUNDED" and expected_type == "ENUM":
+            allowed = spec.get("allowed_values", [])
+            if not isinstance(allowed, (list, tuple)):
+                raise FormalGoalError(
+                    "CONTRACT_SCHEMA_MISMATCH",
+                    "An ENUM Action contract has an invalid allowed-values domain",
+                    details={"slot": key},
+                )
+            if slot.value not in allowed:
+                raise FormalGoalError(
+                    "PARAMETER_TYPE_INVALID",
+                    "An ENUM parameter is outside its Action contract",
+                    details={"slot": key, "expected": allowed, "actual": slot.value},
+                )
+
+    target_slot = intent.target
+    target_key = target_slot.key if target_slot.status == "GROUNDED" else None
+    topology_region_keys_consumed = False
+    if target_slot.status == "UNRESOLVED":
+        compatible = tuple(
+            item.key
+            for item in candidate_refs
+            if _reference_matches_operation_type(definition, action, item, target_type)
+        )
+        compatible = tuple(dict.fromkeys(compatible))
+        if len(compatible) == 1:
+            target_key = compatible[0]
+            unresolved.remove("target")
+            topology_region_keys_consumed = (
+                _operation_target_from_public_topology(
+                    action,
+                    target_type,
+                    candidate_refs,
+                    public_topology,
+                )
+                == target_key
+            )
+        elif len(compatible) > 1:
+            raise FormalGoalError(
+                "TARGET_AMBIGUOUS",
+                "More than one grounded identity satisfies the Action target contract",
+                details={"candidate_keys": list(compatible)},
+            )
+        else:
+            target_key = _operation_target_from_public_topology(
+                action,
+                target_type,
+                candidate_refs,
+                public_topology,
+            )
+            if target_key is not None:
+                unresolved.remove("target")
+                topology_region_keys_consumed = True
+    if unresolved:
+        raise FormalGoalError(
+            "EXPLICIT_CONSTRAINT_UNRESOLVED",
+            "An explicit player constraint could not be grounded uniquely",
+            details={"slots": unresolved},
+        )
+    if target_key is not None:
+        target_ref_type = _slot_expected_reference_type(target_type)
+        if target_ref_type is None:
+            raise FormalGoalError(
+                "CONTRACT_SCHEMA_MISMATCH",
+                "Action target contract is not reference-valued",
+                details={"expected": target_type},
+            )
+        target_ref = DynamicGoalCandidateReference(
+            ref_type=target_ref_type,
+            key=target_key,
+        )
+        if not _reference_matches_operation_type(definition, action, target_ref, target_type):
+            raise FormalGoalError(
+                "BINDING_TYPE_INVALID",
+                "The grounded target is incompatible with the Action target contract",
+                details={"slot": "target", "expected": target_type, "actual": target_key},
+            )
+    _validate_exact_operation_identities(
+        intent,
+        deterministic_refs,
+        target_ref_type=_slot_expected_reference_type(target_type),
+        target_key=target_key,
+        topology_region_keys_consumed=topology_region_keys_consumed,
+    )
+
+    binding_constraints = tuple(
+        ActionInvocationBinding(role=key, value=slot.key)
+        for key, slot in sorted(bindings.items())
+        if slot.status == "GROUNDED" and slot.key is not None
+    )
+    parameter_constraints: dict[str, object] = {}
+    for key, slot in sorted(parameters.items()):
+        if slot.status != "GROUNDED":
+            continue
+        parameter_constraints[key] = slot.key if slot.key is not None else slot.value
+    return DynamicGoalGroundedOperation(
+        action_key=action.key,
+        actor_key=(intent.actor.key if intent.actor.status == "GROUNDED" else None),
+        target_key=target_key,
+        binding_constraints=binding_constraints,
+        parameter_constraints=parameter_constraints or None,
+    )
+
+
+def _dynamic_goal_intent_has_unresolved_slots(intent: DynamicGoalIntentDraft) -> bool:
+    return any(
+        slot.status == "UNRESOLVED"
+        for slot in (
+            intent.action,
+            intent.actor,
+            intent.source,
+            intent.target,
+            intent.resource,
+            intent.amount,
+        )
+    )
+
+
+def _dynamic_goal_action_parameter(
+    action: ActionDefinitionV2,
+    *,
+    semantic: Literal["RESOURCE", "AMOUNT"],
+) -> str | None:
+    if semantic == "RESOURCE":
+        exact_keys = {"resource", "resource_key", "cargo", "cargo_key"}
+        matches = tuple(
+            item.key
+            for item in action.parameters
+            if item.key.casefold() in exact_keys
+            or "resource" in item.key.casefold()
+            or "cargo" in item.key.casefold()
+            or "resource" in _normalize(item.name)
+            or "cargo" in _normalize(item.name)
+        )
+    else:
+        matches = tuple(
+            item.key
+            for item in action.parameters
+            if item.key.casefold() == "amount"
+            or _normalize(item.name) in {"amount", "quantity", "number"}
+        )
+        if not matches:
+            integer_parameters = tuple(
+                item.key for item in action.parameters if item.value_type.value == "INTEGER"
+            )
+            if len(integer_parameters) == 1:
+                matches = integer_parameters
+    return matches[0] if len(matches) == 1 else None
 
 
 def _dynamic_goal_grounded_operation(
     goal: str,
     definition: ScenarioDefinitionV2,
     grounding: _DynamicGoalGrounding,
+    intent: DynamicGoalIntentDraft,
 ) -> DynamicGoalGroundedOperation | None:
-    """Freeze one explicitly directional operation after public grounding.
+    """Build the exact lock from typed public intent provenance.
 
-    This deliberately requires public source/target language and one explicit
-    amount.  It does not infer a route, choose an Actor, read Truth, or turn an
-    ambiguous two-Region Goal into an operation.
+    The lock contains only slots that the player explicitly grounded.  It does
+    not infer an Actor, source, target, route, or parameter value from planner
+    context.  Action-defined binding contracts decide how an explicit source
+    is represented; the resolver never looks for a literal ``source`` Action
+    parameter.
     """
 
-    if not grounding.source.startswith("DETERMINISTIC_"):
+    del goal, grounding
+    if intent.intent_kind != "OPERATION" or _dynamic_goal_intent_has_unresolved_slots(intent):
         return None
-    action_keys = tuple(
-        sorted(item.key for item in grounding.candidate_refs if item.ref_type == "ACTION")
-    )
-    region_keys = tuple(
-        sorted(item.key for item in grounding.candidate_refs if item.ref_type == "REGION")
-    )
-    resource_keys = tuple(
-        sorted(item.key for item in grounding.candidate_refs if item.ref_type == "RESOURCE")
-    )
-    if len(action_keys) != 1 or len(region_keys) != 2 or len(resource_keys) != 1:
-        return None
-    amount_matches = re.findall(r"\d+", goal)
-    if len(amount_matches) != 1:
-        return None
-    try:
-        amount = int(amount_matches[0])
-    except ValueError:
-        return None
-
-    action = next((item for item in definition.actions if item.key == action_keys[0]), None)
-    if action is None or not _action_supports_explicit_region_operation(action):
-        return None
-    regions = {item.key: item for item in definition.world.nodes if item.key in region_keys}
-    if len(regions) != 2:
-        return None
-    normalized_goal = _normalize(goal)
-    region_positions: dict[str, tuple[int, ...]] = {}
-    for key, region in regions.items():
-        region_positions[key] = _dynamic_goal_term_positions(
-            normalized_goal,
-            (_normalize(key), _normalize(region.name)),
-        )
-        if not region_positions[key]:
-            return None
-    ordered_mentions = sorted(
-        (
-            position,
-            key,
-            index,
-        )
-        for key, positions in region_positions.items()
-        for index, position in enumerate(positions)
-    )
-    if len(ordered_mentions) != 2:
-        return None
-    source_position, source_key, _ = ordered_mentions[0]
-    target_position, target_key, _ = ordered_mentions[1]
-    if source_key == target_key or source_position >= target_position:
-        return None
-    if not _dynamic_goal_marker_before(
-        normalized_goal,
-        _OPERATION_SOURCE_MARKERS,
-        source_position,
+    if (
+        intent.action.status != "GROUNDED"
+        or intent.action.ref_type != "ACTION"
+        or intent.action.key is None
     ):
         return None
-    if not _dynamic_goal_marker_before(
-        normalized_goal,
-        _OPERATION_TARGET_MARKERS,
-        target_position,
-        lower_bound=source_position + 1,
-    ):
+    action = next((item for item in definition.actions if item.key == intent.action.key), None)
+    if action is None:
         return None
 
     operation_contract = action_operation_binding_contract(action)
     raw_bindings = operation_contract.get("bindings")
-    source_binding = (
-        next(
-            (
-                binding
-                for binding in raw_bindings
-                if isinstance(binding, dict)
-                and binding.get("source") == "EXECUTION_START_ACTOR_REGION"
-                and binding.get("value_type") == "REGION"
-                and isinstance(binding.get("role"), str)
-            ),
-            None,
-        )
-        if isinstance(raw_bindings, list)
-        else None
+    binding_specs = (
+        tuple(item for item in raw_bindings if isinstance(item, dict))
+        if isinstance(raw_bindings, (list, tuple))
+        else ()
     )
-    target = operation_contract.get("target")
-    if (
-        source_binding is None
-        or not isinstance(target, dict)
-        or target.get("field") != "target_key"
-        or target.get("source") != "ACTION_TARGET_KEY"
-    ):
+    binding_constraints: list[ActionInvocationBinding] = []
+    if intent.source.status == "GROUNDED":
+        if intent.source.ref_type not in {"NODE", "REGION", "ACTOR"} or intent.source.key is None:
+            return None
+        source_specs = tuple(
+            item
+            for item in binding_specs
+            if item.get("source") == "EXECUTION_START_ACTOR_REGION"
+            and item.get("value_type") == intent.source.ref_type
+            and isinstance(item.get("role"), str)
+        )
+        if len(source_specs) != 1:
+            return None
+        role = source_specs[0]["role"]
+        assert isinstance(role, str)
+        binding_constraints.append(ActionInvocationBinding(role=role, value=intent.source.key))
+    elif intent.source.status != "NOT_SPECIFIED":
         return None
-    source_role = source_binding["role"]
-    assert isinstance(source_role, str)
+
+    target_key: str | None = None
+    if intent.target.status == "GROUNDED":
+        if intent.target.ref_type not in {"NODE", "REGION", "ACTOR"} or intent.target.key is None:
+            return None
+        target = operation_contract.get("target")
+        if target is not None and (
+            not isinstance(target, dict)
+            or target.get("field") != "target_key"
+            or target.get("source") != "ACTION_TARGET_KEY"
+            or target.get("value_type") != intent.target.ref_type
+        ):
+            return None
+        target_key = intent.target.key
+    elif intent.target.status != "NOT_SPECIFIED":
+        return None
+
+    parameter_constraints: dict[str, object] = {}
+    if intent.resource.status == "GROUNDED":
+        if intent.resource.ref_type != "RESOURCE" or intent.resource.key is None:
+            return None
+        resource_parameter_key = _dynamic_goal_action_parameter(action, semantic="RESOURCE")
+        if resource_parameter_key is None:
+            return None
+        parameter_constraints[resource_parameter_key] = intent.resource.key
+    elif intent.resource.status != "NOT_SPECIFIED":
+        return None
+    if intent.amount.status == "GROUNDED":
+        if not isinstance(intent.amount.value, int) or isinstance(intent.amount.value, bool):
+            return None
+        amount_parameter_key = _dynamic_goal_action_parameter(action, semantic="AMOUNT")
+        if amount_parameter_key is None:
+            return None
+        parameter_constraints[amount_parameter_key] = intent.amount.value
+    elif intent.amount.status != "NOT_SPECIFIED":
+        return None
+
+    actor_key: str | None = None
+    if intent.actor.status == "GROUNDED":
+        if intent.actor.ref_type != "ACTOR" or intent.actor.key is None:
+            return None
+        actor_key = intent.actor.key
+    elif intent.actor.status != "NOT_SPECIFIED":
+        return None
+
     return DynamicGoalGroundedOperation(
         action_key=action.key,
-        actor_key=None,
+        actor_key=actor_key,
         target_key=target_key,
-        binding_constraints=(ActionInvocationBinding(role=source_role, value=source_key),),
-        parameter_constraints={
-            "resource_key": resource_keys[0],
-            "amount": amount,
-        },
+        binding_constraints=tuple(binding_constraints),
+        parameter_constraints=(parameter_constraints or None),
     )
 
 
@@ -6939,52 +7737,66 @@ def _dynamic_goal_matches_grounded_operation(
     return candidates.requirements == locked_candidates.requirements
 
 
+def _validate_dynamic_goal_operation_lock(
+    candidates: AdHocGoalCandidateSetV2,
+    locked_candidates: AdHocGoalCandidateSetV2,
+) -> None:
+    """Reject every Stage-2 response that is not the exact operation lock."""
+
+    if _dynamic_goal_matches_grounded_operation(candidates, locked_candidates):
+        return
+    expected_requirements = [
+        item.model_dump(mode="json") for item in locked_candidates.requirements
+    ]
+    actual_requirements = [item.model_dump(mode="json") for item in candidates.requirements]
+    raise FormalGoalError(
+        "OPERATION_LOCK_MISMATCH",
+        "The provider changed the exact public operation lock",
+        details={
+            "mismatch": "EXACT_OPERATION_LOCK",
+            "expected": expected_requirements,
+            "actual": actual_requirements,
+            "unexpected_requirement_count": max(
+                0,
+                len(actual_requirements) - len(expected_requirements),
+            ),
+        },
+    )
+
+
 def _validate_dynamic_goal_lossless_operation_semantics(
     goal: str,
     definition: ScenarioDefinitionV2,
     grounding: _DynamicGoalGrounding,
     candidates: AdHocGoalCandidateSetV2,
+    *,
+    intent: DynamicGoalIntentDraft | None = None,
 ) -> None:
-    """Reject a state downgrade when public language names an operation."""
+    """Reject a state downgrade when Stage 1 classifies the Goal as an operation."""
 
+    del definition, goal, grounding
+    operation_intent = intent is not None and intent.intent_kind == "OPERATION"
+    if not operation_intent:
+        return
     if any(
         isinstance(item, AdHocActionCompletedRequirementCandidateV1)
         for item in candidates.requirements
     ):
         return
-
-    grounded_action_keys = {
-        item.key for item in grounding.candidate_refs if item.ref_type == "ACTION"
-    }
-    if not grounded_action_keys:
-        return
-    grounded_entity_keys = {
-        item.key
-        for item in grounding.candidate_refs
-        if item.ref_type in {"NODE", "REGION", "ACTOR"}
-    }
-    grounded_region_keys = {
-        item.key for item in grounding.candidate_refs if item.ref_type == "REGION"
-    }
-    grounded_resource_keys = {
-        item.key for item in grounding.candidate_refs if item.ref_type == "RESOURCE"
-    }
-    has_explicit_amount = re.search(r"\d+", goal) is not None
-    operation_keys: set[str] = set()
-    for action in definition.actions:
-        if action.key not in grounded_action_keys:
-            continue
-        if _action_supports_explicit_region_operation(action):
-            if len(grounded_region_keys) >= 2 and grounded_resource_keys and has_explicit_amount:
-                operation_keys.add(action.key)
-        elif action.behavior != ActionBehavior.RULE and grounded_entity_keys:
-            operation_keys.add(action.key)
+    operation_keys = (
+        [intent.action.key]
+        if intent is not None
+        and intent.action.status == "GROUNDED"
+        and intent.action.ref_type == "ACTION"
+        and intent.action.key is not None
+        else []
+    )
     if not operation_keys:
         return
     raise FormalGoalError(
         "FORMAL_GOAL_OPERATION_SEMANTICS_LOST",
         "The Goal names a concrete Action but the provider returned only a state requirement",
-        details={"action_keys": sorted(operation_keys)},
+        details={"action_keys": operation_keys},
     )
 
 
@@ -7107,12 +7919,6 @@ def _deterministic_dynamic_goal_grounding(
         public_nodes,
         public_action_keys,
         _dynamic_goal_public_actor_keys(db, scope, definition),
-    )
-    reference_matches = _augment_dynamic_goal_action_refs(
-        goal,
-        definition,
-        reference_matches,
-        public_action_keys,
     )
     direct_entity_matches = tuple(item.key for item in reference_matches if item.ref_type == "NODE")
     direct_region_matches = tuple(

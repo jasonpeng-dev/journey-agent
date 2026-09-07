@@ -17,8 +17,10 @@ from app.agent.provider import (
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalIntentDraft,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
+    DynamicGoalMentionSlot,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -74,7 +76,24 @@ class _OperationGoalResolverProvider(_RecordingProvider):
             candidate_refs=(
                 DynamicGoalCandidateReference(ref_type="ACTION", key="diagnose_patient"),
                 DynamicGoalCandidateReference(ref_type="NODE", key="patient_one"),
-            )
+            ),
+            intent=DynamicGoalIntentDraft(
+                intent_kind="OPERATION",
+                action=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="ACTION",
+                    key="diagnose_patient",
+                ),
+                target=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="NODE",
+                    key="patient_one",
+                ),
+                actor=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+                source=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+                resource=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+                amount=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+            ),
         )
 
     def interpret_dynamic_goal(
@@ -199,7 +218,6 @@ def _transport_candidate(
         actor_key=actor_key,
         target_key=destination_region,
         binding_constraints=(
-            ActionInvocationBinding(role="destination_region", value=destination_region),
             ActionInvocationBinding(role="source_region", value=source_region),
         ),
         parameter_constraints=parameters or {"resource_key": "cargo_alpha", "amount": 10},
@@ -370,7 +388,6 @@ def test_transport_operation_matches_actor_source_target_resource_and_amount(
         target_key="region_b",
         bindings=(
             ActionInvocationBinding(role="source_region", value="region_a"),
-            ActionInvocationBinding(role="destination_region", value="region_b"),
         ),
         parameters={"resource_key": "cargo_alpha", "amount": 10},
     )
@@ -384,7 +401,6 @@ def test_transport_operation_matches_actor_source_target_resource_and_amount(
                 update={
                     "bindings": (
                         ActionInvocationBinding(role="source_region", value="region_c"),
-                        ActionInvocationBinding(role="destination_region", value="region_b"),
                     )
                 }
             )
@@ -471,6 +487,19 @@ def test_explicit_operation_language_cannot_downgrade_to_state_requirement() -> 
             DynamicGoalCandidateReference(ref_type="RESOURCE", key="cargo_alpha"),
         ),
     )
+    intent = DynamicGoalIntentDraft(
+        intent_kind="OPERATION",
+        action=DynamicGoalMentionSlot(
+            status="GROUNDED",
+            ref_type="ACTION",
+            key="transport_resource",
+        ),
+        actor=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+        source=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+        target=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+        resource=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+        amount=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+    )
     state_candidate = AdHocFactRequirementCandidateV1(
         kind="FACT",
         node_key="region_b",
@@ -484,6 +513,7 @@ def test_explicit_operation_language_cannot_downgrade_to_state_requirement() -> 
             definition,
             grounding,
             AdHocGoalCandidateSetV2(requirements=(state_candidate,)),
+            intent=intent,
         )
 
     assert error.value.code == "FORMAL_GOAL_OPERATION_SEMANTICS_LOST"

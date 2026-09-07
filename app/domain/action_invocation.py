@@ -96,21 +96,19 @@ def action_operation_binding_contract(action: ActionDefinitionV2) -> dict[str, o
     authorities for the actual binding values.
     """
 
-    if action.behavior != ActionBehavior.TRANSPORT_RESOURCE:
-        return {}
+    target_value_type = (
+        action.target_semantic_reference_type.value
+        if action.target_semantic_reference_type is not None
+        else action.target_kind.value
+    )
     return {
-        "bindings": [
-            {
-                "role": "source_region",
-                "source": "EXECUTION_START_ACTOR_REGION",
-                "value_type": "REGION",
-            }
-        ],
+        "bindings": [item.model_dump(mode="json") for item in action.operation_bindings],
         "target": {
             "field": "target_key",
-            "role": "destination_region",
+            "role": "target",
             "source": "ACTION_TARGET_KEY",
-            "value_type": "REGION",
+            "value_type": target_value_type,
+            "node_type_keys": list(action.target_node_type_keys),
         },
     }
 

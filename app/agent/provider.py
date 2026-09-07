@@ -52,18 +52,159 @@ class GoalSelection(ProviderModel):
     clarification_prompt: str | None = None
 
 
-class DynamicGoalEntityGroundingRequest(ProviderModel):
-    """Knowledge-safe input for the bounded public Entity Grounding call."""
-
-    goal: str = Field(min_length=1, max_length=4000)
-    public_catalog: dict[str, object] = Field(default_factory=dict)
-
-
 class DynamicGoalCandidateReference(ProviderModel):
     """One public Scenario definition that Stage 1 may ground."""
 
     ref_type: Literal["NODE", "REGION", "RESOURCE", "DERIVED_STATE", "ACTION", "ACTOR"]
     key: StrictStr = Field(min_length=1, max_length=160)
+
+
+class GoalFamilyMatchRequest(ProviderModel):
+    goal: str = Field(min_length=1, max_length=4000)
+
+
+class GoalFamilyMatch(ProviderModel):
+    """Stage 0 output.  No entity or requirement fields exist by design."""
+
+    family: Literal["STATE", "OPERATION", "AMBIGUOUS"]
+    clarification_prompt: StrictStr | None = Field(default=None, max_length=1000)
+
+
+class DynamicGoalActionMatchRequest(ProviderModel):
+    goal: str = Field(min_length=1, max_length=4000)
+    frozen_family: Literal["OPERATION"] = "OPERATION"
+    action_catalog: tuple[dict[str, object], ...]
+    deterministic_candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+
+
+class DynamicGoalActionMatch(ProviderModel):
+    frozen_family: Literal["OPERATION"] = "OPERATION"
+    status: Literal["GROUNDED", "UNRESOLVED", "UNSUPPORTED"]
+    action_key: StrictStr | None = Field(default=None, max_length=100)
+    clarification_prompt: StrictStr | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_action_match(self) -> DynamicGoalActionMatch:
+        if self.status == "GROUNDED" and not self.action_key:
+            raise ValueError("A grounded Action match requires action_key")
+        if self.status != "GROUNDED" and self.action_key is not None:
+            raise ValueError("An unresolved Action match cannot carry action_key")
+        return self
+
+
+OperationSlotExpectedType = Literal[
+    "STRING", "ENUM", "INTEGER", "BOOLEAN", "NODE", "REGION", "FACILITY", "RESOURCE", "ACTOR"
+]
+
+
+class OperationContractSlot(ProviderModel):
+    """One Action-contract-owned semantic slot returned by operation grounding."""
+
+    slot_key: StrictStr = Field(min_length=1, max_length=100)
+    expected_type: OperationSlotExpectedType
+    status: Literal["GROUNDED", "UNRESOLVED", "NOT_SPECIFIED"]
+    ref_type: Literal["NODE", "REGION", "RESOURCE", "ACTOR"] | None = None
+    key: StrictStr | None = Field(default=None, max_length=160)
+    value: StrictScalar | None = None
+    surface: StrictStr | None = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def validate_slot_state(self) -> OperationContractSlot:
+        has_ref = self.ref_type is not None or self.key is not None
+        has_value = self.value is not None
+        if self.status == "GROUNDED":
+            if self.expected_type in {"NODE", "REGION", "FACILITY", "RESOURCE", "ACTOR"}:
+                if self.key is None or self.ref_type is None or has_value:
+                    raise ValueError("A grounded reference slot requires ref_type/key only")
+            elif has_ref or not has_value:
+                raise ValueError("A grounded scalar slot requires value only")
+        elif has_ref or has_value:
+            raise ValueError("An unresolved or unspecified slot cannot carry a value")
+        return self
+
+
+class OperationIntentDraft(ProviderModel):
+    frozen_family: Literal["OPERATION"] = "OPERATION"
+    action_key: StrictStr = Field(min_length=1, max_length=100)
+    actor: OperationContractSlot
+    target: OperationContractSlot
+    bindings: tuple[OperationContractSlot, ...] = ()
+    parameters: tuple[OperationContractSlot, ...] = ()
+
+
+class DynamicGoalOperationGroundingRequest(ProviderModel):
+    goal: str = Field(min_length=1, max_length=4000)
+    frozen_family: Literal["OPERATION"] = "OPERATION"
+    action_key: StrictStr = Field(min_length=1, max_length=100)
+    action_contract: dict[str, object]
+    public_references: tuple[dict[str, object], ...]
+    public_topology: dict[str, object] = Field(default_factory=dict)
+    deterministic_candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    recovery_attempt: StrictInt = Field(default=0, ge=0, le=1)
+    recovery_feedback: tuple[dict[str, object], ...] = ()
+
+
+class DynamicGoalOperationGrounding(ProviderModel):
+    frozen_family: Literal["OPERATION"] = "OPERATION"
+    status: Literal["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"]
+    intent: OperationIntentDraft | None = None
+    supplementary_candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    clarification_prompt: StrictStr | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_operation_grounding(self) -> DynamicGoalOperationGrounding:
+        if self.status == "RESOLVED" and self.intent is None:
+            raise ValueError("Resolved operation grounding requires intent")
+        if self.status != "RESOLVED" and self.intent is not None:
+            raise ValueError("Unresolved operation grounding cannot carry intent")
+        return self
+
+
+class DynamicGoalMentionSlot(ProviderModel):
+    """Transient typed provenance for one explicit Goal semantic slot.
+
+    This is a resolver/provider DTO only.  It is never persisted as part of a
+    Formal Goal or Scenario definition.  ``NOT_SPECIFIED`` means the player
+    did not express the slot; it is intentionally different from an explicit
+    value that still needs semantic grounding.
+    """
+
+    status: Literal["GROUNDED", "UNRESOLVED", "NOT_SPECIFIED"]
+    ref_type: Literal["NODE", "REGION", "RESOURCE", "ACTION", "ACTOR"] | None = None
+    key: StrictStr | None = Field(default=None, max_length=160)
+    value: JsonValue | None = None
+    surface: StrictStr | None = Field(default=None, max_length=400)
+
+
+def _not_specified_dynamic_goal_slot() -> DynamicGoalMentionSlot:
+    return DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+
+
+class DynamicGoalIntentDraft(ProviderModel):
+    """Transient, typed semantic provenance returned by Stage 1."""
+
+    intent_kind: Literal["STATE", "OPERATION"]
+    action: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
+    actor: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
+    source: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
+    target: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
+    resource: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
+    amount: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
+
+
+class DynamicGoalEntityGroundingRequest(ProviderModel):
+    """Knowledge-safe input for the bounded public Entity Grounding call."""
+
+    goal: str = Field(min_length=1, max_length=4000)
+    public_catalog: dict[str, object] = Field(default_factory=dict)
+    deterministic_candidate_refs: tuple[DynamicGoalCandidateReference, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+    intent: DynamicGoalIntentDraft | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class DynamicGoalRecoveryFeedback(ProviderModel):
@@ -101,32 +242,39 @@ class DynamicGoalRecoveryFeedback(ProviderModel):
 class DynamicGoalGroundedOperation(ProviderModel):
     """Stage 1's lossless public binding for an explicit operation Goal.
 
-    This is a semantic lock, not a Scenario-specific shortcut.  It contains
-    only public Action/Region/Resource identities and declared parameter
-    values.  Stage 2 may validate and serialize this operation, but may not
-    reinterpret it as another requirement kind or ask for an intentionally
-    unconstrained Actor.
+    This is a universal semantic lock, not a Scenario-specific shortcut.  It
+    contains only public Action/Region/Resource identities and explicitly
+    declared parameter values.  Stage 2 may validate and serialize this
+    operation, but may not reinterpret it as another requirement kind, add a
+    requirement, or ask for an intentionally unconstrained Actor.
     """
 
     action_key: StrictStr = Field(min_length=1, max_length=100)
     actor_key: StrictStr | None = Field(default=None, max_length=100)
-    target_key: StrictStr = Field(min_length=1, max_length=160)
+    target_key: StrictStr | None = Field(default=None, max_length=160)
     binding_constraints: tuple[ActionInvocationBinding, ...] = ()
-    parameter_constraints: dict[str, JsonValue] = Field(default_factory=dict)
+    parameter_constraints: dict[str, JsonValue] | None = None
 
 
 class DynamicGoalEntityGrounding(ProviderModel):
-    """Closed provider output containing public heterogeneous candidates only.
+    """Closed Stage 1 output containing public references and typed intent.
 
     ``candidate_keys`` remains a compatibility input for older deterministic
     test providers and is normalized to ``NODE`` references.  The provider
     contract itself is ``candidate_refs`` so Stage 1 can ground resources and
-    public Derived States without pretending they are world Nodes.
+    public Derived States without pretending they are world Nodes.  ``intent``
+    carries the Stage 1 semantic role/provenance result; it is optional at the
+    model boundary so older provider fixtures can fail over to the legacy
+    interpretation path during rollout.
     """
 
     status: Literal["RESOLVED", "NEEDS_CLARIFICATION", "UNSUPPORTED"] = "RESOLVED"
     candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
     candidate_keys: tuple[StrictStr, ...] = ()
+    intent: DynamicGoalIntentDraft | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     clarification_prompt: str | None = None
 
     @model_validator(mode="after")
@@ -164,6 +312,10 @@ class DynamicGoalInterpretationRequest(ProviderModel):
     # Kept for compatibility with existing provider integrations.  It is the
     # NODE subset of grounded_candidate_refs, never the complete Stage 1 scope.
     grounded_entity_keys: tuple[str, ...] = ()
+    intent: DynamicGoalIntentDraft | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     grounded_operation: DynamicGoalGroundedOperation | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -840,6 +992,20 @@ class DynamicGoalInterpreter(Protocol):
     ) -> DynamicGoalInterpretation: ...
 
 
+class DynamicGoalContractResolver(Protocol):
+    """Provider capability for family-frozen, Action-contract Goal resolution."""
+
+    def match_dynamic_goal_family(self, request: GoalFamilyMatchRequest) -> GoalFamilyMatch: ...
+
+    def match_dynamic_goal_action(
+        self, request: DynamicGoalActionMatchRequest
+    ) -> DynamicGoalActionMatch: ...
+
+    def ground_dynamic_goal_operation(
+        self, request: DynamicGoalOperationGroundingRequest
+    ) -> DynamicGoalOperationGrounding: ...
+
+
 class GenericProviderError(ValueError):
     """Secret-safe provider failure surfaced at the application boundary."""
 
@@ -1219,7 +1385,7 @@ _GOAL_PROVIDER_PURPOSES = frozenset(
     {"dynamic_goal_grounding", "dynamic_goal", "dynamic_goal_interpretation"}
 )
 _GOAL_PROMPT_TEMPLATE_VERSIONS = {
-    "dynamic_goal_grounding": "dynamic-goal-grounding-v1",
+    "dynamic_goal_grounding": "dynamic-goal-grounding-v2",
     "dynamic_goal": "dynamic-goal-interpretation-v1",
     "dynamic_goal_interpretation": "dynamic-goal-interpretation-v1",
 }
@@ -1283,7 +1449,7 @@ def goal_provider_response_snapshot(
         return {"json_type": _safe_json_type(raw) or "unknown"}
     if purpose == "dynamic_goal_grounding":
         raw = _redact_goal_grounding_identities(raw, public_catalog)
-        allowed = {"status", "candidate_refs", "candidate_keys", "clarification_prompt"}
+        allowed = {"status", "candidate_refs", "candidate_keys", "intent", "clarification_prompt"}
         nested_allowed = {"ref_type", "key"}
     else:
         raw = _redact_goal_interpretation_identities(raw, public_ontology)
@@ -1339,6 +1505,66 @@ def _redact_goal_grounding_identities(
             else {"json_type": _safe_json_type(item) or "unknown", "value_omitted": True}
             for item in candidate_keys
         ]
+    if "intent" in value:
+        result["intent"] = _redact_goal_intent(value["intent"], allowed)
+    return result
+
+
+def _redact_goal_intent(
+    value: object,
+    allowed_references: set[tuple[str, str]],
+) -> object:
+    """Keep Stage 1 role provenance while omitting ungrounded identities."""
+
+    if not isinstance(value, dict):
+        return {"json_type": _safe_json_type(value) or "unknown", "value_omitted": True}
+    result: dict[str, object] = {}
+    intent_kind = value.get("intent_kind")
+    if intent_kind in {"STATE", "OPERATION"}:
+        result["intent_kind"] = intent_kind
+    else:
+        result["intent_kind"] = _redacted_goal_identity(intent_kind)
+    slot_keys = ("action", "actor", "source", "target", "resource", "amount")
+    for slot_key in slot_keys:
+        slot = value.get(slot_key)
+        if not isinstance(slot, dict):
+            result[slot_key] = {
+                "json_type": _safe_json_type(slot) or "unknown",
+                "value_omitted": True,
+            }
+            continue
+        safe_slot: dict[str, object] = {}
+        status = slot.get("status")
+        if status in {"GROUNDED", "UNRESOLVED", "NOT_SPECIFIED"}:
+            safe_slot["status"] = status
+        else:
+            safe_slot["status"] = _redacted_goal_identity(status)
+        ref_type = slot.get("ref_type")
+        key = slot.get("key")
+        if ref_type is not None or key is not None:
+            if (
+                isinstance(ref_type, str)
+                and isinstance(key, str)
+                and (
+                    ref_type,
+                    key,
+                )
+                in allowed_references
+            ):
+                safe_slot["ref_type"] = ref_type
+                safe_slot["key"] = key
+            else:
+                if "ref_type" in slot:
+                    safe_slot["ref_type"] = _redacted_goal_identity(ref_type)
+                if "key" in slot:
+                    safe_slot["key"] = _redacted_goal_identity(key)
+        if slot_key == "amount" and "value" in slot:
+            amount = slot.get("value")
+            if type(amount) in {str, int, bool}:
+                safe_slot["value"] = amount
+            else:
+                safe_slot["value"] = _redacted_goal_identity(amount)
+        result[slot_key] = safe_slot
     return result
 
 
@@ -1809,6 +2035,9 @@ class OpenAICompatibleGenericProvider:
             "replan": self._planning_profile,
             "dynamic_goal_grounding": self._fast_semantic_profile,
             "dynamic_goal": self._fast_semantic_profile,
+            "dynamic_goal_family": self._fast_semantic_profile,
+            "dynamic_goal_action": self._fast_semantic_profile,
+            "dynamic_goal_operation": self._fast_semantic_profile,
         }
         self._transport = transport
         self._last_call_metadata: ProviderCallMetadata | None = None
@@ -1907,6 +2136,46 @@ class OpenAICompatibleGenericProvider:
             raise GenericProviderError(
                 "MODEL_PROVIDER_RESPONSE_INVALID",
                 "The model provider returned an invalid Goal selection",
+            ) from exc
+
+    def match_dynamic_goal_family(self, request: GoalFamilyMatchRequest) -> GoalFamilyMatch:
+        try:
+            return GoalFamilyMatch.model_validate(
+                self._invoke("dynamic_goal_family", request.model_dump(mode="json"))
+            )
+        except ValidationError as exc:
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "The model provider returned an invalid Goal family match",
+                validation_diagnostics=provider_validation_diagnostics(exc),
+            ) from exc
+
+    def match_dynamic_goal_action(
+        self, request: DynamicGoalActionMatchRequest
+    ) -> DynamicGoalActionMatch:
+        try:
+            return DynamicGoalActionMatch.model_validate(
+                self._invoke("dynamic_goal_action", request.model_dump(mode="json"))
+            )
+        except ValidationError as exc:
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "The model provider returned an invalid Action match",
+                validation_diagnostics=provider_validation_diagnostics(exc),
+            ) from exc
+
+    def ground_dynamic_goal_operation(
+        self, request: DynamicGoalOperationGroundingRequest
+    ) -> DynamicGoalOperationGrounding:
+        try:
+            return DynamicGoalOperationGrounding.model_validate(
+                self._invoke("dynamic_goal_operation", request.model_dump(mode="json"))
+            )
+        except ValidationError as exc:
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "The model provider returned invalid Action-contract grounding",
+                validation_diagnostics=provider_validation_diagnostics(exc),
             ) from exc
 
     def ground_dynamic_goal_entities(
@@ -2012,7 +2281,33 @@ class OpenAICompatibleGenericProvider:
         self, purpose: str, payload: dict[str, object]
     ) -> tuple[dict[str, object], int]:
         profile = self._profile_for_purpose(purpose)
-        if purpose == "goal_selection":
+        if purpose == "dynamic_goal_family":
+            response_contract = (
+                '{"family":"STATE|OPERATION|AMBIGUOUS",'
+                '"clarification_prompt":null}'
+            )
+        elif purpose == "dynamic_goal_action":
+            response_contract = (
+                '{"frozen_family":"OPERATION",'
+                '"status":"GROUNDED|UNRESOLVED|UNSUPPORTED",'
+                '"action_key":"exact_public_action_key|null",'
+                '"clarification_prompt":null}'
+            )
+        elif purpose == "dynamic_goal_operation":
+            response_contract = (
+                '{"frozen_family":"OPERATION",'
+                '"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
+                '"intent":{"frozen_family":"OPERATION","action_key":"exact_frozen_key",'
+                '"actor":{"slot_key":"actor","expected_type":"ACTOR",'
+                '"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED","ref_type":null,'
+                '"key":null,"value":null,"surface":null},'
+                '"target":{"slot_key":"target","expected_type":"contract type",'
+                '"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED","ref_type":null,'
+                '"key":null,"value":null,"surface":null},'
+                '"bindings":[],"parameters":[]},'
+                '"supplementary_candidate_refs":[],"clarification_prompt":null}'
+            )
+        elif purpose == "goal_selection":
             response_contract = (
                 '{"status":"SELECTED|NEEDS_CLARIFICATION|UNSUPPORTED",'
                 '"objective_keys":["zero_or_more_candidate_keys"],'
@@ -2023,6 +2318,25 @@ class OpenAICompatibleGenericProvider:
                 '{"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
                 '"candidate_refs":[{"ref_type":"NODE|REGION|RESOURCE|DERIVED_STATE|ACTION|ACTOR",'
                 '"key":"public_scenario_reference_key"}],'
+                '"intent":{"intent_kind":"STATE|OPERATION",'
+                '"action":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
+                '"ref_type":"ACTION|null","key":"public_action_key|null",'
+                '"value":null,"surface":null},'
+                '"actor":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
+                '"ref_type":"ACTOR|null","key":"public_actor_key|null",'
+                '"value":null,"surface":null},'
+                '"source":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
+                '"ref_type":"NODE|REGION|ACTOR|null",'
+                '"key":"public_source_key|null","value":null,"surface":null},'
+                '"target":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
+                '"ref_type":"NODE|REGION|ACTOR|null",'
+                '"key":"public_target_key|null","value":null,"surface":null},'
+                '"resource":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
+                '"ref_type":"RESOURCE|null","key":"public_resource_key|null",'
+                '"value":null,"surface":null},'
+                '"amount":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
+                '"ref_type":null,"key":null,"value":"typed_value|null",'
+                '"surface":null}},'
                 '"clarification_prompt":null}'
             )
         elif purpose == "dynamic_goal":
@@ -2072,28 +2386,69 @@ class OpenAICompatibleGenericProvider:
             }
             response_contract += (
                 " The generic alternatives above are overridden for this request because the "
-                "user payload contains grounded_operation. It is a locked, lossless public "
-                "Stage 1 result. Return status RESOLVED with exactly this one requirement: "
+                "user payload contains grounded_operation. It is the universal locked, "
+                "lossless public Stage 1 result. Return status RESOLVED with exactly this one "
+                "requirement and no additional requirement: "
                 f"{json.dumps(locked_requirement, ensure_ascii=False, separators=(',', ':'))}. "
                 "Its action_key, actor_key, target_key, binding_constraints, and declared "
                 "parameter_constraints must match grounded_operation exactly. Do not return "
                 "NEEDS_CLARIFICATION, UNSUPPORTED, FACT, RESOURCE_AT_LEAST, DERIVED_STATE, "
-                "a different Action, or a partial binding; actor_key null is intentional and "
-                "must not trigger an actor clarification."
+                "a different Action, a partial binding, or any unrelated requirement; actor_key "
+                "and target_key null are intentional unconstrained fields and must not trigger "
+                "an actor or target clarification."
             )
-        if purpose == "dynamic_goal_grounding":
+        if purpose == "dynamic_goal_family":
             planning_prompt = (
-                "Ground only public Scenario references mentioned by the player's Goal. Return "
-                "candidate_refs with ref_type NODE, REGION, RESOURCE, DERIVED_STATE, ACTION, "
-                "or ACTOR and a "
-                "key copied exactly from the supplied public_catalog. Multiple plausible public "
-                "references are allowed. If no public reference can be grounded, return "
-                "clarification or unsupported with no candidate_refs. Use canonical names, "
-                "descriptions, aliases, and public topology as semantic evidence, but never "
-                "invent a key. Stage 1 identifies references only: do not emit a Goal kind, "
-                "value, threshold, Formal Goal requirement, authored Objective, Action, or "
-                "plan. Do not inspect current Fact values, infer hidden Truth, or expose "
-                "chain-of-thought."
+                "Classify only the natural-language Goal family. OPERATION means the player "
+                "requires one Action invocation; STATE means a desired world state; AMBIGUOUS "
+                "means the sentence genuinely permits both. Do not identify any Action, entity, "
+                "parameter, Fact, or requirement."
+            )
+        elif purpose == "dynamic_goal_action":
+            planning_prompt = (
+                "The family is immutably OPERATION. Semantically match exactly one Action from "
+                "action_catalog using its complete public contract. Return only its exact key. "
+                "Do not ground targets, bindings, parameters, or produce a Goal requirement."
+            )
+        elif purpose == "dynamic_goal_operation":
+            planning_prompt = (
+                "The family and Action are immutable. Ground only the slots declared by "
+                "action_contract. Return every declared target, binding, and parameter slot "
+                "exactly once with its declared slot_key and expected_type. GROUNDED means the "
+                "player explicitly constrained the slot and it maps uniquely; UNRESOLVED means "
+                "the player explicitly constrained it but no unique public value can be chosen; "
+                "NOT_SPECIFIED means the player did not constrain it. Runtime-required does not "
+                "mean Goal-required. Use canonical public keys for reference slots and native JSON "
+                "scalars for scalar slots. Never change the family or Action, invent a slot, infer "
+                "an Actor/source/route, or produce STATE requirements. public_topology may support "
+                "a unique contract-compatible target. On recovery, correct only the typed schema "
+                "mistakes described by recovery_feedback."
+            )
+        elif purpose == "dynamic_goal_grounding":
+            planning_prompt = (
+                "Stage 1 must semantically parse the entire player's Goal against the supplied "
+                "public_catalog and return two coordinated results: candidate_refs and a typed "
+                "intent. Return candidate_refs with ref_type NODE, REGION, RESOURCE, "
+                "DERIVED_STATE, ACTION, or ACTOR and keys copied exactly from the public_catalog. "
+                "Use the public Action name, description, target_kind, parameter schema, and "
+                "operation_binding_contract to understand the sentence; do not rely on a fixed "
+                "natural-language verb or source/destination marker vocabulary. Exact identity "
+                "matches supplied as deterministic_candidate_refs are evidence to preserve, not "
+                "a replacement for sentence-level semantic parsing. For intent_kind OPERATION, "
+                "classify each action, actor, source, target, resource, and amount slot as "
+                "GROUNDED, UNRESOLVED, or NOT_SPECIFIED. GROUNDED entity slots must use the "
+                "typed public key and GROUNDED amount must use the typed value. UNRESOLVED means "
+                "the sentence expresses that slot but the public catalog cannot identify it; "
+                "NOT_SPECIFIED means the player did not constrain it. A source or target role "
+                "may be a binding declared by the Action contract rather than a literal Action "
+                "parameter. Keep every slot role-compatible; topology is context, not a "
+                "substitute for a typed role. For intent_kind STATE, leave operation slots "
+                "NOT_SPECIFIED. Preserve every deterministic_candidate_ref and add any public "
+                "references needed by the typed intent. If multiple compatible candidates remain "
+                "equally plausible, mark the affected slot UNRESOLVED or return clarification "
+                "instead of guessing. If no public reference can be grounded, return clarification "
+                "or unsupported with no candidate_refs. Never invent a key. Stage 1 must not emit "
+                "a Goal requirement, authored Objective, plan, hidden Truth, or chain-of-thought."
             )
         elif purpose == "dynamic_goal":
             planning_prompt = (
@@ -2144,7 +2499,14 @@ class OpenAICompatibleGenericProvider:
                 "rules, or any other Scenario semantics. The backend assigns requirement "
                 "identity and performs the final exact-Version validation. If the Goal is "
                 "ambiguous or cannot be expressed in this vocabulary, return clarification "
-                "or unsupported with no requirements. Do not expose chain-of-thought."
+                "or unsupported with no requirements. The transient intent payload is provenance "
+                "only: GROUNDED means preserve the typed public value, UNRESOLVED means the "
+                "explicit mention still needs grounding, and NOT_SPECIFIED means the player did "
+                "not constrain that slot. Do not add a source, Actor, route, or other HOW choice "
+                "when it is NOT_SPECIFIED. When grounded_operation is present, it is a universal "
+                "exact operation lock: preserve every field exactly, return only that one "
+                "ACTION_COMPLETED requirement, and never expand the semantics. Do not expose "
+                "chain-of-thought."
             )
             if payload.get("recovery_attempt"):
                 planning_prompt += (
@@ -3003,7 +3365,10 @@ def _safe_text(value: object, *, limit: int) -> str:
 
 __all__ = [
     "AntiRegressionMemoryItem",
+    "DynamicGoalActionMatch",
+    "DynamicGoalActionMatchRequest",
     "DynamicGoalCandidateReference",
+    "DynamicGoalContractResolver",
     "DynamicGoalEntityGrounder",
     "DynamicGoalEntityGrounding",
     "DynamicGoalEntityGroundingRequest",
@@ -3011,14 +3376,20 @@ __all__ = [
     "DynamicGoalInterpretation",
     "DynamicGoalInterpretationRequest",
     "DynamicGoalInterpreter",
+    "DynamicGoalOperationGrounding",
+    "DynamicGoalOperationGroundingRequest",
     "DynamicGoalRecoveryFeedback",
     "GenericModelProvider",
     "GenericProviderError",
     "GoalDependencyProjection",
+    "GoalFamilyMatch",
+    "GoalFamilyMatchRequest",
     "GoalSelection",
     "GoalSelectionRequest",
     "OpenAICompatibleGenericProvider",
+    "OperationContractSlot",
     "OperationGoalProjection",
+    "OperationIntentDraft",
     "PlanProposal",
     "PlanRequest",
     "PlanSegment",

@@ -12,10 +12,13 @@ from pydantic import SecretStr, ValidationError
 
 from app.agent.provider import (
     DynamicGoalCandidateReference,
+    DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
     DynamicGoalGroundedOperation,
+    DynamicGoalIntentDraft,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
+    DynamicGoalMentionSlot,
     GenericProviderError,
     GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
@@ -427,6 +430,165 @@ def test_dynamic_goal_prompt_explains_action_defined_derived_bindings() -> None:
         assert term in prompt
 
 
+def test_dynamic_grounding_prompt_exposes_typed_roles_and_preserves_exact_refs() -> None:
+    deterministic_refs = (
+        DynamicGoalCandidateReference(ref_type="REGION", key="region_a"),
+        DynamicGoalCandidateReference(ref_type="REGION", key="region_b"),
+    )
+    request = DynamicGoalEntityGroundingRequest(
+        goal="transport 30 cargo from region a to region b",
+        public_catalog={
+            "references": [
+                {
+                    "ref_type": "REGION",
+                    "key": "region_a",
+                    "name": "Region A",
+                },
+                {
+                    "ref_type": "REGION",
+                    "key": "region_b",
+                    "name": "Region B",
+                },
+                {
+                    "ref_type": "RESOURCE",
+                    "key": "cargo_alpha",
+                    "name": "Cargo Alpha",
+                },
+                {
+                    "ref_type": "ACTION",
+                    "key": "transport_resource",
+                    "name": "Transport Resource",
+                    "parameters": [
+                        {"key": "resource_key", "value_type": "STRING"},
+                        {"key": "amount", "value_type": "INTEGER"},
+                    ],
+                    "operation_binding_contract": {
+                        "bindings": [
+                            {
+                                "role": "source_region",
+                                "source": "EXECUTION_START_ACTOR_REGION",
+                                "value_type": "REGION",
+                            }
+                        ],
+                        "target": {
+                            "field": "target_key",
+                            "role": "destination_region",
+                            "source": "ACTION_TARGET_KEY",
+                            "value_type": "REGION",
+                        },
+                    },
+                },
+            ]
+        },
+        deterministic_candidate_refs=deterministic_refs,
+    )
+    provider = OpenAICompatibleGenericProvider(_settings())
+
+    body, _size = provider._build_request_body(
+        "dynamic_goal_grounding",
+        request.model_dump(mode="json"),
+    )
+    payload = json.loads(body["messages"][1]["content"])
+    prompt = body["messages"][0]["content"]
+
+    assert payload["deterministic_candidate_refs"] == [
+        item.model_dump(mode="json") for item in deterministic_refs
+    ]
+    for term in (
+        "semantically parse the entire player's Goal",
+        "public Action name, description, target_kind",
+        "do not rely on a fixed",
+        "Exact identity matches supplied as deterministic_candidate_refs are evidence",
+        "GROUNDED, UNRESOLVED, or NOT_SPECIFIED",
+        "source or target role may be a binding declared by the Action contract",
+        "multiple compatible candidates remain equally plausible",
+    ):
+        assert term in prompt
+
+
+def test_dynamic_goal_prompt_exposes_explicit_slot_provenance() -> None:
+    intent = DynamicGoalIntentDraft(
+        intent_kind="OPERATION",
+        action=DynamicGoalMentionSlot(status="GROUNDED", ref_type="ACTION", key="move_cargo"),
+        source=DynamicGoalMentionSlot(status="GROUNDED", ref_type="REGION", key="region_a"),
+        target=DynamicGoalMentionSlot(status="GROUNDED", ref_type="REGION", key="region_b"),
+        resource=DynamicGoalMentionSlot(
+            status="UNRESOLVED",
+            ref_type="RESOURCE",
+            surface="cargo shorthand",
+        ),
+        amount=DynamicGoalMentionSlot(status="GROUNDED", value=30),
+        actor=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+    )
+    request = DynamicGoalEntityGroundingRequest(
+        goal="move 30 cargo from region a to region b",
+        public_catalog={"references": []},
+        intent=intent,
+    )
+    provider = OpenAICompatibleGenericProvider(_settings())
+
+    body, _size = provider._build_request_body(
+        "dynamic_goal_grounding",
+        request.model_dump(mode="json"),
+    )
+    payload = json.loads(body["messages"][1]["content"])
+    prompt = body["messages"][0]["content"]
+
+    assert payload["intent"] == intent.model_dump(mode="json")
+    for term in (
+        "semantically parse the entire player's Goal",
+        "GROUNDED, UNRESOLVED, or NOT_SPECIFIED",
+        "NOT_SPECIFIED means the player did not constrain it",
+        "preserve",
+        "binding declared by the Action contract",
+        "topology is context, not a substitute",
+    ):
+        assert term in prompt
+
+
+def test_dynamic_grounding_snapshot_retains_safe_typed_intent_provenance() -> None:
+    grounding = DynamicGoalEntityGrounding(
+        candidate_refs=(
+            DynamicGoalCandidateReference(ref_type="ACTION", key="move_cargo"),
+            DynamicGoalCandidateReference(ref_type="REGION", key="region_a"),
+            DynamicGoalCandidateReference(ref_type="REGION", key="region_b"),
+            DynamicGoalCandidateReference(ref_type="RESOURCE", key="cargo"),
+        ),
+        intent=DynamicGoalIntentDraft(
+            intent_kind="OPERATION",
+            action=DynamicGoalMentionSlot(status="GROUNDED", ref_type="ACTION", key="move_cargo"),
+            source=DynamicGoalMentionSlot(status="GROUNDED", ref_type="REGION", key="region_a"),
+            target=DynamicGoalMentionSlot(status="GROUNDED", ref_type="REGION", key="region_b"),
+            resource=DynamicGoalMentionSlot(status="GROUNDED", ref_type="RESOURCE", key="cargo"),
+            amount=DynamicGoalMentionSlot(status="GROUNDED", value=30),
+            actor=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+        ),
+    )
+
+    snapshot = goal_provider_response_snapshot(
+        "dynamic_goal_grounding",
+        grounding,
+        public_catalog={
+            "references": [
+                {"ref_type": "ACTION", "key": "move_cargo"},
+                {"ref_type": "REGION", "key": "region_a"},
+                {"ref_type": "REGION", "key": "region_b"},
+                {"ref_type": "RESOURCE", "key": "cargo"},
+            ]
+        },
+    )
+
+    intent = snapshot["intent"]
+    assert isinstance(intent, dict)
+    assert intent["intent_kind"] == "OPERATION"
+    assert intent["source"] == {
+        "status": "GROUNDED",
+        "ref_type": "REGION",
+        "key": "region_a",
+    }
+    assert intent["amount"] == {"status": "GROUNDED", "value": 30}
+
+
 def test_dynamic_goal_prompt_locks_stage_one_explicit_operation() -> None:
     request = DynamicGoalInterpretationRequest(
         goal="move 30 cargo from source to destination",
@@ -446,9 +608,11 @@ def test_dynamic_goal_prompt_locks_stage_one_explicit_operation() -> None:
 
     assert payload["grounded_operation"]["action_key"] == "move_cargo"
     assert payload["grounded_operation"]["target_key"] == "destination"
-    assert "locked, lossless public Stage 1 result" in prompt
+    assert "universal locked, lossless public Stage 1 result" in prompt
     assert "Do not return NEEDS_CLARIFICATION, UNSUPPORTED" in prompt
-    assert "actor_key null is intentional" in prompt
+    assert "actor_key and target_key null are intentional unconstrained fields" in prompt
+    assert "no additional requirement" in prompt
+    assert "never expand the semantics" in prompt
 
 
 def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
@@ -521,6 +685,10 @@ def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
     assert [item.call_type for item in history] == [
         "DYNAMIC_GOAL_GROUNDING",
         "DYNAMIC_GOAL",
+    ]
+    assert [item.prompt_template_version for item in history] == [
+        "dynamic-goal-grounding-v2",
+        "dynamic-goal-interpretation-v1",
     ]
     assert [item.prompt_tokens for item in history] == [11, 13]
     assert [item.prompt_cache_hit_tokens for item in history] == [3, 4]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import pytest
 from sqlalchemy import select
@@ -8,14 +9,17 @@ from sqlalchemy import select
 from app.agent.generic import (
     GenericAgentService,
     GenericGoalResolver,
+    _validate_dynamic_goal_operation_lock,
 )
 from app.agent.planning_context import PlanningContextBuilder
 from app.agent.provider import (
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalIntentDraft,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
+    DynamicGoalMentionSlot,
     GenericProviderError,
     GoalSelection,
     GoalSelectionRequest,
@@ -27,6 +31,8 @@ from app.domain.enums import AgentTaskStatus, ResourcePoolAvailability, Resource
 from app.domain.formal_goal import (
     AdHocActionCompletedRequirementCandidateV1,
     AdHocFactRequirementCandidateV1,
+    AdHocGoalCandidateSetV2,
+    FormalGoalError,
     FormalGoalSourceKind,
     compile_predefined_formal_goal,
 )
@@ -44,6 +50,78 @@ from app.services.runtime_initialization import RuntimeInitializationService
 from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import GENERIC_TEST
 from tests.unit.test_transport_resource import _definition as transport_definition
+
+
+def _stage1_operation_grounding(
+    *,
+    action_key: str,
+    target_key: str | None = None,
+    target_ref_type: Literal["NODE", "REGION", "ACTOR"] = "REGION",
+    source_key: str | None = None,
+    resource_key: str | None = None,
+    resource_status: Literal["GROUNDED", "UNRESOLVED", "NOT_SPECIFIED"] = "GROUNDED",
+    amount: int | None = None,
+    actor_key: str | None = None,
+) -> DynamicGoalEntityGrounding:
+    """Return a provider-shaped Stage 1 result for an explicit operation.
+
+    The test fixture deliberately supplies the typed semantic result that a
+    Stage 1 model is expected to return.  It does not derive roles from the
+    natural-language surface, so synthetic Actions exercise the same generic
+    resolver boundary as authored Actions.
+    """
+
+    refs = [DynamicGoalCandidateReference(ref_type="ACTION", key=action_key)]
+    action = DynamicGoalMentionSlot(status="GROUNDED", ref_type="ACTION", key=action_key)
+    if source_key is None:
+        source = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+    else:
+        source = DynamicGoalMentionSlot(status="GROUNDED", ref_type="REGION", key=source_key)
+        refs.append(DynamicGoalCandidateReference(ref_type="REGION", key=source_key))
+    if target_key is None:
+        target = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+    else:
+        target = DynamicGoalMentionSlot(
+            status="GROUNDED",
+            ref_type=target_ref_type,
+            key=target_key,
+        )
+        refs.append(DynamicGoalCandidateReference(ref_type=target_ref_type, key=target_key))
+    if resource_status == "NOT_SPECIFIED":
+        resource = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+    elif resource_status == "UNRESOLVED":
+        resource = DynamicGoalMentionSlot(status="UNRESOLVED", ref_type="RESOURCE")
+        if resource_key is not None:
+            refs.append(DynamicGoalCandidateReference(ref_type="RESOURCE", key=resource_key))
+    else:
+        assert resource_key is not None
+        resource = DynamicGoalMentionSlot(
+            status="GROUNDED",
+            ref_type="RESOURCE",
+            key=resource_key,
+        )
+        refs.append(DynamicGoalCandidateReference(ref_type="RESOURCE", key=resource_key))
+    if amount is None:
+        amount_slot = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+    else:
+        amount_slot = DynamicGoalMentionSlot(status="GROUNDED", value=amount)
+    if actor_key is None:
+        actor = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+    else:
+        actor = DynamicGoalMentionSlot(status="GROUNDED", ref_type="ACTOR", key=actor_key)
+        refs.append(DynamicGoalCandidateReference(ref_type="ACTOR", key=actor_key))
+    return DynamicGoalEntityGrounding(
+        candidate_refs=tuple(refs),
+        intent=DynamicGoalIntentDraft(
+            intent_kind="OPERATION",
+            action=action,
+            actor=actor,
+            source=source,
+            target=target,
+            resource=resource,
+            amount=amount_slot,
+        ),
+    )
 
 
 @dataclass
@@ -91,7 +169,8 @@ class _DynamicProvider:
                             ),
                         )
                     )
-                elif candidate.derived_key is not None:
+                elif candidate.kind == ObjectiveRequirementKind.DERIVED_STATE:
+                    assert candidate.derived_key is not None
                     refs.append(
                         DynamicGoalCandidateReference(
                             ref_type="DERIVED_STATE", key=candidate.derived_key
@@ -175,6 +254,12 @@ class _SequenceDynamicProvider(_DynamicProvider):
         request: DynamicGoalEntityGroundingRequest,
     ) -> object:
         self.grounding_requests.append(request)
+        if not self.grounding_results:
+            if request.deterministic_candidate_refs:
+                return DynamicGoalEntityGrounding(
+                    candidate_refs=request.deterministic_candidate_refs,
+                )
+            return DynamicGoalEntityGrounding(status="UNSUPPORTED")
         result = self.grounding_results.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -248,7 +333,16 @@ def test_explicit_transport_goal_preserves_action_defined_source_binding() -> No
             "amount": 30,
         },
     )
-    provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(candidate,)))
+    provider = _DynamicProvider(
+        DynamicGoalInterpretation(requirements=(candidate,)),
+        default_grounding=_stage1_operation_grounding(
+            action_key="transport_resource",
+            source_key="southeast_heights_district",
+            target_key="south_waterfront_district",
+            resource_key="emergency_fuel",
+            amount=30,
+        ),
+    )
     goal = (
         "\u4ece\u4e1c\u5357\u9ad8\u5730\u533a\u8fd0 30 "
         "\u4e2a\u5e94\u6025\u71c3\u6599\u5230\u5357\u90e8\u6ee8\u6c34\u533a"
@@ -268,35 +362,25 @@ def test_explicit_transport_goal_preserves_action_defined_source_binding() -> No
     assert requirement.parameter_constraints == {
         "resources": [{"resource_key": "emergency_fuel", "amount": 30}]
     }
-    assert provider.grounding_requests == []
-    request = provider.requests[0]
-    grounded_refs = set(request.grounded_candidate_refs)
-    assert {
-        DynamicGoalCandidateReference(ref_type="ACTION", key="transport_resource"),
-        DynamicGoalCandidateReference(ref_type="REGION", key="southeast_heights_district"),
-        DynamicGoalCandidateReference(ref_type="REGION", key="south_waterfront_district"),
-        DynamicGoalCandidateReference(ref_type="RESOURCE", key="emergency_fuel"),
-    }.issubset(grounded_refs)
-    transport = next(
-        item for item in request.ontology["world"]["actions"] if item["key"] == "transport_resource"
-    )
-    assert transport["operation_binding_contract"] == {
-        "bindings": [
-            {
-                "role": "source_region",
-                "source": "EXECUTION_START_ACTOR_REGION",
-                "value_type": "REGION",
-            }
-        ],
-        "target": {
-            "field": "target_key",
-            "role": "destination_region",
-            "source": "ACTION_TARGET_KEY",
-            "value_type": "REGION",
-        },
-    }
-    assert request.grounded_operation is not None
-    assert request.grounded_operation.model_dump(mode="json") == {
+    assert len(provider.grounding_requests) == 1
+    assert provider.requests == []
+    assert resolution.provider_observation is not None
+    assert resolution.provider_observation["stage_2_skipped"] is True
+    intent = resolution.provider_observation["intent"]
+    assert isinstance(intent, dict)
+    assert intent["intent_kind"] == "OPERATION"
+    assert intent["action"]["status"] == "GROUNDED"
+    assert intent["action"]["ref_type"] == "ACTION"
+    assert intent["source"]["status"] == "GROUNDED"
+    assert intent["source"]["ref_type"] == "REGION"
+    assert intent["target"]["status"] == "GROUNDED"
+    assert intent["target"]["ref_type"] == "REGION"
+    assert intent["resource"]["status"] == "GROUNDED"
+    assert intent["resource"]["ref_type"] == "RESOURCE"
+    assert intent["amount"]["status"] == "GROUNDED"
+    assert intent["amount"]["value"] == 30
+    assert intent["actor"]["status"] == "NOT_SPECIFIED"
+    assert resolution.provider_observation["grounded_operation"] == {
         "action_key": "transport_resource",
         "actor_key": None,
         "target_key": "south_waterfront_district",
@@ -305,9 +389,185 @@ def test_explicit_transport_goal_preserves_action_defined_source_binding() -> No
     }
 
 
-def test_explicit_operation_lock_rejects_provider_reinterpretation() -> None:
+def test_explicit_operation_without_source_keeps_source_and_actor_not_specified() -> None:
+    candidate = AdHocActionCompletedRequirementCandidateV1(
+        kind="ACTION_COMPLETED",
+        action_key="transport_resource",
+        target_key="south_waterfront_district",
+        parameter_constraints={
+            "resource_key": "emergency_fuel",
+            "amount": 30,
+        },
+    )
+    provider = _DynamicProvider(
+        DynamicGoalInterpretation(requirements=(candidate,)),
+        default_grounding=_stage1_operation_grounding(
+            action_key="transport_resource",
+            target_key="south_waterfront_district",
+            resource_key="emergency_fuel",
+            amount=30,
+        ),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "把30个应急燃料运到南部滨水区",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 1
+    assert provider.requests == []
+    assert resolution.provider_observation is not None
+    intent = resolution.provider_observation["intent"]
+    assert isinstance(intent, dict)
+    assert intent["intent_kind"] == "OPERATION"
+    assert intent["source"]["status"] == "NOT_SPECIFIED"
+    assert intent["actor"]["status"] == "NOT_SPECIFIED"
+    assert intent["target"]["key"] == "south_waterfront_district"
+    assert intent["resource"]["key"] == "emergency_fuel"
+    assert intent["amount"]["value"] == 30
+
+
+@pytest.mark.parametrize(
+    ("surface", "resource_key"),
+    [
+        ("电力部件", "electrical_repair_parts"),
+        ("通用部件", "general_engineering_parts"),
+    ],
+)
+def test_explicit_resource_shorthand_remains_unresolved_until_typed_grounding(
+    surface: str,
+    resource_key: str,
+) -> None:
     provider = _SequenceDynamicProvider(
+        (
+            _stage1_operation_grounding(
+                action_key="transport_resource",
+                source_key="south_waterfront_district",
+                target_key="southeast_heights_district",
+                resource_key=resource_key,
+                resource_status="UNRESOLVED",
+                amount=30,
+            ),
+            _stage1_operation_grounding(
+                action_key="transport_resource",
+                source_key="south_waterfront_district",
+                target_key="southeast_heights_district",
+                resource_key=resource_key,
+                amount=30,
+            ),
+        ),
         (),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        f"从南部滨水区运30个{surface}到东南高地区",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 2
+    assert provider.grounding_requests[0].intent is None
+    grounding_intent = provider.grounding_requests[1].intent
+    assert grounding_intent is not None
+    assert grounding_intent.intent_kind == "OPERATION"
+    assert grounding_intent.source.status == "GROUNDED"
+    assert grounding_intent.target.status == "GROUNDED"
+    assert grounding_intent.resource.status == "UNRESOLVED"
+    assert grounding_intent.resource.ref_type == "RESOURCE"
+    assert grounding_intent.amount.status == "GROUNDED"
+    assert provider.requests == []
+    assert resolution.provider_observation is not None
+    interpretation_intent = resolution.provider_observation["intent"]
+    assert isinstance(interpretation_intent, dict)
+    assert interpretation_intent["resource"]["status"] == "GROUNDED"
+    assert interpretation_intent["resource"]["key"] == resource_key
+
+
+def test_ambiguous_explicit_resource_does_not_become_a_state_goal() -> None:
+    grounding = _stage1_operation_grounding(
+        action_key="transport_resource",
+        source_key="south_waterfront_district",
+        target_key="southeast_heights_district",
+        resource_key="emergency_fuel",
+        resource_status="UNRESOLVED",
+        amount=30,
+    ).model_copy(
+        update={
+            "candidate_refs": (
+                DynamicGoalCandidateReference(ref_type="ACTION", key="transport_resource"),
+                DynamicGoalCandidateReference(ref_type="REGION", key="south_waterfront_district"),
+                DynamicGoalCandidateReference(ref_type="REGION", key="southeast_heights_district"),
+                DynamicGoalCandidateReference(ref_type="RESOURCE", key="emergency_fuel"),
+                DynamicGoalCandidateReference(ref_type="RESOURCE", key="general_engineering_parts"),
+            )
+        }
+    )
+    provider = _GroundingProvider(
+        grounding,
+        (),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "从南部滨水区运30个资源到东南高地区",
+        LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.dynamic_requirements == ()
+    assert provider.requests == []
+    assert len(provider.grounding_requests) == 2
+
+
+def test_synthetic_unique_region_grounding_stays_region_typed() -> None:
+    definition = transport_definition()
+    definition = definition.model_copy(
+        update={
+            "goal_resolution": definition.goal_resolution.model_copy(
+                update={"allow_llm_fallback": True}
+            )
+        }
+    )
+    provider = _SequenceDynamicProvider(
+        (
+            _stage1_operation_grounding(
+                action_key="transport_resource",
+                target_key="region_a",
+                resource_key="cargo_alpha",
+                amount=30,
+            ),
+        ),
+        (),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "transport 30 cargo to eastern region",
+        definition,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 1
+    assert provider.requests == []
+    assert resolution.provider_observation is not None
+    intent = resolution.provider_observation["intent"]
+    assert isinstance(intent, dict)
+    assert intent["target"]["status"] == "GROUNDED"
+    assert intent["target"]["ref_type"] == "REGION"
+    assert intent["target"]["key"] == "region_a"
+    assert intent["resource"]["ref_type"] == "RESOURCE"
+
+
+def test_explicit_operation_lock_skips_provider_reinterpretation() -> None:
+    provider = _SequenceDynamicProvider(
+        (
+            _stage1_operation_grounding(
+                action_key="transport_resource",
+                source_key="southeast_heights_district",
+                target_key="south_waterfront_district",
+                resource_key="emergency_fuel",
+                amount=30,
+            ),
+        ),
         (
             DynamicGoalInterpretation(
                 status="NEEDS_CLARIFICATION",
@@ -350,26 +610,42 @@ def test_explicit_operation_lock_rejects_provider_reinterpretation() -> None:
     assert requirement.parameter_constraints == {
         "resources": [{"resource_key": "emergency_fuel", "amount": 30}]
     }
-    assert len(provider.requests) == 2
-    assert provider.requests[0].grounded_operation is not None
-    assert provider.requests[1].grounded_operation == provider.requests[0].grounded_operation
-    assert provider.requests[1].recovery_feedback
-    assert provider.requests[1].recovery_feedback[0].expected_shape["action_key"] == (
-        "transport_resource"
-    )
+    assert provider.requests == []
     assert resolution.provider_observation is not None
     assert resolution.provider_observation["result"] == "DETERMINISTIC_GROUNDED_OPERATION"
+    assert resolution.provider_observation["stage_2_skipped"] is True
 
 
 def test_operation_without_directional_source_and_target_stays_clarifiable() -> None:
-    provider = _SequenceDynamicProvider(
-        (),
-        (
-            DynamicGoalInterpretation(
-                status="NEEDS_CLARIFICATION",
-                clarification_prompt="Which region is the source?",
+    grounding = _stage1_operation_grounding(
+        action_key="transport_resource",
+        resource_key="emergency_fuel",
+        amount=30,
+    )
+    assert grounding.intent is not None
+    grounding = grounding.model_copy(
+        update={
+            "candidate_refs": (
+                DynamicGoalCandidateReference(ref_type="ACTION", key="transport_resource"),
+                DynamicGoalCandidateReference(ref_type="REGION", key="southeast_heights_district"),
+                DynamicGoalCandidateReference(ref_type="REGION", key="south_waterfront_district"),
+                DynamicGoalCandidateReference(ref_type="RESOURCE", key="emergency_fuel"),
             ),
-        ),
+            "intent": grounding.intent.model_copy(
+                update={
+                    "source": DynamicGoalMentionSlot(
+                        status="UNRESOLVED", ref_type="REGION", surface="source region"
+                    ),
+                    "target": DynamicGoalMentionSlot(
+                        status="UNRESOLVED", ref_type="REGION", surface="target region"
+                    ),
+                }
+            ),
+        }
+    )
+    provider = _SequenceDynamicProvider(
+        (grounding,),
+        (),
     )
     goal = (
         "\u8fd030\u4e2a\u5e94\u6025\u71c3\u6599\uff0c\u5728\u4e1c\u5357\u9ad8\u5730\u533a"
@@ -382,8 +658,8 @@ def test_operation_without_directional_source_and_target_stays_clarifiable() -> 
     )
 
     assert resolution.status == "NEEDS_CLARIFICATION"
-    assert len(provider.requests) == 1
-    assert provider.requests[0].grounded_operation is None
+    assert provider.requests == []
+    assert len(provider.grounding_requests) == 2
 
 
 def test_explicit_operation_lock_is_generic_for_synthetic_transport() -> None:
@@ -396,7 +672,15 @@ def test_explicit_operation_lock_is_generic_for_synthetic_transport() -> None:
         }
     )
     provider = _SequenceDynamicProvider(
-        (),
+        (
+            _stage1_operation_grounding(
+                action_key="transport_resource",
+                source_key="region_a",
+                target_key="region_b",
+                resource_key="cargo_alpha",
+                amount=30,
+            ),
+        ),
         (
             DynamicGoalInterpretation(
                 status="NEEDS_CLARIFICATION",
@@ -424,9 +708,157 @@ def test_explicit_operation_lock_is_generic_for_synthetic_transport() -> None:
     }
 
 
+def test_stage1_can_ground_a_new_action_without_resolver_lexical_rules() -> None:
+    definition = transport_definition()
+    synthetic_action = definition.actions[0].model_copy(
+        update={
+            "key": "relocate_clinical_kits",
+            "name": "Reposition Clinical Kits",
+            "description": "Move a payload between public regions along one corridor.",
+        }
+    )
+    definition = definition.model_copy(
+        update={
+            "actions": (synthetic_action,),
+            "goal_resolution": definition.goal_resolution.model_copy(
+                update={"allow_llm_fallback": True}
+            ),
+        }
+    )
+    provider = _SequenceDynamicProvider(
+        (
+            _stage1_operation_grounding(
+                action_key="relocate_clinical_kits",
+                source_key="region_a",
+                target_key="region_b",
+                resource_key="cargo_alpha",
+                amount=30,
+            ),
+        ),
+        (),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "relocate 30 cargo alpha from region a into region b",
+        definition,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 1
+    assert provider.requests == []
+    grounding_request = provider.grounding_requests[0]
+    action_reference = next(
+        item
+        for item in grounding_request.public_catalog["references"]
+        if isinstance(item, dict) and item.get("key") == "relocate_clinical_kits"
+    )
+    assert action_reference["name"] == "Reposition Clinical Kits"
+    assert action_reference["operation_binding_contract"]
+    requirement = resolution.dynamic_requirements[0]
+    assert isinstance(requirement, AdHocActionCompletedRequirementCandidateV1)
+    assert requirement.action_key == "relocate_clinical_kits"
+    assert requirement.target_key == "region_b"
+    assert requirement.binding_constraints == (
+        ActionInvocationBinding(role="source_region", value="region_a"),
+    )
+    assert requirement.parameter_constraints == {
+        "resources": [{"resource_key": "cargo_alpha", "amount": 30}]
+    }
+
+
+def test_partial_typed_operation_grounding_adds_semantic_resource_candidate() -> None:
+    definition = transport_definition()
+    definition = definition.model_copy(
+        update={
+            "goal_resolution": definition.goal_resolution.model_copy(
+                update={"allow_llm_fallback": True}
+            )
+        }
+    )
+    provider = _SequenceDynamicProvider(
+        (
+            _stage1_operation_grounding(
+                action_key="transport_resource",
+                source_key="region_a",
+                target_key="region_b",
+                resource_key="cargo_alpha",
+                amount=30,
+            ),
+        ),
+        (),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "transport 30 cargo from region a to region b",
+        definition,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 1
+    grounding_request = provider.grounding_requests[0]
+    assert grounding_request.deterministic_candidate_refs
+    assert set(grounding_request.deterministic_candidate_refs) >= {
+        DynamicGoalCandidateReference(ref_type="REGION", key="region_a"),
+        DynamicGoalCandidateReference(ref_type="REGION", key="region_b"),
+    }
+    action_reference = next(
+        item
+        for item in grounding_request.public_catalog["references"]
+        if item["ref_type"] == "ACTION" and item["key"] == "transport_resource"
+    )
+    assert action_reference["parameters"]
+    assert action_reference["operation_binding_contract"]
+    assert provider.requests == []
+    assert resolution.provider_observation is not None
+    assert resolution.provider_observation["stage_2_skipped"] is True
+
+
+def test_directional_partial_grounding_does_not_change_non_operation_resource_goal() -> None:
+    definition = transport_definition()
+    definition = definition.model_copy(
+        update={
+            "goal_resolution": definition.goal_resolution.model_copy(
+                update={"allow_llm_fallback": True}
+            )
+        }
+    )
+    candidate = AdHocGoalRequirementCandidateV1(
+        kind=ObjectiveRequirementKind.RESOURCE_AT_LEAST,
+        region_key="region_a",
+        resource_key="cargo_alpha",
+        minimum=30,
+    )
+    provider = _GroundingProvider(
+        DynamicGoalEntityGrounding(
+            candidate_refs=(
+                DynamicGoalCandidateReference(ref_type="REGION", key="region_a"),
+                DynamicGoalCandidateReference(ref_type="RESOURCE", key="cargo_alpha"),
+            )
+        ),
+        (DynamicGoalInterpretation(requirements=(candidate,)),),
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "keep 30 cargo alpha in region a",
+        definition,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 1
+    assert len(provider.requests) == 1
+
+
 def test_explicit_operation_lock_recovers_from_legacy_binding_shape() -> None:
     provider = _SequenceDynamicProvider(
-        (),
+        (
+            _stage1_operation_grounding(
+                action_key="transport_resource",
+                source_key="southeast_heights_district",
+                target_key="south_waterfront_district",
+                resource_key="emergency_fuel",
+                amount=30,
+            ),
+        ),
         (
             {
                 "status": "RESOLVED",
@@ -463,10 +895,41 @@ def test_explicit_operation_lock_recovers_from_legacy_binding_shape() -> None:
     )
 
     assert resolution.status == "RESOLVED"
-    assert len(provider.requests) == 2
-    assert provider.requests[1].recovery_feedback
+    assert provider.requests == []
     assert resolution.provider_observation is not None
     assert resolution.provider_observation["provider_fallback"] == "GROUNDED_OPERATION_LOCK"
+    assert resolution.provider_observation["stage_2_skipped"] is True
+
+
+def test_operation_lock_rejects_changed_or_expanded_stage_two_response() -> None:
+    locked_requirement = AdHocActionCompletedRequirementCandidateV1(
+        kind="ACTION_COMPLETED",
+        action_key="transport_resource",
+        target_key="region_b",
+        binding_constraints=(ActionInvocationBinding(role="source_region", value="region_a"),),
+        parameter_constraints={"resource_key": "cargo_alpha", "amount": 30},
+    )
+    locked = AdHocGoalCandidateSetV2(requirements=(locked_requirement,))
+    changed = AdHocGoalCandidateSetV2(
+        requirements=(locked_requirement.model_copy(update={"target_key": "region_c"}),)
+    )
+    expanded = AdHocGoalCandidateSetV2(
+        requirements=(
+            locked_requirement,
+            AdHocFactRequirementCandidateV1(
+                kind="FACT",
+                node_key="region_b",
+                fact_key="delivered",
+                accepted_values=(True,),
+            ),
+        )
+    )
+
+    for actual in (changed, expanded):
+        with pytest.raises(FormalGoalError) as error:
+            _validate_dynamic_goal_operation_lock(actual, locked)
+        assert error.value.code == "OPERATION_LOCK_MISMATCH"
+        assert error.value.details["mismatch"] == "EXACT_OPERATION_LOCK"
 
 
 def test_exact_public_entity_uses_focused_ontology_and_one_recovery() -> None:
@@ -477,7 +940,7 @@ def test_exact_public_entity_uses_focused_ontology_and_one_recovery() -> None:
         accepted_values=(True,),
     )
     provider = _GroundingProvider(
-        DynamicGoalEntityGrounding(status="UNSUPPORTED"),
+        DynamicGoalEntityGrounding(candidate_keys=("west_freight_corridor",)),
         (
             DynamicGoalInterpretation(status="UNSUPPORTED"),
             DynamicGoalInterpretation(requirements=(candidate,)),
@@ -491,7 +954,7 @@ def test_exact_public_entity_uses_focused_ontology_and_one_recovery() -> None:
 
     assert resolution.status == "RESOLVED"
     assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
-    assert provider.grounding_requests == []
+    assert len(provider.grounding_requests) == 1
     assert len(provider.requests) == 2
     focused_keys = {
         "west_freight_corridor",
@@ -508,7 +971,7 @@ def test_exact_public_entity_uses_focused_ontology_and_one_recovery() -> None:
     assert resolution.provider_observation is not None
     assert resolution.provider_observation["attempt_count"] == 2
     assert resolution.provider_observation["grounding"]["source"] == (
-        "DETERMINISTIC_ENTITY_GROUNDING"
+        "MODEL_ENTITY_GROUNDING_WITH_DETERMINISTIC_REFS"
     )
 
 
@@ -562,7 +1025,9 @@ def test_public_topology_uniquely_grounds_relation_without_model_search() -> Non
     assert provider.selection_requests == []
     assert len(provider.requests) == 1
     assert provider.requests[0].grounded_entity_keys == ("central_river_tunnel",)
-    assert provider.requests[0].ontology["grounding"]["source"] == ("DETERMINISTIC_PUBLIC_TOPOLOGY")
+    assert provider.requests[0].ontology["grounding"]["source"] == (
+        "MODEL_ENTITY_GROUNDING_WITH_DETERMINISTIC_REFS"
+    )
 
 
 def test_ambiguous_public_topology_clarifies_without_arbitrary_pick() -> None:
@@ -996,13 +1461,14 @@ def test_interpretation_retries_twice_without_regrounding() -> None:
     )
 
     assert resolution.status == "RESOLVED"
-    assert provider.grounding_requests == []
+    assert len(provider.grounding_requests) == 1
     assert len(provider.requests) == 2
     assert [request.recovery_attempt for request in provider.requests] == [0, 1]
     assert provider.requests[0].ontology == provider.requests[1].ontology
     assert resolution.provider_observation is not None
     assert resolution.provider_observation["attempt_count"] == 2
     assert [item["result"] for item in resolution.provider_observation["attempts"]] == [
+        "BACKEND_ACCEPTED",
         "MODEL_UNSUPPORTED",
         "MODEL_ACCEPTED",
     ]

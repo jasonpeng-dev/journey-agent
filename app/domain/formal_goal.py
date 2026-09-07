@@ -39,7 +39,9 @@ from app.domain.action_invocation import (
 )
 from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import (
+    ActionBehavior,
     ActionDefinitionV2,
+    ActionParameterType,
     ActionTargetKind,
     FactDefinitionV2,
     ObjectiveDefinitionV2,
@@ -851,22 +853,20 @@ def _validate_action_completed_candidate(
     if candidate.binding_constraints:
         operation_contract = action_operation_binding_contract(action)
         raw_bindings = operation_contract.get("bindings")
-        raw_target = operation_contract.get("target")
         binding_specs = raw_bindings if isinstance(raw_bindings, (list, tuple)) else ()
-        allowed_roles = {
-            str(item["role"])
+        specs_by_role = {
+            str(item["role"]): item
             for item in binding_specs
             if isinstance(item, Mapping) and isinstance(item.get("role"), str)
         }
-        if isinstance(raw_target, Mapping) and isinstance(raw_target.get("role"), str):
-            allowed_roles.add(str(raw_target["role"]))
-        if not allowed_roles:
+        if not specs_by_role:
             raise FormalGoalError(
                 "FORMAL_GOAL_ACTION_BINDING_UNSUPPORTED",
                 "This Action does not declare public operation binding roles",
             )
         for binding in candidate.binding_constraints:
-            if binding.role not in allowed_roles:
+            spec = specs_by_role.get(binding.role)
+            if spec is None:
                 raise FormalGoalError(
                     "FORMAL_GOAL_ACTION_BINDING_INVALID",
                     f"Unsupported Action binding role {binding.role}",
@@ -874,18 +874,33 @@ def _validate_action_completed_candidate(
             if not isinstance(binding.value, str) or not binding.value:
                 raise FormalGoalError(
                     "FORMAL_GOAL_ACTION_BINDING_INVALID",
-                    "Region-valued Action bindings must name public Regions",
+                    "Reference-valued Action bindings must name a public identity",
                 )
-            region = definition.world.node(binding.value)
-            locality = definition.metadata.locality
-            if (
-                region is None
-                or not locality.enabled
-                or region.node_type_key != locality.region_node_type_key
-            ):
+            value_type = spec.get("value_type")
+            node = definition.world.node(binding.value)
+            valid = False
+            if value_type in {"NODE", "REGION", "FACILITY"} and node is not None:
+                valid = value_type == "NODE"
+                if value_type == "REGION":
+                    valid = (
+                        node.node_type_key
+                        == definition.metadata.locality.region_node_type_key
+                    )
+                elif value_type == "FACILITY":
+                    valid = (
+                        node.node_type_key
+                        == definition.metadata.locality.facility_node_type_key
+                    )
+            elif value_type == "ACTOR":
+                valid = any(
+                    item.key == binding.value for item in definition.actors.actor_profiles
+                )
+            elif value_type == "RESOURCE":
+                valid = any(item.key == binding.value for item in definition.world.resources)
+            if not valid:
                 raise FormalGoalError(
                     "FORMAL_GOAL_ACTION_BINDING_INVALID",
-                    "Region-valued Action bindings must name Scenario Regions",
+                    "Action binding value does not match its declared semantic type",
                 )
 
     if candidate.parameter_constraints is not None:
@@ -909,13 +924,57 @@ def _canonical_action_parameters_for_goal(
             f"Dynamic Goal references unknown Action {action_key}",
         )
     try:
-        normalized = canonical_action_parameters(action, parameters)
+        normalized: dict[str, JsonValue]
+        if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
+            normalized = cast(
+                dict[str, JsonValue],
+                canonical_action_parameters(action, parameters),
+            )
+        else:
+            definitions = {item.key: item for item in action.parameters}
+            if set(parameters) - set(definitions):
+                raise ValueError("Unknown Action parameter constraint")
+            normalized = {}
+            for key, value in parameters.items():
+                parameter = definitions[key]
+                valid = (
+                    (
+                        parameter.value_type == ActionParameterType.INTEGER
+                        and isinstance(value, int)
+                        and not isinstance(value, bool)
+                    )
+                    or (
+                        parameter.value_type == ActionParameterType.BOOLEAN
+                        and isinstance(value, bool)
+                    )
+                    or (
+                        parameter.value_type
+                        in {ActionParameterType.STRING, ActionParameterType.ENUM}
+                        and isinstance(value, str)
+                    )
+                )
+                if not valid:
+                    raise ValueError("Action parameter constraint has an invalid type")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    if parameter.minimum is not None and value < parameter.minimum:
+                        raise ValueError("Action parameter constraint is below minimum")
+                    if parameter.maximum is not None and value > parameter.maximum:
+                        raise ValueError("Action parameter constraint is above maximum")
+                if (
+                    parameter.value_type == ActionParameterType.ENUM
+                    and value not in parameter.allowed_values
+                ):
+                    raise ValueError("Action parameter constraint is outside allowed values")
+                normalized[key] = value
     except (TypeError, ValueError) as exc:
         raise FormalGoalError(
             "FORMAL_GOAL_ACTION_PARAMETERS_INVALID",
             "ACTION_COMPLETED parameter constraints do not match the Action schema",
         ) from exc
-    return cast(dict[str, JsonValue], {str(key): value for key, value in normalized.items()})
+    return cast(
+        dict[str, JsonValue],
+        {str(key): value for key, value in normalized.items()},
+    )
 
 
 def validate_ad_hoc_dynamic_candidates(

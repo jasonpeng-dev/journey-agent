@@ -2048,6 +2048,9 @@ actions:
     hints: []
   behavior: CLEAR_TRANSPORT
   locality: TRANSPORT_ENDPOINT
+  target_semantic_reference_type: NODE
+  target_node_type_keys:
+  - transport
 - key: deploy_heavy_engineering_support
   name: 部署重型工程支援
   description: 在设施或通道目标上部署已解锁的重型工程支援。
@@ -2364,6 +2367,7 @@ actions:
     maximum: null
     allowed_values: []
     default: null
+    semantic_reference_type: RESOURCE
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   - LOGISTICS
@@ -2384,6 +2388,14 @@ actions:
     hints: []
   behavior: TRANSPORT_RESOURCE
   locality: NONE
+  target_semantic_reference_type: REGION
+  target_node_type_keys:
+  - region
+  operation_bindings:
+  - role: source_region
+    value_type: REGION
+    source: EXECUTION_START_ACTOR_REGION
+    description: Player-constrained origin Region; omitted origins remain a Planner choice.
 - key: travel
   name: 前往区域
   description: 尝试通过一个连接当前 Region 与目标 Region 的 Transport。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复。

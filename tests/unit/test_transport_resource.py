@@ -249,6 +249,7 @@ def _definition() -> ScenarioDefinitionV2:
                         "key": "resource_key",
                         "name": "Resource",
                         "value_type": "STRING",
+                        "semantic_reference_type": "RESOURCE",
                     },
                     {
                         "key": "amount",
@@ -268,6 +269,15 @@ def _definition() -> ScenarioDefinitionV2:
                 },
                 "behavior": "TRANSPORT_RESOURCE",
                 "locality": "TRANSPORT_ENDPOINT",
+                "target_semantic_reference_type": "REGION",
+                "target_node_type_keys": ["region"],
+                "operation_bindings": [
+                    {
+                        "role": "source_region",
+                        "value_type": "REGION",
+                        "source": "EXECUTION_START_ACTOR_REGION",
+                    }
+                ],
             }
         ],
         "rules": [
