@@ -8,13 +8,18 @@ from app.agent.generic import (
     GenericGoalResolver,
     _dynamic_goal_action_contract,
     _dynamic_goal_routing_action_catalog,
+    _dynamic_goal_routing_state_catalog,
 )
 from app.agent.provider import (
     DynamicGoalActionMatch,
     DynamicGoalActionMatchRequest,
+    DynamicGoalActionRouting,
+    DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRouting,
+    DynamicGoalFamilyRoutingRequest,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     DynamicGoalOperationGrounding,
@@ -125,13 +130,43 @@ class _RoutingProvider(_ContractProvider):
     ) -> None:
         super().__init__(operation_results=operation_results)
         self.routing = routing
-        self.routing_requests: list[DynamicGoalSemanticRoutingRequest] = []
+        self.family_requests: list[DynamicGoalFamilyRoutingRequest] = []
+        self.routing_requests: list[DynamicGoalActionRoutingRequest] = []
+
+    def decide_dynamic_goal_family(
+        self, request: DynamicGoalFamilyRoutingRequest
+    ) -> DynamicGoalFamilyRouting:
+        self.family_requests.append(request)
+        assert self.routing.family in {"STATE", "OPERATION"}
+        return DynamicGoalFamilyRouting(family=self.routing.family)
+
+    def route_dynamic_goal_action(
+        self, request: DynamicGoalActionRoutingRequest
+    ) -> DynamicGoalActionRouting:
+        self.routing_requests.append(request)
+        assert self.routing.action_match is not None
+        return DynamicGoalActionRouting(
+            action_match=self.routing.action_match,
+            action_key=self.routing.action_key,
+            candidate_keys=self.routing.candidate_keys,
+            clarification_prompt=self.routing.clarification_prompt,
+        )
 
     def route_dynamic_goal(
         self, request: DynamicGoalSemanticRoutingRequest
     ) -> DynamicGoalSemanticRouting:
-        self.routing_requests.append(request)
-        return self.routing
+        del request
+        raise AssertionError("canonical routing must not use the mixed legacy call")
+
+    def match_dynamic_goal_family(self, request: GoalFamilyMatchRequest) -> GoalFamilyMatch:
+        del request
+        raise AssertionError("canonical routing must not use legacy GoalFamilyMatch")
+
+    def match_dynamic_goal_action(
+        self, request: DynamicGoalActionMatchRequest
+    ) -> DynamicGoalActionMatch:
+        del request
+        raise AssertionError("canonical routing must not use legacy DynamicGoalActionMatch")
 
 
 class _StateRoutingProvider(_RoutingProvider):
@@ -152,7 +187,7 @@ class _StateRoutingProvider(_RoutingProvider):
         return self.interpretation
 
 
-def _routing_request(goal: str) -> DynamicGoalSemanticRoutingRequest:
+def _routing_request(goal: str) -> DynamicGoalActionRoutingRequest:
     provider = _RoutingProvider(
         routing=DynamicGoalSemanticRouting(
             family="OPERATION",
@@ -181,13 +216,85 @@ def test_routing_action_projection_conservatively_retains_relevant_action(
     assert expected_action in {item["key"] for item in request.action_catalog}
 
 
+def test_action_routing_enriches_direct_target_with_public_semantics() -> None:
+    request = _routing_request("修复中央河底隧道")
+    entities = {(item["ref_type"], item["key"]): item for item in request.relevant_public_entities}
+
+    assert entities[("NODE", "central_river_tunnel")] == {
+        "ref_type": "NODE",
+        "key": "central_river_tunnel",
+        "provenance": "EXACT_USER_MENTION",
+        "name": "中央河底隧道",
+        "description": "连接中央城区与东部居住区的河底通道。",
+        "node_type_key": "transport",
+    }
+
+
+def test_action_routing_uses_same_enrichment_for_facility_target() -> None:
+    request = _routing_request("修复中央通信枢纽")
+    target = next(
+        item for item in request.relevant_public_entities if item["key"] == "central_telecom_hub"
+    )
+
+    assert target["name"] == "中央通信枢纽"
+    assert target["node_type_key"] == "facility"
+    assert target["description"] == "汇聚并转接城市核心通信网络。"
+    assert target["provenance"] == "EXACT_USER_MENTION"
+
+
+def test_action_routing_enriches_topology_target_without_changing_topology() -> None:
+    request = _routing_request("修复中区到北区的路")
+    target = next(
+        item for item in request.relevant_public_entities if item["key"] == "north_service_corridor"
+    )
+
+    assert target["name"] == "北部联络通道"
+    assert target["node_type_key"] == "transport"
+    assert target["provenance"] == "TOPOLOGY_ENRICHED"
+    pair = request.public_topology["transport_endpoint_pairs"][0]
+    assert pair["entity_key"] == "north_service_corridor"
+    assert pair["derived_target"]["key"] == "north_service_corridor"
+
+
+def test_action_routing_enriches_heterogeneous_public_entities() -> None:
+    request = _routing_request("从南部滨水区运30个应急燃料到东南高地区")
+    entities = {(item["ref_type"], item["key"]): item for item in request.relevant_public_entities}
+
+    assert entities[("REGION", "south_waterfront_district")]["node_type_key"] == "region"
+    assert entities[("REGION", "southeast_heights_district")]["node_type_key"] == "region"
+    assert "南部" in entities[("REGION", "south_waterfront_district")]["public_references"]
+    assert "东南区" in entities[("REGION", "southeast_heights_district")]["public_references"]
+    assert entities[("RESOURCE", "emergency_fuel")]["name"] == "应急燃料"
+    assert "node_type_key" not in entities[("RESOURCE", "emergency_fuel")]
+
+
+def test_action_routing_semantic_entities_are_public_safe() -> None:
+    request = _routing_request("修复中央河底隧道")
+    forbidden = {
+        "facts",
+        "rules",
+        "planning",
+        "planning_hints",
+        "runtime_preconditions",
+        "inventory",
+        "legality",
+        "objective_completion",
+        "behavior",
+        "parameters",
+        "operation_binding_contract",
+    }
+
+    assert request.relevant_public_entities
+    assert all(forbidden.isdisjoint(item) for item in request.relevant_public_entities)
+
+
 def test_routing_action_projection_filters_incompatible_target_capability() -> None:
     request = _routing_request("修复中央河底隧道")
     action_keys = {item["key"] for item in request.action_catalog}
 
     assert {"clear_transport", "inspect"} <= action_keys
     assert "repair_communications" not in action_keys
-    assert "supply_power" not in action_keys
+    assert "supply_power" in action_keys
 
 
 def test_routing_action_projection_filters_facility_incompatible_actions() -> None:
@@ -196,8 +303,51 @@ def test_routing_action_projection_filters_facility_incompatible_actions() -> No
 
     assert {"inspect", "repair_communications"} <= action_keys
     assert "clear_transport" not in action_keys
-    assert "supply_power" not in action_keys
+    assert "supply_power" in action_keys
     assert "generate_power" not in action_keys
+
+
+def test_routing_action_projection_assigns_supply_source_and_target_roles() -> None:
+    request = _routing_request("从东南应急电源站向东部配电站送电")
+    action_keys = {item["key"] for item in request.action_catalog}
+    source = LINJIANG_V2_TEST.world.node("southeast_emergency_power_station")
+
+    assert source is not None
+    assert "power_targetable" not in source.interaction_keys
+    assert "supply_power" in action_keys
+
+
+def test_routing_action_projection_rejects_impossible_role_assignment() -> None:
+    public_action_keys = {item.key for item in LINJIANG_V2_TEST.actions}
+    catalog = _dynamic_goal_routing_action_catalog(
+        LINJIANG_V2_TEST,
+        public_action_keys,
+        (
+            DynamicGoalCandidateReference(
+                ref_type="NODE",
+                key="southeast_emergency_power_station",
+                provenance="EXACT_USER_MENTION",
+            ),
+            DynamicGoalCandidateReference(
+                ref_type="NODE",
+                key="central_telecom_hub",
+                provenance="EXACT_USER_MENTION",
+            ),
+        ),
+    )
+
+    assert "supply_power" not in {item["key"] for item in catalog}
+
+
+def test_role_aware_projection_preserves_transport_topology_and_direct_targets() -> None:
+    transport = _routing_request("从南部滨水区运30个应急燃料到东南高地区")
+    topology = _routing_request("修复中区到北区的路")
+    direct = _routing_request("修复中央河底隧道")
+
+    assert "transport_resource" in {item["key"] for item in transport.action_catalog}
+    assert "clear_transport" in {item["key"] for item in topology.action_catalog}
+    assert topology.public_topology["transport_endpoint_pairs"]
+    assert "clear_transport" in {item["key"] for item in direct.action_catalog}
 
 
 def test_routing_action_projection_keeps_transport_without_resource_alias() -> None:
@@ -216,6 +366,20 @@ def test_routing_action_projection_without_refs_does_not_aggressively_filter() -
     )
 
     assert {item["key"] for item in catalog} == public_action_keys
+
+
+def test_routing_action_projection_uses_semantic_description_not_planning_or_rules() -> None:
+    public_action_keys = {item.key for item in LINJIANG_V2_TEST.actions}
+    catalog = _dynamic_goal_routing_action_catalog(
+        LINJIANG_V2_TEST,
+        public_action_keys,
+        (),
+    )
+    actions = {item.key: item for item in LINJIANG_V2_TEST.actions}
+
+    assert all(item["description"] == actions[str(item["key"])].description for item in catalog)
+    assert all("planning" not in item and "planning_hints" not in item for item in catalog)
+    assert all("rules" not in item and "runtime_preconditions" not in item for item in catalog)
 
 
 def test_routing_action_projection_has_no_goal_lexical_matcher() -> None:
@@ -243,23 +407,27 @@ def test_routing_action_projection_has_no_goal_lexical_matcher() -> None:
 
 
 def test_routing_fact_catalog_uses_authored_goal_alias() -> None:
-    request = _routing_request("恢复中央通信能力")
+    catalog = _dynamic_goal_routing_state_catalog(
+        "恢复中央通信能力", None, None, LINJIANG_V2_TEST, ()
+    )
 
     assert any(
         item["kind"] == "FACT"
         and item["node_key"] == "central_telecom_hub"
         and item["fact_key"] == "operational"
-        for item in request.state_catalog
+        for item in catalog
     )
 
 
 def test_routing_derived_state_catalog_uses_goal_addressable_state() -> None:
-    request = _routing_request("恢复北部基础工程支援")
+    catalog = _dynamic_goal_routing_state_catalog(
+        "恢复北部基础工程支援", None, None, LINJIANG_V2_TEST, ()
+    )
 
     assert any(
         item["kind"] == "DERIVED_STATE"
         and item["key"] == "north_basic_engineering_support"
-        for item in request.state_catalog
+        for item in catalog
     )
 
 
@@ -320,6 +488,63 @@ def test_frozen_state_routes_directly_to_typed_state_interpretation(
     assert request.grounded_operation is None
     assert request.ontology["world"]["actions"] == []
     assert "ACTION_COMPLETED" not in request.ontology["goal_language"]["requirement_kinds"]
+    assert len(provider.family_requests) == 1
+    assert provider.routing_requests == []
+
+
+def test_naturally_dual_reading_completes_along_either_frozen_branch() -> None:
+    goal = "让中区到东区的路恢复通行"
+    state_provider = _StateRoutingProvider(
+        DynamicGoalInterpretation.model_validate(
+            {
+                "status": "RESOLVED",
+                "requirements": [
+                    {
+                        "kind": "FACT",
+                        "node_key": "central_river_tunnel",
+                        "fact_key": "passable",
+                        "accepted_values": [True],
+                    }
+                ],
+            }
+        )
+    )
+    operation_provider = _RoutingProvider(
+        routing=DynamicGoalSemanticRouting(
+            family="OPERATION",
+            action_match="MATCHED",
+            action_key="clear_transport",
+        ),
+        operation_results=[_clear_transport_operation("central_river_tunnel")],
+    )
+
+    state = GenericGoalResolver(provider=state_provider).resolve(goal, LINJIANG_V2_TEST)
+    operation = GenericGoalResolver(provider=operation_provider).resolve(goal, LINJIANG_V2_TEST)
+
+    assert state.status == "RESOLVED"
+    assert state.dynamic_requirements[0].kind == "FACT"
+    assert state_provider.routing_requests == []
+    assert operation.status == "RESOLVED"
+    assert operation.dynamic_requirements[0].kind == "ACTION_COMPLETED"
+    assert operation.dynamic_requirements[0].action_key == "clear_transport"
+    assert len(operation_provider.routing_requests) == 1
+
+
+def test_true_state_ambiguity_clarifies_inside_frozen_state_branch() -> None:
+    provider = _StateRoutingProvider(
+        DynamicGoalInterpretation(
+            status="NEEDS_CLARIFICATION",
+            clarification_prompt="Which public state should hold?",
+        )
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "让中央通信枢纽恢复到某种状态", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.clarification_prompt == "Which public state should hold?"
+    assert provider.routing_requests == []
 
 
 def test_routing_topology_reference_remains_non_exact_candidate_evidence() -> None:
@@ -334,6 +559,36 @@ def test_routing_topology_reference_remains_non_exact_candidate_evidence() -> No
     } >= {
         ("NODE", "southeast_access_corridor", "TOPOLOGY_ENRICHED"),
     }
+
+
+def test_action_routing_exposes_only_goal_relevant_topology_relationship() -> None:
+    request = _routing_request("修复中区到北区的路")
+
+    assert len(request.public_topology["transport_endpoint_pairs"]) == 1
+    pair = request.public_topology["transport_endpoint_pairs"][0]
+    assert pair["entity_key"] == "north_service_corridor"
+    assert set(pair["endpoint_region_keys"]) == {
+        "central_district",
+        "north_industrial_district",
+    }
+    assert pair["derived_target"] == {
+        "ref_type": "NODE",
+        "key": "north_service_corridor",
+        "name": "北部联络通道",
+        "node_type_key": "transport",
+        "description": "连接北部工业区与中央城区的区域联络通道。",
+        "provenance": "TOPOLOGY_ENRICHED",
+    }
+    assert len(request.public_topology["relations"]) == 2
+    assert {
+        item["target_node_key"] for item in request.public_topology["relations"]
+    } == {"central_district", "north_industrial_district"}
+
+
+def test_action_routing_without_derived_pair_has_empty_topology_context() -> None:
+    request = _routing_request("修复中央河底隧道")
+
+    assert request.public_topology == {"relations": [], "transport_endpoint_pairs": []}
 
 
 def test_routing_rejects_action_outside_projected_catalog() -> None:
@@ -708,9 +963,9 @@ def test_semantic_routing_distinguishes_action_ambiguity_from_no_match() -> None
 
 def test_semantic_routing_schema_failure_gets_one_structural_recovery() -> None:
     class _RecoveringRoutingProvider(_RoutingProvider):
-        def route_dynamic_goal(
-            self, request: DynamicGoalSemanticRoutingRequest
-        ) -> DynamicGoalSemanticRouting:
+        def route_dynamic_goal_action(
+            self, request: DynamicGoalActionRoutingRequest
+        ) -> DynamicGoalActionRouting:
             self.routing_requests.append(request)
             if len(self.routing_requests) == 1:
                 raise GenericProviderError(
@@ -718,7 +973,12 @@ def test_semantic_routing_schema_failure_gets_one_structural_recovery() -> None:
                     "invalid routing shape",
                     validation_diagnostics=({"code": "missing", "location": "action_match"},),
                 )
-            return self.routing
+            assert self.routing.action_match is not None
+            return DynamicGoalActionRouting(
+                action_match=self.routing.action_match,
+                action_key=self.routing.action_key,
+                candidate_keys=self.routing.candidate_keys,
+            )
 
     provider = _RecoveringRoutingProvider(
         routing=DynamicGoalSemanticRouting(
@@ -743,9 +1003,9 @@ def test_semantic_routing_schema_failure_gets_one_structural_recovery() -> None:
 
 def test_semantic_routing_recovery_cannot_change_preserved_match() -> None:
     class _RegressingRoutingProvider(_RoutingProvider):
-        def route_dynamic_goal(
-            self, request: DynamicGoalSemanticRoutingRequest
-        ) -> DynamicGoalSemanticRouting:
+        def route_dynamic_goal_action(
+            self, request: DynamicGoalActionRoutingRequest
+        ) -> DynamicGoalActionRouting:
             self.routing_requests.append(request)
             if len(self.routing_requests) == 1:
                 raise GenericProviderError(
@@ -765,7 +1025,7 @@ def test_semantic_routing_recovery_cannot_change_preserved_match() -> None:
                         },
                     ),
                 )
-            return DynamicGoalSemanticRouting(family="OPERATION", action_match="NO_MATCH")
+            return DynamicGoalActionRouting(action_match="NO_MATCH")
 
     provider = _RegressingRoutingProvider(
         routing=DynamicGoalSemanticRouting(family="OPERATION", action_match="NO_MATCH")

@@ -2025,7 +2025,7 @@ interactions:
 actions:
 - key: clear_transport
   name: 清理交通通道
-  description: 修复已确认受阻的 Transport，使其恢复可通行；不应对尚未确认受阻的未知通道执行。
+  description: 恢复受损交通通道的通行能力。
   required_interaction_key: clearable
   execution_mode: IMMEDIATE
   parameters: []
@@ -2053,7 +2053,7 @@ actions:
   - transport
 - key: deploy_heavy_engineering_support
   name: 部署重型工程支援
-  description: 在设施或通道目标上部署已解锁的重型工程支援。
+  description: 在设施或交通通道目标上部署重型工程支援。
   required_interaction_key: heavy_support_target
   execution_mode: IMMEDIATE
   parameters: []
@@ -2082,7 +2082,7 @@ actions:
   locality: LOCAL_TARGET
 - key: inspect
   name: 检查状态
-  description: 主动调查一个已知但尚未检查的设施或通道，揭示设施状态、供电状态、维修需求和其他非资源情报；不调查资源库存。
+  description: 调查设施或交通通道的状态。
   required_interaction_key: inspectable
   execution_mode: IMMEDIATE
   parameters: []
@@ -2107,7 +2107,7 @@ actions:
   locality: LOCAL_TARGET
 - key: relay_message
   name: 传递信息
-  description: ONLINE Actor 在同一 Region 向失联 Actor 传递命令。
+  description: 向目标行动人员传递命令或信息。
   required_interaction_key: relayable
   execution_mode: IMMEDIATE
   parameters: []
@@ -2132,7 +2132,7 @@ actions:
   target_kind: ACTOR
 - key: repair_communications
   name: 修复通信设施
-  description: 修复通信设施后，获得该通信设施所属 Region 全部 Facility 的非资源设施情报；不揭示资源库存、隐藏资源或新的供电关系。
+  description: 修复通信设施并恢复其通信能力。
   required_interaction_key: repairable
   execution_mode: IMMEDIATE
   parameters: []
@@ -2276,7 +2276,7 @@ actions:
   locality: FACILITY_REGION
 - key: supply_power
   name: 送电
-  description: 根据已知的直接供电关系为目标设施恢复供电。
+  description: 从供电来源向目标设施输送电力。
   required_interaction_key: power_targetable
   execution_mode: IMMEDIATE
   parameters:
@@ -2322,7 +2322,7 @@ actions:
   locality: FACILITY_REGION
 - key: survey_resources
   name: 查探资源
-  description: 专门调查目标 Region 的资源库存，发现普通资源与可调查的设施关联资源及其来源；不调查一般 Facility 状态。
+  description: 调查目标区域的资源库存及来源。
   required_interaction_key: surveyable
   execution_mode: IMMEDIATE
   parameters: []
@@ -2347,7 +2347,7 @@ actions:
   locality: REGION
 - key: transport_resource
   name: 运输资源
-  description: 将当前 Region 的已知可用资源运往目标 Region。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复；成功后 Actor 随资源移动到目标 Region。
+  description: 将资源从来源区域运输到目标区域。
   required_interaction_key: transport_destination
   execution_mode: IMMEDIATE
   parameters:
@@ -2398,7 +2398,7 @@ actions:
     description: Player-constrained origin Region; omitted origins remain a Planner choice.
 - key: travel
   name: 前往区域
-  description: 尝试通过一个连接当前 Region 与目标 Region 的 Transport。未知通行状态可以尝试；成功后确认通行，受阻失败后确认该通道需要修复。
+  description: 让行动人员前往目标区域。
   required_interaction_key: travel_destination
   execution_mode: IMMEDIATE
   parameters: []
@@ -2422,7 +2422,7 @@ actions:
   locality: NONE
 - key: receive_external_relief_supplies
   name: 接收外部救援物资
-  description: 接收外部救援物资
+  description: 在指定设施接收外部救援物资。
   required_interaction_key: external_relief_intake
   execution_mode: IMMEDIATE
   parameters: []
@@ -2446,7 +2446,7 @@ actions:
   locality: FACILITY_REGION
 - key: generate_power
   name: 启动燃料应急发电
-  description: 启动燃料应急发电
+  description: 启动燃料应急发电设施进行发电。
   required_interaction_key: generation_control
   execution_mode: IMMEDIATE
   parameters: []

@@ -10,9 +10,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.generic import GenericGoalResolution
 from app.agent.provider import (
+    DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRouting,
+    DynamicGoalFamilyRoutingRequest,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     DynamicGoalSemanticRouting,
@@ -135,6 +138,15 @@ class _HistoryResolutionProvider(_ResolutionProvider):
 
 
 class _StateRoutingHistoryProvider(_HistoryResolutionProvider):
+    def decide_dynamic_goal_family(
+        self, _request: DynamicGoalFamilyRoutingRequest
+    ) -> DynamicGoalFamilyRouting:
+        self._record_call("DYNAMIC_GOAL_FAMILY_ROUTING")
+        return DynamicGoalFamilyRouting(family="STATE")
+
+    def route_dynamic_goal_action(self, _request: DynamicGoalActionRoutingRequest) -> object:
+        raise AssertionError("STATE routing must not enter Action routing")
+
     def route_dynamic_goal(
         self, _request: DynamicGoalSemanticRoutingRequest
     ) -> DynamicGoalSemanticRouting:
@@ -415,7 +427,7 @@ def test_state_recursive_observation_keeps_outer_routing_call(
     assert submitted.status_code == 200, submitted.text
     calls = _attempt(session, game_id).provider_metadata["provider_calls"]
     assert [call["call_type"] for call in calls] == [
-        "DYNAMIC_GOAL_ROUTING",
+        "DYNAMIC_GOAL_FAMILY_ROUTING",
         "DYNAMIC_GOAL_INTERPRETATION",
     ]
 

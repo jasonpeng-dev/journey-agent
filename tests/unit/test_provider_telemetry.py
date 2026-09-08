@@ -11,9 +11,11 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from app.agent.provider import (
+    DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRoutingRequest,
     DynamicGoalGroundedOperation,
     DynamicGoalIntentDraft,
     DynamicGoalInterpretation,
@@ -143,6 +145,141 @@ def test_semantic_routing_request_is_small_closed_and_observable() -> None:
     assert "keyword X means OPERATION" not in system_prompt
 
 
+def test_family_routing_request_excludes_action_and_state_catalogs() -> None:
+    captured: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"family":"STATE"}'}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 2},
+            },
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(observability="DEBUG"), transport=httpx.MockTransport(complete)
+    )
+    result = provider.decide_dynamic_goal_family(
+        DynamicGoalFamilyRoutingRequest(
+            goal="make the facility operational",
+            deterministic_candidate_refs=(
+                DynamicGoalCandidateReference(
+                    ref_type="NODE", key="facility", provenance="EXACT_USER_MENTION"
+                ),
+            ),
+        )
+    )
+
+    assert result.family == "STATE"
+    payload = json.loads(captured[0]["messages"][1]["content"])
+    assert set(payload) == {
+        "goal",
+        "deterministic_candidate_refs",
+        "recovery_attempt",
+        "recovery_feedback",
+    }
+    assert "action_catalog" not in payload
+    assert "state_catalog" not in payload
+    prompt = captured[0]["messages"][0]["content"]
+    assert "Return exactly STATE or OPERATION and freeze that choice" in prompt
+    assert "Do not select, match, rank, or infer any Action or State requirement" in prompt
+    assert "candidate availability must not decide the family" in prompt
+    assert provider.call_metadata_history[-1].call_type == "DYNAMIC_GOAL_FAMILY_ROUTING"
+
+
+def test_action_routing_request_is_operation_only_and_excludes_state_candidates() -> None:
+    captured: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action_match":"MATCHED","action_key":"repair",'
+                                '"candidate_keys":[],"clarification_prompt":null}'
+                            )
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 4},
+            },
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(observability="DEBUG"), transport=httpx.MockTransport(complete)
+    )
+    result = provider.route_dynamic_goal_action(
+        DynamicGoalActionRoutingRequest(
+            goal="repair the facility",
+            action_catalog=(
+                {"key": "repair", "name": "Repair", "description": "Repair a facility"},
+            ),
+            relevant_public_entities=(
+                {
+                    "ref_type": "NODE",
+                    "key": "corridor",
+                    "provenance": "TOPOLOGY_ENRICHED",
+                    "name": "Service corridor",
+                    "description": "A public road corridor.",
+                    "node_type_key": "transport",
+                },
+            ),
+            public_topology={
+                "relations": [],
+                "transport_endpoint_pairs": [
+                    {
+                        "entity_key": "corridor",
+                        "endpoint_region_keys": ["north", "central"],
+                        "derived_target": {
+                            "ref_type": "NODE",
+                            "key": "corridor",
+                            "name": "Service corridor",
+                            "node_type_key": "transport",
+                            "description": "A public road corridor.",
+                            "provenance": "TOPOLOGY_ENRICHED",
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    assert result.action_key == "repair"
+    payload = json.loads(captured[0]["messages"][1]["content"])
+    assert payload["frozen_family"] == "OPERATION"
+    assert payload["relevant_public_entities"][0]["key"] == "corridor"
+    assert payload["public_topology"]["transport_endpoint_pairs"][0]["derived_target"] == {
+        "ref_type": "NODE",
+        "key": "corridor",
+        "name": "Service corridor",
+        "node_type_key": "transport",
+        "description": "A public road corridor.",
+        "provenance": "TOPOLOGY_ENRICHED",
+    }
+    assert "state_catalog" not in payload
+    assert "family" not in result.model_dump(mode="json")
+    prompt = captured[0]["messages"][0]["content"]
+    assert "family is already immutably OPERATION" in prompt
+    assert "never reconsider, restate, or change the family" in prompt
+    assert "structural applicability, not semantic equivalence" in prompt
+    assert "This stage selects only the Action identity" in prompt
+    assert "does not ground the final target or actor" in prompt
+    assert "complete bindings or parameters" in prompt
+    assert "prove Action preconditions" in prompt
+    assert "an execution precondition is not yet established" in prompt
+    assert "conditions alone are not reasons for NO_MATCH" in prompt
+    assert provider.call_metadata_history[-1].call_type == "DYNAMIC_GOAL_ACTION_ROUTING"
+
+
 def test_semantic_routing_does_not_force_temperature_zero() -> None:
     provider = OpenAICompatibleGenericProvider(_settings())
 
@@ -153,10 +290,14 @@ def test_semantic_routing_does_not_force_temperature_zero() -> None:
         ),
     )
     operation_body, _ = provider._build_request_body("dynamic_goal_operation", {})
+    family_body, _ = provider._build_request_body("dynamic_goal_family_routing", {})
+    action_body, _ = provider._build_request_body("dynamic_goal_action_routing", {})
     state_body, _ = provider._build_request_body("dynamic_goal", {})
 
     assert "temperature" not in routing_body
     assert "temperature" not in operation_body
+    assert "temperature" not in family_body
+    assert "temperature" not in action_body
     assert "temperature" not in state_body
 
 

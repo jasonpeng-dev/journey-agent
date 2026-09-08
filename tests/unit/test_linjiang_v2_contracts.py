@@ -162,6 +162,60 @@ def _v2_0_runtime(
     return runtime, scope
 
 
+def test_linjiang_action_descriptions_are_semantic_only_authoring_text() -> None:
+    expected = {
+        "clear_transport": "恢复受损交通通道的通行能力。",
+        "deploy_heavy_engineering_support": "在设施或交通通道目标上部署重型工程支援。",
+        "inspect": "调查设施或交通通道的状态。",
+        "relay_message": "向目标行动人员传递命令或信息。",
+        "repair_communications": "修复通信设施并恢复其通信能力。",
+        "repair_electrical": "修复发电、变电或配电设施。",
+        "repair_industrial_facility": "修复工业基地或服务中心。",
+        "repair_water_facility": "修复水处理或供水设施。",
+        "supply_power": "从供电来源向目标设施输送电力。",
+        "survey_resources": "调查目标区域的资源库存及来源。",
+        "transport_resource": "将资源从来源区域运输到目标区域。",
+        "travel": "让行动人员前往目标区域。",
+        "receive_external_relief_supplies": "在指定设施接收外部救援物资。",
+        "generate_power": "启动燃料应急发电设施进行发电。",
+    }
+
+    actions = {item.key: item for item in LINJIANG_V2_TEST.actions}
+
+    assert {key: item.description for key, item in actions.items()} == expected
+    assert all(
+        item.description.strip() and len(item.description) <= 40 for item in actions.values()
+    )
+    assert all(isinstance(item.planning.hints, tuple) for item in actions.values())
+    assert ScenarioDefinitionV2.model_validate(
+        LINJIANG_V2_TEST.model_dump(mode="json")
+    ) == LINJIANG_V2_TEST
+
+
+def test_builtin_action_authoring_change_publishes_without_mutating_predecessor(
+    session: Session,
+) -> None:
+    document = LINJIANG_V2_TEST.model_dump(mode="json")
+    document["metadata"]["key"] = "linjiang_action_description_version_test"
+    document["world"]["key"] = "linjiang_action_description_version_test"
+    actions = {item["key"]: item for item in document["actions"]}
+    actions["clear_transport"]["description"] = "旧版交通通道说明。"
+    predecessor_definition = ScenarioDefinitionV2.model_validate(document)
+    predecessor = require_builtin_v2_version(session, predecessor_definition)
+    predecessor_snapshot = json.loads(json.dumps(predecessor.snapshot_document))
+
+    actions["clear_transport"]["description"] = "恢复受损交通通道的通行能力。"
+    successor_definition = ScenarioDefinitionV2.model_validate(document)
+    successor = require_builtin_v2_version(session, successor_definition)
+    session.refresh(predecessor)
+
+    assert predecessor.id != successor.id
+    assert predecessor.version_number == 1
+    assert successor.version_number == 2
+    assert predecessor.snapshot_document == predecessor_snapshot
+    assert predecessor.content_hash != successor.content_hash
+
+
 def _linjiang_v4_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
     version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
     player = Player(name=key)

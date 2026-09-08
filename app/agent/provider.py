@@ -62,6 +62,56 @@ class DynamicGoalCandidateReference(ProviderModel):
     )
 
 
+class DynamicGoalFamilyRoutingRequest(ProviderModel):
+    """Family-only request over raw intent and deterministic public evidence."""
+
+    goal: str = Field(min_length=1, max_length=4000)
+    deterministic_candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    recovery_attempt: StrictInt = Field(default=0, ge=0, le=1)
+    recovery_feedback: tuple[dict[str, object], ...] = ()
+
+
+class DynamicGoalFamilyRouting(ProviderModel):
+    """Frozen semantic family; it deliberately cannot select an Action."""
+
+    family: Literal["STATE", "OPERATION"]
+
+
+class DynamicGoalActionRoutingRequest(ProviderModel):
+    """Action-only request used after the OPERATION family is frozen."""
+
+    goal: str = Field(min_length=1, max_length=4000)
+    frozen_family: Literal["OPERATION"] = "OPERATION"
+    action_catalog: tuple[dict[str, object], ...]
+    relevant_public_entities: tuple[dict[str, object], ...] = ()
+    public_topology: dict[str, object] = Field(default_factory=dict)
+    recovery_attempt: StrictInt = Field(default=0, ge=0, le=1)
+    recovery_feedback: tuple[dict[str, object], ...] = ()
+
+
+class DynamicGoalActionRouting(ProviderModel):
+    """Closed Action selection that cannot reopen the family decision."""
+
+    action_match: Literal["MATCHED", "AMBIGUOUS", "NO_MATCH"]
+    action_key: StrictStr | None = Field(default=None, max_length=100)
+    candidate_keys: tuple[StrictStr, ...] = ()
+    clarification_prompt: StrictStr | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_action_routing(self) -> DynamicGoalActionRouting:
+        if self.action_match == "MATCHED":
+            if self.action_key is None or self.candidate_keys:
+                raise ValueError("MATCHED routing requires only action_key")
+        elif self.action_match == "AMBIGUOUS":
+            if self.action_key is not None or len(self.candidate_keys) < 2:
+                raise ValueError("AMBIGUOUS routing requires at least two candidate_keys")
+        elif self.action_key is not None or self.candidate_keys:
+            raise ValueError("NO_MATCH routing cannot carry Action candidates")
+        if len(set(self.candidate_keys)) != len(self.candidate_keys):
+            raise ValueError("Routing candidate_keys must be unique")
+        return self
+
+
 class DynamicGoalSemanticRoutingRequest(ProviderModel):
     """Small, closed routing request over public semantic candidates."""
 
@@ -1045,6 +1095,14 @@ class DynamicGoalContractResolver(Protocol):
 
     def match_dynamic_goal_family(self, request: GoalFamilyMatchRequest) -> GoalFamilyMatch: ...
 
+    def decide_dynamic_goal_family(
+        self, request: DynamicGoalFamilyRoutingRequest
+    ) -> DynamicGoalFamilyRouting: ...
+
+    def route_dynamic_goal_action(
+        self, request: DynamicGoalActionRoutingRequest
+    ) -> DynamicGoalActionRouting: ...
+
     def route_dynamic_goal(
         self, request: DynamicGoalSemanticRoutingRequest
     ) -> DynamicGoalSemanticRouting: ...
@@ -1155,6 +1213,21 @@ def _normalize_dynamic_goal_semantic_routing(raw: object) -> object:
     if (
         raw.get("family") == "OPERATION"
         and raw.get("action_match") == "MATCHED"
+        and isinstance(action_key, str)
+        and raw.get("candidate_keys") == [action_key]
+    ):
+        return {**raw, "candidate_keys": []}
+    return raw
+
+
+def _normalize_dynamic_goal_action_routing(raw: object) -> object:
+    """Normalize only the redundant singleton form of a matched Action."""
+
+    if not isinstance(raw, dict):
+        return raw
+    action_key = raw.get("action_key")
+    if (
+        raw.get("action_match") == "MATCHED"
         and isinstance(action_key, str)
         and raw.get("candidate_keys") == [action_key]
     ):
@@ -1423,6 +1496,37 @@ def _dynamic_goal_routing_validation_diagnostics(
                 "expected_candidate_keys": [],
                 "preserve": {
                     "family": "OPERATION",
+                    "action_match": "MATCHED",
+                    "action_key": action_key,
+                },
+                "fix_only": ["candidate_keys"],
+            },
+            *diagnostics,
+        )
+    return diagnostics
+
+
+def _dynamic_goal_action_routing_validation_diagnostics(
+    raw: object,
+    error: ValidationError,
+) -> tuple[dict[str, object], ...]:
+    diagnostics = provider_validation_diagnostics(error)
+    if not isinstance(raw, dict):
+        return diagnostics
+    action_key = raw.get("action_key")
+    candidate_keys = raw.get("candidate_keys")
+    if (
+        raw.get("action_match") == "MATCHED"
+        and isinstance(action_key, str)
+        and isinstance(candidate_keys, list)
+        and candidate_keys
+    ):
+        return (
+            {
+                "code": "MATCHED_HAS_CANDIDATE_KEYS",
+                "field_path": "candidate_keys",
+                "expected_candidate_keys": [],
+                "preserve": {
                     "action_match": "MATCHED",
                     "action_key": action_key,
                 },
@@ -1725,6 +1829,8 @@ _GOAL_PROVIDER_PURPOSES = frozenset(
         "dynamic_goal_grounding",
         "dynamic_goal",
         "dynamic_goal_interpretation",
+        "dynamic_goal_family_routing",
+        "dynamic_goal_action_routing",
         "dynamic_goal_routing",
         "dynamic_goal_operation",
     }
@@ -1733,6 +1839,8 @@ _GOAL_PROMPT_TEMPLATE_VERSIONS = {
     "dynamic_goal_grounding": "dynamic-goal-grounding-v2",
     "dynamic_goal": "dynamic-goal-interpretation-v1",
     "dynamic_goal_interpretation": "dynamic-goal-interpretation-v1",
+    "dynamic_goal_family_routing": "dynamic-goal-family-routing-v1",
+    "dynamic_goal_action_routing": "dynamic-goal-action-routing-v2",
     "dynamic_goal_routing": "dynamic-goal-routing-v2",
     "dynamic_goal_operation": "dynamic-goal-operation-v2",
 }
@@ -1794,7 +1902,12 @@ def goal_provider_response_snapshot(
         raw = value.model_dump(mode="json")
     if not isinstance(raw, dict):
         return {"json_type": _safe_json_type(raw) or "unknown"}
-    if purpose in {"dynamic_goal_routing", "dynamic_goal_operation"}:
+    if purpose in {
+        "dynamic_goal_family_routing",
+        "dynamic_goal_action_routing",
+        "dynamic_goal_routing",
+        "dynamic_goal_operation",
+    }:
         snapshot = _safe_goal_snapshot(raw, depth=0)
         return _bounded_goal_snapshot(snapshot, max_bytes=_GOAL_RESPONSE_SNAPSHOT_MAX_BYTES)
     if purpose == "dynamic_goal_grounding":
@@ -2402,6 +2515,8 @@ class OpenAICompatibleGenericProvider:
             "dynamic_goal_family": self._fast_semantic_profile,
             "dynamic_goal_action": self._fast_semantic_profile,
             "dynamic_goal_operation": self._fast_semantic_profile,
+            "dynamic_goal_family_routing": self._fast_semantic_profile,
+            "dynamic_goal_action_routing": self._fast_semantic_profile,
             "dynamic_goal_routing": self._fast_semantic_profile,
         }
         self._transport = transport
@@ -2523,6 +2638,63 @@ class OpenAICompatibleGenericProvider:
                 "The model provider returned an invalid Goal family match",
                 validation_diagnostics=provider_validation_diagnostics(exc),
             ) from exc
+
+    def decide_dynamic_goal_family(
+        self, request: DynamicGoalFamilyRoutingRequest
+    ) -> DynamicGoalFamilyRouting:
+        raw = self._invoke("dynamic_goal_family_routing", request.model_dump(mode="json"))
+        try:
+            result = DynamicGoalFamilyRouting.model_validate(raw)
+        except ValidationError as exc:
+            diagnostics = provider_validation_diagnostics(exc)
+            self._record_validation_diagnostics(diagnostics)
+            self._record_response_validation("REJECTED")
+            if self._goal_resolution_observability == "DEBUG":
+                self._record_goal_response_snapshot(
+                    goal_provider_response_snapshot("dynamic_goal_family_routing", raw),
+                    validation="REJECTED",
+                )
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "The model provider returned invalid family routing",
+                validation_diagnostics=diagnostics,
+            ) from exc
+        self._record_response_validation("ACCEPTED")
+        if self._goal_resolution_observability == "DEBUG":
+            self._record_goal_response_snapshot(
+                goal_provider_response_snapshot("dynamic_goal_family_routing", result),
+                validation="ACCEPTED",
+            )
+        return result
+
+    def route_dynamic_goal_action(
+        self, request: DynamicGoalActionRoutingRequest
+    ) -> DynamicGoalActionRouting:
+        raw = self._invoke("dynamic_goal_action_routing", request.model_dump(mode="json"))
+        raw = _normalize_dynamic_goal_action_routing(raw)
+        try:
+            result = DynamicGoalActionRouting.model_validate(raw)
+        except ValidationError as exc:
+            diagnostics = _dynamic_goal_action_routing_validation_diagnostics(raw, exc)
+            self._record_validation_diagnostics(diagnostics)
+            self._record_response_validation("REJECTED")
+            if self._goal_resolution_observability == "DEBUG":
+                self._record_goal_response_snapshot(
+                    goal_provider_response_snapshot("dynamic_goal_action_routing", raw),
+                    validation="REJECTED",
+                )
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "The model provider returned invalid Action routing",
+                validation_diagnostics=diagnostics,
+            ) from exc
+        self._record_response_validation("ACCEPTED")
+        if self._goal_resolution_observability == "DEBUG":
+            self._record_goal_response_snapshot(
+                goal_provider_response_snapshot("dynamic_goal_action_routing", result),
+                validation="ACCEPTED",
+            )
+        return result
 
     def route_dynamic_goal(
         self, request: DynamicGoalSemanticRoutingRequest
@@ -2726,7 +2898,21 @@ class OpenAICompatibleGenericProvider:
         self, purpose: str, payload: dict[str, object]
     ) -> tuple[dict[str, object], int]:
         profile = self._profile_for_purpose(purpose)
-        if purpose == "dynamic_goal_routing":
+        if purpose == "dynamic_goal_family_routing":
+            response_contract = '{"family":"STATE|OPERATION"}'
+        elif purpose == "dynamic_goal_action_routing":
+            response_contract = (
+                "exactly one mutually exclusive variant: "
+                'MATCHED={"action_match":"MATCHED",'
+                '"action_key":"exact_public_action_key","candidate_keys":[],'
+                '"clarification_prompt":null}; '
+                'AMBIGUOUS={"action_match":"AMBIGUOUS","action_key":null,'
+                '"candidate_keys":["public_action_key_1","public_action_key_2"],'
+                '"clarification_prompt":null}; '
+                'NO_MATCH={"action_match":"NO_MATCH","action_key":null,'
+                '"candidate_keys":[],"clarification_prompt":null}'
+            )
+        elif purpose == "dynamic_goal_routing":
             response_contract = (
                 "exactly one mutually exclusive variant: "
                 'MATCHED={"family":"OPERATION","action_match":"MATCHED",'
@@ -2861,7 +3047,52 @@ class OpenAICompatibleGenericProvider:
                 "and target_key null are intentional unconstrained fields and must not trigger "
                 "an actor or target clarification."
             )
-        if purpose == "dynamic_goal_routing":
+        if purpose == "dynamic_goal_family_routing":
+            planning_prompt = (
+                "Decide only the semantic Goal family from the raw player Goal. STATE means the "
+                "player requires a public terminal world state but does not require one specific "
+                "Action invocation. OPERATION means the requested behavior or Action invocation "
+                "itself must occur, even if it has a terminal State effect. Return exactly STATE "
+                "or OPERATION and freeze that choice. Do not select, match, rank, or infer any "
+                "Action or State requirement. No Action catalog or State candidate catalog is "
+                "available at this stage. deterministic_candidate_refs identify public nouns and "
+                "topology context only; candidate availability must not decide the family. When a "
+                "natural expression permits both a reasonable STATE and OPERATION reading, choose "
+                "one reasonable reading rather than requesting clarification merely because both "
+                "exist. Judge semantic intent, never keywords, substrings, or language-specific "
+                "verb rules. On recovery fix only the supplied structural validation error and do "
+                "not add fields outside the response contract."
+            )
+        elif purpose == "dynamic_goal_action_routing":
+            planning_prompt = (
+                "The Goal family is already immutably OPERATION. Perform only semantic Action "
+                "selection from action_catalog; never reconsider, restate, or change the family, "
+                "and never produce a State requirement. Return MATCHED for exactly one authored "
+                "Action whose name, description, and complete contract semantics express the "
+                "requested invocation; AMBIGUOUS only when multiple Actions genuinely compete; "
+                "or NO_MATCH when none expresses it. Candidate-reference or slot-shape "
+                "compatibility establishes only structural applicability, not semantic "
+                "equivalence. Merely "
+                "accepting a Node target or fitting Regions into slots is insufficient. Within one "
+                "Action candidate, an exact Region endpoint pair plus exactly one "
+                "TOPOLOGY_ENRICHED Node is one derived target evidence unit, not three competing "
+                "identities. public_topology contains only Goal-relevant public evidence; each "
+                "transport_endpoint_pair explicitly maps its exact endpoint Regions to its "
+                "derived_target Node. Use that relationship and the derived target's public "
+                "semantics to understand the requested invocation, without treating the Node as "
+                "an exact user mention. This stage selects only the Action identity. It does not "
+                "ground the final target or actor, complete bindings or parameters, prove Action "
+                "preconditions, decide Runtime executability, or construct or complete a Formal "
+                "Goal. When the Action identity is semantically clear, return MATCHED even if a "
+                "target is expressed indirectly through typed topology evidence, slots remain for "
+                "Operation Grounding, or an execution precondition is not yet established. Those "
+                "conditions alone are not reasons for NO_MATCH. Judge "
+                "the raw Goal together with authored Action semantics and typed/topology evidence; "
+                "never use keywords, substrings, regexes, or language-specific verb rules. On "
+                "recovery preserve every recovery_feedback.preserve field exactly and change only "
+                "recovery_feedback.fix_only fields."
+            )
+        elif purpose == "dynamic_goal_routing":
             planning_prompt = (
                 "Compare the finite action_catalog and state_catalog, then perform only two "
                 "logically ordered routing decisions. STATE means the player states a desired "
@@ -3894,11 +4125,15 @@ __all__ = [
     "AntiRegressionMemoryItem",
     "DynamicGoalActionMatch",
     "DynamicGoalActionMatchRequest",
+    "DynamicGoalActionRouting",
+    "DynamicGoalActionRoutingRequest",
     "DynamicGoalCandidateReference",
     "DynamicGoalContractResolver",
     "DynamicGoalEntityGrounder",
     "DynamicGoalEntityGrounding",
     "DynamicGoalEntityGroundingRequest",
+    "DynamicGoalFamilyRouting",
+    "DynamicGoalFamilyRoutingRequest",
     "DynamicGoalGroundedOperation",
     "DynamicGoalInterpretation",
     "DynamicGoalInterpretationRequest",

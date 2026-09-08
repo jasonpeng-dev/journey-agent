@@ -35,9 +35,13 @@ from app.agent.provider import (
     AntiRegressionMemoryItem,
     DynamicGoalActionMatch,
     DynamicGoalActionMatchRequest,
+    DynamicGoalActionRouting,
+    DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRouting,
+    DynamicGoalFamilyRoutingRequest,
     DynamicGoalGroundedOperation,
     DynamicGoalIntentDraft,
     DynamicGoalInterpretation,
@@ -45,8 +49,6 @@ from app.agent.provider import (
     DynamicGoalOperationGrounding,
     DynamicGoalOperationGroundingRequest,
     DynamicGoalRecoveryFeedback,
-    DynamicGoalSemanticRouting,
-    DynamicGoalSemanticRoutingRequest,
     GenericModelProvider,
     GenericProviderError,
     GoalFamilyMatch,
@@ -414,8 +416,29 @@ class PlanRevalidationResult:
     diagnostics: tuple[dict[str, object], ...] = ()
 
 
-def _validate_semantic_routing_recovery_preservation(
-    routing: DynamicGoalSemanticRouting,
+def _validate_family_routing_recovery_preservation(
+    routing: DynamicGoalFamilyRouting,
+    recovery_feedback: tuple[dict[str, object], ...],
+) -> None:
+    for feedback in recovery_feedback:
+        preserve = feedback.get("preserve")
+        if isinstance(preserve, dict) and (
+            "family" in preserve and preserve["family"] != routing.family
+        ):
+            raise GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "Family recovery changed a preserved semantic decision",
+                validation_diagnostics=(
+                    {
+                        "code": "RECOVERY_CHANGED_PRESERVED_FIELD",
+                        "field_path": "family",
+                    },
+                ),
+            )
+
+
+def _validate_action_routing_recovery_preservation(
+    routing: DynamicGoalActionRouting,
     recovery_feedback: tuple[dict[str, object], ...],
 ) -> None:
     actual = routing.model_dump(mode="json")
@@ -425,13 +448,13 @@ def _validate_semantic_routing_recovery_preservation(
             continue
         changed = tuple(
             key
-            for key in ("family", "action_match", "action_key")
+            for key in ("action_match", "action_key")
             if key in preserve and actual.get(key) != preserve[key]
         )
         if changed:
             raise GenericProviderError(
                 "PROVIDER_SCHEMA_INVALID",
-                "Routing recovery changed a preserved semantic decision",
+                "Action recovery changed a preserved semantic decision",
                 validation_diagnostics=tuple(
                     {
                         "code": "RECOVERY_CHANGED_PRESERVED_FIELD",
@@ -524,10 +547,15 @@ class GenericGoalResolver:
         family_matcher = getattr(provider, "match_dynamic_goal_family", None)
         action_matcher = getattr(provider, "match_dynamic_goal_action", None)
         operation_grounder = getattr(provider, "ground_dynamic_goal_operation", None)
-        semantic_router = getattr(provider, "route_dynamic_goal", None)
-        if frozen_family is None and callable(semantic_router) and callable(operation_grounder):
+        family_router = getattr(provider, "decide_dynamic_goal_family", None)
+        action_router = getattr(provider, "route_dynamic_goal_action", None)
+        if frozen_family is None and all(
+            callable(item) for item in (family_router, action_router, operation_grounder)
+        ):
+            assert callable(family_router)
+            assert callable(action_router)
+            assert callable(operation_grounder)
             routing_history_start = len(provider_call_history_metadata(provider))
-            public_action_keys = _dynamic_goal_public_action_keys(self.db, self.scope, definition)
             routing_grounding = _deterministic_dynamic_goal_grounding(
                 goal,
                 self.db,
@@ -558,37 +586,24 @@ class GenericGoalResolver:
                 if routing_grounding.status == "RESOLVED"
                 else ()
             )
-            action_catalog = _dynamic_goal_routing_action_catalog(
-                definition,
-                public_action_keys,
-                routing_refs,
-            )
-            routing_action_keys = {str(item["key"]) for item in action_catalog}
-            state_catalog = _dynamic_goal_routing_state_catalog(
-                goal,
-                self.db,
-                self.scope,
-                definition,
-                routing_refs,
-            )
-            routing: DynamicGoalSemanticRouting | None = None
-            recovery_feedback: tuple[dict[str, object], ...] = ()
+
+            family_routing: DynamicGoalFamilyRouting | None = None
+            family_recovery: tuple[dict[str, object], ...] = ()
             for recovery_attempt in range(2):
                 try:
-                    routing = DynamicGoalSemanticRouting.model_validate(
-                        semantic_router(
-                            DynamicGoalSemanticRoutingRequest(
+                    family_routing = DynamicGoalFamilyRouting.model_validate(
+                        family_router(
+                            DynamicGoalFamilyRoutingRequest(
                                 goal=goal,
-                                action_catalog=action_catalog,
-                                state_catalog=state_catalog,
+                                deterministic_candidate_refs=routing_refs,
                                 recovery_attempt=recovery_attempt,
-                                recovery_feedback=recovery_feedback,
+                                recovery_feedback=family_recovery,
                             )
                         )
                     )
-                    _validate_semantic_routing_recovery_preservation(
-                        routing,
-                        recovery_feedback,
+                    _validate_family_routing_recovery_preservation(
+                        family_routing,
+                        family_recovery,
                     )
                     break
                 except GenericProviderError as exc:
@@ -596,89 +611,154 @@ class GenericGoalResolver:
                         "MODEL_PROVIDER_RESPONSE_INVALID",
                         "PROVIDER_SCHEMA_INVALID",
                     }:
-                        recovery_feedback = tuple(exc.validation_diagnostics) or (
-                            {"code": exc.code, "expected": "DynamicGoalSemanticRouting"},
+                        family_recovery = tuple(exc.validation_diagnostics) or (
+                            {
+                                "code": exc.code,
+                                "expected": "DynamicGoalFamilyRouting",
+                            },
                         )
                         continue
                     raise
                 except (ValidationError, TypeError, ValueError) as exc:
                     if recovery_attempt == 0:
-                        recovery_feedback = (
+                        family_recovery = (
                             {
                                 "code": "PROVIDER_SCHEMA_INVALID",
-                                "expected": "DynamicGoalSemanticRouting",
+                                "expected": "DynamicGoalFamilyRouting",
                             },
                         )
                         continue
                     raise GenericProviderError(
                         "PROVIDER_SCHEMA_INVALID",
-                        "The model provider returned invalid semantic routing",
+                        "The model provider returned invalid family routing",
                     ) from exc
-            assert routing is not None
-            if routing.family == "AMBIGUOUS":
-                return GenericGoalResolution(
-                    "NEEDS_CLARIFICATION",
-                    clarification_prompt=(
-                        routing.clarification_prompt
-                        or definition.goal_resolution.clarification_prompt
-                    ),
-                    source="FAMILY_AMBIGUOUS",
-                    provider_observation={
-                        "stage": "DYNAMIC_GOAL_ROUTING",
-                        "frozen_family": "AMBIGUOUS",
-                        "rejection_code": "FAMILY_AMBIGUOUS",
-                    },
-                )
-            if routing.family == "STATE":
+            assert family_routing is not None
+            if family_routing.family == "STATE":
                 return self._resolve_dynamic_goal(
                     goal,
                     definition,
                     frozen_family="STATE",
                     _provider_history_start=routing_history_start,
                 )
-            if routing.action_match == "AMBIGUOUS":
-                invalid = set(routing.candidate_keys) - routing_action_keys
+
+            public_action_keys = _dynamic_goal_public_action_keys(
+                self.db,
+                self.scope,
+                definition,
+            )
+            action_catalog = _dynamic_goal_routing_action_catalog(
+                definition,
+                public_action_keys,
+                routing_refs,
+            )
+            public_entity_catalog = _dynamic_goal_entity_catalog(
+                self.db,
+                self.scope,
+                definition,
+            )
+            relevant_public_entities = _dynamic_goal_action_semantic_entities(
+                public_entity_catalog,
+                routing_refs,
+            )
+            action_topology = _dynamic_goal_action_topology_context(
+                self.db,
+                self.scope,
+                definition,
+                routing_refs,
+                public_catalog=public_entity_catalog,
+            )
+            routing_action_keys = {str(item["key"]) for item in action_catalog}
+            action_routing: DynamicGoalActionRouting | None = None
+            action_recovery: tuple[dict[str, object], ...] = ()
+            for recovery_attempt in range(2):
+                try:
+                    action_routing = DynamicGoalActionRouting.model_validate(
+                        action_router(
+                            DynamicGoalActionRoutingRequest(
+                                goal=goal,
+                                action_catalog=action_catalog,
+                                relevant_public_entities=relevant_public_entities,
+                                public_topology=action_topology,
+                                recovery_attempt=recovery_attempt,
+                                recovery_feedback=action_recovery,
+                            )
+                        )
+                    )
+                    _validate_action_routing_recovery_preservation(
+                        action_routing,
+                        action_recovery,
+                    )
+                    break
+                except GenericProviderError as exc:
+                    if recovery_attempt == 0 and exc.code in {
+                        "MODEL_PROVIDER_RESPONSE_INVALID",
+                        "PROVIDER_SCHEMA_INVALID",
+                    }:
+                        action_recovery = tuple(exc.validation_diagnostics) or (
+                            {
+                                "code": exc.code,
+                                "expected": "DynamicGoalActionRouting",
+                            },
+                        )
+                        continue
+                    raise
+                except (ValidationError, TypeError, ValueError) as exc:
+                    if recovery_attempt == 0:
+                        action_recovery = (
+                            {
+                                "code": "PROVIDER_SCHEMA_INVALID",
+                                "expected": "DynamicGoalActionRouting",
+                            },
+                        )
+                        continue
+                    raise GenericProviderError(
+                        "PROVIDER_SCHEMA_INVALID",
+                        "The model provider returned invalid Action routing",
+                    ) from exc
+            assert action_routing is not None
+            if action_routing.action_match == "AMBIGUOUS":
+                invalid = set(action_routing.candidate_keys) - routing_action_keys
                 if invalid:
                     raise GenericProviderError(
                         "CANONICAL_IDENTITY_CONFLICT",
-                        "Semantic routing returned a non-public Action candidate",
+                        "Action routing returned a non-public Action candidate",
                     )
                 return GenericGoalResolution(
                     "NEEDS_CLARIFICATION",
-                    candidate_keys=routing.candidate_keys,
+                    candidate_keys=action_routing.candidate_keys,
                     clarification_prompt=(
-                        routing.clarification_prompt
+                        action_routing.clarification_prompt
                         or definition.goal_resolution.clarification_prompt
                     ),
                     source="ACTION_AMBIGUOUS",
                     provider_observation={
-                        "stage": "DYNAMIC_GOAL_ROUTING",
+                        "stage": "DYNAMIC_GOAL_ACTION_ROUTING",
                         "frozen_family": "OPERATION",
-                        "candidate_keys": list(routing.candidate_keys),
+                        "candidate_keys": list(action_routing.candidate_keys),
                         "rejection_code": "ACTION_AMBIGUOUS",
                     },
                 )
-            if routing.action_match == "NO_MATCH":
+            if action_routing.action_match == "NO_MATCH":
                 return GenericGoalResolution(
                     "UNSUPPORTED",
                     source="ACTION_NO_MATCH",
                     provider_observation={
-                        "stage": "DYNAMIC_GOAL_ROUTING",
+                        "stage": "DYNAMIC_GOAL_ACTION_ROUTING",
                         "frozen_family": "OPERATION",
                         "rejection_code": "ACTION_NO_MATCH",
                     },
                 )
-            assert routing.action_key is not None
-            if routing.action_key not in routing_action_keys:
+            assert action_routing.action_key is not None
+            if action_routing.action_key not in routing_action_keys:
                 raise GenericProviderError(
                     "CANONICAL_IDENTITY_CONFLICT",
-                    "Semantic routing returned an Action outside its candidate catalog",
+                    "Action routing returned an Action outside its candidate catalog",
                 )
             return self._resolve_contract_driven_operation(
                 goal,
                 definition,
                 operation_grounder=operation_grounder,
-                frozen_action_key=routing.action_key,
+                frozen_action_key=action_routing.action_key,
             )
         if frozen_family is None and all(
             callable(item) for item in (family_matcher, action_matcher, operation_grounder)
@@ -7508,9 +7588,9 @@ def _dynamic_goal_routing_action_catalog(
         contract = _dynamic_goal_action_contract(action)
         compatible_refs = _dynamic_goal_action_compatible_refs(
             definition,
+            action,
             contract,
             candidate_refs,
-            required_interaction_key=action.required_interaction_key,
         )
         if compatible_refs is None:
             continue
@@ -7553,14 +7633,159 @@ def _dynamic_goal_routing_action_catalog(
     return tuple(result)
 
 
-def _dynamic_goal_action_compatible_refs(
+def _dynamic_goal_action_semantic_entities(
+    public_catalog: dict[str, object],
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...],
+) -> tuple[dict[str, object], ...]:
+    """Enrich relevant identities with a bounded, public semantic view."""
+
+    raw_references = public_catalog.get("references")
+    references = (
+        {
+            (str(item["ref_type"]), str(item["key"])): item
+            for item in raw_references
+            if isinstance(item, dict)
+            and isinstance(item.get("ref_type"), str)
+            and isinstance(item.get("key"), str)
+        }
+        if isinstance(raw_references, (list, tuple))
+        else {}
+    )
+    raw_entities = public_catalog.get("entities")
+    entities = (
+        {
+            str(item["key"]): item
+            for item in raw_entities
+            if isinstance(item, dict) and isinstance(item.get("key"), str)
+        }
+        if isinstance(raw_entities, (list, tuple))
+        else {}
+    )
+
+    result: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidate_refs:
+        identity = (candidate.ref_type, candidate.key)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        reference = references.get(identity)
+        if reference is None:
+            continue
+        entity = entities.get(candidate.key, {})
+        semantic_view: dict[str, object] = {
+            "ref_type": candidate.ref_type,
+            "key": candidate.key,
+            "provenance": candidate.provenance,
+            "name": reference["name"],
+            "description": str(reference.get("description", ""))[:400],
+        }
+        if isinstance(entity.get("node_type_key"), str):
+            semantic_view["node_type_key"] = entity["node_type_key"]
+        public_references = reference.get("public_references")
+        if isinstance(public_references, (list, tuple)) and public_references:
+            semantic_view["public_references"] = list(public_references)
+        result.append(semantic_view)
+    return tuple(result)
+
+
+def _dynamic_goal_action_topology_context(
+    db: Session | None,
+    scope: RuntimeScope | None,
     definition: ScenarioDefinitionV2,
-    contract: dict[str, object],
     candidate_refs: tuple[DynamicGoalCandidateReference, ...],
     *,
-    required_interaction_key: str | None = None,
+    public_catalog: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Project only the public topology relationship already derived for this Goal."""
+
+    exact_regions = {
+        item.key
+        for item in candidate_refs
+        if item.ref_type == "REGION" and item.provenance == "EXACT_USER_MENTION"
+    }
+    topology_nodes = {
+        item.key
+        for item in candidate_refs
+        if item.ref_type == "NODE" and item.provenance == "TOPOLOGY_ENRICHED"
+    }
+    empty: dict[str, object] = {"relations": [], "transport_endpoint_pairs": []}
+    if len(exact_regions) != 2 or not topology_nodes:
+        return empty
+
+    if public_catalog is None:
+        public_catalog = _dynamic_goal_entity_catalog(db, scope, definition)
+    raw_topology = public_catalog.get("public_topology")
+    if not isinstance(raw_topology, dict):
+        return empty
+    raw_entities = public_catalog.get("entities")
+    entities = (
+        {
+            str(item["key"]): item
+            for item in raw_entities
+            if isinstance(item, dict) and isinstance(item.get("key"), str)
+        }
+        if isinstance(raw_entities, (list, tuple))
+        else {}
+    )
+
+    raw_pairs = raw_topology.get("transport_endpoint_pairs")
+    pairs: list[dict[str, object]] = []
+    if isinstance(raw_pairs, (list, tuple)):
+        for item in raw_pairs:
+            if not isinstance(item, dict):
+                continue
+            entity_key = item.get("entity_key")
+            endpoints = item.get("endpoint_region_keys")
+            if (
+                not isinstance(entity_key, str)
+                or entity_key not in topology_nodes
+                or not isinstance(endpoints, (list, tuple))
+                or set(endpoints) != exact_regions
+            ):
+                continue
+            entity = entities.get(entity_key, {})
+            pairs.append(
+                {
+                    **item,
+                    "derived_target": {
+                        "ref_type": "NODE",
+                        "key": entity_key,
+                        "name": entity.get("name"),
+                        "node_type_key": entity.get("node_type_key"),
+                        "description": str(entity.get("description", ""))[:400],
+                        "provenance": "TOPOLOGY_ENRICHED",
+                    },
+                }
+            )
+
+    pair_keys = {
+        str(item["entity_key"])
+        for item in pairs
+        if isinstance(item.get("entity_key"), str)
+    }
+    raw_relations = raw_topology.get("relations")
+    relations = (
+        [
+            item
+            for item in raw_relations
+            if isinstance(item, dict)
+            and item.get("source_node_key") in pair_keys
+            and item.get("target_node_key") in exact_regions
+        ]
+        if isinstance(raw_relations, (list, tuple))
+        else []
+    )
+    return {"relations": relations, "transport_endpoint_pairs": pairs}
+
+
+def _dynamic_goal_action_compatible_refs(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    contract: dict[str, object],
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...],
 ) -> tuple[DynamicGoalCandidateReference, ...] | None:
-    """Return evidence usable by an Action, or None when its shape is impossible.
+    """Retain an Action when explicit refs have any legal semantic-role assignment.
 
     Topology-enriched Nodes are evidence, never an exact target or frozen Action.
     Endpoint Regions may therefore describe that Node instead of consuming Region
@@ -7572,66 +7797,77 @@ def _dynamic_goal_action_compatible_refs(
     )
     if not semantic_refs:
         return candidate_refs
-    if any(item.ref_type == "DERIVED_STATE" for item in semantic_refs):
-        return None
 
     target = cast(dict[str, object], contract["target"])
     bindings = cast(list[dict[str, object]], contract["bindings"])
     parameters = cast(list[dict[str, object]], contract["parameters"])
-    expected_types = [
-        str(target["expected_type"]),
-        *(str(item["expected_type"]) for item in bindings),
-        *(str(item["expected_type"]) for item in parameters),
-    ]
-    capacity: dict[str, int] = {}
-    for expected_type in expected_types:
-        ref_type = _slot_expected_reference_type(expected_type)
-        if ref_type is not None:
-            capacity[ref_type] = capacity.get(ref_type, 0) + 1
-
     nodes_by_key = {item.key: item for item in definition.world.nodes}
     target_node_types = {
         str(item) for item in cast(list[object], target.get("node_type_keys", []))
     }
-    def target_accepts_node(reference: DynamicGoalCandidateReference) -> bool:
-        if _slot_expected_reference_type(str(target["expected_type"])) != "NODE":
+    target_ref_type = _slot_expected_reference_type(str(target["expected_type"]))
+
+    def target_accepts(reference: DynamicGoalCandidateReference) -> bool:
+        if reference.ref_type != target_ref_type:
             return False
+        if reference.ref_type not in {"NODE", "REGION"}:
+            return True
         node = nodes_by_key.get(reference.key)
         if node is None or (
             target_node_types and node.node_type_key not in target_node_types
         ):
             return False
         return (
-            required_interaction_key is None
-            or required_interaction_key in node.interaction_keys
+            action.required_interaction_key is None
+            or action.required_interaction_key in node.interaction_keys
         )
+
+    roles: list[tuple[str, str]] = []
+    if target_ref_type is not None:
+        roles.append(("TARGET", target_ref_type))
+    for slot in (*bindings, *parameters):
+        ref_type = _slot_expected_reference_type(str(slot["expected_type"]))
+        if ref_type is not None:
+            roles.append(("SLOT", ref_type))
+    if action.source_relation_type_key is not None:
+        roles.append(("RELATION_SOURCE", "NODE"))
 
     topology_nodes = tuple(
         item
         for item in semantic_refs
         if item.ref_type == "NODE" and item.provenance == "TOPOLOGY_ENRICHED"
     )
-    topology_target = any(target_accepts_node(item) for item in topology_nodes)
-    required_counts: dict[str, int] = {}
-    for item in semantic_refs:
-        if item.provenance != "EXACT_USER_MENTION":
-            continue
+    topology_target = any(target_accepts(item) for item in topology_nodes)
+    explicit_refs = tuple(
+        item
+        for item in semantic_refs
+        if item.provenance == "EXACT_USER_MENTION"
         # Region pairs may be endpoint evidence for a compatible topology Node.
-        if topology_target and item.ref_type == "REGION":
-            continue
-        required_counts[item.ref_type] = required_counts.get(item.ref_type, 0) + 1
-        if (
-            item.ref_type == "NODE"
-            and capacity.get("NODE", 0) == 1
-            and not target_accepts_node(item)
-        ):
-            return None
-    if any(
-        required > capacity.get(ref_type, 0)
-        for ref_type, required in required_counts.items()
-    ):
-        return None
-    return candidate_refs
+        and not (topology_target and item.ref_type == "REGION")
+    )
+
+    def role_accepts(
+        role: tuple[str, str], reference: DynamicGoalCandidateReference
+    ) -> bool:
+        role_kind, ref_type = role
+        if reference.ref_type != ref_type:
+            return False
+        return role_kind != "TARGET" or target_accepts(reference)
+
+    def assignment_exists(index: int, used_roles: set[int]) -> bool:
+        if index == len(explicit_refs):
+            return True
+        reference = explicit_refs[index]
+        for role_index, role in enumerate(roles):
+            if role_index in used_roles or not role_accepts(role, reference):
+                continue
+            used_roles.add(role_index)
+            if assignment_exists(index + 1, used_roles):
+                return True
+            used_roles.remove(role_index)
+        return False
+
+    return candidate_refs if assignment_exists(0, set()) else None
 
 
 def _dynamic_goal_routing_state_catalog(
