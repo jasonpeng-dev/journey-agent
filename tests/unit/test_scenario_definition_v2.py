@@ -176,6 +176,37 @@ def _contract_scenario_document() -> dict[str, Any]:
     }
 
 
+def test_public_references_validate_canonical_identity_and_affect_hash_canonically() -> None:
+    first = _contract_scenario_document()
+    first["public_references"] = [
+        {"term": "healing supplies", "ref_type": "RESOURCE", "ref_key": "medicine"},
+        {"term": "patient", "ref_type": "NODE", "ref_key": "patient_one"},
+    ]
+    second = deepcopy(first)
+    second["public_references"].reverse()
+
+    parsed = ScenarioDefinitionV2.model_validate(first)
+
+    assert parsed.public_references[0].ref_key == "medicine"
+    assert scenario_content_hash(first) == scenario_content_hash(second)
+
+
+def test_public_reference_rejects_missing_or_wrong_typed_identity() -> None:
+    missing = _contract_scenario_document()
+    missing["public_references"] = [
+        {"term": "unknown", "ref_type": "RESOURCE", "ref_key": "unknown_resource"}
+    ]
+    wrong_type = _contract_scenario_document()
+    wrong_type["public_references"] = [
+        {"term": "medicine", "ref_type": "NODE", "ref_key": "medicine"}
+    ]
+
+    with pytest.raises(ValidationError):
+        ScenarioDefinitionV2.model_validate(missing)
+    with pytest.raises(ValidationError):
+        ScenarioDefinitionV2.model_validate(wrong_type)
+
+
 def test_v2_document_is_frozen_strict_and_canonical() -> None:
     source = _contract_scenario_document()
     parsed = parse_scenario_document(source)

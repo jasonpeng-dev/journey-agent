@@ -17,6 +17,7 @@ from app.agent.provider import (
     DynamicGoalEntityGroundingRequest,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
+    DynamicGoalOperationGrounding,
     DynamicGoalOperationGroundingRequest,
     DynamicGoalSemanticRouting,
     DynamicGoalSemanticRoutingRequest,
@@ -459,6 +460,99 @@ def test_topology_can_compose_one_transport_target_from_region_pair() -> None:
     assert resolution.dynamic_requirements[0].target_key == "north_service_corridor"
 
 
+def _clear_transport_operation(target_key: str) -> dict[str, object]:
+    return _operation(
+        "clear_transport",
+        target=_slot(
+            "target",
+            "NODE",
+            "GROUNDED",
+            ref_type="NODE",
+            key=target_key,
+        ),
+    )
+
+
+def test_grounded_target_equal_to_unique_topology_consumes_endpoint_regions() -> None:
+    provider = _ContractProvider(
+        action_key="clear_transport",
+        operation_results=[_clear_transport_operation("central_river_tunnel")],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "repair central_district to east_residential_district",
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.dynamic_requirements[0].target_key == "central_river_tunnel"
+
+
+def test_grounded_target_different_from_unique_topology_keeps_identity_conflict() -> None:
+    provider = _ContractProvider(
+        action_key="clear_transport",
+        operation_results=[_clear_transport_operation("north_service_corridor")],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "repair central_district to east_residential_district",
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.source == "CANONICAL_IDENTITY_CONFLICT"
+
+
+def test_grounded_target_without_unique_topology_cannot_consume_regions() -> None:
+    provider = _ContractProvider(
+        action_key="clear_transport",
+        operation_results=[_clear_transport_operation("central_river_tunnel")],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "repair central_district to southeast_heights_district",
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.source == "CANONICAL_IDENTITY_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    "extra_identity",
+    ["north_industrial_district", "emergency_fuel"],
+)
+def test_topology_consumption_does_not_hide_unrelated_exact_identity(
+    extra_identity: str,
+) -> None:
+    provider = _ContractProvider(
+        action_key="clear_transport",
+        operation_results=[_clear_transport_operation("central_river_tunnel")],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "repair central_district to east_residential_district " + extra_identity,
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.source == "CANONICAL_IDENTITY_CONFLICT"
+
+
+def test_direct_grounded_node_does_not_require_topology_consumption() -> None:
+    provider = _ContractProvider(
+        action_key="clear_transport",
+        operation_results=[_clear_transport_operation("central_river_tunnel")],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "repair central_river_tunnel", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.dynamic_requirements[0].target_key == "central_river_tunnel"
+
+
 def test_unresolved_action_returns_typed_clarification_without_grounding() -> None:
     provider = _ContractProvider(action_status="UNRESOLVED")
 
@@ -759,6 +853,145 @@ def test_routed_region_pair_uses_only_local_topology_for_unique_node() -> None:
     assert len(topology["transport_endpoint_pairs"]) == 1
     assert len(topology["relations"]) == 2
     assert topology["transport_endpoint_pairs"][0]["entity_key"] == "north_service_corridor"
+
+
+@pytest.mark.parametrize(
+    ("goal", "expected_refs", "topology_key"),
+    [
+        (
+            "从东南区运30个应急燃料到南部",
+            {
+                ("REGION", "southeast_heights_district"),
+                ("REGION", "south_waterfront_district"),
+                ("RESOURCE", "emergency_fuel"),
+            },
+            "southeast_access_corridor",
+        ),
+        (
+            "修复中区到北区的路",
+            {("REGION", "central_district"), ("REGION", "north_industrial_district")},
+            "north_service_corridor",
+        ),
+        (
+            "修复中区到东区的路",
+            {("REGION", "central_district"), ("REGION", "east_residential_district")},
+            "central_river_tunnel",
+        ),
+    ],
+)
+def test_approved_references_feed_routing_and_existing_topology(
+    goal: str,
+    expected_refs: set[tuple[str, str]],
+    topology_key: str,
+) -> None:
+    request = _routing_request(goal)
+    expected_action = "transport_resource" if "运" in goal else "clear_transport"
+    action = next(item for item in request.action_catalog if item["key"] == expected_action)
+    actual = {(item["ref_type"], item["key"]) for item in action["candidate_refs"]}
+
+    assert expected_refs <= actual
+    assert ("NODE", topology_key) in actual
+
+
+@pytest.mark.parametrize(
+    ("goal", "resource_key"),
+    [
+        ("从东南高地区运30个通用部件到南部滨水区", "general_engineering_parts"),
+        ("从东南高地区运30个电力部件到南部滨水区", "electrical_repair_parts"),
+    ],
+)
+def test_specific_resource_reference_is_deterministic(
+    goal: str, resource_key: str
+) -> None:
+    request = _routing_request(goal)
+    transport = next(item for item in request.action_catalog if item["key"] == "transport_resource")
+
+    assert ("RESOURCE", resource_key, "EXACT_USER_MENTION") in {
+        (item["ref_type"], item["key"], item["provenance"])
+        for item in transport["candidate_refs"]
+    }
+
+
+def test_ambiguous_public_resource_reference_clarifies_without_provider_call() -> None:
+    provider = _RoutingProvider(
+        routing=DynamicGoalSemanticRouting(family="OPERATION", action_match="NO_MATCH")
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "运30个部件到南部", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "PUBLIC_REFERENCE_AMBIGUOUS"
+    assert set(resolution.candidate_keys) == {
+        "general_engineering_parts",
+        "electrical_repair_parts",
+    }
+    assert provider.routing_requests == []
+    assert provider.operation_requests == []
+
+
+def test_unregistered_resource_expression_keeps_llm_semantic_grounding_open() -> None:
+    operation = _operation(
+        "transport_resource",
+        target=_slot(
+            "target",
+            "REGION",
+            "GROUNDED",
+            ref_type="REGION",
+            key="south_waterfront_district",
+        ),
+        bindings=[
+            _slot(
+                "source_region",
+                "REGION",
+                "GROUNDED",
+                ref_type="REGION",
+                key="southeast_heights_district",
+            )
+        ],
+        parameters=[
+            _slot("amount", "INTEGER", "GROUNDED", value=30),
+            _slot(
+                "resource_key",
+                "RESOURCE",
+                "GROUNDED",
+                ref_type="RESOURCE",
+                key="electrical_repair_parts",
+            ),
+        ],
+        references=[
+            {"ref_type": "RESOURCE", "key": "electrical_repair_parts"},
+        ],
+    )
+    provider = _RoutingProvider(
+        routing=DynamicGoalSemanticRouting(
+            family="OPERATION",
+            action_match="MATCHED",
+            action_key="transport_resource",
+        ),
+        operation_results=[operation],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "从东南高地区运30个电力修理零件到南部滨水区", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    request = provider.operation_requests[0]
+    assert not any(
+        item.ref_type == "RESOURCE" for item in request.deterministic_candidate_refs
+    )
+    resource = next(
+        item
+        for item in request.public_references
+        if item["ref_type"] == "RESOURCE"
+        and item["key"] == "electrical_repair_parts"
+    )
+    assert set(resource["public_references"]) == {"电力部件", "部件"}
+    supplemented = DynamicGoalOperationGrounding.model_validate(operation)
+    assert supplemented.supplementary_candidate_refs[0].provenance == "LLM_SUPPLEMENTED"
+    assert len(provider.routing_requests) == 1
 
 
 class _StateProvider(_ContractProvider):

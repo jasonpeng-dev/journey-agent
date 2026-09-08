@@ -131,6 +131,7 @@ from app.domain.scenario_v2 import (
     ObjectiveDefinitionV2,
     ObjectiveRequirementKind,
     ObjectiveRequirementV2,
+    PublicReferenceTypeV2,
     RuleDefinitionV2,
     RulePhase,
     ScenarioDefinitionV2,
@@ -162,6 +163,11 @@ from app.infrastructure.db.models import (
     PlanningAttempt,
     PlanningCycle,
     WorldOperation,
+)
+from app.scenarios.public_references import (
+    PublicReferenceIdentity,
+    PublicReferenceIndexBuilder,
+    PublicReferenceLookup,
 )
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.formal_goal import (
@@ -528,6 +534,25 @@ class GenericGoalResolver:
                 self.scope,
                 definition,
             )
+            if routing_grounding.status == "NEEDS_CLARIFICATION":
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION",
+                    candidate_keys=_dynamic_goal_grounding_keys(routing_grounding),
+                    clarification_prompt=(
+                        routing_grounding.clarification_prompt
+                        or definition.goal_resolution.clarification_prompt
+                    ),
+                    source="PUBLIC_REFERENCE_AMBIGUOUS",
+                    provider_observation={
+                        "stage": "DETERMINISTIC_PUBLIC_REFERENCE",
+                        "status": "NEEDS_CLARIFICATION",
+                        "candidate_refs": [
+                            item.model_dump(mode="json")
+                            for item in routing_grounding.candidate_refs
+                        ],
+                        "rejection_code": "PUBLIC_REFERENCE_AMBIGUOUS",
+                    },
+                )
             routing_refs = (
                 routing_grounding.candidate_refs
                 if routing_grounding.status == "RESOLVED"
@@ -1850,6 +1875,25 @@ class GenericGoalResolver:
         """Resolve every Action through the same frozen, contract-owned pipeline."""
 
         deterministic = _deterministic_dynamic_goal_grounding(goal, self.db, self.scope, definition)
+        if deterministic.status == "NEEDS_CLARIFICATION":
+            return GenericGoalResolution(
+                "NEEDS_CLARIFICATION",
+                candidate_keys=_dynamic_goal_grounding_keys(deterministic),
+                clarification_prompt=(
+                    deterministic.clarification_prompt
+                    or definition.goal_resolution.clarification_prompt
+                ),
+                source="PUBLIC_REFERENCE_AMBIGUOUS",
+                provider_observation={
+                    "stage": "DETERMINISTIC_PUBLIC_REFERENCE",
+                    "status": "NEEDS_CLARIFICATION",
+                    "candidate_refs": [
+                        item.model_dump(mode="json")
+                        for item in deterministic.candidate_refs
+                    ],
+                    "rejection_code": "PUBLIC_REFERENCE_AMBIGUOUS",
+                },
+            )
         deterministic_refs = (
             deterministic.candidate_refs if deterministic.status == "RESOLVED" else ()
         )
@@ -7113,6 +7157,7 @@ def _dynamic_goal_entity_catalog(
     )
     public_action_keys = _dynamic_goal_public_action_keys(db, scope, definition)
     public_actor_keys = _dynamic_goal_public_actor_keys(db, scope, definition)
+    reference_index = PublicReferenceIndexBuilder.build(definition)
     nodes_by_key = {node.key: node for node in definition.world.nodes}
     nodes = [
         {
@@ -7120,6 +7165,18 @@ def _dynamic_goal_entity_catalog(
             "name": node.name,
             "description": node.description,
             "node_type_key": node.node_type_key,
+            **(
+                {"public_references": list(terms)}
+                if (
+                    terms := reference_index.terms_for(
+                        PublicReferenceTypeV2.REGION
+                        if node.key in public_regions
+                        else PublicReferenceTypeV2.NODE,
+                        node.key,
+                    )
+                )
+                else {}
+            ),
         }
         for node in sorted(definition.world.nodes, key=lambda item: item.key)
         if node.key in public_nodes
@@ -7174,6 +7231,18 @@ def _dynamic_goal_entity_catalog(
                 "key": node.key,
                 "name": node.name,
                 "description": node.description,
+                **(
+                    {"public_references": list(terms)}
+                    if (
+                        terms := reference_index.terms_for(
+                            PublicReferenceTypeV2.REGION
+                            if node.key in public_regions
+                            else PublicReferenceTypeV2.NODE,
+                            node.key,
+                        )
+                    )
+                    else {}
+                ),
             }
         )
     references.extend(
@@ -7182,6 +7251,15 @@ def _dynamic_goal_entity_catalog(
             "key": resource.key,
             "name": resource.name,
             "description": resource.description,
+            **(
+                {"public_references": list(terms)}
+                if (
+                    terms := reference_index.terms_for(
+                        PublicReferenceTypeV2.RESOURCE, resource.key
+                    )
+                )
+                else {}
+            ),
         }
         for resource in sorted(definition.world.resources, key=lambda item: item.key)
     )
@@ -7195,6 +7273,15 @@ def _dynamic_goal_entity_catalog(
             "allowed_values": list(state.allowed_values),
             **({"goal_aliases": list(state.goal_aliases)} if state.goal_aliases else {}),
             **({"goal_examples": list(state.goal_examples)} if state.goal_examples else {}),
+            **(
+                {"public_references": list(terms)}
+                if (
+                    terms := reference_index.terms_for(
+                        PublicReferenceTypeV2.DERIVED_STATE, state.key
+                    )
+                )
+                else {}
+            ),
         }
         for state in sorted(definition.derived_states, key=lambda item: item.key)
         if state.goal_addressable
@@ -7210,6 +7297,15 @@ def _dynamic_goal_entity_catalog(
             "target_node_type_keys": list(action.target_node_type_keys),
             "parameters": [item.model_dump(mode="json") for item in action.parameters],
             "operation_binding_contract": action_operation_binding_contract(action),
+            **(
+                {"public_references": list(terms)}
+                if (
+                    terms := reference_index.terms_for(
+                        PublicReferenceTypeV2.ACTION, action.key
+                    )
+                )
+                else {}
+            ),
         }
         for action in sorted(definition.actions, key=lambda item: item.key)
         if action.key in public_action_keys
@@ -7220,6 +7316,15 @@ def _dynamic_goal_entity_catalog(
             "key": actor.key,
             "name": actor.name,
             "description": actor.persona,
+            **(
+                {"public_references": list(terms)}
+                if (
+                    terms := reference_index.terms_for(
+                        PublicReferenceTypeV2.ACTOR, actor.key
+                    )
+                )
+                else {}
+            ),
         }
         for actor in sorted(definition.actors.actor_profiles, key=lambda item: item.key)
         if actor.key in public_actor_keys
@@ -7277,8 +7382,30 @@ def _dynamic_goal_exact_public_matches(
     public_action_keys: set[str],
     public_actor_keys: set[str],
 ) -> tuple[DynamicGoalCandidateReference, ...]:
-    normalized_goal = _normalize(goal)
-    matches: list[DynamicGoalCandidateReference] = []
+    lookup = _dynamic_goal_public_reference_lookup(
+        goal,
+        definition,
+        public_nodes,
+        public_action_keys,
+        public_actor_keys,
+    )
+    return tuple(
+        DynamicGoalCandidateReference(
+            ref_type=identity.ref_type.value,
+            key=identity.ref_key,
+            provenance="EXACT_USER_MENTION",
+        )
+        for identity in lookup.identities
+    )
+
+
+def _dynamic_goal_public_reference_lookup(
+    goal: str,
+    definition: ScenarioDefinitionV2,
+    public_nodes: set[str],
+    public_action_keys: set[str],
+    public_actor_keys: set[str],
+) -> PublicReferenceLookup:
     public_regions = {
         node.key
         for node in definition.world.nodes
@@ -7286,63 +7413,37 @@ def _dynamic_goal_exact_public_matches(
         and definition.metadata.locality.enabled
         and node.node_type_key == definition.metadata.locality.region_node_type_key
     }
-    for node in sorted(definition.world.nodes, key=lambda item: item.key):
-        if node.key not in public_nodes:
-            continue
-        terms = (_normalize(node.key), _normalize(node.name))
-        if any(_contains_public_term(normalized_goal, term) for term in terms):
-            matches.append(
-                DynamicGoalCandidateReference(
-                    ref_type="REGION" if node.key in public_regions else "NODE",
-                    key=node.key,
-                    provenance="EXACT_USER_MENTION",
-                )
+    allowed = {
+        *(
+            PublicReferenceIdentity(
+                PublicReferenceTypeV2.REGION
+                if node_key in public_regions
+                else PublicReferenceTypeV2.NODE,
+                node_key,
             )
-    for resource in sorted(definition.world.resources, key=lambda item: item.key):
-        resource_terms = (_normalize(resource.key), _normalize(resource.name))
-        if any(_contains_public_term(normalized_goal, term) for term in resource_terms):
-            matches.append(
-                DynamicGoalCandidateReference(
-                    ref_type="RESOURCE", key=resource.key, provenance="EXACT_USER_MENTION"
-                )
-            )
-    for state in sorted(definition.derived_states, key=lambda item: item.key):
-        if not state.goal_addressable:
-            continue
-        state_terms: tuple[str, ...] = (
-            _normalize(state.key),
-            _normalize(state.name),
-            *(_normalize(alias) for alias in state.goal_aliases),
-            *(_normalize(example) for example in state.goal_examples),
-        )
-        if any(_contains_public_term(normalized_goal, term) for term in state_terms):
-            matches.append(
-                DynamicGoalCandidateReference(
-                    ref_type="DERIVED_STATE", key=state.key, provenance="EXACT_USER_MENTION"
-                )
-            )
-    for action in sorted(definition.actions, key=lambda item: item.key):
-        if action.key not in public_action_keys:
-            continue
-        action_terms = (_normalize(action.key), _normalize(action.name))
-        if any(_contains_public_term(normalized_goal, term) for term in action_terms):
-            matches.append(
-                DynamicGoalCandidateReference(
-                    ref_type="ACTION", key=action.key, provenance="EXACT_USER_MENTION"
-                )
-            )
-    for actor in sorted(definition.actors.actor_profiles, key=lambda item: item.key):
-        if actor.key not in public_actor_keys:
-            continue
-        actor_terms = (_normalize(actor.key), _normalize(actor.name))
-        if any(_contains_public_term(normalized_goal, term) for term in actor_terms):
-            matches.append(
-                DynamicGoalCandidateReference(
-                    ref_type="ACTOR", key=actor.key, provenance="EXACT_USER_MENTION"
-                )
-            )
-    unique = {(item.ref_type, item.key): item for item in matches}
-    return tuple(unique[key] for key in sorted(unique))
+            for node_key in public_nodes
+        ),
+        *(
+            PublicReferenceIdentity(PublicReferenceTypeV2.RESOURCE, item.key)
+            for item in definition.world.resources
+        ),
+        *(
+            PublicReferenceIdentity(PublicReferenceTypeV2.DERIVED_STATE, item.key)
+            for item in definition.derived_states
+            if item.goal_addressable
+        ),
+        *(
+            PublicReferenceIdentity(PublicReferenceTypeV2.ACTION, key)
+            for key in public_action_keys
+        ),
+        *(
+            PublicReferenceIdentity(PublicReferenceTypeV2.ACTOR, key)
+            for key in public_actor_keys
+        ),
+    }
+    return PublicReferenceIndexBuilder.build(definition).lookup(
+        goal, allowed_identities=allowed
+    )
 
 
 def _merge_dynamic_goal_candidate_refs(
@@ -7400,6 +7501,7 @@ def _dynamic_goal_routing_action_catalog(
     """Conservatively remove only Actions incompatible with public reference types."""
 
     result: list[dict[str, object]] = []
+    reference_index = PublicReferenceIndexBuilder.build(definition)
     for action in sorted(definition.actions, key=lambda item: item.key):
         if action.key not in public_action_keys:
             continue
@@ -7417,6 +7519,15 @@ def _dynamic_goal_routing_action_catalog(
                 "key": action.key,
                 "name": action.name,
                 "description": action.description[:400],
+                **(
+                    {"public_references": list(terms)}
+                    if (
+                        terms := reference_index.terms_for(
+                            PublicReferenceTypeV2.ACTION, action.key
+                        )
+                    )
+                    else {}
+                ),
                 "target": contract["target"],
                 "bindings": [
                     {
@@ -8070,7 +8181,17 @@ def _compose_contract_driven_operation(
 
     target_slot = intent.target
     target_key = target_slot.key if target_slot.status == "GROUNDED" else None
-    topology_region_keys_consumed = False
+    topology_target_key = _operation_target_from_public_topology(
+        action,
+        target_type,
+        candidate_refs,
+        public_topology,
+    )
+    topology_region_keys_consumed = (
+        target_key is not None
+        and topology_target_key is not None
+        and target_key == topology_target_key
+    )
     if target_slot.status == "UNRESOLVED":
         compatible = tuple(
             item.key
@@ -8081,15 +8202,7 @@ def _compose_contract_driven_operation(
         if len(compatible) == 1:
             target_key = compatible[0]
             unresolved.remove("target")
-            topology_region_keys_consumed = (
-                _operation_target_from_public_topology(
-                    action,
-                    target_type,
-                    candidate_refs,
-                    public_topology,
-                )
-                == target_key
-            )
+            topology_region_keys_consumed = topology_target_key == target_key
         elif len(compatible) > 1:
             raise FormalGoalError(
                 "TARGET_AMBIGUOUS",
@@ -8097,12 +8210,7 @@ def _compose_contract_driven_operation(
                 details={"candidate_keys": list(compatible)},
             )
         else:
-            target_key = _operation_target_from_public_topology(
-                action,
-                target_type,
-                candidate_refs,
-                public_topology,
-            )
+            target_key = topology_target_key
             if target_key is not None:
                 unresolved.remove("target")
                 topology_region_keys_consumed = True
@@ -8525,12 +8633,44 @@ def _deterministic_dynamic_goal_grounding(
         definition,
     )
     public_action_keys = _dynamic_goal_public_action_keys(db, scope, definition)
-    reference_matches = _dynamic_goal_exact_public_matches(
+    public_actor_keys = _dynamic_goal_public_actor_keys(db, scope, definition)
+    lookup = _dynamic_goal_public_reference_lookup(
         goal,
         definition,
         public_nodes,
         public_action_keys,
-        _dynamic_goal_public_actor_keys(db, scope, definition),
+        public_actor_keys,
+    )
+    ambiguous_identities = {
+        identity
+        for match in lookup.ambiguous_matches
+        for identity in match.identities
+    }
+    if ambiguous_identities:
+        ambiguous_refs = tuple(
+            DynamicGoalCandidateReference(
+                ref_type=identity.ref_type.value,
+                key=identity.ref_key,
+                provenance="EXACT_USER_MENTION",
+            )
+            for identity in sorted(
+                ambiguous_identities,
+                key=lambda item: (item.ref_type.value, item.ref_key),
+            )
+        )
+        return _DynamicGoalGrounding(
+            status="NEEDS_CLARIFICATION",
+            candidate_refs=ambiguous_refs,
+            source="DETERMINISTIC_PUBLIC_REFERENCE_AMBIGUOUS",
+            clarification_prompt=definition.goal_resolution.clarification_prompt,
+        )
+    reference_matches = tuple(
+        DynamicGoalCandidateReference(
+            ref_type=identity.ref_type.value,
+            key=identity.ref_key,
+            provenance="EXACT_USER_MENTION",
+        )
+        for identity in lookup.identities
     )
     direct_entity_matches = tuple(item.key for item in reference_matches if item.ref_type == "NODE")
     direct_region_matches = tuple(

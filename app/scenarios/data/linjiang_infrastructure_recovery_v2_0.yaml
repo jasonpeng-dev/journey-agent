@@ -8240,6 +8240,34 @@ goal_resolution:
   allow_llm_fallback: true
   clarification_prompt: 请说明希望恢复的基础设施或公共服务。
   world_goal_state_catalog: true
+public_references:
+- term: 东南区
+  ref_type: REGION
+  ref_key: southeast_heights_district
+- term: 南部
+  ref_type: REGION
+  ref_key: south_waterfront_district
+- term: 中区
+  ref_type: REGION
+  ref_key: central_district
+- term: 北区
+  ref_type: REGION
+  ref_key: north_industrial_district
+- term: 东区
+  ref_type: REGION
+  ref_key: east_residential_district
+- term: 通用部件
+  ref_type: RESOURCE
+  ref_key: general_engineering_parts
+- term: 电力部件
+  ref_type: RESOURCE
+  ref_key: electrical_repair_parts
+- term: 部件
+  ref_type: RESOURCE
+  ref_key: general_engineering_parts
+- term: 部件
+  ref_type: RESOURCE
+  ref_key: electrical_repair_parts
 public_knowledge:
   resource_source_hints:
   - resource_key: general_engineering_parts

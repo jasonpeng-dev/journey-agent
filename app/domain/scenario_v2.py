@@ -132,6 +132,31 @@ class ActionSemanticReferenceType(StrEnum):
     ACTOR = "ACTOR"
 
 
+class PublicReferenceTypeV2(StrEnum):
+    """Canonical identity domains exposed by Goal Resolver public catalogs."""
+
+    NODE = "NODE"
+    REGION = "REGION"
+    RESOURCE = "RESOURCE"
+    DERIVED_STATE = "DERIVED_STATE"
+    ACTION = "ACTION"
+    ACTOR = "ACTOR"
+
+
+class PublicReferenceV2(FrozenDefinitionModel):
+    """One author-approved natural-language term for a canonical identity."""
+
+    term: StrictStr = Field(min_length=1, max_length=160)
+    ref_type: PublicReferenceTypeV2
+    ref_key: StableKey
+
+    @model_validator(mode="after")
+    def validate_term(self) -> PublicReferenceV2:
+        if self.term != self.term.strip():
+            raise ValueError("Public reference term must not have surrounding whitespace")
+        return self
+
+
 class ActionOperationBindingSource(StrEnum):
     EXPLICIT = "EXPLICIT"
     EXECUTION_START_ACTOR_REGION = "EXECUTION_START_ACTOR_REGION"
@@ -1344,6 +1369,9 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
         default_factory=PublicKnowledgeDefinitionV2,
         exclude_if=lambda value: not value.resource_source_hints,
     )
+    public_references: tuple[PublicReferenceV2, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
     @property
     def objective_catalog_version(self) -> str:
@@ -1542,6 +1570,36 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     actions = {item.key: item for item in definition.actions}
     objectives = {item.key: item for item in definition.objectives}
     derived_states = {item.key: item for item in definition.derived_states}
+
+    for reference in definition.public_references:
+        if reference.ref_type == PublicReferenceTypeV2.REGION:
+            node = _require_key(nodes, reference.ref_key, "Public reference Region")
+            if (
+                not definition.metadata.locality.enabled
+                or node.node_type_key != definition.metadata.locality.region_node_type_key
+            ):
+                raise ValueError("Public reference REGION must target a Region Node")
+        elif reference.ref_type == PublicReferenceTypeV2.NODE:
+            node = _require_key(nodes, reference.ref_key, "Public reference Node")
+            if (
+                definition.metadata.locality.enabled
+                and node.node_type_key == definition.metadata.locality.region_node_type_key
+            ):
+                raise ValueError("Public reference NODE must not target a Region Node")
+        elif reference.ref_type == PublicReferenceTypeV2.RESOURCE:
+            _require_key(resources, reference.ref_key, "Public reference Resource")
+        elif reference.ref_type == PublicReferenceTypeV2.DERIVED_STATE:
+            state = _require_key(
+                derived_states, reference.ref_key, "Public reference Derived State"
+            )
+            if not state.goal_addressable:
+                raise ValueError(
+                    "Public reference DERIVED_STATE must target a goal-addressable State"
+                )
+        elif reference.ref_type == PublicReferenceTypeV2.ACTION:
+            _require_key(actions, reference.ref_key, "Public reference Action")
+        else:
+            _require_key(actors, reference.ref_key, "Public reference Actor")
 
     _validate_locality_contract(definition, nodes, node_types)
     _validate_resource_initial_states(definition, nodes)
@@ -2226,6 +2284,8 @@ __all__ = [
     "EngineCapability",
     "LocalityContractV2",
     "PublicKnowledgeDefinitionV2",
+    "PublicReferenceTypeV2",
+    "PublicReferenceV2",
     "RegionResourceKnowledgeInitialStateV2",
     "ResourceAvailabilityRequirementV2",
     "ResourceInitialStateV2",

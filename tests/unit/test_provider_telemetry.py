@@ -160,6 +160,49 @@ def test_semantic_routing_does_not_force_temperature_zero() -> None:
     assert "temperature" not in state_body
 
 
+def test_semantic_routing_prompt_treats_topology_as_derived_action_evidence() -> None:
+    provider = OpenAICompatibleGenericProvider(_settings())
+
+    body, _ = provider._build_request_body("dynamic_goal_routing", {})
+    prompt = body["messages"][0]["content"]
+
+    assert "exact Region endpoint pair plus exactly one TOPOLOGY_ENRICHED Node" in prompt
+    assert "one derived target evidence unit" in prompt
+    assert (
+        "do not treat the two Regions and that Node as three competing target identities" in prompt
+    )
+    assert "slot-shape compatibility establishes only structural applicability" in prompt
+    assert "not a semantic Action match" in prompt
+    assert "merely accepting a Node target or fitting Regions into slots is insufficient" in prompt
+    assert "does not override the Family decision" in prompt
+    assert "a genuinely terminal-state-only reading may remain STATE" in prompt
+    assert "repair means clear_transport" not in prompt
+    assert "road means transport Node" not in prompt
+
+
+def test_operation_prompt_commits_unique_topology_target_without_guessing() -> None:
+    provider = OpenAICompatibleGenericProvider(_settings())
+
+    body, _ = provider._build_request_body("dynamic_goal_operation", {})
+    prompt = body["messages"][0]["content"]
+
+    assert "exact endpoint Regions" in prompt
+    assert "exactly one contract-compatible mapping to target Node T" in prompt
+    assert "explicit indirect constraint on T" in prompt
+    assert "return target GROUNDED with T's canonical key" in prompt
+    assert "leave target UNRESOLVED for deterministic backend composition" in prompt
+    assert "Do not ask the player to repeat the endpoints or name T" in prompt
+    assert (
+        "Other same-type Nodes in public_references are ontology context and do not make "
+        "that unique mapping ambiguous"
+    ) in prompt
+    assert "With zero or multiple compatible mappings, do not guess" in prompt
+    assert "do not replace or auto-correct X" in prompt
+    assert "backend typed validation owns that conflict" in prompt
+    assert "north_service_corridor" not in prompt
+    assert "central_east_transit_link" not in prompt
+
+
 def _operation_request(
     *,
     recovery_attempt: int = 0,

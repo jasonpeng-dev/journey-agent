@@ -105,6 +105,15 @@ def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
         hints = public_knowledge.get("resource_source_hints")
         if isinstance(hints, list):
             hints.sort(key=lambda item: item["resource_key"])
+    public_references = normalized.get("public_references")
+    if isinstance(public_references, list):
+        public_references.sort(
+            key=lambda item: (
+                str(item["term"]).casefold(),
+                item["ref_type"],
+                item["ref_key"],
+            )
+        )
     return ScenarioDefinitionV2.model_validate(normalized)
 
 
