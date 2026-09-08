@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictStr, model_v
 from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionDefinitionV2,
+    ActionOperationBindingSource,
     ActionParameters,
     normalize_action_parameters,
     transport_resource_entries,
@@ -86,29 +87,150 @@ class ActionInvocation(ActionInvocationModel):
 ActionInvocationBindingInput = ActionInvocationBinding | Mapping[str, object]
 
 
-def action_operation_binding_contract(action: ActionDefinitionV2) -> dict[str, object]:
-    """Project Action-defined invocation bindings for public Goal grounding.
+def canonical_action_invocation_contract(action: ActionDefinitionV2) -> dict[str, object]:
+    """Compile the canonical typed invocation contract for one Action.
 
-    Some invocation roles are derived from execution context rather than
-    being literal Action parameters.  This public projection lets the Goal
-    Resolver preserve those roles without teaching it individual Action keys.
-    It is descriptive only; canonical invocation and Runtime remain the
-    authorities for the actual binding values.
+    Resolver stages consume smaller views of this one contract.  In
+    particular, scalar storage types stay distinct from semantic identity
+    types, and relation-source semantics stay attached to their backing slot.
     """
 
-    target_value_type = (
-        action.target_semantic_reference_type.value
-        if action.target_semantic_reference_type is not None
-        else action.target_kind.value
-    )
+    if action.target_semantic_reference_type is not None:
+        target_semantic_type = action.target_semantic_reference_type.value
+    elif action.target_kind.value == "NODE" and len(action.target_node_type_keys) == 1:
+        node_type = action.target_node_type_keys[0].casefold()
+        target_semantic_type = (
+            "REGION" if node_type == "region" else "FACILITY" if node_type == "facility" else "NODE"
+        )
+    else:
+        target_semantic_type = action.target_kind.value
+    relation_source_slot = action.relation_source_slot()
+    actor = {
+        "slot_key": "actor",
+        "storage_channel": "actor",
+        "logical_role": "actor",
+        "scalar_value_type": None,
+        "semantic_reference_type": "ACTOR",
+        "expected_type": "ACTOR",
+        "goal_required": False,
+        "runtime_required": True,
+        "cardinality": "ONE",
+    }
+    target = {
+        # Compatibility aliases retained for existing public projections.
+        "field": "target_key",
+        "role": "target",
+        "source": "ACTION_TARGET_KEY",
+        "value_type": target_semantic_type,
+        # Canonical slot semantics.
+        "slot_key": "target",
+        "storage_channel": "target",
+        "logical_role": "target",
+        "scalar_value_type": None,
+        "semantic_reference_type": target_semantic_type,
+        "expected_type": target_semantic_type,
+        "goal_required": False,
+        "runtime_required": True,
+        "cardinality": "ONE",
+        "node_type_keys": list(action.target_node_type_keys),
+        "required_interaction_key": action.required_interaction_key,
+    }
+    bindings = []
+    for binding in action.operation_bindings:
+        identity = ("binding", binding.role)
+        logical_role = (
+            "source"
+            if identity == relation_source_slot
+            or binding.source == ActionOperationBindingSource.EXECUTION_START_ACTOR_REGION
+            else "binding"
+        )
+        bindings.append(
+            {
+                # Compatibility aliases retained for existing consumers.
+                "role": binding.role,
+                "value_type": binding.value_type.value,
+                "source": binding.source.value,
+                "description": binding.description,
+                # Canonical slot semantics.
+                "slot_key": binding.role,
+                "storage_channel": "binding",
+                "logical_role": logical_role,
+                "scalar_value_type": None,
+                "semantic_reference_type": binding.value_type.value,
+                "expected_type": binding.value_type.value,
+                "goal_required": False,
+                "runtime_required": False,
+                "cardinality": "ONE",
+            }
+        )
+    parameters = []
+    for parameter in action.parameters:
+        semantic_type = (
+            parameter.semantic_reference_type.value
+            if parameter.semantic_reference_type is not None
+            else None
+        )
+        identity = ("parameter", parameter.key)
+        parameters.append(
+            {
+                "slot_key": parameter.key,
+                "name": parameter.name,
+                "storage_channel": "parameter",
+                "logical_role": "source" if identity == relation_source_slot else "parameter",
+                "scalar_value_type": parameter.value_type.value,
+                "semantic_reference_type": semantic_type,
+                "expected_type": semantic_type or parameter.value_type.value,
+                "goal_required": False,
+                "runtime_required": parameter.required,
+                "cardinality": "ONE",
+                "minimum": parameter.minimum,
+                "maximum": parameter.maximum,
+                "allowed_values": list(parameter.allowed_values),
+            }
+        )
+    slots = [actor, target, *bindings, *parameters]
+    relation_semantics = None
+    if action.source_relation_type_key is not None and relation_source_slot is not None:
+        relation_semantics = {
+            "source_relation_type_key": action.source_relation_type_key,
+            "source_storage_channel": relation_source_slot[0],
+            "source_slot_key": relation_source_slot[1],
+            "target_slot_key": "target",
+            "direction": "SOURCE_TO_TARGET",
+        }
     return {
-        "bindings": [item.model_dump(mode="json") for item in action.operation_bindings],
+        "action_key": action.key,
+        "actor": actor,
+        "target": target,
+        "bindings": bindings,
+        "parameters": parameters,
+        "slots": slots,
+        "relation_semantics": relation_semantics,
+    }
+
+
+def action_operation_binding_contract(action: ActionDefinitionV2) -> dict[str, object]:
+    """Return the compact legacy/public view of the canonical contract."""
+
+    contract = canonical_action_invocation_contract(action)
+    target = cast(dict[str, object], contract["target"])
+    bindings = cast(list[dict[str, object]], contract["bindings"])
+    return {
+        "bindings": [
+            {
+                "role": item["slot_key"],
+                "value_type": item["semantic_reference_type"],
+                "source": item["source"],
+                "description": item["description"],
+            }
+            for item in bindings
+        ],
         "target": {
             "field": "target_key",
             "role": "target",
             "source": "ACTION_TARGET_KEY",
-            "value_type": target_value_type,
-            "node_type_keys": list(action.target_node_type_keys),
+            "value_type": target["semantic_reference_type"],
+            "node_type_keys": target["node_type_keys"],
         },
     }
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 import pytest
+from pydantic import ValidationError
 
 from app.agent.generic import (
     GenericGoalResolver,
@@ -29,6 +30,7 @@ from app.agent.provider import (
     GenericProviderError,
     GoalFamilyMatch,
     GoalFamilyMatchRequest,
+    OperationContractSlot,
 )
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
@@ -39,6 +41,7 @@ from app.domain.scenario_v2 import (
     ActionSemanticReferenceType,
     ScenarioDefinitionV2,
 )
+from app.scenarios.validation import ScenarioDefinitionValidator
 from tests.scenario_fixtures import LINJIANG_V2_TEST
 
 
@@ -150,6 +153,9 @@ class _RoutingProvider(_ContractProvider):
             action_key=self.routing.action_key,
             candidate_keys=self.routing.candidate_keys,
             clarification_prompt=self.routing.clarification_prompt,
+            no_match_reason=(
+                "NO_SEMANTIC_ACTION" if self.routing.action_match == "NO_MATCH" else None
+            ),
         )
 
     def route_dynamic_goal(
@@ -294,7 +300,7 @@ def test_routing_action_projection_filters_incompatible_target_capability() -> N
 
     assert {"clear_transport", "inspect"} <= action_keys
     assert "repair_communications" not in action_keys
-    assert "supply_power" in action_keys
+    assert "supply_power" not in action_keys
 
 
 def test_routing_action_projection_filters_facility_incompatible_actions() -> None:
@@ -303,8 +309,62 @@ def test_routing_action_projection_filters_facility_incompatible_actions() -> No
 
     assert {"inspect", "repair_communications"} <= action_keys
     assert "clear_transport" not in action_keys
-    assert "supply_power" in action_keys
+    assert "supply_power" not in action_keys
     assert "generate_power" not in action_keys
+
+
+def test_canonical_invocation_contract_preserves_sp1_and_a1_slot_semantics() -> None:
+    actions = {item.key: item for item in LINJIANG_V2_TEST.actions}
+    supply = _dynamic_goal_action_contract(actions["supply_power"])
+    transport = _dynamic_goal_action_contract(actions["transport_resource"])
+
+    supply_source = next(
+        item for item in supply["parameters"] if item["slot_key"] == "source_key"  # type: ignore[union-attr]
+    )
+    assert supply_source == {
+        "slot_key": "source_key",
+        "name": "供电来源",
+        "storage_channel": "parameter",
+        "logical_role": "source",
+        "scalar_value_type": "STRING",
+        "semantic_reference_type": "NODE",
+        "expected_type": "NODE",
+        "goal_required": False,
+        "runtime_required": True,
+        "cardinality": "ONE",
+        "minimum": None,
+        "maximum": None,
+        "allowed_values": [],
+    }
+    assert supply["relation_semantics"] == {
+        "source_relation_type_key": "supplies_power_to",
+        "source_storage_channel": "parameter",
+        "source_slot_key": "source_key",
+        "target_slot_key": "target",
+        "direction": "SOURCE_TO_TARGET",
+    }
+
+    transport_slots = {
+        item["slot_key"]: item for item in transport["slots"]  # type: ignore[union-attr]
+    }
+    assert transport_slots["source_region"]["semantic_reference_type"] == "REGION"
+    assert transport_slots["source_region"]["logical_role"] == "source"
+    assert transport_slots["resource_key"]["semantic_reference_type"] == "RESOURCE"
+    assert transport_slots["amount"]["scalar_value_type"] == "INTEGER"
+    assert transport_slots["amount"]["semantic_reference_type"] is None
+
+
+def test_relation_source_requires_one_typed_source_slot() -> None:
+    payload = LINJIANG_V2_TEST.model_dump(mode="json")
+    supply = next(item for item in payload["actions"] if item["key"] == "supply_power")
+    supply["parameters"][0].pop("semantic_reference_type")
+
+    result = ScenarioDefinitionValidator().validate(payload)
+
+    assert not result.passed
+    assert "SCENARIO_ACTION_RELATION_SOURCE_SLOT_INVALID" in {
+        item.code for item in result.issues
+    }
 
 
 def test_routing_action_projection_assigns_supply_source_and_target_roles() -> None:
@@ -652,6 +712,65 @@ def test_operation_family_resolves_from_selected_action_contract() -> None:
     assert resolution.provider_observation["stage_2_skipped"] is True
 
 
+def test_supply_power_source_is_a_canonical_node_through_formal_goal() -> None:
+    operation = _operation(
+        "supply_power",
+        target=_slot(
+            "target",
+            "NODE",
+            "GROUNDED",
+            ref_type="NODE",
+            key="east_distribution_station",
+        ),
+        parameters=[
+            _slot(
+                "source_key",
+                "NODE",
+                "GROUNDED",
+                ref_type="NODE",
+                key="southeast_emergency_power_station",
+            )
+        ],
+    )
+    provider = _RoutingProvider(
+        routing=DynamicGoalSemanticRouting(
+            family="OPERATION",
+            action_match="MATCHED",
+            action_key="supply_power",
+        ),
+        operation_results=[operation],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "从东南应急电源站向东部配电站送电",
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "RESOLVED"
+    requirement = resolution.dynamic_requirements[0]
+    assert requirement.action_key == "supply_power"
+    assert requirement.target_key == "east_distribution_station"
+    assert requirement.parameter_constraints == {
+        "source_key": "southeast_emergency_power_station"
+    }
+    source_contract = provider.operation_requests[0].action_contract["parameters"][0]  # type: ignore[index]
+    assert source_contract["scalar_value_type"] == "STRING"  # type: ignore[index]
+    assert source_contract["semantic_reference_type"] == "NODE"  # type: ignore[index]
+    assert source_contract["expected_type"] == "NODE"  # type: ignore[index]
+
+
+def test_supply_power_source_display_value_is_not_a_valid_grounded_node() -> None:
+    with pytest.raises(ValidationError):
+        OperationContractSlot.model_validate(
+            _slot(
+                "source_key",
+                "NODE",
+                "GROUNDED",
+                value="东南应急电源站",
+            )
+        )
+
+
 def test_invalid_scalar_shape_gets_one_bounded_recovery() -> None:
     malformed = _transport_operation(amount=12)
     malformed["intent"]["parameters"][0]["value"] = {"amount": 12}  # type: ignore[index]
@@ -959,6 +1078,10 @@ def test_semantic_routing_distinguishes_action_ambiguity_from_no_match() -> None
     )
     assert no_match_resolution.status == "UNSUPPORTED"
     assert no_match_resolution.source == "ACTION_NO_MATCH"
+    assert no_match_resolution.provider_observation is not None
+    assert no_match_resolution.provider_observation["no_match_reason"] == (
+        "NO_SEMANTIC_ACTION"
+    )
 
 
 def test_semantic_routing_schema_failure_gets_one_structural_recovery() -> None:
@@ -1025,7 +1148,10 @@ def test_semantic_routing_recovery_cannot_change_preserved_match() -> None:
                         },
                     ),
                 )
-            return DynamicGoalActionRouting(action_match="NO_MATCH")
+            return DynamicGoalActionRouting(
+                action_match="NO_MATCH",
+                no_match_reason="NO_SEMANTIC_ACTION",
+            )
 
     provider = _RegressingRoutingProvider(
         routing=DynamicGoalSemanticRouting(family="OPERATION", action_match="NO_MATCH")

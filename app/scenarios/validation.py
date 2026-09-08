@@ -138,6 +138,17 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
     }
     projected_resource_effects: set[tuple[str, str]] = set()
     for action in definition.actions:
+        if action.source_relation_type_key is not None and action.relation_source_slot() is None:
+            issues.append(
+                ScenarioValidationIssue(
+                    code="SCENARIO_ACTION_RELATION_SOURCE_SLOT_INVALID",
+                    path=f"actions.{action.key}.source_relation_type_key",
+                    message=(
+                        "An Action source relation requires exactly one Node-valued "
+                        "semantic source slot"
+                    ),
+                )
+            )
         if action.key not in resolve_action_keys:
             continue
         # The readiness contract is based on the Action's public planning

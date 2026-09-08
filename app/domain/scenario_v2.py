@@ -852,6 +852,30 @@ class ActionDefinitionV2(FrozenDefinitionModel):
     target_node_type_keys: tuple[StableKey, ...] = ()
     operation_bindings: tuple[ActionOperationBindingV2, ...] = ()
 
+    def relation_source_slot(self) -> tuple[str, StableKey] | None:
+        """Return the one typed invocation slot backing a relation source."""
+
+        if self.source_relation_type_key is None:
+            return None
+        reference_types = {
+            ActionSemanticReferenceType.NODE,
+            ActionSemanticReferenceType.REGION,
+            ActionSemanticReferenceType.FACILITY,
+        }
+        candidates = (
+            *(
+                ("binding", item.role)
+                for item in self.operation_bindings
+                if item.value_type in reference_types
+            ),
+            *(
+                ("parameter", item.key)
+                for item in self.parameters
+                if item.semantic_reference_type in reference_types
+            ),
+        )
+        return candidates[0] if len(candidates) == 1 else None
+
     @model_validator(mode="after")
     def validate_action(self) -> ActionDefinitionV2:
         _require_unique((item.key for item in self.parameters), "Action parameter keys")

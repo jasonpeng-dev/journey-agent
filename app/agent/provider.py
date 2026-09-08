@@ -89,6 +89,9 @@ class DynamicGoalActionRoutingRequest(ProviderModel):
     recovery_feedback: tuple[dict[str, object], ...] = ()
 
 
+ActionNoMatchReason = Literal["NO_SEMANTIC_ACTION", "SEMANTIC_CONFLICT"]
+
+
 class DynamicGoalActionRouting(ProviderModel):
     """Closed Action selection that cannot reopen the family decision."""
 
@@ -96,17 +99,28 @@ class DynamicGoalActionRouting(ProviderModel):
     action_key: StrictStr | None = Field(default=None, max_length=100)
     candidate_keys: tuple[StrictStr, ...] = ()
     clarification_prompt: StrictStr | None = Field(default=None, max_length=1000)
+    no_match_reason: ActionNoMatchReason | None = None
 
     @model_validator(mode="after")
     def validate_action_routing(self) -> DynamicGoalActionRouting:
         if self.action_match == "MATCHED":
-            if self.action_key is None or self.candidate_keys:
+            if self.action_key is None or self.candidate_keys or self.no_match_reason is not None:
                 raise ValueError("MATCHED routing requires only action_key")
         elif self.action_match == "AMBIGUOUS":
-            if self.action_key is not None or len(self.candidate_keys) < 2:
+            if (
+                self.action_key is not None
+                or len(self.candidate_keys) < 2
+                or self.no_match_reason is not None
+            ):
                 raise ValueError("AMBIGUOUS routing requires at least two candidate_keys")
-        elif self.action_key is not None or self.candidate_keys:
-            raise ValueError("NO_MATCH routing cannot carry Action candidates")
+        elif (
+            self.action_key is not None
+            or self.candidate_keys
+            or self.no_match_reason is None
+        ):
+            raise ValueError(
+                "NO_MATCH routing requires no Action candidates and a typed reason"
+            )
         if len(set(self.candidate_keys)) != len(self.candidate_keys):
             raise ValueError("Routing candidate_keys must be unique")
         return self
@@ -1534,6 +1548,43 @@ def _dynamic_goal_action_routing_validation_diagnostics(
             },
             *diagnostics,
         )
+    action_match = raw.get("action_match")
+    no_match_reason = raw.get("no_match_reason")
+    allowed_reasons = ["NO_SEMANTIC_ACTION", "SEMANTIC_CONFLICT"]
+    if action_match == "NO_MATCH" and no_match_reason not in allowed_reasons:
+        return (
+            {
+                "code": (
+                    "MISSING_NO_MATCH_REASON"
+                    if no_match_reason is None
+                    else "INVALID_NO_MATCH_REASON"
+                ),
+                "field_path": "no_match_reason",
+                "allowed": allowed_reasons,
+                "preserve": {
+                    "action_match": "NO_MATCH",
+                    "action_key": None,
+                    "candidate_keys": [],
+                },
+                "fix_only": ["no_match_reason"],
+            },
+            *diagnostics,
+        )
+    if action_match in {"MATCHED", "AMBIGUOUS"} and no_match_reason is not None:
+        return (
+            {
+                "code": f"{action_match}_HAS_NO_MATCH_REASON",
+                "field_path": "no_match_reason",
+                "expected": None,
+                "preserve": {
+                    "action_match": action_match,
+                    "action_key": action_key,
+                    "candidate_keys": candidate_keys or [],
+                },
+                "fix_only": ["no_match_reason"],
+            },
+            *diagnostics,
+        )
     return diagnostics
 
 
@@ -2905,12 +2956,13 @@ class OpenAICompatibleGenericProvider:
                 "exactly one mutually exclusive variant: "
                 'MATCHED={"action_match":"MATCHED",'
                 '"action_key":"exact_public_action_key","candidate_keys":[],'
-                '"clarification_prompt":null}; '
+                '"clarification_prompt":null,"no_match_reason":null}; '
                 'AMBIGUOUS={"action_match":"AMBIGUOUS","action_key":null,'
                 '"candidate_keys":["public_action_key_1","public_action_key_2"],'
-                '"clarification_prompt":null}; '
+                '"clarification_prompt":null,"no_match_reason":null}; '
                 'NO_MATCH={"action_match":"NO_MATCH","action_key":null,'
-                '"candidate_keys":[],"clarification_prompt":null}'
+                '"candidate_keys":[],"clarification_prompt":null,'
+                '"no_match_reason":"NO_SEMANTIC_ACTION|SEMANTIC_CONFLICT"}'
             )
         elif purpose == "dynamic_goal_routing":
             response_contract = (
@@ -3088,9 +3140,21 @@ class OpenAICompatibleGenericProvider:
                 "Operation Grounding, or an execution precondition is not yet established. Those "
                 "conditions alone are not reasons for NO_MATCH. Judge "
                 "the raw Goal together with authored Action semantics and typed/topology evidence; "
-                "never use keywords, substrings, regexes, or language-specific verb rules. On "
-                "recovery preserve every recovery_feedback.preserve field exactly and change only "
-                "recovery_feedback.fix_only fields."
+                "never use keywords, substrings, regexes, or language-specific verb rules. "
+                "Positive semantic evidence is sufficient for MATCHED when the raw Goal, public "
+                "entity name/type/description, authored Action name/description, and typed "
+                "contract form one consistent invocation interpretation; the Goal wording need "
+                "not literally repeat the Action name. An inspect or survey Action is a comparable "
+                "competitor only when the Goal asks to investigate, check, confirm, or otherwise "
+                "observe state; a repair, restore, or remediation request is not equally matched "
+                "by inspect merely because it accepts the same target. Return NO_MATCH only when "
+                "no candidate can express the invocation, using no_match_reason "
+                "NO_SEMANTIC_ACTION, or when the explicit request has a real semantic or typed "
+                "contract conflict with the candidates, using SEMANTIC_CONFLICT. If multiple "
+                "candidates remain genuinely plausible, return AMBIGUOUS. Never use NO_MATCH for "
+                "uncertainty, missing preconditions, incomplete slots, or weak wording alone. "
+                "On recovery preserve every recovery_feedback.preserve field exactly and change "
+                "only recovery_feedback.fix_only fields."
             )
         elif purpose == "dynamic_goal_routing":
             planning_prompt = (

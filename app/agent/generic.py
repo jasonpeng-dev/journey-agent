@@ -78,6 +78,7 @@ from app.domain.action_invocation import (
     ActionInvocationBinding,
     action_operation_binding_contract,
     canonical_action_invocation,
+    canonical_action_invocation_contract,
 )
 from app.domain.enums import (
     AgentPlanStatus,
@@ -746,6 +747,7 @@ class GenericGoalResolver:
                         "stage": "DYNAMIC_GOAL_ACTION_ROUTING",
                         "frozen_family": "OPERATION",
                         "rejection_code": "ACTION_NO_MATCH",
+                        "no_match_reason": action_routing.no_match_reason,
                     },
                 )
             assert action_routing.action_key is not None
@@ -2058,7 +2060,6 @@ class GenericGoalResolver:
         topology = public_catalog.get("public_topology", {})
         operation_references, operation_topology = _contract_driven_operation_context(
             definition,
-            action,
             action_contract,
             references,
             topology if isinstance(topology, dict) else {},
@@ -7588,7 +7589,6 @@ def _dynamic_goal_routing_action_catalog(
         contract = _dynamic_goal_action_contract(action)
         compatible_refs = _dynamic_goal_action_compatible_refs(
             definition,
-            action,
             contract,
             candidate_refs,
         )
@@ -7781,7 +7781,6 @@ def _dynamic_goal_action_topology_context(
 
 def _dynamic_goal_action_compatible_refs(
     definition: ScenarioDefinitionV2,
-    action: ActionDefinitionV2,
     contract: dict[str, object],
     candidate_refs: tuple[DynamicGoalCandidateReference, ...],
 ) -> tuple[DynamicGoalCandidateReference, ...] | None:
@@ -7807,8 +7806,25 @@ def _dynamic_goal_action_compatible_refs(
     }
     target_ref_type = _slot_expected_reference_type(str(target["expected_type"]))
 
+    def slot_accepts(
+        slot: dict[str, object], reference: DynamicGoalCandidateReference
+    ) -> bool:
+        expected_type = str(slot["expected_type"])
+        if reference.ref_type != _slot_expected_reference_type(expected_type):
+            return False
+        if expected_type not in {"NODE", "REGION", "FACILITY"}:
+            return True
+        node = nodes_by_key.get(reference.key)
+        if node is None:
+            return False
+        if expected_type == "REGION":
+            return node.node_type_key == definition.metadata.locality.region_node_type_key
+        if expected_type == "FACILITY":
+            return node.node_type_key == definition.metadata.locality.facility_node_type_key
+        return True
+
     def target_accepts(reference: DynamicGoalCandidateReference) -> bool:
-        if reference.ref_type != target_ref_type:
+        if not slot_accepts(target, reference):
             return False
         if reference.ref_type not in {"NODE", "REGION"}:
             return True
@@ -7818,19 +7834,16 @@ def _dynamic_goal_action_compatible_refs(
         ):
             return False
         return (
-            action.required_interaction_key is None
-            or action.required_interaction_key in node.interaction_keys
+            target.get("required_interaction_key") is None
+            or target.get("required_interaction_key") in node.interaction_keys
         )
 
-    roles: list[tuple[str, str]] = []
+    roles: list[dict[str, object]] = []
     if target_ref_type is not None:
-        roles.append(("TARGET", target_ref_type))
+        roles.append(target)
     for slot in (*bindings, *parameters):
-        ref_type = _slot_expected_reference_type(str(slot["expected_type"]))
-        if ref_type is not None:
-            roles.append(("SLOT", ref_type))
-    if action.source_relation_type_key is not None:
-        roles.append(("RELATION_SOURCE", "NODE"))
+        if _slot_expected_reference_type(str(slot["expected_type"])) is not None:
+            roles.append(slot)
 
     topology_nodes = tuple(
         item
@@ -7847,27 +7860,76 @@ def _dynamic_goal_action_compatible_refs(
     )
 
     def role_accepts(
-        role: tuple[str, str], reference: DynamicGoalCandidateReference
+        role: dict[str, object], reference: DynamicGoalCandidateReference
     ) -> bool:
-        role_kind, ref_type = role
-        if reference.ref_type != ref_type:
-            return False
-        return role_kind != "TARGET" or target_accepts(reference)
+        return (
+            target_accepts(reference)
+            if role.get("logical_role") == "target"
+            else slot_accepts(role, reference)
+        )
 
-    def assignment_exists(index: int, used_roles: set[int]) -> bool:
-        if index == len(explicit_refs):
+    relation = contract.get("relation_semantics")
+
+    def relation_assignment_is_valid(assignments: dict[int, DynamicGoalCandidateReference]) -> bool:
+        if not isinstance(relation, dict):
             return True
+        source_slot_key = relation.get("source_slot_key")
+        relation_type = relation.get("source_relation_type_key")
+        source = next(
+            (
+                assignments[index]
+                for index, role in enumerate(roles)
+                if role.get("slot_key") == source_slot_key and index in assignments
+            ),
+            None,
+        )
+        if source is None or not isinstance(relation_type, str):
+            return True
+        explicit_target = next(
+            (
+                assignments[index]
+                for index, role in enumerate(roles)
+                if role.get("logical_role") == "target" and index in assignments
+            ),
+            None,
+        )
+        return any(
+            item.source_node_key == source.key
+            and item.relation_type_key == relation_type
+            and (
+                item.target_node_key == explicit_target.key
+                if explicit_target is not None
+                else target_accepts(
+                    DynamicGoalCandidateReference(
+                        ref_type=target_ref_type or "NODE",
+                        key=item.target_node_key,
+                        provenance="OTHER",
+                    )
+                )
+            )
+            for item in definition.world.relations
+        )
+
+    def assignment_exists(
+        index: int,
+        used_roles: set[int],
+        assignments: dict[int, DynamicGoalCandidateReference],
+    ) -> bool:
+        if index == len(explicit_refs):
+            return relation_assignment_is_valid(assignments)
         reference = explicit_refs[index]
         for role_index, role in enumerate(roles):
             if role_index in used_roles or not role_accepts(role, reference):
                 continue
             used_roles.add(role_index)
-            if assignment_exists(index + 1, used_roles):
+            assignments[role_index] = reference
+            if assignment_exists(index + 1, used_roles, assignments):
                 return True
             used_roles.remove(role_index)
+            assignments.pop(role_index)
         return False
 
-    return candidate_refs if assignment_exists(0, set()) else None
+    return candidate_refs if assignment_exists(0, set(), {}) else None
 
 
 def _dynamic_goal_routing_state_catalog(
@@ -8035,54 +8097,13 @@ def _dynamic_goal_frozen_state_grounding(
 
 
 def _dynamic_goal_action_contract(action: ActionDefinitionV2) -> dict[str, object]:
-    """Project the one schema authority consumed by operation grounding."""
+    """Return the single canonical invocation contract consumed by Resolver stages."""
 
-    target_type = "ACTOR" if action.target_kind == ActionTargetKind.ACTOR else "NODE"
-    if action.target_kind == ActionTargetKind.NODE and len(action.target_node_type_keys) == 1:
-        node_type = action.target_node_type_keys[0]
-        if node_type.casefold() == "region":
-            target_type = "REGION"
-        elif node_type.casefold() == "facility":
-            target_type = "FACILITY"
-    return {
-        "action_key": action.key,
-        "target": {
-            "slot_key": "target",
-            "expected_type": target_type,
-            "node_type_keys": list(action.target_node_type_keys),
-        },
-        "actor": {"slot_key": "actor", "expected_type": "ACTOR"},
-        "bindings": [
-            {
-                "slot_key": item.role,
-                "expected_type": item.value_type.value,
-                "source": item.source.value,
-                "description": item.description,
-            }
-            for item in action.operation_bindings
-        ],
-        "parameters": [
-            {
-                "slot_key": item.key,
-                "name": item.name,
-                "expected_type": (
-                    item.semantic_reference_type.value
-                    if item.semantic_reference_type is not None
-                    else item.value_type.value
-                ),
-                "runtime_required": item.required,
-                "minimum": item.minimum,
-                "maximum": item.maximum,
-                "allowed_values": list(item.allowed_values),
-            }
-            for item in action.parameters
-        ],
-    }
+    return canonical_action_invocation_contract(action)
 
 
 def _contract_driven_operation_context(
     definition: ScenarioDefinitionV2,
-    action: ActionDefinitionV2,
     action_contract: dict[str, object],
     references: tuple[dict[str, object], ...],
     public_topology: dict[str, object],
@@ -8143,7 +8164,7 @@ def _contract_driven_operation_context(
             continue
         if raw_ref_type == "NODE" and target_type in {"NODE", "FACILITY"}:
             candidate = DynamicGoalCandidateReference(ref_type="NODE", key=key, provenance="OTHER")
-            if not _reference_matches_operation_type(definition, action, candidate, target_type):
+            if not _reference_matches_operation_type(definition, target, candidate):
                 continue
         filtered.append(raw_reference)
 
@@ -8271,10 +8292,10 @@ def _validate_contract_slot_shape(
 
 def _reference_matches_operation_type(
     definition: ScenarioDefinitionV2,
-    action: ActionDefinitionV2,
+    slot_contract: dict[str, object],
     reference: DynamicGoalCandidateReference,
-    expected_type: str,
 ) -> bool:
+    expected_type = str(slot_contract["expected_type"])
     expected_ref = _slot_expected_reference_type(expected_type)
     if reference.ref_type != expected_ref:
         return False
@@ -8289,20 +8310,23 @@ def _reference_matches_operation_type(
             region_type = definition.metadata.locality.region_node_type_key
             return region_type is not None and node.node_type_key == region_type
         return (
-            not action.target_node_type_keys or node.node_type_key in action.target_node_type_keys
+            not slot_contract.get("node_type_keys")
+            or node.node_type_key in cast(list[object], slot_contract["node_type_keys"])
         )
     return True
 
 
 def _operation_target_from_public_topology(
-    action: ActionDefinitionV2,
-    expected_type: str,
+    target_contract: dict[str, object],
     candidate_refs: tuple[DynamicGoalCandidateReference, ...],
     public_topology: dict[str, object],
 ) -> str | None:
     """Compose a node target from grounded regions and public topology metadata."""
 
-    if expected_type != "NODE" or not action.target_node_type_keys:
+    if (
+        target_contract.get("expected_type") != "NODE"
+        or not target_contract.get("node_type_keys")
+    ):
         return None
     region_keys = {item.key for item in candidate_refs if item.ref_type == "REGION"}
     pairs = public_topology.get("transport_endpoint_pairs", ())
@@ -8418,8 +8442,7 @@ def _compose_contract_driven_operation(
     target_slot = intent.target
     target_key = target_slot.key if target_slot.status == "GROUNDED" else None
     topology_target_key = _operation_target_from_public_topology(
-        action,
-        target_type,
+        target_contract,
         candidate_refs,
         public_topology,
     )
@@ -8432,7 +8455,7 @@ def _compose_contract_driven_operation(
         compatible = tuple(
             item.key
             for item in candidate_refs
-            if _reference_matches_operation_type(definition, action, item, target_type)
+            if _reference_matches_operation_type(definition, target_contract, item)
         )
         compatible = tuple(dict.fromkeys(compatible))
         if len(compatible) == 1:
@@ -8468,7 +8491,7 @@ def _compose_contract_driven_operation(
             ref_type=target_ref_type,
             key=target_key,
         )
-        if not _reference_matches_operation_type(definition, action, target_ref, target_type):
+        if not _reference_matches_operation_type(definition, target_contract, target_ref):
             raise FormalGoalError(
                 "BINDING_TYPE_INVALID",
                 "The grounded target is incompatible with the Action target contract",
@@ -8520,30 +8543,26 @@ def _dynamic_goal_action_parameter(
     *,
     semantic: Literal["RESOURCE", "AMOUNT"],
 ) -> str | None:
+    contract = canonical_action_invocation_contract(action)
+    raw_parameters = contract.get("parameters")
+    parameters = (
+        tuple(item for item in raw_parameters if isinstance(item, dict))
+        if isinstance(raw_parameters, (list, tuple))
+        else ()
+    )
     if semantic == "RESOURCE":
-        exact_keys = {"resource", "resource_key", "cargo", "cargo_key"}
         matches = tuple(
-            item.key
-            for item in action.parameters
-            if item.key.casefold() in exact_keys
-            or "resource" in item.key.casefold()
-            or "cargo" in item.key.casefold()
-            or "resource" in _normalize(item.name)
-            or "cargo" in _normalize(item.name)
+            str(item["slot_key"])
+            for item in parameters
+            if item.get("semantic_reference_type") == "RESOURCE"
         )
     else:
         matches = tuple(
-            item.key
-            for item in action.parameters
-            if item.key.casefold() == "amount"
-            or _normalize(item.name) in {"amount", "quantity", "number"}
+            str(item["slot_key"])
+            for item in parameters
+            if item.get("scalar_value_type") == "INTEGER"
+            and item.get("semantic_reference_type") is None
         )
-        if not matches:
-            integer_parameters = tuple(
-                item.key for item in action.parameters if item.value_type.value == "INTEGER"
-            )
-            if len(integer_parameters) == 1:
-                matches = integer_parameters
     return matches[0] if len(matches) == 1 else None
 
 
@@ -8575,29 +8594,36 @@ def _dynamic_goal_grounded_operation(
     if action is None:
         return None
 
-    operation_contract = action_operation_binding_contract(action)
-    raw_bindings = operation_contract.get("bindings")
-    binding_specs = (
-        tuple(item for item in raw_bindings if isinstance(item, dict))
-        if isinstance(raw_bindings, (list, tuple))
+    operation_contract = canonical_action_invocation_contract(action)
+    raw_slots = operation_contract.get("slots")
+    slots = (
+        tuple(item for item in raw_slots if isinstance(item, dict))
+        if isinstance(raw_slots, (list, tuple))
         else ()
     )
     binding_constraints: list[ActionInvocationBinding] = []
+    parameter_constraints: dict[str, object] = {}
     if intent.source.status == "GROUNDED":
         if intent.source.ref_type not in {"NODE", "REGION", "ACTOR"} or intent.source.key is None:
             return None
         source_specs = tuple(
             item
-            for item in binding_specs
-            if item.get("source") == "EXECUTION_START_ACTOR_REGION"
-            and item.get("value_type") == intent.source.ref_type
-            and isinstance(item.get("role"), str)
+            for item in slots
+            if item.get("logical_role") == "source"
+            and item.get("semantic_reference_type") == intent.source.ref_type
+            and isinstance(item.get("slot_key"), str)
         )
         if len(source_specs) != 1:
             return None
-        role = source_specs[0]["role"]
+        source_slot = source_specs[0]
+        role = source_slot["slot_key"]
         assert isinstance(role, str)
-        binding_constraints.append(ActionInvocationBinding(role=role, value=intent.source.key))
+        if source_slot.get("storage_channel") == "binding":
+            binding_constraints.append(ActionInvocationBinding(role=role, value=intent.source.key))
+        elif source_slot.get("storage_channel") == "parameter":
+            parameter_constraints[role] = intent.source.key
+        else:
+            return None
     elif intent.source.status != "NOT_SPECIFIED":
         return None
 
@@ -8609,15 +8635,14 @@ def _dynamic_goal_grounded_operation(
         if target is not None and (
             not isinstance(target, dict)
             or target.get("field") != "target_key"
-            or target.get("source") != "ACTION_TARGET_KEY"
-            or target.get("value_type") != intent.target.ref_type
+            or target.get("storage_channel") != "target"
+            or target.get("semantic_reference_type") != intent.target.ref_type
         ):
             return None
         target_key = intent.target.key
     elif intent.target.status != "NOT_SPECIFIED":
         return None
 
-    parameter_constraints: dict[str, object] = {}
     if intent.resource.status == "GROUNDED":
         if intent.resource.ref_type != "RESOURCE" or intent.resource.key is None:
             return None

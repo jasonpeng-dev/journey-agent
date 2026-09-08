@@ -2288,6 +2288,7 @@ actions:
     maximum: null
     allowed_values: []
     default: null
+    semantic_reference_type: NODE
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   required_actor_role_key: electrical_response_team

@@ -277,7 +277,131 @@ def test_action_routing_request_is_operation_only_and_excludes_state_candidates(
     assert "prove Action preconditions" in prompt
     assert "an execution precondition is not yet established" in prompt
     assert "conditions alone are not reasons for NO_MATCH" in prompt
+    assert "Positive semantic evidence is sufficient for MATCHED" in prompt
+    assert "a repair, restore, or remediation request is not equally matched" in prompt
+    assert "NO_SEMANTIC_ACTION" in prompt
+    assert "SEMANTIC_CONFLICT" in prompt
     assert provider.call_metadata_history[-1].call_type == "DYNAMIC_GOAL_ACTION_ROUTING"
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_code"),
+    [
+        (
+            {
+                "action_match": "NO_MATCH",
+                "action_key": None,
+                "candidate_keys": [],
+                "clarification_prompt": None,
+            },
+            "MISSING_NO_MATCH_REASON",
+        ),
+        (
+            {
+                "action_match": "NO_MATCH",
+                "action_key": None,
+                "candidate_keys": [],
+                "clarification_prompt": None,
+                "no_match_reason": "UNCERTAIN",
+            },
+            "INVALID_NO_MATCH_REASON",
+        ),
+        (
+            {
+                "action_match": "MATCHED",
+                "action_key": "repair",
+                "candidate_keys": [],
+                "clarification_prompt": None,
+                "no_match_reason": "SEMANTIC_CONFLICT",
+            },
+            "MATCHED_HAS_NO_MATCH_REASON",
+        ),
+    ],
+)
+def test_action_routing_rejects_missing_or_malformed_typed_no_match_reason(
+    response: dict[str, object], expected_code: str
+) -> None:
+    def complete(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": json.dumps(response)},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(complete)
+    )
+
+    with pytest.raises(GenericProviderError) as captured:
+        provider.route_dynamic_goal_action(
+            DynamicGoalActionRoutingRequest(
+                goal="repair the facility",
+                action_catalog=(
+                    {"key": "repair", "name": "Repair", "description": "Repair"},
+                ),
+            )
+        )
+
+    assert captured.value.validation_diagnostics[0]["code"] == expected_code
+
+
+def test_action_routing_accepts_valid_typed_no_match_and_ambiguous_boundary() -> None:
+    responses = iter(
+        [
+            {
+                "action_match": "NO_MATCH",
+                "action_key": None,
+                "candidate_keys": [],
+                "clarification_prompt": None,
+                "no_match_reason": "NO_SEMANTIC_ACTION",
+            },
+            {
+                "action_match": "AMBIGUOUS",
+                "action_key": None,
+                "candidate_keys": ["repair", "inspect"],
+                "clarification_prompt": None,
+                "no_match_reason": None,
+            },
+        ]
+    )
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": json.dumps(next(responses))},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(complete)
+    )
+    request = DynamicGoalActionRoutingRequest(
+        goal="repair the facility",
+        action_catalog=(
+            {"key": "repair", "name": "Repair", "description": "Repair"},
+            {"key": "inspect", "name": "Inspect", "description": "Inspect"},
+        ),
+    )
+
+    no_match = provider.route_dynamic_goal_action(request)
+    assert no_match.no_match_reason == "NO_SEMANTIC_ACTION"
+    ambiguous = provider.route_dynamic_goal_action(request)
+    assert ambiguous.action_match == "AMBIGUOUS"
+    assert ambiguous.no_match_reason is None
 
 
 def test_semantic_routing_does_not_force_temperature_zero() -> None:

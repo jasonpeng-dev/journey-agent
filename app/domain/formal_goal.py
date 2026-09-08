@@ -34,7 +34,7 @@ from pydantic import (
 
 from app.domain.action_invocation import (
     ActionInvocationBinding,
-    action_operation_binding_contract,
+    canonical_action_invocation_contract,
     canonical_action_parameters,
 )
 from app.domain.scenario import ScenarioVersionSnapshot
@@ -42,7 +42,6 @@ from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionDefinitionV2,
     ActionParameterType,
-    ActionTargetKind,
     FactDefinitionV2,
     ObjectiveDefinitionV2,
     ObjectivePrerequisiteV2,
@@ -810,6 +809,7 @@ def _validate_action_completed_candidate(
             "FORMAL_GOAL_UNKNOWN_ACTION",
             f"Dynamic Goal references unknown Action {candidate.action_key}",
         )
+    invocation_contract = canonical_action_invocation_contract(action)
 
     if candidate.actor_key is not None:
         actor = next(
@@ -828,36 +828,25 @@ def _validate_action_completed_candidate(
                 "FORMAL_GOAL_TARGET_INVALID",
                 "ACTION_COMPLETED target_key cannot be blank",
             )
-        if action.target_kind == ActionTargetKind.NODE:
-            target = definition.world.node(candidate.target_key)
-            if target is None:
-                raise FormalGoalError(
-                    "FORMAL_GOAL_UNKNOWN_TARGET",
-                    f"Dynamic Goal references unknown Node target {candidate.target_key}",
-                )
-        else:
-            actor_target = next(
-                (
-                    item
-                    for item in definition.actors.actor_profiles
-                    if item.key == candidate.target_key
-                ),
-                None,
+        target_spec = invocation_contract.get("target")
+        if not isinstance(target_spec, Mapping) or not _invocation_reference_is_valid(
+            definition,
+            str(target_spec.get("semantic_reference_type")),
+            candidate.target_key,
+            node_type_keys=target_spec.get("node_type_keys"),
+        ):
+            raise FormalGoalError(
+                "FORMAL_GOAL_UNKNOWN_TARGET",
+                f"Dynamic Goal references incompatible target {candidate.target_key}",
             )
-            if actor_target is None:
-                raise FormalGoalError(
-                    "FORMAL_GOAL_UNKNOWN_TARGET",
-                    f"Dynamic Goal references unknown Actor target {candidate.target_key}",
-                )
 
     if candidate.binding_constraints:
-        operation_contract = action_operation_binding_contract(action)
-        raw_bindings = operation_contract.get("bindings")
+        raw_bindings = invocation_contract.get("bindings")
         binding_specs = raw_bindings if isinstance(raw_bindings, (list, tuple)) else ()
         specs_by_role = {
-            str(item["role"]): item
+            str(item["slot_key"]): item
             for item in binding_specs
-            if isinstance(item, Mapping) and isinstance(item.get("role"), str)
+            if isinstance(item, Mapping) and isinstance(item.get("slot_key"), str)
         }
         if not specs_by_role:
             raise FormalGoalError(
@@ -876,28 +865,12 @@ def _validate_action_completed_candidate(
                     "FORMAL_GOAL_ACTION_BINDING_INVALID",
                     "Reference-valued Action bindings must name a public identity",
                 )
-            value_type = spec.get("value_type")
-            node = definition.world.node(binding.value)
-            valid = False
-            if value_type in {"NODE", "REGION", "FACILITY"} and node is not None:
-                valid = value_type == "NODE"
-                if value_type == "REGION":
-                    valid = (
-                        node.node_type_key
-                        == definition.metadata.locality.region_node_type_key
-                    )
-                elif value_type == "FACILITY":
-                    valid = (
-                        node.node_type_key
-                        == definition.metadata.locality.facility_node_type_key
-                    )
-            elif value_type == "ACTOR":
-                valid = any(
-                    item.key == binding.value for item in definition.actors.actor_profiles
-                )
-            elif value_type == "RESOURCE":
-                valid = any(item.key == binding.value for item in definition.world.resources)
-            if not valid:
+            semantic_type = spec.get("semantic_reference_type")
+            if not _invocation_reference_is_valid(
+                definition,
+                str(semantic_type),
+                binding.value,
+            ):
                 raise FormalGoalError(
                     "FORMAL_GOAL_ACTION_BINDING_INVALID",
                     "Action binding value does not match its declared semantic type",
@@ -912,6 +885,38 @@ def _validate_action_completed_candidate(
     return action
 
 
+def _invocation_reference_is_valid(
+    definition: ScenarioDefinitionV2,
+    semantic_type: str,
+    value: object,
+    *,
+    node_type_keys: object = (),
+) -> bool:
+    """Validate one canonical identity from the compiled invocation contract."""
+
+    if not isinstance(value, str) or not value:
+        return False
+    if semantic_type in {"NODE", "REGION", "FACILITY"}:
+        node = definition.world.node(value)
+        if node is None:
+            return False
+        if semantic_type == "REGION":
+            return node.node_type_key == definition.metadata.locality.region_node_type_key
+        if semantic_type == "FACILITY":
+            return node.node_type_key == definition.metadata.locality.facility_node_type_key
+        declared_types = (
+            {str(item) for item in node_type_keys}
+            if isinstance(node_type_keys, (list, tuple, set))
+            else set()
+        )
+        return not declared_types or node.node_type_key in declared_types
+    if semantic_type == "ACTOR":
+        return any(item.key == value for item in definition.actors.actor_profiles)
+    if semantic_type == "RESOURCE":
+        return any(item.key == value for item in definition.world.resources)
+    return False
+
+
 def _canonical_action_parameters_for_goal(
     definition: ScenarioDefinitionV2,
     action_key: str,
@@ -924,48 +929,82 @@ def _canonical_action_parameters_for_goal(
             f"Dynamic Goal references unknown Action {action_key}",
         )
     try:
-        normalized: dict[str, JsonValue]
+        definitions = {item.key: item for item in action.parameters}
+        invocation_contract = canonical_action_invocation_contract(action)
+        raw_parameter_specs = invocation_contract.get("parameters")
+        parameter_specs = {
+            str(item["slot_key"]): item
+            for item in raw_parameter_specs
+            if isinstance(item, Mapping) and isinstance(item.get("slot_key"), str)
+        } if isinstance(raw_parameter_specs, (list, tuple)) else {}
         if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
             normalized = cast(
                 dict[str, JsonValue],
                 canonical_action_parameters(action, parameters),
             )
-        else:
-            definitions = {item.key: item for item in action.parameters}
-            if set(parameters) - set(definitions):
-                raise ValueError("Unknown Action parameter constraint")
-            normalized = {}
-            for key, value in parameters.items():
-                parameter = definitions[key]
-                valid = (
-                    (
-                        parameter.value_type == ActionParameterType.INTEGER
-                        and isinstance(value, int)
-                        and not isinstance(value, bool)
-                    )
-                    or (
-                        parameter.value_type == ActionParameterType.BOOLEAN
-                        and isinstance(value, bool)
-                    )
-                    or (
-                        parameter.value_type
-                        in {ActionParameterType.STRING, ActionParameterType.ENUM}
-                        and isinstance(value, str)
-                    )
+            resources = normalized.get("resources")
+            resource_spec = next(
+                (
+                    item
+                    for item in parameter_specs.values()
+                    if item.get("semantic_reference_type") == "RESOURCE"
+                ),
+                None,
+            )
+            if not isinstance(resources, list) or resource_spec is None:
+                raise ValueError("Transport parameters lack canonical Resource entries")
+            if any(
+                not isinstance(item, dict)
+                or not _invocation_reference_is_valid(
+                    definition,
+                    str(resource_spec["semantic_reference_type"]),
+                    item.get("resource_key"),
                 )
-                if not valid:
-                    raise ValueError("Action parameter constraint has an invalid type")
-                if isinstance(value, int) and not isinstance(value, bool):
-                    if parameter.minimum is not None and value < parameter.minimum:
-                        raise ValueError("Action parameter constraint is below minimum")
-                    if parameter.maximum is not None and value > parameter.maximum:
-                        raise ValueError("Action parameter constraint is above maximum")
-                if (
-                    parameter.value_type == ActionParameterType.ENUM
-                    and value not in parameter.allowed_values
-                ):
-                    raise ValueError("Action parameter constraint is outside allowed values")
-                normalized[key] = value
+                for item in resources
+            ):
+                raise ValueError("Transport Resource identity is invalid")
+            return normalized
+        if set(parameters) - set(definitions):
+            raise ValueError("Unknown Action parameter constraint")
+        for key, value in parameters.items():
+            parameter = definitions[key]
+            valid = (
+                (
+                    parameter.value_type == ActionParameterType.INTEGER
+                    and isinstance(value, int)
+                    and not isinstance(value, bool)
+                )
+                or (
+                    parameter.value_type == ActionParameterType.BOOLEAN
+                    and isinstance(value, bool)
+                )
+                or (
+                    parameter.value_type
+                    in {ActionParameterType.STRING, ActionParameterType.ENUM}
+                    and isinstance(value, str)
+                )
+            )
+            if not valid:
+                raise ValueError("Action parameter constraint has an invalid type")
+            spec = parameter_specs.get(key)
+            semantic_type = spec.get("semantic_reference_type") if spec is not None else None
+            if semantic_type is not None and not _invocation_reference_is_valid(
+                definition,
+                str(semantic_type),
+                value,
+            ):
+                raise ValueError("Action parameter identity does not match its semantic type")
+            if isinstance(value, int) and not isinstance(value, bool):
+                if parameter.minimum is not None and value < parameter.minimum:
+                    raise ValueError("Action parameter constraint is below minimum")
+                if parameter.maximum is not None and value > parameter.maximum:
+                    raise ValueError("Action parameter constraint is above maximum")
+            if (
+                parameter.value_type == ActionParameterType.ENUM
+                and value not in parameter.allowed_values
+            ):
+                raise ValueError("Action parameter constraint is outside allowed values")
+        normalized = dict(parameters)
     except (TypeError, ValueError) as exc:
         raise FormalGoalError(
             "FORMAL_GOAL_ACTION_PARAMETERS_INVALID",
