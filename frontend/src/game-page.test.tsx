@@ -1885,13 +1885,13 @@ describe("Formal Play player projections", () => {
         resource_usage: index === 5
           ? [
               { resource_key: "municipal", resource_name: "市政维修材料", amount: 10 },
-              { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+              { resource_key: "general", resource_name: "通用维修部件", amount: 5 },
               { resource_key: "electrical", resource_name: "电力维修部件", amount: 2 },
             ]
           : index === 4
             ? [
-                { resource_key: "water", resource_name: "水务系统部件", amount: 15 },
-                { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+                { resource_key: "water", resource_name: "水务维修部件", amount: 15 },
+                { resource_key: "general", resource_name: "通用维修部件", amount: 5 },
               ]
           : [],
         resource_usage_kind: index === 5 ? "TRANSPORT" as const : index === 4 ? "CONSUME" as const : null,
@@ -1918,8 +1918,8 @@ describe("Formal Play player projections", () => {
     expect(within(card).queryByText("2m 10s")).not.toBeInTheDocument();
     expect(within(card).queryByText("2 次尝试")).not.toBeInTheDocument();
     expect(card).toHaveTextContent("展开全部");
-    expect(screen.getByText("运输：市政维修材料 ×10 · 通用工程部件 ×5 · 电力维修部件 ×2")).toBeVisible();
-    expect(screen.getByText(/消耗：水务系统部件 ×15 · 通用工程部件 ×5/)).toBeVisible();
+    expect(screen.getByText("运输：市政维修材料 ×10 · 通用维修部件 ×5 · 电力维修部件 ×2")).toBeVisible();
+    expect(screen.getByText(/消耗：水务维修部件 ×15 · 通用维修部件 ×5/)).toBeVisible();
 
     fireEvent.click(card);
     expect(card).toHaveTextContent("收起");
@@ -1987,7 +1987,7 @@ describe("Formal Play player projections", () => {
             location: { kind: "ROUTE", summary: "西部物流区 → 中央城区", detail: "旧资源文字 ×10" },
             resource_usage: [
               { resource_key: "municipal", resource_name: "市政维修材料", amount: 10 },
-              { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+              { resource_key: "general", resource_name: "通用维修部件", amount: 5 },
             ],
             resource_usage_kind: "TRANSPORT",
           }],
@@ -1995,7 +1995,7 @@ describe("Formal Play player projections", () => {
       />,
     );
     expect(screen.getByText("运输资源 · 西部物流区 → 中央城区")).toBeVisible();
-    expect(screen.getByText("资源已运输 · 市政维修材料 ×10 · 通用工程部件 ×5")).toBeVisible();
+    expect(screen.getByText("资源已运输 · 市政维修材料 ×10 · 通用维修部件 ×5")).toBeVisible();
     expect(screen.queryByText(/旧资源文字/)).not.toBeInTheDocument();
     expect(screen.queryByText("行动已完成")).not.toBeInTheDocument();
   });
@@ -3042,14 +3042,14 @@ describe("Formal Play player projections", () => {
     expect(screen.getByTestId("knowledge-accordion-locations")).toBeInTheDocument();
     const actionRequirements = screen.getByTestId("known-action-requirements");
     expect(actionRequirements).toHaveTextContent("启动燃料应急发电：应急燃料 ×50");
-    expect(actionRequirements).not.toHaveTextContent("通用工程部件 ×5");
-    expect(utility).toHaveTextContent("通用工程部件");
+    expect(actionRequirements).not.toHaveTextContent("通用维修部件 ×5");
+    expect(utility).toHaveTextContent("通用维修部件");
     expect(utility).toHaveTextContent("×5");
     expect(utility).toHaveTextContent("×20");
-    expect(utility).toHaveTextContent("修复需求：通用工程部件 ×5、市政维修材料 ×20");
+    expect(utility).toHaveTextContent("修复需求：通用维修部件 ×5、市政维修材料 ×20");
     expect(utility).toHaveTextContent("电力维修部件 ×15");
     expect(utility).toHaveTextContent("执行队伍：Industrial Repair Team");
-    expect(utility).toHaveTextContent("关联资源：通用工程部件 ×50，暂不可用，解锁条件：Utility Service Depot恢复运行");
+    expect(utility).toHaveTextContent("关联资源：通用维修部件 ×50，暂不可用，解锁条件：Utility Service Depot恢复运行");
     expect(utility).toHaveTextContent("重型工程支援：不可用");
     expect(utility).not.toHaveTextContent("修复效果：");
     expect(utility).not.toHaveTextContent("修复后设备正常");

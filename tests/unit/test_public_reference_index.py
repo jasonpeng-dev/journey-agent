@@ -66,22 +66,19 @@ def test_lookup_supports_type_safe_filtering() -> None:
     assert not lookup.ambiguous_matches
 
 
-def test_more_specific_reference_suppresses_contained_ambiguous_term() -> None:
+def test_approved_resource_references_are_deterministic() -> None:
     index = PublicReferenceIndexBuilder.build(LINJIANG_V2_TEST)
 
-    specific = index.lookup("运输30个通用部件")
-    ambiguous = index.lookup("运输30个部件")
+    for text, resource_key in (
+        ("运输30个电力维修材料", "electrical_repair_parts"),
+        ("运输30个应急物资", "emergency_relief_supplies"),
+    ):
+        lookup = index.lookup(text)
 
-    assert specific.identities == (
-        PublicReferenceIdentity(
-            PublicReferenceTypeV2.RESOURCE, "general_engineering_parts"
-        ),
-    )
-    assert {item.ref_key for item in ambiguous.identities} == {
-        "general_engineering_parts",
-        "electrical_repair_parts",
-    }
-    assert ambiguous.ambiguous_matches
+        assert lookup.identities == (
+            PublicReferenceIdentity(PublicReferenceTypeV2.RESOURCE, resource_key),
+        )
+        assert not lookup.ambiguous_matches
 
 
 def test_unregistered_expression_is_no_exact_hit_not_a_semantic_decision() -> None:

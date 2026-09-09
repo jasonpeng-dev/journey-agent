@@ -853,7 +853,7 @@ world:
       allowed_values: []
   - key: rail_freight_yard
     name: 铁路货运场
-    description: 铁路货运场
+    description: 承担铁路物资装卸与转运的货运设施。
     node_type_key: facility
     initial_access: AVAILABLE
     initial_visibility: KNOWN
@@ -1363,7 +1363,7 @@ world:
       allowed_values: []
   - key: vehicle_depot
     name: 应急车辆基地
-    description: 应急车辆基地
+    description: 存放与调度应急运输车辆的车辆设施。
     node_type_key: facility
     initial_access: AVAILABLE
     initial_visibility: KNOWN
@@ -1548,7 +1548,7 @@ world:
     facts: []
   - key: southeast_fuel_emergency_power_plant
     name: 东南燃料应急发电厂
-    description: 东南燃料应急发电厂
+    description: 使用应急燃料为东南高地区提供持续发电能力的设施。
     node_type_key: facility
     initial_access: AVAILABLE
     initial_visibility: KNOWN
@@ -1792,8 +1792,8 @@ world:
     target_node_key: southeast_heights_district
   resources:
   - key: communication_equipment
-    name: 通信设备
-    description: 用于恢复通信节点的设备。
+    name: 通信维修部件
+    description: 用于通信节点或通信设施抢修恢复的维修部件。
     initial_value: 0
     minimum: 0
     maximum: null
@@ -1806,8 +1806,8 @@ world:
     maximum: null
     reservation_supported: false
   - key: general_engineering_parts
-    name: 通用工程部件
-    description: 用于普通设施维修的通用工程部件。
+    name: 通用维修部件
+    description: 用于普通设施抢修和维修的通用维修部件。
     initial_value: 0
     minimum: 0
     maximum: null
@@ -1820,20 +1820,22 @@ world:
     maximum: null
     reservation_supported: false
   - key: water_system_parts
-    name: 水务系统部件
-    description: 用于水处理与供水设施恢复。
+    name: 水务维修部件
+    description: 用于水处理和供水设施恢复的水务维修部件。
     initial_value: 0
     minimum: 0
     maximum: null
     reservation_supported: false
   - key: emergency_relief_supplies
     name: 应急救援物资
+    description: 用于灾后救援、安置与公共服务保障的应急物资。
     initial_value: 0
     minimum: 0
     maximum: 500
     reservation_supported: false
   - key: emergency_fuel
     name: 应急燃料
+    description: 用于应急发电与关键设施保障的燃料。
     initial_value: 0
     minimum: 0
     maximum: 500
@@ -8242,33 +8244,123 @@ goal_resolution:
   clarification_prompt: 请说明希望恢复的基础设施或公共服务。
   world_goal_state_catalog: true
 public_references:
-- term: 东南区
-  ref_type: REGION
-  ref_key: southeast_heights_district
-- term: 南部
-  ref_type: REGION
-  ref_key: south_waterfront_district
 - term: 中区
   ref_type: REGION
   ref_key: central_district
-- term: 北区
+- term: 中部
   ref_type: REGION
-  ref_key: north_industrial_district
+  ref_key: central_district
+- term: 中央
+  ref_type: REGION
+  ref_key: central_district
 - term: 东区
   ref_type: REGION
   ref_key: east_residential_district
-- term: 通用部件
+- term: 东部
+  ref_type: REGION
+  ref_key: east_residential_district
+- term: 东边
+  ref_type: REGION
+  ref_key: east_residential_district
+- term: 北区
+  ref_type: REGION
+  ref_key: north_industrial_district
+- term: 北部
+  ref_type: REGION
+  ref_key: north_industrial_district
+- term: 北方
+  ref_type: REGION
+  ref_key: north_industrial_district
+- term: 南区
+  ref_type: REGION
+  ref_key: south_waterfront_district
+- term: 南部
+  ref_type: REGION
+  ref_key: south_waterfront_district
+- term: 南方
+  ref_type: REGION
+  ref_key: south_waterfront_district
+- term: 东南区
+  ref_type: REGION
+  ref_key: southeast_heights_district
+- term: 东南部
+  ref_type: REGION
+  ref_key: southeast_heights_district
+- term: 东南
+  ref_type: REGION
+  ref_key: southeast_heights_district
+- term: 西部
+  ref_type: REGION
+  ref_key: west_logistics_district
+- term: 西区
+  ref_type: REGION
+  ref_key: west_logistics_district
+- term: 西边
+  ref_type: REGION
+  ref_key: west_logistics_district
+- term: 通信部件
   ref_type: RESOURCE
-  ref_key: general_engineering_parts
+  ref_key: communication_equipment
+- term: 通讯维修部件
+  ref_type: RESOURCE
+  ref_key: communication_equipment
+- term: 通信维修材料
+  ref_type: RESOURCE
+  ref_key: communication_equipment
 - term: 电力部件
   ref_type: RESOURCE
   ref_key: electrical_repair_parts
-- term: 部件
-  ref_type: RESOURCE
-  ref_key: general_engineering_parts
-- term: 部件
+- term: 电力维修零件
   ref_type: RESOURCE
   ref_key: electrical_repair_parts
+- term: 电力维修材料
+  ref_type: RESOURCE
+  ref_key: electrical_repair_parts
+- term: 通用部件
+  ref_type: RESOURCE
+  ref_key: general_engineering_parts
+- term: 通用工程部件
+  ref_type: RESOURCE
+  ref_key: general_engineering_parts
+- term: 通用维修材料
+  ref_type: RESOURCE
+  ref_key: general_engineering_parts
+- term: 市政材料
+  ref_type: RESOURCE
+  ref_key: municipal_repair_materials
+- term: 市政抢修材料
+  ref_type: RESOURCE
+  ref_key: municipal_repair_materials
+- term: 市政维修部件
+  ref_type: RESOURCE
+  ref_key: municipal_repair_materials
+- term: 水务部件
+  ref_type: RESOURCE
+  ref_key: water_system_parts
+- term: 水务维修零件
+  ref_type: RESOURCE
+  ref_key: water_system_parts
+- term: 水务维修材料
+  ref_type: RESOURCE
+  ref_key: water_system_parts
+- term: 救援物资
+  ref_type: RESOURCE
+  ref_key: emergency_relief_supplies
+- term: 应急物资
+  ref_type: RESOURCE
+  ref_key: emergency_relief_supplies
+- term: 救援用品
+  ref_type: RESOURCE
+  ref_key: emergency_relief_supplies
+- term: 燃料
+  ref_type: RESOURCE
+  ref_key: emergency_fuel
+- term: 应急燃油
+  ref_type: RESOURCE
+  ref_key: emergency_fuel
+- term: 应急能源
+  ref_type: RESOURCE
+  ref_key: emergency_fuel
 public_knowledge:
   resource_source_hints:
   - resource_key: general_engineering_parts

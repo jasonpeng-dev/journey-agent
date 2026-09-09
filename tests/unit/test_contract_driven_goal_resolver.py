@@ -1474,25 +1474,6 @@ def test_specific_resource_reference_is_deterministic(
     }
 
 
-def test_ambiguous_public_resource_reference_clarifies_without_provider_call() -> None:
-    provider = _RoutingProvider(
-        routing=DynamicGoalSemanticRouting(family="OPERATION", action_match="NO_MATCH")
-    )
-
-    resolution = GenericGoalResolver(provider=provider).resolve(
-        "运30个部件到南部", LINJIANG_V2_TEST
-    )
-
-    assert resolution.status == "NEEDS_CLARIFICATION"
-    assert resolution.source == "PUBLIC_REFERENCE_AMBIGUOUS"
-    assert set(resolution.candidate_keys) == {
-        "general_engineering_parts",
-        "electrical_repair_parts",
-    }
-    assert provider.routing_requests == []
-    assert provider.operation_requests == []
-
-
 def test_unregistered_resource_expression_keeps_llm_semantic_grounding_open() -> None:
     operation = _operation(
         "transport_resource",
@@ -1550,7 +1531,11 @@ def test_unregistered_resource_expression_keeps_llm_semantic_grounding_open() ->
         if item["ref_type"] == "RESOURCE"
         and item["key"] == "electrical_repair_parts"
     )
-    assert set(resource["public_references"]) == {"电力部件", "部件"}
+    assert set(resource["public_references"]) == {
+        "电力部件",
+        "电力维修零件",
+        "电力维修材料",
+    }
     supplemented = DynamicGoalOperationGrounding.model_validate(operation)
     assert supplemented.supplementary_candidate_refs[0].provenance == "LLM_SUPPLEMENTED"
     assert len(provider.routing_requests) == 1

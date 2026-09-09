@@ -997,7 +997,7 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
     associated = nodes_by_key["utility_service_depot"].associated_known_resources
     assert len(associated) == 1
     assert associated[0]["resource_key"] == "general_engineering_parts"
-    assert associated[0]["resource_name"] == "通用工程部件"
+    assert associated[0]["resource_name"] == "通用维修部件"
     assert associated[0]["facility_name"] == "市政工程维修基地"
     assert associated[0]["quantity"] == 100
     assert associated[0]["availability"] == "UNAVAILABLE"

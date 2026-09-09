@@ -6,11 +6,11 @@ import type {
 import { uiLabel } from "./ui";
 
 const RESOURCE_LABELS: Record<string, string> = {
-  communication_equipment: "通信设备",
+  communication_equipment: "通信维修部件",
   electrical_repair_parts: "电力维修部件",
-  general_engineering_parts: "通用工程部件",
+  general_engineering_parts: "通用维修部件",
   municipal_repair_materials: "市政维修材料",
-  water_system_parts: "水务系统部件",
+  water_system_parts: "水务维修部件",
 };
 
 export function resourceDisplayName(key: string, candidate?: string): string {
