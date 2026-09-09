@@ -1,14 +1,22 @@
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.domain.formal_goal import compile_predefined_formal_goal
 from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.infrastructure.db.models import Scenario, ScenarioVersion
 from app.scenarios.documents import parse_scenario_document
 from app.scenarios.persistence import ScenarioDefinitionRepository
-from app.scenarios.serialization import canonical_document, scenario_content_hash
+from app.scenarios.serialization import (
+    canonical_document,
+    canonical_document_payload,
+    canonical_payload_hash,
+    scenario_content_hash,
+)
 from app.scenarios.validation import ScenarioDefinitionValidator
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.scenarios import ScenarioService
@@ -255,6 +263,60 @@ def test_v2_validation_fails_closed_for_references_and_engine_contract(
 
     assert not result.passed
     assert code in {issue.code for issue in result.issues}
+
+
+def test_legacy_v2_snapshot_loads_without_rewriting_optional_action_fields(
+    session: Session,
+) -> None:
+    payload = canonical_document_payload(_contract_scenario_document())
+    assert all(
+        "target_node_type_keys" not in action and "operation_bindings" not in action
+        for action in payload["actions"]
+    )
+
+    scenario = Scenario(
+        key="legacy_contract",
+        name="Legacy Contract",
+        status="PUBLISHED",
+    )
+    session.add(scenario)
+    session.flush()
+    version = ScenarioVersion(
+        scenario_id=scenario.id,
+        version_number=1,
+        schema_version=2,
+        snapshot_document=payload,
+        content_hash=canonical_payload_hash(payload),
+        engine_contract_key="declarative-rule-engine",
+        engine_contract_version="1",
+        published_at=datetime.now(UTC),
+    )
+    session.add(version)
+    session.flush()
+
+    loaded = ScenarioVersionRepository(session).load(version.id)
+
+    assert loaded.id == version.id
+    assert loaded.definition.metadata.key == "generic_contract"
+    assert version.content_hash in loaded.verified_content_hashes
+    assert all(
+        action.operation_bindings == () and action.target_node_type_keys == ()
+        for action in loaded.definition.actions
+    )
+    contract = compile_predefined_formal_goal(loaded, (loaded.definition.objectives[0],))
+    contract.assert_bound_to(loaded)
+    assert canonical_document_payload(payload) == payload
+
+
+def test_explicit_empty_action_fields_remain_a_valid_current_snapshot_shape() -> None:
+    payload = canonical_document_payload(_contract_scenario_document())
+    for action in payload["actions"]:
+        action["target_node_type_keys"] = []
+        action["operation_bindings"] = []
+
+    canonical_payload = canonical_document_payload(payload)
+
+    assert canonical_payload == payload
 
 
 def test_v2_draft_publishes_and_loads_exact_snapshot(session: Session) -> None:

@@ -1208,7 +1208,8 @@ def _validate_scenario_snapshot(snapshot: ScenarioVersionSnapshot) -> None:
             "FORMAL_GOAL_SCENARIO_INVALID",
             "The exact ScenarioVersion definition cannot be canonicalized",
         ) from exc
-    if expected_hash != snapshot.content_hash:
+    verified_hashes = snapshot.verified_content_hashes or (expected_hash,)
+    if expected_hash not in verified_hashes or snapshot.content_hash not in verified_hashes:
         raise FormalGoalError(
             "FORMAL_GOAL_SCENARIO_HASH_MISMATCH",
             "The exact ScenarioVersion proof does not match its immutable definition",

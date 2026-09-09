@@ -4,19 +4,42 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.scenarios.documents import parse_scenario_document
 
+_OPTIONAL_ACTION_FIELDS_WITH_LEGACY_OMISSION = (
+    "target_node_type_keys",
+    "operation_bindings",
+)
+
 
 def canonical_document(document: dict[str, Any]) -> ScenarioDefinitionV2:
     """Validate and normalize ordering without changing Scenario semantics."""
 
-    return _canonical_v2(parse_scenario_document(document))
+    return ScenarioDefinitionV2.model_validate(canonical_document_payload(document))
 
 
-def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
+def canonical_document_payload(document: dict[str, Any]) -> dict[str, Any]:
+    """Return canonical JSON while preserving safe legacy omissions.
+
+    ``target_node_type_keys`` and ``operation_bindings`` were added to the v2
+    Action contract with empty defaults. Versions persisted before that change
+    legitimately omit them. Their absence is equivalent to an empty tuple, so
+    the serializer keeps the original presence/absence bit for persisted
+    snapshot equality. The regular semantic hash remains stable across both
+    shapes; the payload hash below is available for historical raw hashes.
+    """
+
+    return _canonical_v2_payload(parse_scenario_document(document), document)
+
+
+def _canonical_v2_payload(
+    parsed: ScenarioDefinitionV2,
+    source_document: Mapping[str, Any],
+) -> dict[str, Any]:
     normalized = parsed.model_dump(mode="json")
     world = normalized["world"]
     world["node_types"].sort(key=lambda item: item["key"])
@@ -66,6 +89,21 @@ def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
         planning["success_outcome_codes"].sort()
         planning["wait_success_outcome_codes"].sort()
 
+    source_actions = source_document.get("actions")
+    if isinstance(source_actions, list):
+        source_actions_by_key = {
+            item.get("key"): item
+            for item in source_actions
+            if isinstance(item, Mapping) and isinstance(item.get("key"), str)
+        }
+        for action in normalized["actions"]:
+            source_action = source_actions_by_key.get(action["key"])
+            if source_action is None:
+                continue
+            for field in _OPTIONAL_ACTION_FIELDS_WITH_LEGACY_OMISSION:
+                if field not in source_action and not action[field]:
+                    action.pop(field)
+
     normalized["rules"].sort(
         key=lambda item: (
             item["action_key"],
@@ -114,7 +152,10 @@ def _canonical_v2(parsed: ScenarioDefinitionV2) -> ScenarioDefinitionV2:
                 item["ref_key"],
             )
         )
-    return ScenarioDefinitionV2.model_validate(normalized)
+    # Validate without dumping the model again: another dump would reintroduce
+    # fields intentionally omitted by legacy payloads.
+    ScenarioDefinitionV2.model_validate(normalized)
+    return normalized
 
 
 def _sort_authority(policy: dict[str, Any]) -> None:
@@ -164,16 +205,31 @@ def _derived_dependency_sort_key(item: dict[str, Any]) -> tuple[object, ...]:
 
 def canonical_document_bytes(document: dict[str, Any]) -> bytes:
     normalized = canonical_document(document).model_dump(mode="json")
+    return canonical_payload_bytes(normalized)
+
+
+def canonical_payload_bytes(payload: Mapping[str, Any]) -> bytes:
     return json.dumps(
-        normalized,
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
 
 
+def canonical_payload_hash(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_payload_bytes(payload)).hexdigest()
+
+
 def scenario_content_hash(document: dict[str, Any]) -> str:
-    return hashlib.sha256(canonical_document_bytes(document)).hexdigest()
+    return canonical_payload_hash(canonical_document(document).model_dump(mode="json"))
 
 
-__all__ = ["canonical_document", "canonical_document_bytes", "scenario_content_hash"]
+__all__ = [
+    "canonical_document",
+    "canonical_document_bytes",
+    "canonical_document_payload",
+    "canonical_payload_bytes",
+    "canonical_payload_hash",
+    "scenario_content_hash",
+]
