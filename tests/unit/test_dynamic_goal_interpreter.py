@@ -20,6 +20,7 @@ from app.agent.provider import (
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     DynamicGoalMentionSlot,
+    DynamicGoalScalarMentionSlot,
     GenericProviderError,
     GoalSelection,
     GoalSelectionRequest,
@@ -102,9 +103,9 @@ def _stage1_operation_grounding(
         )
         refs.append(DynamicGoalCandidateReference(ref_type="RESOURCE", key=resource_key))
     if amount is None:
-        amount_slot = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+        amount_slot = DynamicGoalScalarMentionSlot(status="NOT_SPECIFIED")
     else:
-        amount_slot = DynamicGoalMentionSlot(status="GROUNDED", value=amount)
+        amount_slot = DynamicGoalScalarMentionSlot(status="GROUNDED", value=amount)
     if actor_key is None:
         actor = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
     else:

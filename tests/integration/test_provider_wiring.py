@@ -803,6 +803,222 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
     assert http_error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
 
 
+@pytest.mark.parametrize(
+    "invalid_content",
+    [
+        '{"goal":"leaked","status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}',
+        "not-json",
+        '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":null}]}',
+        '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}],"intent":{"intent_kind":"OPERATION","source":{"status":"UNRESOLVED","key":"public_node"}}}',
+        '{"status":"NEEDS_CLARIFICATION","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}',
+    ],
+)
+def test_grounding_wire_invalid_variants_get_one_bounded_structural_recovery(
+    invalid_content: str,
+) -> None:
+    settings = _settings("openai_compatible")
+    calls: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        content = (
+            invalid_content
+            if len(calls) == 1
+            else '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}'
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    result = provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="repair the public road",
+            public_catalog={
+                "references": [{"ref_type": "NODE", "key": "public_node"}],
+            },
+        )
+    )
+
+    assert result.status == "RESOLVED"
+    assert [item.key for item in result.candidate_refs] == ["public_node"]
+    assert len(calls) == 2
+    recovery_payload = json.loads(calls[1]["messages"][1]["content"])
+    assert recovery_payload["recovery_attempt"] == 1
+    assert recovery_payload["recovery_feedback"]
+    assert "one bounded structural recovery attempt" in calls[1]["messages"][0]["content"]
+
+
+def test_grounding_wire_valid_unresolved_variant_is_not_recovered() -> None:
+    settings = _settings("openai_compatible")
+    calls: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"status":"NEEDS_CLARIFICATION",'
+                                '"candidate_refs":[],"clarification_prompt":"Which road?"}'
+                            )
+                        }
+                    }
+                ]
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    result = provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="repair an unclear road",
+            public_catalog={"references": []},
+        )
+    )
+
+    assert result.status == "NEEDS_CLARIFICATION"
+    assert result.candidate_refs == ()
+    assert len(calls) == 1
+
+
+def test_grounding_amount_object_recovery_requires_native_scalar_and_preserves_refs() -> None:
+    settings = _settings("openai_compatible")
+    calls: list[dict[str, object]] = []
+    candidate_refs = [
+        {"ref_type": "ACTION", "key": "transport_resource"},
+        {"ref_type": "REGION", "key": "region_a"},
+        {"ref_type": "REGION", "key": "region_b"},
+        {"ref_type": "RESOURCE", "key": "emergency_fuel"},
+    ]
+
+    def response_content(*, amount: object) -> str:
+        return json.dumps(
+            {
+                "status": "RESOLVED",
+                "candidate_refs": candidate_refs,
+                "intent": {
+                    "intent_kind": "OPERATION",
+                    "action": {
+                        "status": "GROUNDED",
+                        "ref_type": "ACTION",
+                        "key": "transport_resource",
+                    },
+                    "source": {
+                        "status": "GROUNDED",
+                        "ref_type": "REGION",
+                        "key": "region_a",
+                    },
+                    "target": {
+                        "status": "GROUNDED",
+                        "ref_type": "REGION",
+                        "key": "region_b",
+                    },
+                    "resource": {
+                        "status": "GROUNDED",
+                        "ref_type": "RESOURCE",
+                        "key": "emergency_fuel",
+                    },
+                    "amount": {"status": "GROUNDED", "value": amount},
+                },
+            }
+        )
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        content = (
+            response_content(amount={"value": 30})
+            if len(calls) == 1
+            else response_content(amount=30)
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    result = provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="move 30 fuel from region a to region b",
+            public_catalog={"references": candidate_refs},
+        )
+    )
+
+    assert result.intent is not None
+    assert result.intent.amount.value == 30
+    assert len(calls) == 2
+    recovery_payload = json.loads(calls[1]["messages"][1]["content"])
+    feedback = recovery_payload["recovery_feedback"][0]
+    assert feedback["fix_only"] == ["intent.amount"]
+    assert feedback["expected_field_shape"] == {
+        "path": "intent.amount",
+        "example": {
+            "status": "GROUNDED",
+            "ref_type": None,
+            "key": None,
+            "value": 30,
+            "surface": None,
+        },
+        "rule": "value must be a native JSON scalar, never an object or array",
+    }
+    assert {item["key"] for item in feedback["preserve"]} == {
+        "transport_resource",
+        "region_a",
+        "region_b",
+        "emergency_fuel",
+    }
+    recovery_prompt = calls[1]["messages"][0]["content"]
+    assert "change only that slot so value is a native JSON scalar" in recovery_prompt
+    assert '"value":30' in recovery_prompt
+    assert (
+        "never interpret fields from the rejected object as a canonical identity"
+        in recovery_prompt
+    )
+
+
+def test_grounding_recovery_feedback_preserves_only_public_canonical_identity() -> None:
+    settings = _settings("openai_compatible")
+    calls: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        content = (
+            '{"goal":"leaked","status":"RESOLVED","candidate_refs":['
+            '{"ref_type":"NODE","key":"public_node"},'
+            '{"ref_type":"NODE","key":"invented_node"}]}'
+            if len(calls) == 1
+            else '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}'
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="repair the public road",
+            public_catalog={
+                "references": [{"ref_type": "NODE", "key": "public_node"}],
+            },
+        )
+    )
+    feedback = json.loads(calls[1]["messages"][1]["content"])["recovery_feedback"][0]
+    assert feedback["preserve"] == [
+        {"path": "candidate_refs[0]", "ref_type": "NODE", "key": "public_node"}
+    ]
+    assert "candidate_refs[1]" not in feedback["preserve"]
+
+
 def test_provider_total_deadline_bounds_a_slow_sync_provider_call() -> None:
     settings = _settings("openai_compatible").model_copy(
         update={"model_timeout_seconds": 5, "model_total_timeout_seconds": 0.02}

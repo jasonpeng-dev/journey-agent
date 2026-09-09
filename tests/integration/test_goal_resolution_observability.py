@@ -427,6 +427,7 @@ def test_state_recursive_observation_keeps_outer_routing_call(
     assert submitted.status_code == 200, submitted.text
     calls = _attempt(session, game_id).provider_metadata["provider_calls"]
     assert [call["call_type"] for call in calls] == [
+        "DYNAMIC_GOAL_GROUNDING",
         "DYNAMIC_GOAL_FAMILY_ROUTING",
         "DYNAMIC_GOAL_INTERPRETATION",
     ]

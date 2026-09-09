@@ -23,6 +23,7 @@ from app.agent.provider import (
     DynamicGoalMentionSlot,
     DynamicGoalOperationGrounding,
     DynamicGoalOperationGroundingRequest,
+    DynamicGoalScalarMentionSlot,
     DynamicGoalSemanticRouting,
     DynamicGoalSemanticRoutingRequest,
     GenericProviderError,
@@ -1233,7 +1234,7 @@ def test_dynamic_goal_prompt_exposes_explicit_slot_provenance() -> None:
             ref_type="RESOURCE",
             surface="cargo shorthand",
         ),
-        amount=DynamicGoalMentionSlot(status="GROUNDED", value=30),
+        amount=DynamicGoalScalarMentionSlot(status="GROUNDED", value=30),
         actor=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
     )
     request = DynamicGoalEntityGroundingRequest(
@@ -1262,6 +1263,102 @@ def test_dynamic_goal_prompt_exposes_explicit_slot_provenance() -> None:
         assert term in prompt
 
 
+def test_dynamic_goal_grounding_scalar_wire_schema_matches_runtime_contract() -> None:
+    schema = DynamicGoalEntityGrounding.model_json_schema()
+    definitions = schema["$defs"]
+    intent_schema = definitions["DynamicGoalIntentDraft"]
+    amount_schema = intent_schema["properties"]["amount"]
+    assert amount_schema == {"$ref": "#/$defs/DynamicGoalScalarMentionSlot"}
+
+    scalar_slot = definitions["DynamicGoalScalarMentionSlot"]
+    assert scalar_slot["additionalProperties"] is False
+    value_variants = scalar_slot["properties"]["value"]["anyOf"]
+    assert value_variants[0] == {"$ref": "#/$defs/StrictScalar"}
+    assert value_variants[1] == {"type": "null"}
+    scalar_variants = definitions["StrictScalar"]["anyOf"]
+    assert {variant["type"] for variant in scalar_variants} == {
+        "string",
+        "integer",
+        "boolean",
+    }
+    assert {} not in scalar_variants
+
+    accepted = DynamicGoalScalarMentionSlot(status="GROUNDED", value=30)
+    assert accepted.value == 30
+    for invalid_value in ({"value": 30}, [30]):
+        with pytest.raises(ValidationError):
+            DynamicGoalScalarMentionSlot.model_validate(
+                {"status": "GROUNDED", "value": invalid_value}
+            )
+
+
+def test_dynamic_goal_grounding_reference_and_scalar_slot_modes_are_closed() -> None:
+    reference = DynamicGoalMentionSlot(
+        status="GROUNDED",
+        ref_type="REGION",
+        key="region_a",
+    )
+    assert reference.key == "region_a"
+    assert DynamicGoalMentionSlot(status="UNRESOLVED", ref_type="RESOURCE").key is None
+    assert DynamicGoalMentionSlot(status="NOT_SPECIFIED").ref_type is None
+    assert DynamicGoalScalarMentionSlot(status="UNRESOLVED").value is None
+    assert DynamicGoalScalarMentionSlot(status="NOT_SPECIFIED").value is None
+
+    with pytest.raises(ValidationError):
+        DynamicGoalMentionSlot.model_validate(
+            {
+                "status": "GROUNDED",
+                "ref_type": "REGION",
+                "key": "region_a",
+                "value": 30,
+            }
+        )
+    with pytest.raises(ValidationError):
+        DynamicGoalScalarMentionSlot.model_validate(
+            {
+                "status": "GROUNDED",
+                "ref_type": "REGION",
+                "key": "region_a",
+                "value": 30,
+            }
+        )
+
+
+def test_dynamic_goal_grounding_request_uses_json_object_with_explicit_scalar_contract() -> None:
+    provider = OpenAICompatibleGenericProvider(_settings())
+    body, _size = provider._build_request_body("dynamic_goal_grounding", {})
+    prompt = body["messages"][0]["content"]
+
+    assert body["response_format"] == {"type": "json_object"}
+    assert "json_schema" not in body["response_format"]
+    assert '"value":30' in prompt
+    assert "native JSON scalar" in prompt
+    assert "never an object or array" in prompt
+    assert '"typed_value|null"' not in prompt
+
+
+def test_historical_grounding_snapshot_keeps_invalid_amount_shape_redacted() -> None:
+    snapshot = goal_provider_response_snapshot(
+        "dynamic_goal_grounding",
+        {
+            "status": "RESOLVED",
+            "candidate_refs": [{"ref_type": "RESOURCE", "key": "emergency_fuel"}],
+            "intent": {
+                "intent_kind": "OPERATION",
+                "amount": {"status": "GROUNDED", "value": {"amount": 30}},
+            },
+        },
+        public_catalog={
+            "references": [{"ref_type": "RESOURCE", "key": "emergency_fuel"}],
+        },
+    )
+
+    assert snapshot["intent"]["amount"] == {
+        "status": "GROUNDED",
+        "value": {"json_type": "object", "value_omitted": True},
+    }
+
+
 def test_dynamic_grounding_snapshot_retains_safe_typed_intent_provenance() -> None:
     grounding = DynamicGoalEntityGrounding(
         candidate_refs=(
@@ -1276,7 +1373,7 @@ def test_dynamic_grounding_snapshot_retains_safe_typed_intent_provenance() -> No
             source=DynamicGoalMentionSlot(status="GROUNDED", ref_type="REGION", key="region_a"),
             target=DynamicGoalMentionSlot(status="GROUNDED", ref_type="REGION", key="region_b"),
             resource=DynamicGoalMentionSlot(status="GROUNDED", ref_type="RESOURCE", key="cargo"),
-            amount=DynamicGoalMentionSlot(status="GROUNDED", value=30),
+            amount=DynamicGoalScalarMentionSlot(status="GROUNDED", value=30),
             actor=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
         ),
     )
@@ -1403,7 +1500,7 @@ def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
         "DYNAMIC_GOAL",
     ]
     assert [item.prompt_template_version for item in history] == [
-        "dynamic-goal-grounding-v2",
+        "dynamic-goal-grounding-v5",
         "dynamic-goal-interpretation-v1",
     ]
     assert [item.prompt_tokens for item in history] == [11, 13]

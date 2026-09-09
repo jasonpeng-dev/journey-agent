@@ -279,12 +279,44 @@ class DynamicGoalMentionSlot(ProviderModel):
     status: Literal["GROUNDED", "UNRESOLVED", "NOT_SPECIFIED"]
     ref_type: Literal["NODE", "REGION", "RESOURCE", "ACTION", "ACTOR"] | None = None
     key: StrictStr | None = Field(default=None, max_length=160)
-    value: JsonValue | None = None
+    value: None = None
     surface: StrictStr | None = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def validate_mention_shape(self) -> DynamicGoalMentionSlot:
+        has_identity = self.ref_type is not None or self.key is not None
+        if self.status == "GROUNDED":
+            if not has_identity or self.ref_type is None or self.key is None:
+                raise ValueError("A grounded reference mention requires ref_type and key")
+        elif self.key is not None:
+            raise ValueError("An unresolved or unspecified reference cannot carry a key")
+        return self
 
 
 def _not_specified_dynamic_goal_slot() -> DynamicGoalMentionSlot:
     return DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+
+
+class DynamicGoalScalarMentionSlot(ProviderModel):
+    """Closed scalar counterpart to a public-reference mention slot."""
+
+    status: Literal["GROUNDED", "UNRESOLVED", "NOT_SPECIFIED"]
+    ref_type: None = None
+    key: None = None
+    value: StrictScalar | None = None
+    surface: StrictStr | None = Field(default=None, max_length=400)
+
+    @model_validator(mode="after")
+    def validate_scalar_shape(self) -> DynamicGoalScalarMentionSlot:
+        if self.status == "GROUNDED" and self.value is None:
+            raise ValueError("A grounded scalar mention requires a JSON scalar value")
+        if self.status != "GROUNDED" and self.value is not None:
+            raise ValueError("An unresolved or unspecified scalar cannot carry a value")
+        return self
+
+
+def _not_specified_dynamic_goal_scalar_slot() -> DynamicGoalScalarMentionSlot:
+    return DynamicGoalScalarMentionSlot(status="NOT_SPECIFIED")
 
 
 class DynamicGoalIntentDraft(ProviderModel):
@@ -296,7 +328,9 @@ class DynamicGoalIntentDraft(ProviderModel):
     source: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
     target: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
     resource: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
-    amount: DynamicGoalMentionSlot = Field(default_factory=_not_specified_dynamic_goal_slot)
+    amount: DynamicGoalScalarMentionSlot = Field(
+        default_factory=_not_specified_dynamic_goal_scalar_slot
+    )
 
 
 class DynamicGoalEntityGroundingRequest(ProviderModel):
@@ -311,6 +345,12 @@ class DynamicGoalEntityGroundingRequest(ProviderModel):
     intent: DynamicGoalIntentDraft | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
+    )
+    recovery_attempt: StrictInt = Field(default=0, ge=0, le=1, exclude_if=lambda value: value == 0)
+    recovery_feedback: tuple[dict[str, object], ...] = Field(
+        default=(),
+        max_length=4,
+        exclude_if=lambda value: not value,
     )
 
 
@@ -1140,6 +1180,7 @@ class GenericProviderError(ValueError):
         *,
         validation_diagnostics: tuple[dict[str, object], ...] = (),
         recovery_feedback: tuple[DynamicGoalRecoveryFeedback, ...] = (),
+        grounding_recovery_feedback: tuple[dict[str, object], ...] = (),
         resolution_observation: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
@@ -1147,6 +1188,7 @@ class GenericProviderError(ValueError):
         self.message = message
         self.validation_diagnostics = validation_diagnostics
         self.recovery_feedback = recovery_feedback
+        self.grounding_recovery_feedback = grounding_recovery_feedback
         self.resolution_observation = (
             dict(resolution_observation) if resolution_observation is not None else None
         )
@@ -1654,6 +1696,146 @@ _DYNAMIC_GOAL_REQUIREMENT_ALLOWED_FIELDS = {
 }
 
 
+def dynamic_goal_grounding_recovery_feedback(
+    raw: object,
+    *,
+    validation_diagnostics: tuple[dict[str, object], ...] = (),
+    public_catalog: dict[str, object] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Build one bounded, structural retry instruction for Stage 1 grounding.
+
+    The feedback is intentionally shape-only.  It may preserve canonical
+    identities that were already present in the rejected response when those
+    identities are also present in the public catalog, but it never proposes a
+    replacement identity or performs semantic disambiguation.
+    """
+
+    allowed_identities: set[tuple[str, str]] = set()
+    if isinstance(public_catalog, dict):
+        references = public_catalog.get("references")
+        if isinstance(references, (list, tuple)):
+            for reference in references:
+                if not isinstance(reference, dict):
+                    continue
+                ref_type = reference.get("ref_type")
+                key = reference.get("key")
+                if isinstance(ref_type, str) and isinstance(key, str):
+                    allowed_identities.add((ref_type, key))
+
+    preserve: list[dict[str, object]] = []
+    if isinstance(raw, dict):
+        candidate_refs = raw.get("candidate_refs")
+        if isinstance(candidate_refs, (list, tuple)):
+            for index, reference in enumerate(candidate_refs):
+                if not isinstance(reference, dict):
+                    continue
+                ref_type = reference.get("ref_type")
+                key = reference.get("key")
+                if (
+                    isinstance(ref_type, str)
+                    and isinstance(key, str)
+                    and (ref_type, key) in allowed_identities
+                ):
+                    preserve.append(
+                        {
+                            "path": f"candidate_refs[{index}]",
+                            "ref_type": ref_type,
+                            "key": key,
+                        }
+                    )
+
+        intent = raw.get("intent")
+        if isinstance(intent, dict):
+            for slot_key in ("action", "actor", "source", "target", "resource"):
+                slot = intent.get(slot_key)
+                if not isinstance(slot, dict) or slot.get("status") != "GROUNDED":
+                    continue
+                ref_type = slot.get("ref_type")
+                key = slot.get("key")
+                if (
+                    isinstance(ref_type, str)
+                    and isinstance(key, str)
+                    and (ref_type, key) in allowed_identities
+                ):
+                    preserve.append(
+                        {
+                            "path": f"intent.{slot_key}",
+                            "ref_type": ref_type,
+                            "key": key,
+                        }
+                    )
+
+    issue = "INVALID_JSON"
+    fix_only: list[str] = []
+    if isinstance(raw, dict):
+        unknown_fields = sorted(
+            str(field)
+            for field in raw
+            if field
+            not in {"status", "candidate_refs", "candidate_keys", "intent", "clarification_prompt"}
+        )
+        if unknown_fields:
+            issue = "UNKNOWN_FIELD"
+            fix_only.extend(unknown_fields)
+        elif any(
+            isinstance(item.get("field_path"), str)
+            and str(item["field_path"]).startswith("candidate_refs")
+            for item in validation_diagnostics
+            if isinstance(item, dict)
+        ):
+            issue = "INVALID_REFERENCE"
+        elif any(
+            isinstance(item.get("field_path"), str)
+            and str(item["field_path"]).startswith("intent")
+            for item in validation_diagnostics
+            if isinstance(item, dict)
+        ):
+            issue = "INVALID_SLOT"
+        else:
+            issue = "INVALID_VARIANT"
+        fix_only.extend(
+            str(item["field_path"])
+            for item in validation_diagnostics
+            if isinstance(item, dict) and isinstance(item.get("field_path"), str)
+        )
+
+    amount_scalar_shape_error = any(
+        isinstance(item.get("field_path"), str)
+        and str(item["field_path"]).startswith("intent.amount")
+        and item.get("actual_json_type") in {"object", "array"}
+        for item in validation_diagnostics
+        if isinstance(item, dict)
+    )
+    if amount_scalar_shape_error:
+        fix_only = [path for path in fix_only if not path.startswith("intent.amount")]
+        fix_only.append("intent.amount")
+    feedback: dict[str, object] = {
+        "code": "GROUNDING_STRUCTURAL_REPAIR",
+        "issue": issue,
+        "expected": (
+            "Return one JSON object with only status, candidate_refs, intent, "
+            "and clarification_prompt; use catalog identities exactly."
+        ),
+        "preserve": preserve,
+        "fix_only": sorted(set(fix_only))[:8],
+    }
+    if amount_scalar_shape_error:
+        feedback["expected_field_shape"] = {
+            "path": "intent.amount",
+            "example": {
+                "status": "GROUNDED",
+                "ref_type": None,
+                "key": None,
+                "value": 30,
+                "surface": None,
+            },
+            "rule": "value must be a native JSON scalar, never an object or array",
+        }
+    if validation_diagnostics:
+        feedback["diagnostics"] = [dict(item) for item in validation_diagnostics[:8]]
+    return (feedback,)
+
+
 def dynamic_goal_recovery_feedback(
     raw: object,
     *,
@@ -1887,7 +2069,7 @@ _GOAL_PROVIDER_PURPOSES = frozenset(
     }
 )
 _GOAL_PROMPT_TEMPLATE_VERSIONS = {
-    "dynamic_goal_grounding": "dynamic-goal-grounding-v2",
+    "dynamic_goal_grounding": "dynamic-goal-grounding-v5",
     "dynamic_goal": "dynamic-goal-interpretation-v1",
     "dynamic_goal_interpretation": "dynamic-goal-interpretation-v1",
     "dynamic_goal_family_routing": "dynamic-goal-family-routing-v1",
@@ -2849,36 +3031,93 @@ class OpenAICompatibleGenericProvider:
     def ground_dynamic_goal_entities(
         self, request: DynamicGoalEntityGroundingRequest
     ) -> DynamicGoalEntityGrounding:
-        raw = self._invoke("dynamic_goal_grounding", request.model_dump(mode="json"))
-        try:
-            result = DynamicGoalEntityGrounding.model_validate(raw)
-        except ValidationError as exc:
+        current_request = request
+        for attempt in range(2):
+            raw: object | None = None
+            try:
+                raw = self._invoke(
+                    "dynamic_goal_grounding",
+                    current_request.model_dump(mode="json"),
+                )
+                result = DynamicGoalEntityGrounding.model_validate(raw)
+            except GenericProviderError as exc:
+                if (
+                    attempt == 0
+                    and exc.code == "MODEL_PROVIDER_RESPONSE_INVALID"
+                ):
+                    recovery_feedback = dynamic_goal_grounding_recovery_feedback(
+                        raw,
+                        public_catalog=request.public_catalog,
+                    )
+                    current_request = request.model_copy(
+                        update={
+                            "recovery_attempt": 1,
+                            "recovery_feedback": recovery_feedback,
+                        }
+                    )
+                    continue
+                raise
+            except ValidationError as exc:
+                diagnostics = provider_validation_diagnostics(exc)
+                recovery_feedback = dynamic_goal_grounding_recovery_feedback(
+                    raw,
+                    validation_diagnostics=diagnostics,
+                    public_catalog=request.public_catalog,
+                )
+                if self._goal_resolution_observability == "DEBUG":
+                    self._record_goal_response_snapshot(
+                        goal_provider_response_snapshot(
+                            "dynamic_goal_grounding",
+                            raw,
+                            public_catalog=request.public_catalog,
+                        ),
+                        validation="REJECTED",
+                    )
+                self._record_validation_diagnostics(diagnostics)
+                if attempt == 0:
+                    current_request = request.model_copy(
+                        update={
+                            "recovery_attempt": 1,
+                            "recovery_feedback": recovery_feedback,
+                        }
+                    )
+                    continue
+                raise GenericProviderError(
+                    "MODEL_PROVIDER_RESPONSE_INVALID",
+                    "The model provider returned an invalid Dynamic Goal Entity Grounding",
+                    validation_diagnostics=diagnostics,
+                    grounding_recovery_feedback=recovery_feedback,
+                ) from exc
+            except (TypeError, ValueError) as exc:
+                recovery_feedback = dynamic_goal_grounding_recovery_feedback(
+                    raw,
+                    public_catalog=request.public_catalog,
+                )
+                self._record_response_validation("REJECTED")
+                if attempt == 0:
+                    current_request = request.model_copy(
+                        update={
+                            "recovery_attempt": 1,
+                            "recovery_feedback": recovery_feedback,
+                        }
+                    )
+                    continue
+                raise GenericProviderError(
+                    "MODEL_PROVIDER_RESPONSE_INVALID",
+                    "The model provider returned an invalid Dynamic Goal Entity Grounding",
+                    grounding_recovery_feedback=recovery_feedback,
+                ) from exc
             if self._goal_resolution_observability == "DEBUG":
                 self._record_goal_response_snapshot(
                     goal_provider_response_snapshot(
                         "dynamic_goal_grounding",
-                        raw,
+                        result,
                         public_catalog=request.public_catalog,
                     ),
-                    validation="REJECTED",
+                    validation="ACCEPTED",
                 )
-            diagnostics = provider_validation_diagnostics(exc)
-            self._record_validation_diagnostics(diagnostics)
-            raise GenericProviderError(
-                "MODEL_PROVIDER_RESPONSE_INVALID",
-                "The model provider returned an invalid Dynamic Goal Entity Grounding",
-                validation_diagnostics=diagnostics,
-            ) from exc
-        if self._goal_resolution_observability == "DEBUG":
-            self._record_goal_response_snapshot(
-                goal_provider_response_snapshot(
-                    "dynamic_goal_grounding",
-                    result,
-                    public_catalog=request.public_catalog,
-                ),
-                validation="ACCEPTED",
-            )
-        return result
+            return result
+        raise AssertionError("bounded grounding recovery exhausted unexpectedly")
 
     def interpret_dynamic_goal(
         self, request: DynamicGoalInterpretationRequest
@@ -3037,9 +3276,18 @@ class OpenAICompatibleGenericProvider:
                 '"ref_type":"RESOURCE|null","key":"public_resource_key|null",'
                 '"value":null,"surface":null},'
                 '"amount":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
-                '"ref_type":null,"key":null,"value":"typed_value|null",'
+                '"ref_type":null,"key":null,"value":30,'
                 '"surface":null}},'
-                '"clarification_prompt":null}'
+                '"clarification_prompt":null}. '
+                "The top level has no goal field and no unknown fields. A RESOLVED response "
+                "must contain catalog-backed candidate_refs and a valid intent. A "
+                "NEEDS_CLARIFICATION or UNSUPPORTED response must contain no candidate_refs "
+                "or intent; NEEDS_CLARIFICATION must include clarification_prompt. "
+                "A GROUNDED reference slot requires ref_type and key from public_catalog; "
+                "an UNRESOLVED or NOT_SPECIFIED slot carries no key or value. The amount "
+                "example uses native JSON integer 30; use the player's actual native JSON "
+                "scalar value. A scalar value is a string, integer, or boolean, never an "
+                "object or array. Do not place reference identity inside a value object."
             )
         elif purpose == "dynamic_goal":
             response_contract = (
@@ -3245,9 +3493,13 @@ class OpenAICompatibleGenericProvider:
                 "DERIVED_STATE, ACTION, or ACTOR and keys copied exactly from the public_catalog. "
                 "Use the public Action name, description, target_kind, parameter schema, and "
                 "operation_binding_contract to understand the sentence; do not rely on a fixed "
-                "natural-language verb or source/destination marker vocabulary. Exact identity "
-                "matches supplied as deterministic_candidate_refs are evidence to preserve, not "
-                "a replacement for sentence-level semantic parsing. For intent_kind OPERATION, "
+                "natural-language verb or source/destination marker vocabulary. Canonical names "
+                "and public_references are semantic evidence, not a closed vocabulary or backend "
+                "parser rule. Ground every explicit public mention in the whole Goal in this one "
+                "pass; do not stop after an easy exact match or omit a remaining semantic mention. "
+                "Exact identity matches supplied as deterministic_candidate_refs are evidence to "
+                "preserve, not a replacement for sentence-level semantic parsing. For intent_kind "
+                "OPERATION, "
                 "classify each action, actor, source, target, resource, and amount slot as "
                 "GROUNDED, UNRESOLVED, or NOT_SPECIFIED. GROUNDED entity slots must use the "
                 "typed public key and GROUNDED amount must use the typed value. UNRESOLVED means "
@@ -3263,6 +3515,25 @@ class OpenAICompatibleGenericProvider:
                 "or unsupported with no candidate_refs. Never invent a key. Stage 1 must not emit "
                 "a Goal requirement, authored Objective, plan, hidden Truth, or chain-of-thought."
             )
+            if payload.get("recovery_attempt"):
+                planning_prompt += (
+                    " This is the one bounded structural recovery attempt. Return JSON only and "
+                    "use only the grounding response fields in the contract; remove unknown "
+                    "fields and correct JSON/DTO shape errors. Preserve every canonical identity "
+                    "listed in recovery_feedback.preserve exactly, and edit only paths listed in "
+                    "recovery_feedback.fix_only. Do not invent, replace, or disambiguate a key. "
+                    "For GROUNDED reference slots return a catalog ref_type and canonical key; "
+                    "for UNRESOLVED or NOT_SPECIFIED slots do not return a key or scalar value. "
+                    "If recovery_feedback identifies intent.amount as an object or array, change "
+                    "only that slot so value is a native JSON scalar; for example, an explicit "
+                    "amount of 30 is {\"status\":\"GROUNDED\",\"ref_type\":null,"
+                    "\"key\":null,\"value\":30,\"surface\":null}. The example shows wire "
+                    "shape only: use the player's actual scalar and never interpret fields from "
+                    "the rejected object as a canonical identity. "
+                    "A non-RESOLVED response must not carry candidate_refs; use a clarification "
+                    "prompt for unresolved or ambiguous semantics. Do not return markdown, prose, "
+                    "a code fence, a top-level goal, or any unknown field."
+                )
         elif purpose == "dynamic_goal":
             planning_prompt = (
                 "Interpret the player's Goal only into the closed V2 typed requirement "
@@ -4235,6 +4506,7 @@ __all__ = [
     "ProviderCallMetadata",
     "ProviderTotalTimeout",
     "build_generic_provider",
+    "dynamic_goal_grounding_recovery_feedback",
     "dynamic_goal_recovery_feedback",
     "goal_provider_request_snapshot",
     "goal_provider_response_snapshot",

@@ -540,6 +540,7 @@ class GenericGoalResolver:
         *,
         frozen_family: Literal["STATE"] | None = None,
         _provider_history_start: int | None = None,
+        _pre_grounding: _DynamicGoalGrounding | None = None,
     ) -> GenericGoalResolution | None:
         if not definition.goal_resolution.allow_llm_fallback or self.provider is None:
             return None
@@ -557,11 +558,12 @@ class GenericGoalResolver:
             assert callable(action_router)
             assert callable(operation_grounder)
             routing_history_start = len(provider_call_history_metadata(provider))
-            routing_grounding = _deterministic_dynamic_goal_grounding(
+            routing_grounding = _llm_all_dynamic_goal_grounding(
                 goal,
                 self.db,
                 self.scope,
                 definition,
+                provider,
             )
             if routing_grounding.status == "NEEDS_CLARIFICATION":
                 return GenericGoalResolution(
@@ -640,6 +642,7 @@ class GenericGoalResolver:
                     definition,
                     frozen_family="STATE",
                     _provider_history_start=routing_history_start,
+                    _pre_grounding=routing_grounding,
                 )
 
             public_action_keys = _dynamic_goal_public_action_keys(
@@ -761,6 +764,7 @@ class GenericGoalResolver:
                 definition,
                 operation_grounder=operation_grounder,
                 frozen_action_key=action_routing.action_key,
+                initial_grounding=routing_grounding,
             )
         if frozen_family is None and all(
             callable(item) for item in (family_matcher, action_matcher, operation_grounder)
@@ -821,7 +825,7 @@ class GenericGoalResolver:
         def resolution_provider_calls() -> list[dict[str, object]]:
             return [dict(item) for item in provider_call_records]
 
-        grounding = _deterministic_dynamic_goal_grounding(
+        grounding = _pre_grounding or _deterministic_dynamic_goal_grounding(
             goal,
             self.db,
             self.scope,
@@ -899,7 +903,7 @@ class GenericGoalResolver:
                     "grounding_round": grounding_round,
                     "request_hash": _dynamic_goal_payload_hash(request_payload),
                     "prompt_template_version": (
-                        "dynamic-goal-grounding-v2"
+                        "dynamic-goal-grounding-v3"
                         if purpose == "dynamic_goal_grounding"
                         else "dynamic-goal-interpretation-v1"
                     ),
@@ -1953,10 +1957,13 @@ class GenericGoalResolver:
         action_matcher: Callable[[DynamicGoalActionMatchRequest], object] | None = None,
         operation_grounder: Callable[[DynamicGoalOperationGroundingRequest], object],
         frozen_action_key: str | None = None,
+        initial_grounding: _DynamicGoalGrounding | None = None,
     ) -> GenericGoalResolution:
         """Resolve every Action through the same frozen, contract-owned pipeline."""
 
-        deterministic = _deterministic_dynamic_goal_grounding(goal, self.db, self.scope, definition)
+        deterministic = initial_grounding or _deterministic_dynamic_goal_grounding(
+            goal, self.db, self.scope, definition
+        )
         if deterministic.status == "NEEDS_CLARIFICATION":
             return GenericGoalResolution(
                 "NEEDS_CLARIFICATION",
@@ -8979,6 +8986,75 @@ def _deterministic_dynamic_goal_grounding(
             definition,
         )
     return _DynamicGoalGrounding(status="NONE")
+
+
+def _llm_all_dynamic_goal_grounding(
+    goal: str,
+    db: Session | None,
+    scope: RuntimeScope | None,
+    definition: ScenarioDefinitionV2,
+    provider: object,
+) -> _DynamicGoalGrounding:
+    """Ground the whole public Goal before canonical routing when supported.
+
+    The canonical routing path uses this experimental whole-goal pass so the
+    backend does not decide that an exact hit has completed entity grounding.
+    Providers without the optional capability retain the compatibility path;
+    production GenericProvider implements the capability and therefore sends
+    an empty deterministic seed together with the full public catalog.
+    """
+
+    grounder = getattr(provider, "ground_dynamic_goal_entities", None)
+    if not callable(grounder):
+        return _deterministic_dynamic_goal_grounding(goal, db, scope, definition)
+
+    request = DynamicGoalEntityGroundingRequest(
+        goal=goal,
+        public_catalog=_dynamic_goal_entity_catalog(db, scope, definition),
+        deterministic_candidate_refs=(),
+    )
+    raw: object | None = None
+    try:
+        raw = grounder(request)
+        grounded = DynamicGoalEntityGrounding.model_validate(raw)
+    except GenericProviderError:
+        raise
+    except ValidationError as exc:
+        raise GenericProviderError(
+            "MODEL_PROVIDER_RESPONSE_INVALID",
+            "The model provider returned an invalid whole-goal Entity Grounding",
+            validation_diagnostics=provider_validation_diagnostics(exc),
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise GenericProviderError(
+            "MODEL_PROVIDER_RESPONSE_INVALID",
+            "The model provider returned an invalid whole-goal Entity Grounding",
+        ) from exc
+
+    if grounded.status != "RESOLVED":
+        return _DynamicGoalGrounding(
+            status=grounded.status,
+            source="MODEL_ENTITY_GROUNDING",
+            clarification_prompt=grounded.clarification_prompt,
+        )
+
+    candidate_refs = _merge_dynamic_goal_candidate_refs(
+        (),
+        (*grounded.candidate_refs, *_dynamic_goal_intent_candidate_refs(grounded.intent)),
+    )
+    candidate_refs = _validate_dynamic_goal_candidate_refs(
+        definition,
+        db,
+        scope,
+        candidate_refs,
+    )
+    return _dynamic_goal_grounding_from_refs(
+        candidate_refs,
+        "MODEL_ENTITY_GROUNDING",
+        db,
+        scope,
+        definition,
+    )
 
 
 def _validate_dynamic_entity_grounding_keys(

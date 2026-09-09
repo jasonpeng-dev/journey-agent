@@ -32,6 +32,7 @@ from app.agent.provider import (
     GoalFamilyMatchRequest,
     OperationContractSlot,
 )
+from app.domain.formal_goal import FormalGoalError
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
     ActionOperationBindingSource,
@@ -164,6 +165,31 @@ class _RoutingProvider(_ContractProvider):
         del request
         raise AssertionError("canonical routing must not use the mixed legacy call")
 
+
+class _LLMAllRoutingProvider(_RoutingProvider):
+    def __init__(
+        self,
+        *,
+        grounding: DynamicGoalEntityGrounding,
+        operation_results: Iterable[object] = (),
+    ) -> None:
+        super().__init__(
+            routing=DynamicGoalSemanticRouting(
+                family="OPERATION",
+                action_match="MATCHED",
+                action_key="transport_resource",
+            ),
+            operation_results=operation_results,
+        )
+        self.grounding = grounding
+        self.grounding_requests: list[DynamicGoalEntityGroundingRequest] = []
+
+    def ground_dynamic_goal_entities(
+        self, request: DynamicGoalEntityGroundingRequest
+    ) -> DynamicGoalEntityGrounding:
+        self.grounding_requests.append(request)
+        return self.grounding
+
     def match_dynamic_goal_family(self, request: GoalFamilyMatchRequest) -> GoalFamilyMatch:
         del request
         raise AssertionError("canonical routing must not use legacy GoalFamilyMatch")
@@ -180,11 +206,47 @@ class _StateRoutingProvider(_RoutingProvider):
         super().__init__(routing=DynamicGoalSemanticRouting(family="STATE"))
         self.interpretation = interpretation
         self.interpretation_requests: list[DynamicGoalInterpretationRequest] = []
+        self.grounding_requests: list[DynamicGoalEntityGroundingRequest] = []
 
     def ground_dynamic_goal_entities(
-        self, _request: DynamicGoalEntityGroundingRequest
+        self, request: DynamicGoalEntityGroundingRequest
     ) -> DynamicGoalEntityGrounding:
-        raise AssertionError("frozen STATE must skip generic Entity Grounding")
+        self.grounding_requests.append(request)
+        requirement = (
+            self.interpretation.requirements[0] if self.interpretation.requirements else None
+        )
+        if requirement is None:
+            return DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(
+                        ref_type="NODE", key="central_telecom_hub"
+                    ),
+                )
+            )
+        if requirement.kind == "RESOURCE_AT_LEAST":
+            return DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(
+                        ref_type="REGION", key=requirement.region_key
+                    ),
+                    DynamicGoalCandidateReference(
+                        ref_type="RESOURCE", key=requirement.resource_key
+                    ),
+                )
+            )
+        if requirement.kind == "FACT":
+            return DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(ref_type="NODE", key=requirement.node_key),
+                )
+            )
+        return DynamicGoalEntityGrounding(
+            candidate_refs=(
+                DynamicGoalCandidateReference(
+                    ref_type="DERIVED_STATE", key=requirement.derived_key
+                ),
+            )
+        )
 
     def interpret_dynamic_goal(
         self, request: DynamicGoalInterpretationRequest
@@ -687,6 +749,120 @@ def _transport_operation(*, amount: object = 12) -> dict[str, object]:
             {"ref_type": "RESOURCE", "key": "emergency_fuel"},
         ],
     )
+
+
+def test_llm_all_grounding_runs_once_with_no_deterministic_short_circuit() -> None:
+    grounding = DynamicGoalEntityGrounding(
+        candidate_refs=(
+            DynamicGoalCandidateReference(ref_type="REGION", key="central_district"),
+            DynamicGoalCandidateReference(ref_type="REGION", key="south_waterfront_district"),
+            DynamicGoalCandidateReference(ref_type="RESOURCE", key="emergency_fuel"),
+        )
+    )
+    operation = _operation(
+        "transport_resource",
+        target=_slot("target", "REGION", "GROUNDED", ref_type="REGION", key="central_district"),
+        bindings=[
+            _slot(
+                "source_region",
+                "REGION",
+                "GROUNDED",
+                ref_type="REGION",
+                key="south_waterfront_district",
+            )
+        ],
+        parameters=[
+            _slot("amount", "INTEGER", "GROUNDED", value=30),
+            _slot(
+                "resource_key",
+                "RESOURCE",
+                "GROUNDED",
+                ref_type="RESOURCE",
+                key="emergency_fuel",
+            ),
+        ],
+    )
+    provider = _LLMAllRoutingProvider(
+        grounding=grounding,
+        operation_results=[operation],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "unregistered semantic transport wording", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 1
+    assert provider.grounding_requests[0].deterministic_candidate_refs == ()
+    assert {
+        (item.ref_type, item.key)
+        for item in provider.family_requests[0].deterministic_candidate_refs
+    } >= {
+        ("REGION", "central_district"),
+        ("REGION", "south_waterfront_district"),
+        ("RESOURCE", "emergency_fuel"),
+    }
+    assert {
+        (item.ref_type, item.key)
+        for item in provider.operation_requests[0].deterministic_candidate_refs
+    } >= {
+        ("REGION", "central_district"),
+        ("REGION", "south_waterfront_district"),
+        ("RESOURCE", "emergency_fuel"),
+    }
+
+
+def test_llm_all_grounding_rejects_invented_public_identity() -> None:
+    provider = _LLMAllRoutingProvider(
+        grounding=DynamicGoalEntityGrounding(
+            candidate_refs=(
+                DynamicGoalCandidateReference(ref_type="REGION", key="invented_region"),
+            )
+        )
+    )
+
+    with pytest.raises(FormalGoalError):
+        GenericGoalResolver(provider=provider).resolve(
+            "an unregistered semantic reference", LINJIANG_V2_TEST
+        )
+
+
+def test_llm_all_grounding_preserves_provider_ambiguity() -> None:
+    provider = _LLMAllRoutingProvider(
+        grounding=DynamicGoalEntityGrounding(
+            status="NEEDS_CLARIFICATION",
+            clarification_prompt="Which public reference?",
+        )
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "an ambiguous public reference", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "PUBLIC_REFERENCE_AMBIGUOUS"
+    assert provider.family_requests == []
+
+
+def test_llm_all_grounding_does_not_add_unmentioned_refs() -> None:
+    provider = _LLMAllRoutingProvider(
+        grounding=DynamicGoalEntityGrounding(
+            candidate_refs=(
+                DynamicGoalCandidateReference(ref_type="RESOURCE", key="emergency_fuel"),
+            )
+        ),
+        operation_results=[_transport_operation()],
+    )
+
+    GenericGoalResolver(provider=provider).resolve(
+        "a goal mentioning only emergency fuel", LINJIANG_V2_TEST
+    )
+
+    refs = {
+        (item.ref_type, item.key)
+        for item in provider.family_requests[0].deterministic_candidate_refs
+    }
+    assert refs == {("RESOURCE", "emergency_fuel")}
 
 
 def test_operation_family_resolves_from_selected_action_contract() -> None:

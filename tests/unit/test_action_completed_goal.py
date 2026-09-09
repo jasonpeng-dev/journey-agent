@@ -21,6 +21,7 @@ from app.agent.provider import (
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     DynamicGoalMentionSlot,
+    DynamicGoalScalarMentionSlot,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -92,7 +93,7 @@ class _OperationGoalResolverProvider(_RecordingProvider):
                 actor=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
                 source=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
                 resource=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
-                amount=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+                amount=DynamicGoalScalarMentionSlot(status="NOT_SPECIFIED"),
             ),
         )
 
@@ -498,7 +499,7 @@ def test_explicit_operation_language_cannot_downgrade_to_state_requirement() -> 
         source=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
         target=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
         resource=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
-        amount=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+        amount=DynamicGoalScalarMentionSlot(status="NOT_SPECIFIED"),
     )
     state_candidate = AdHocFactRequirementCandidateV1(
         kind="FACT",
