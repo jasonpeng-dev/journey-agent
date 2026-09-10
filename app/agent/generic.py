@@ -368,6 +368,23 @@ class _DynamicGoalGrounding:
 
 
 @dataclass(frozen=True, slots=True)
+class _FrozenDynamicGoalEvidence:
+    """Immutable public evidence shared by every VNext semantic owner.
+
+    Deterministic identities remain separate from model-supplemented evidence so
+    downstream fields named ``deterministic_candidate_refs`` are truthful.  The
+    legacy Stage-1 intent kind and Action guess are deliberately not retained.
+    """
+
+    deterministic_exact_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    deterministic_ambiguous_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    semantic_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    merged_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+    explicit_role_evidence: dict[str, object] | None = None
+    semantic_status: str = "UNAVAILABLE"
+
+
+@dataclass(frozen=True, slots=True)
 class _DynamicGoalProjection:
     """The single Stage 1 -> Stage 2 allow-list contract.
 
@@ -558,37 +575,21 @@ class GenericGoalResolver:
             assert callable(action_router)
             assert callable(operation_grounder)
             routing_history_start = len(provider_call_history_metadata(provider))
-            routing_grounding = _llm_all_dynamic_goal_grounding(
+            deterministic_grounding = _deterministic_dynamic_goal_grounding(
+                goal,
+                self.db,
+                self.scope,
+                definition,
+            )
+            frozen_evidence = _vnext_frozen_dynamic_goal_evidence(
                 goal,
                 self.db,
                 self.scope,
                 definition,
                 provider,
+                deterministic_grounding,
             )
-            if routing_grounding.status == "NEEDS_CLARIFICATION":
-                return GenericGoalResolution(
-                    "NEEDS_CLARIFICATION",
-                    candidate_keys=_dynamic_goal_grounding_keys(routing_grounding),
-                    clarification_prompt=(
-                        routing_grounding.clarification_prompt
-                        or definition.goal_resolution.clarification_prompt
-                    ),
-                    source="PUBLIC_REFERENCE_AMBIGUOUS",
-                    provider_observation={
-                        "stage": "DETERMINISTIC_PUBLIC_REFERENCE",
-                        "status": "NEEDS_CLARIFICATION",
-                        "candidate_refs": [
-                            item.model_dump(mode="json")
-                            for item in routing_grounding.candidate_refs
-                        ],
-                        "rejection_code": "PUBLIC_REFERENCE_AMBIGUOUS",
-                    },
-                )
-            routing_refs = (
-                routing_grounding.candidate_refs
-                if routing_grounding.status == "RESOLVED"
-                else ()
-            )
+            routing_refs = frozen_evidence.merged_refs
 
             family_routing: DynamicGoalFamilyRouting | None = None
             family_recovery: tuple[dict[str, object], ...] = ()
@@ -598,7 +599,16 @@ class GenericGoalResolver:
                         family_router(
                             DynamicGoalFamilyRoutingRequest(
                                 goal=goal,
-                                deterministic_candidate_refs=routing_refs,
+                                deterministic_candidate_refs=(
+                                    frozen_evidence.deterministic_exact_refs
+                                ),
+                                deterministic_ambiguous_refs=(
+                                    frozen_evidence.deterministic_ambiguous_refs
+                                ),
+                                semantic_candidate_refs=frozen_evidence.semantic_refs,
+                                explicit_role_evidence=(
+                                    frozen_evidence.explicit_role_evidence or {}
+                                ),
                                 recovery_attempt=recovery_attempt,
                                 recovery_feedback=family_recovery,
                             )
@@ -636,13 +646,26 @@ class GenericGoalResolver:
                         "The model provider returned invalid family routing",
                     ) from exc
             assert family_routing is not None
+            if family_routing.family == "AMBIGUOUS":
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION",
+                    clarification_prompt=family_routing.clarification_prompt,
+                    source="FAMILY_AMBIGUOUS",
+                    provider_observation=_vnext_goal_observation(
+                        frozen_evidence,
+                        frozen_family="AMBIGUOUS",
+                        terminal_stage="FAMILY_ROUTING",
+                        result="NEEDS_CLARIFICATION",
+                        rejection_code="FAMILY_AMBIGUOUS",
+                    ),
+                )
             if family_routing.family == "STATE":
-                return self._resolve_dynamic_goal(
+                return self._resolve_vnext_state_goal(
                     goal,
                     definition,
-                    frozen_family="STATE",
-                    _provider_history_start=routing_history_start,
-                    _pre_grounding=routing_grounding,
+                    interpreter=getattr(provider, "interpret_dynamic_goal", None),
+                    frozen_evidence=frozen_evidence,
+                    provider_history_start=routing_history_start,
                 )
 
             public_action_keys = _dynamic_goal_public_action_keys(
@@ -653,7 +676,7 @@ class GenericGoalResolver:
             action_catalog = _dynamic_goal_routing_action_catalog(
                 definition,
                 public_action_keys,
-                routing_refs,
+                (),
             )
             public_entity_catalog = _dynamic_goal_entity_catalog(
                 self.db,
@@ -683,6 +706,16 @@ class GenericGoalResolver:
                                 action_catalog=action_catalog,
                                 relevant_public_entities=relevant_public_entities,
                                 public_topology=action_topology,
+                                deterministic_candidate_refs=(
+                                    frozen_evidence.deterministic_exact_refs
+                                ),
+                                deterministic_ambiguous_refs=(
+                                    frozen_evidence.deterministic_ambiguous_refs
+                                ),
+                                semantic_candidate_refs=frozen_evidence.semantic_refs,
+                                explicit_role_evidence=(
+                                    frozen_evidence.explicit_role_evidence or {}
+                                ),
                                 recovery_attempt=recovery_attempt,
                                 recovery_feedback=action_recovery,
                             )
@@ -727,6 +760,14 @@ class GenericGoalResolver:
                         "CANONICAL_IDENTITY_CONFLICT",
                         "Action routing returned a non-public Action candidate",
                     )
+                observation = _vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="OPERATION",
+                    terminal_stage="ACTION_ROUTING",
+                    result="NEEDS_CLARIFICATION",
+                    rejection_code="ACTION_AMBIGUOUS",
+                )
+                observation["candidate_keys"] = list(action_routing.candidate_keys)
                 return GenericGoalResolution(
                     "NEEDS_CLARIFICATION",
                     candidate_keys=action_routing.candidate_keys,
@@ -735,23 +776,21 @@ class GenericGoalResolver:
                         or definition.goal_resolution.clarification_prompt
                     ),
                     source="ACTION_AMBIGUOUS",
-                    provider_observation={
-                        "stage": "DYNAMIC_GOAL_ACTION_ROUTING",
-                        "frozen_family": "OPERATION",
-                        "candidate_keys": list(action_routing.candidate_keys),
-                        "rejection_code": "ACTION_AMBIGUOUS",
-                    },
+                    provider_observation=observation,
                 )
             if action_routing.action_match == "NO_MATCH":
+                observation = _vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="OPERATION",
+                    terminal_stage="ACTION_ROUTING",
+                    result="UNSUPPORTED",
+                    rejection_code="ACTION_NO_MATCH",
+                )
+                observation["no_match_reason"] = action_routing.no_match_reason
                 return GenericGoalResolution(
                     "UNSUPPORTED",
                     source="ACTION_NO_MATCH",
-                    provider_observation={
-                        "stage": "DYNAMIC_GOAL_ACTION_ROUTING",
-                        "frozen_family": "OPERATION",
-                        "rejection_code": "ACTION_NO_MATCH",
-                        "no_match_reason": action_routing.no_match_reason,
-                    },
+                    provider_observation=observation,
                 )
             assert action_routing.action_key is not None
             if action_routing.action_key not in routing_action_keys:
@@ -764,7 +803,7 @@ class GenericGoalResolver:
                 definition,
                 operation_grounder=operation_grounder,
                 frozen_action_key=action_routing.action_key,
-                initial_grounding=routing_grounding,
+                frozen_evidence=frozen_evidence,
             )
         if frozen_family is None and all(
             callable(item) for item in (family_matcher, action_matcher, operation_grounder)
@@ -818,8 +857,7 @@ class GenericGoalResolver:
         # adds the exact public request, safe response shape, round, and
         # validation outcome so G1/I1/I2/G2/I1/I2 can be audited together.
         provider_call_records = [
-            dict(item)
-            for item in provider_call_history_metadata(provider)[provider_history_start:]
+            dict(item) for item in provider_call_history_metadata(provider)[provider_history_start:]
         ]
 
         def resolution_provider_calls() -> list[dict[str, object]]:
@@ -1087,9 +1125,7 @@ class GenericGoalResolver:
                 ),
             )
 
-        max_grounding_rounds = (
-            1 if frozen_family == "STATE" else _DYNAMIC_GOAL_MAX_GROUNDING_ROUNDS
-        )
+        max_grounding_rounds = 1 if frozen_family == "STATE" else _DYNAMIC_GOAL_MAX_GROUNDING_ROUNDS
         last_interpretation_error: GenericProviderError | None = None
         last_backend_rejection_code: str | None = None
         last_backend_value_type_diagnostics: list[dict[str, object]] = []
@@ -1949,6 +1985,218 @@ class GenericGoalResolver:
 
         return GenericGoalResolution("UNSUPPORTED", source="NO_PUBLIC_GROUNDING")
 
+    def _resolve_vnext_state_goal(
+        self,
+        goal: str,
+        definition: ScenarioDefinitionV2,
+        *,
+        interpreter: object,
+        frozen_evidence: _FrozenDynamicGoalEvidence,
+        provider_history_start: int,
+    ) -> GenericGoalResolution:
+        """Resolve a frozen STATE without entering the legacy grounding-round loop."""
+
+        if not callable(interpreter):
+            return GenericGoalResolution(
+                "UNSUPPORTED",
+                source="NO_STATE_INTERPRETER",
+                provider_observation=_vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="STATE",
+                    terminal_stage="STATE_INTERPRETATION",
+                    result="NO_STATE_INTERPRETER",
+                ),
+            )
+        if not frozen_evidence.merged_refs:
+            return GenericGoalResolution(
+                "UNSUPPORTED",
+                source="NO_PUBLIC_GROUNDING",
+                provider_observation=_vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="STATE",
+                    terminal_stage="STATE_INTERPRETATION",
+                    result="NO_PUBLIC_STATE_EVIDENCE",
+                ),
+            )
+
+        grounding = _dynamic_goal_grounding_from_refs(
+            frozen_evidence.merged_refs,
+            "VNEXT_FROZEN_EVIDENCE",
+            self.db,
+            self.scope,
+            definition,
+        )
+        grounding = _dynamic_goal_frozen_state_grounding(
+            goal,
+            self.db,
+            self.scope,
+            definition,
+            grounding,
+        )
+        if grounding.status != "RESOLVED":
+            return GenericGoalResolution(
+                "UNSUPPORTED",
+                source="NO_PUBLIC_GROUNDING",
+                provider_observation=_vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="STATE",
+                    terminal_stage="STATE_INTERPRETATION",
+                    result="NO_PUBLIC_STATE_EVIDENCE",
+                ),
+            )
+
+        projection = _dynamic_goal_projection(
+            db=self.db,
+            scope=self.scope,
+            definition=definition,
+            grounding=grounding,
+        )
+        ontology = _dynamic_goal_ontology(
+            self.db,
+            self.scope,
+            definition,
+            grounding=grounding,
+            projection=projection,
+        )
+        world = ontology.get("world")
+        if isinstance(world, dict):
+            # STATE interpretation never receives an Action/Actor catalog.
+            world["actions"] = []
+            world["actors"] = []
+        goal_language = ontology.get("goal_language")
+        if isinstance(goal_language, dict):
+            goal_language["requirement_kinds"] = [
+                item
+                for item in goal_language.get("requirement_kinds", [])
+                if item in {"FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"}
+            ]
+
+        recovery_feedback: tuple[DynamicGoalRecoveryFeedback, ...] = ()
+        for recovery_attempt in range(2):
+            request = DynamicGoalInterpretationRequest(
+                goal=goal,
+                ontology=ontology,
+                grounded_candidate_refs=grounding.candidate_refs,
+                grounded_entity_keys=grounding.entity_keys,
+                frozen_family="STATE",
+                recovery_attempt=recovery_attempt,
+                recovery_feedback=recovery_feedback,
+            )
+            raw: object | None = None
+            try:
+                raw = interpreter(request)
+                interpretation = DynamicGoalInterpretation.model_validate(raw)
+            except GenericProviderError as exc:
+                if recovery_attempt == 0 and exc.code in {
+                    "MODEL_PROVIDER_RESPONSE_INVALID",
+                    "PROVIDER_SCHEMA_INVALID",
+                }:
+                    recovery_feedback = exc.recovery_feedback
+                    continue
+                raise
+            except (ValidationError, TypeError, ValueError) as exc:
+                if recovery_attempt == 0:
+                    continue
+                raise GenericProviderError(
+                    "PROVIDER_SCHEMA_INVALID",
+                    "The model provider returned invalid frozen STATE interpretation",
+                    validation_diagnostics=(
+                        provider_validation_diagnostics(exc)
+                        if isinstance(exc, ValidationError)
+                        else ()
+                    ),
+                ) from exc
+
+            if interpretation.status == "NEEDS_CLARIFICATION":
+                return GenericGoalResolution(
+                    "NEEDS_CLARIFICATION",
+                    clarification_prompt=(
+                        interpretation.clarification_prompt
+                        or definition.goal_resolution.clarification_prompt
+                    ),
+                    source="STATE_INTERPRETATION_AMBIGUOUS",
+                    provider_observation=_vnext_goal_observation(
+                        frozen_evidence,
+                        frozen_family="STATE",
+                        terminal_stage="STATE_INTERPRETATION",
+                        result="NEEDS_CLARIFICATION",
+                        attempt=recovery_attempt,
+                    ),
+                )
+            if interpretation.status == "UNSUPPORTED":
+                return GenericGoalResolution(
+                    "UNSUPPORTED",
+                    source="STATE_INTERPRETATION_UNSUPPORTED",
+                    provider_observation=_vnext_goal_observation(
+                        frozen_evidence,
+                        frozen_family="STATE",
+                        terminal_stage="STATE_INTERPRETATION",
+                        result="UNSUPPORTED",
+                        attempt=recovery_attempt,
+                    ),
+                )
+
+            candidate_set = AdHocGoalCandidateSetV2(requirements=interpretation.requirements)
+            try:
+                if any(
+                    isinstance(item, AdHocActionCompletedRequirementCandidateV1)
+                    for item in candidate_set.requirements
+                ):
+                    raise FormalGoalError(
+                        "FROZEN_FAMILY_CONFLICT",
+                        "Frozen STATE interpretation cannot produce ACTION_COMPLETED",
+                    )
+                canonical = canonicalize_ad_hoc_dynamic_candidates_v2(
+                    definition,
+                    candidate_set,
+                )
+                _validate_dynamic_goal_publicity(
+                    self.db,
+                    self.scope,
+                    definition,
+                    canonical,
+                    projection=projection,
+                )
+            except FormalGoalError as exc:
+                if recovery_attempt == 0:
+                    continue
+                return GenericGoalResolution(
+                    "UNSUPPORTED",
+                    source=exc.code,
+                    provider_observation=_vnext_goal_observation(
+                        frozen_evidence,
+                        frozen_family="STATE",
+                        terminal_stage="STATE_INTERPRETATION",
+                        result="BACKEND_VALIDATION_REJECTED",
+                        attempt=recovery_attempt,
+                        rejection_code=exc.code,
+                    ),
+                )
+
+            observation = _vnext_goal_observation(
+                frozen_evidence,
+                frozen_family="STATE",
+                terminal_stage="FORMAL_GOAL",
+                result="ACCEPTED",
+                attempt=recovery_attempt,
+                intermediate_stages=(
+                    {"stage": "STATE_INTERPRETATION", "result": "RESOLVED"},
+                    {"stage": "CONTRACT_VALIDATION", "result": "ACCEPTED"},
+                ),
+            )
+            provider = self.provider
+            observation["provider_calls"] = list(provider_call_history_metadata(provider))[
+                provider_history_start:
+            ]
+            return GenericGoalResolution(
+                "RESOLVED",
+                dynamic_requirements=canonical.requirements,
+                source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+                provider_observation=observation,
+            )
+
+        raise AssertionError("bounded STATE interpretation recovery exhausted unexpectedly")
+
     def _resolve_contract_driven_operation(
         self,
         goal: str,
@@ -1958,11 +2206,20 @@ class GenericGoalResolver:
         operation_grounder: Callable[[DynamicGoalOperationGroundingRequest], object],
         frozen_action_key: str | None = None,
         initial_grounding: _DynamicGoalGrounding | None = None,
+        frozen_evidence: _FrozenDynamicGoalEvidence | None = None,
     ) -> GenericGoalResolution:
         """Resolve every Action through the same frozen, contract-owned pipeline."""
 
-        deterministic = initial_grounding or _deterministic_dynamic_goal_grounding(
-            goal, self.db, self.scope, definition
+        deterministic = initial_grounding or (
+            _dynamic_goal_grounding_from_refs(
+                frozen_evidence.merged_refs,
+                "VNEXT_FROZEN_EVIDENCE",
+                self.db,
+                self.scope,
+                definition,
+            )
+            if frozen_evidence is not None and frozen_evidence.merged_refs
+            else _deterministic_dynamic_goal_grounding(goal, self.db, self.scope, definition)
         )
         if deterministic.status == "NEEDS_CLARIFICATION":
             return GenericGoalResolution(
@@ -1977,14 +2234,17 @@ class GenericGoalResolver:
                     "stage": "DETERMINISTIC_PUBLIC_REFERENCE",
                     "status": "NEEDS_CLARIFICATION",
                     "candidate_refs": [
-                        item.model_dump(mode="json")
-                        for item in deterministic.candidate_refs
+                        item.model_dump(mode="json") for item in deterministic.candidate_refs
                     ],
                     "rejection_code": "PUBLIC_REFERENCE_AMBIGUOUS",
                 },
             )
         deterministic_refs = (
-            deterministic.candidate_refs if deterministic.status == "RESOLVED" else ()
+            frozen_evidence.deterministic_exact_refs
+            if frozen_evidence is not None
+            else deterministic.candidate_refs
+            if deterministic.status == "RESOLVED"
+            else ()
         )
         public_catalog = _dynamic_goal_entity_catalog(self.db, self.scope, definition)
         raw_references = public_catalog.get("references", ())
@@ -2082,6 +2342,19 @@ class GenericGoalResolver:
                 public_references=operation_references,
                 public_topology=operation_topology,
                 deterministic_candidate_refs=deterministic_refs,
+                deterministic_ambiguous_refs=(
+                    frozen_evidence.deterministic_ambiguous_refs
+                    if frozen_evidence is not None
+                    else ()
+                ),
+                semantic_candidate_refs=(
+                    frozen_evidence.semantic_refs if frozen_evidence is not None else ()
+                ),
+                explicit_role_evidence=(
+                    frozen_evidence.explicit_role_evidence or {}
+                    if frozen_evidence is not None
+                    else {}
+                ),
                 recovery_attempt=recovery_attempt,
                 recovery_feedback=recovery_feedback,
             )
@@ -2125,6 +2398,31 @@ class GenericGoalResolver:
                     if grounded.status == "NEEDS_CLARIFICATION"
                     else "GOAL_UNREPRESENTABLE"
                 )
+                observation = (
+                    _vnext_goal_observation(
+                        frozen_evidence,
+                        frozen_family="OPERATION",
+                        terminal_stage="OPERATION_GROUNDING",
+                        result=code,
+                        attempt=recovery_attempt,
+                        rejection_code=code,
+                        intermediate_stages=(
+                            {
+                                "stage": "ACTION_ROUTING",
+                                "action_key": action.key,
+                                "result": "MATCHED",
+                            },
+                        ),
+                    )
+                    if frozen_evidence is not None
+                    else {
+                        "stage": "DYNAMIC_GOAL_OPERATION_GROUNDING",
+                        "frozen_family": "OPERATION",
+                        "action_key": action.key,
+                        "rejection_code": code,
+                        "recovery_used": bool(recovery_attempt),
+                    }
+                )
                 return GenericGoalResolution(
                     "NEEDS_CLARIFICATION"
                     if grounded.status == "NEEDS_CLARIFICATION"
@@ -2134,17 +2432,15 @@ class GenericGoalResolver:
                         or definition.goal_resolution.clarification_prompt
                     ),
                     source=code,
-                    provider_observation={
-                        "stage": "DYNAMIC_GOAL_OPERATION_GROUNDING",
-                        "frozen_family": "OPERATION",
-                        "action_key": action.key,
-                        "rejection_code": code,
-                        "recovery_used": bool(recovery_attempt),
-                    },
+                    provider_observation=observation,
                 )
             try:
                 merged_refs = _merge_dynamic_goal_candidate_refs(
-                    deterministic_refs,
+                    (
+                        frozen_evidence.merged_refs
+                        if frozen_evidence is not None
+                        else deterministic_refs
+                    ),
                     grounded.supplementary_candidate_refs,
                 )
                 merged_refs = _merge_dynamic_goal_candidate_refs(
@@ -2165,6 +2461,18 @@ class GenericGoalResolver:
                     merged_refs,
                     deterministic_refs,
                     operation_topology,
+                )
+                _validate_explicit_actor_action_compatibility(
+                    definition,
+                    action,
+                    operation,
+                )
+                _validate_explicit_operation_relation(
+                    self.db,
+                    self.scope,
+                    definition,
+                    action_contract,
+                    operation,
                 )
                 if operation.target_key is not None:
                     target_contract = cast(dict[str, object], action_contract["target"])
@@ -2230,6 +2538,34 @@ class GenericGoalResolver:
                     }
                     else "UNSUPPORTED"
                 )
+                observation = (
+                    _vnext_goal_observation(
+                        frozen_evidence,
+                        frozen_family="OPERATION",
+                        terminal_stage="CONTRACT_VALIDATION",
+                        result="REJECTED",
+                        attempt=recovery_attempt,
+                        rejection_code=exc.code,
+                        intermediate_stages=(
+                            {
+                                "stage": "ACTION_ROUTING",
+                                "action_key": action.key,
+                                "result": "MATCHED",
+                            },
+                            {"stage": "OPERATION_GROUNDING", "result": "RESOLVED"},
+                        ),
+                    )
+                    if frozen_evidence is not None
+                    else {
+                        "stage": "DYNAMIC_GOAL_OPERATION_COMPOSITION",
+                        "frozen_family": "OPERATION",
+                        "action_key": action.key,
+                        "rejection_code": exc.code,
+                        "diagnostics": dict(exc.details),
+                        "recovery_used": bool(recovery_attempt),
+                    }
+                )
+                observation["diagnostics"] = dict(exc.details)
                 return GenericGoalResolution(
                     status,
                     clarification_prompt=(
@@ -2238,20 +2574,27 @@ class GenericGoalResolver:
                         else None
                     ),
                     source=exc.code,
-                    provider_observation={
-                        "stage": "DYNAMIC_GOAL_OPERATION_COMPOSITION",
-                        "frozen_family": "OPERATION",
-                        "action_key": action.key,
-                        "rejection_code": exc.code,
-                        "diagnostics": dict(exc.details),
-                        "recovery_used": bool(recovery_attempt),
-                    },
+                    provider_observation=observation,
                 )
-            return GenericGoalResolution(
-                "RESOLVED",
-                dynamic_requirements=canonical.requirements,
-                source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
-                provider_observation={
+            observation = (
+                _vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="OPERATION",
+                    terminal_stage="FORMAL_GOAL",
+                    result="ACCEPTED",
+                    attempt=recovery_attempt,
+                    intermediate_stages=(
+                        {
+                            "stage": "ACTION_ROUTING",
+                            "action_key": action.key,
+                            "result": "MATCHED",
+                        },
+                        {"stage": "OPERATION_GROUNDING", "result": "RESOLVED"},
+                        {"stage": "CONTRACT_VALIDATION", "result": "ACCEPTED"},
+                    ),
+                )
+                if frozen_evidence is not None
+                else {
                     "stage": "DYNAMIC_GOAL_OPERATION_COMPOSITION",
                     "frozen_family": "OPERATION",
                     "action_key": action.key,
@@ -2259,7 +2602,13 @@ class GenericGoalResolver:
                     "validation": "ACCEPTED",
                     "recovery_used": bool(recovery_attempt),
                     "stage_2_skipped": True,
-                },
+                }
+            )
+            return GenericGoalResolution(
+                "RESOLVED",
+                dynamic_requirements=canonical.requirements,
+                source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+                provider_observation=observation,
             )
         assert last_error is not None
         raise last_error
@@ -7342,9 +7691,7 @@ def _dynamic_goal_entity_catalog(
             **(
                 {"public_references": list(terms)}
                 if (
-                    terms := reference_index.terms_for(
-                        PublicReferenceTypeV2.RESOURCE, resource.key
-                    )
+                    terms := reference_index.terms_for(PublicReferenceTypeV2.RESOURCE, resource.key)
                 )
                 else {}
             ),
@@ -7387,11 +7734,7 @@ def _dynamic_goal_entity_catalog(
             "operation_binding_contract": action_operation_binding_contract(action),
             **(
                 {"public_references": list(terms)}
-                if (
-                    terms := reference_index.terms_for(
-                        PublicReferenceTypeV2.ACTION, action.key
-                    )
-                )
+                if (terms := reference_index.terms_for(PublicReferenceTypeV2.ACTION, action.key))
                 else {}
             ),
         }
@@ -7406,11 +7749,7 @@ def _dynamic_goal_entity_catalog(
             "description": actor.persona,
             **(
                 {"public_references": list(terms)}
-                if (
-                    terms := reference_index.terms_for(
-                        PublicReferenceTypeV2.ACTOR, actor.key
-                    )
-                )
+                if (terms := reference_index.terms_for(PublicReferenceTypeV2.ACTOR, actor.key))
                 else {}
             ),
         }
@@ -7520,18 +7859,10 @@ def _dynamic_goal_public_reference_lookup(
             for item in definition.derived_states
             if item.goal_addressable
         ),
-        *(
-            PublicReferenceIdentity(PublicReferenceTypeV2.ACTION, key)
-            for key in public_action_keys
-        ),
-        *(
-            PublicReferenceIdentity(PublicReferenceTypeV2.ACTOR, key)
-            for key in public_actor_keys
-        ),
+        *(PublicReferenceIdentity(PublicReferenceTypeV2.ACTION, key) for key in public_action_keys),
+        *(PublicReferenceIdentity(PublicReferenceTypeV2.ACTOR, key) for key in public_actor_keys),
     }
-    return PublicReferenceIndexBuilder.build(definition).lookup(
-        goal, allowed_identities=allowed
-    )
+    return PublicReferenceIndexBuilder.build(definition).lookup(goal, allowed_identities=allowed)
 
 
 def _merge_dynamic_goal_candidate_refs(
@@ -7609,9 +7940,7 @@ def _dynamic_goal_routing_action_catalog(
                 **(
                     {"public_references": list(terms)}
                     if (
-                        terms := reference_index.terms_for(
-                            PublicReferenceTypeV2.ACTION, action.key
-                        )
+                        terms := reference_index.terms_for(PublicReferenceTypeV2.ACTION, action.key)
                     )
                     else {}
                 ),
@@ -7632,9 +7961,7 @@ def _dynamic_goal_routing_action_catalog(
                     }
                     for item in cast(list[dict[str, object]], contract["parameters"])
                 ],
-                "candidate_refs": [
-                    item.model_dump(mode="json") for item in compatible_refs
-                ],
+                "candidate_refs": [item.model_dump(mode="json") for item in compatible_refs],
             }
         )
     return tuple(result)
@@ -7767,9 +8094,7 @@ def _dynamic_goal_action_topology_context(
             )
 
     pair_keys = {
-        str(item["entity_key"])
-        for item in pairs
-        if isinstance(item.get("entity_key"), str)
+        str(item["entity_key"]) for item in pairs if isinstance(item.get("entity_key"), str)
     }
     raw_relations = raw_topology.get("relations")
     relations = (
@@ -7808,14 +8133,10 @@ def _dynamic_goal_action_compatible_refs(
     bindings = cast(list[dict[str, object]], contract["bindings"])
     parameters = cast(list[dict[str, object]], contract["parameters"])
     nodes_by_key = {item.key: item for item in definition.world.nodes}
-    target_node_types = {
-        str(item) for item in cast(list[object], target.get("node_type_keys", []))
-    }
+    target_node_types = {str(item) for item in cast(list[object], target.get("node_type_keys", []))}
     target_ref_type = _slot_expected_reference_type(str(target["expected_type"]))
 
-    def slot_accepts(
-        slot: dict[str, object], reference: DynamicGoalCandidateReference
-    ) -> bool:
+    def slot_accepts(slot: dict[str, object], reference: DynamicGoalCandidateReference) -> bool:
         expected_type = str(slot["expected_type"])
         if reference.ref_type != _slot_expected_reference_type(expected_type):
             return False
@@ -7836,9 +8157,7 @@ def _dynamic_goal_action_compatible_refs(
         if reference.ref_type not in {"NODE", "REGION"}:
             return True
         node = nodes_by_key.get(reference.key)
-        if node is None or (
-            target_node_types and node.node_type_key not in target_node_types
-        ):
+        if node is None or (target_node_types and node.node_type_key not in target_node_types):
             return False
         return (
             target.get("required_interaction_key") is None
@@ -7866,9 +8185,7 @@ def _dynamic_goal_action_compatible_refs(
         and not (topology_target and item.ref_type == "REGION")
     )
 
-    def role_accepts(
-        role: dict[str, object], reference: DynamicGoalCandidateReference
-    ) -> bool:
+    def role_accepts(role: dict[str, object], reference: DynamicGoalCandidateReference) -> bool:
         return (
             target_accepts(reference)
             if role.get("logical_role") == "target"
@@ -7955,9 +8272,7 @@ def _dynamic_goal_routing_state_catalog(
     )
     normalized_goal = _normalize(goal)
     refs_by_identity = {(item.ref_type, item.key): item for item in candidate_refs}
-    referenced_nodes = {
-        item.key for item in candidate_refs if item.ref_type in {"NODE", "REGION"}
-    }
+    referenced_nodes = {item.key for item in candidate_refs if item.ref_type in {"NODE", "REGION"}}
     entries: list[dict[str, object]] = []
     for node in sorted(definition.world.nodes, key=lambda item: item.key):
         if node.key not in public_nodes:
@@ -7974,9 +8289,7 @@ def _dynamic_goal_routing_state_catalog(
                 *(_normalize(item) for item in fact.goal_aliases),
                 *(_normalize(item) for item in fact.goal_examples),
             )
-            authored_match = any(
-                _contains_public_term(normalized_goal, term) for term in terms
-            )
+            authored_match = any(_contains_public_term(normalized_goal, term) for term in terms)
             if node.key not in referenced_nodes and not authored_match:
                 continue
             entries.append(
@@ -8316,9 +8629,8 @@ def _reference_matches_operation_type(
         if expected_type == "REGION":
             region_type = definition.metadata.locality.region_node_type_key
             return region_type is not None and node.node_type_key == region_type
-        return (
-            not slot_contract.get("node_type_keys")
-            or node.node_type_key in cast(list[object], slot_contract["node_type_keys"])
+        return not slot_contract.get("node_type_keys") or node.node_type_key in cast(
+            list[object], slot_contract["node_type_keys"]
         )
     return True
 
@@ -8330,10 +8642,7 @@ def _operation_target_from_public_topology(
 ) -> str | None:
     """Compose a node target from grounded regions and public topology metadata."""
 
-    if (
-        target_contract.get("expected_type") != "NODE"
-        or not target_contract.get("node_type_keys")
-    ):
+    if target_contract.get("expected_type") != "NODE" or not target_contract.get("node_type_keys"):
         return None
     region_keys = {item.key for item in candidate_refs if item.ref_type == "REGION"}
     pairs = public_topology.get("transport_endpoint_pairs", ())
@@ -8529,6 +8838,118 @@ def _compose_contract_driven_operation(
         binding_constraints=binding_constraints,
         parameter_constraints=parameter_constraints or None,
     )
+
+
+def _validate_explicit_actor_action_compatibility(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    operation: DynamicGoalGroundedOperation,
+) -> None:
+    """Reject only a player-selected Actor with a deterministic static conflict."""
+
+    if operation.actor_key is None:
+        return
+    actor = next(
+        (item for item in definition.actors.actor_profiles if item.key == operation.actor_key),
+        None,
+    )
+    if actor is None:
+        raise FormalGoalError(
+            "EXPLICIT_ACTOR_ACTION_CONFLICT",
+            "The explicit Actor is not part of the exact ScenarioVersion",
+            details={"actor_key": operation.actor_key, "action_key": action.key},
+        )
+    role = next((item for item in definition.actors.roles if item.key == actor.role_key), None)
+    actor_capabilities = {item.value for item in role.capabilities} if role is not None else set()
+    required_capabilities = {item.value for item in action.allowed_actor_capabilities}
+    conflicts: list[str] = []
+    if action.key not in actor.allowed_action_keys:
+        conflicts.append("ACTION_NOT_ALLOWED")
+    if (
+        action.required_actor_role_key is not None
+        and actor.role_key != action.required_actor_role_key
+    ):
+        conflicts.append("ROLE_MISMATCH")
+    if not required_capabilities.issubset(actor_capabilities):
+        conflicts.append("CAPABILITY_MISMATCH")
+    if conflicts:
+        raise FormalGoalError(
+            "EXPLICIT_ACTOR_ACTION_CONFLICT",
+            "The explicit Actor is statically incompatible with the frozen Action",
+            details={
+                "actor_key": actor.key,
+                "action_key": action.key,
+                "conflicts": conflicts,
+            },
+        )
+
+
+def _validate_explicit_operation_relation(
+    db: Session | None,
+    scope: RuntimeScope | None,
+    definition: ScenarioDefinitionV2,
+    action_contract: dict[str, object],
+    operation: DynamicGoalGroundedOperation,
+) -> None:
+    """Enforce an Action-declared public source-to-target relation generically."""
+
+    raw_semantics = action_contract.get("relation_semantics")
+    if not isinstance(raw_semantics, dict) or operation.target_key is None:
+        return
+    source_channel = raw_semantics.get("source_storage_channel")
+    source_slot_key = raw_semantics.get("source_slot_key")
+    relation_type_key = raw_semantics.get("source_relation_type_key")
+    direction = raw_semantics.get("direction")
+    if not all(
+        isinstance(item, str)
+        for item in (source_channel, source_slot_key, relation_type_key, direction)
+    ):
+        raise FormalGoalError(
+            "CONTRACT_SCHEMA_MISMATCH",
+            "Action relation semantics are incomplete",
+        )
+    source_key: object | None = None
+    if source_channel == "binding":
+        source_key = next(
+            (item.value for item in operation.binding_constraints if item.role == source_slot_key),
+            None,
+        )
+    elif source_channel == "parameter" and operation.parameter_constraints is not None:
+        source_key = operation.parameter_constraints.get(str(source_slot_key))
+    else:
+        raise FormalGoalError(
+            "CONTRACT_SCHEMA_MISMATCH",
+            "Action relation semantics name an unsupported storage channel",
+        )
+    # A missing source/target remains a Planner choice.  Only two explicit
+    # canonical identities create a Goal-time relation assertion.
+    if not isinstance(source_key, str):
+        return
+
+    public_nodes, _facts, _regions = _dynamic_goal_public_keys(db, scope, definition)
+    relations = _dynamic_goal_public_relations(db, scope, definition, public_nodes)
+    if direction == "SOURCE_TO_TARGET":
+        matches = any(
+            item.get("source_node_key") == source_key
+            and item.get("target_node_key") == operation.target_key
+            and item.get("relation_type_key") == relation_type_key
+            for item in relations
+        )
+    else:
+        raise FormalGoalError(
+            "CONTRACT_SCHEMA_MISMATCH",
+            "Action relation semantics use an unsupported direction",
+        )
+    if not matches:
+        raise FormalGoalError(
+            "EXPLICIT_RELATION_CONFLICT",
+            "The explicit source and target violate the frozen Action relation contract",
+            details={
+                "relation_type_key": relation_type_key,
+                "source_key": source_key,
+                "target_key": operation.target_key,
+            },
+        )
 
 
 def _dynamic_goal_intent_has_unresolved_slots(intent: DynamicGoalIntentDraft) -> bool:
@@ -8910,9 +9331,7 @@ def _deterministic_dynamic_goal_grounding(
         public_actor_keys,
     )
     ambiguous_identities = {
-        identity
-        for match in lookup.ambiguous_matches
-        for identity in match.identities
+        identity for match in lookup.ambiguous_matches for identity in match.identities
     }
     if ambiguous_identities:
         ambiguous_refs = tuple(
@@ -9055,6 +9474,205 @@ def _llm_all_dynamic_goal_grounding(
         scope,
         definition,
     )
+
+
+def _vnext_explicit_role_evidence(
+    intent: DynamicGoalIntentDraft | None,
+) -> dict[str, object] | None:
+    """Retain explicit WHAT evidence while discarding Stage-1 family/Action guesses."""
+
+    if intent is None:
+        return None
+    return {
+        "actor": intent.actor.model_dump(mode="json"),
+        "source": intent.source.model_dump(mode="json"),
+        "target": intent.target.model_dump(mode="json"),
+        "resource": intent.resource.model_dump(mode="json"),
+        "amount": intent.amount.model_dump(mode="json"),
+    }
+
+
+def _vnext_role_candidate_refs(
+    intent: DynamicGoalIntentDraft | None,
+) -> tuple[DynamicGoalCandidateReference, ...]:
+    if intent is None:
+        return ()
+    refs = []
+    for slot in (intent.actor, intent.source, intent.target, intent.resource):
+        if slot.status == "GROUNDED" and slot.ref_type is not None and slot.key is not None:
+            refs.append(
+                DynamicGoalCandidateReference(
+                    ref_type=slot.ref_type,
+                    key=slot.key,
+                    provenance="LLM_SUPPLEMENTED",
+                )
+            )
+    unique = {(item.ref_type, item.key): item for item in refs}
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _vnext_frozen_dynamic_goal_evidence(
+    goal: str,
+    db: Session | None,
+    scope: RuntimeScope | None,
+    definition: ScenarioDefinitionV2,
+    provider: object,
+    deterministic: _DynamicGoalGrounding,
+) -> _FrozenDynamicGoalEvidence:
+    """Run evidence-only semantic grounding after deterministic public lookup."""
+
+    exact_refs = deterministic.candidate_refs if deterministic.status == "RESOLVED" else ()
+    ambiguous_refs = (
+        deterministic.candidate_refs if deterministic.status == "NEEDS_CLARIFICATION" else ()
+    )
+    grounder = getattr(provider, "ground_dynamic_goal_entities", None)
+    if not callable(grounder):
+        merged = _merge_dynamic_goal_candidate_refs(exact_refs, ambiguous_refs)
+        return _FrozenDynamicGoalEvidence(
+            deterministic_exact_refs=exact_refs,
+            deterministic_ambiguous_refs=ambiguous_refs,
+            merged_refs=merged,
+        )
+
+    public_catalog = _dynamic_goal_entity_catalog(db, scope, definition)
+    recovery_feedback: tuple[dict[str, object], ...] = ()
+    last_error: GenericProviderError | None = None
+    for recovery_attempt in range(2):
+        request = DynamicGoalEntityGroundingRequest(
+            goal=goal,
+            public_catalog=public_catalog,
+            deterministic_candidate_refs=exact_refs,
+            deterministic_ambiguous_refs=ambiguous_refs,
+            recovery_attempt=recovery_attempt,
+            recovery_feedback=recovery_feedback,
+        )
+        raw: object | None = None
+        try:
+            raw = grounder(request)
+            grounded = DynamicGoalEntityGrounding.model_validate(raw)
+
+            semantic_refs: tuple[DynamicGoalCandidateReference, ...] = ()
+            role_evidence: dict[str, object] | None = None
+            if grounded.status == "RESOLVED":
+                deterministic_identities = {
+                    (item.ref_type, item.key) for item in (*exact_refs, *ambiguous_refs)
+                }
+                raw_semantic_refs = (
+                    *(item for item in grounded.candidate_refs if item.ref_type != "ACTION"),
+                    *_vnext_role_candidate_refs(grounded.intent),
+                )
+                semantic_refs = tuple(
+                    DynamicGoalCandidateReference(
+                        ref_type=item.ref_type,
+                        key=item.key,
+                        provenance="LLM_SUPPLEMENTED",
+                    )
+                    for item in raw_semantic_refs
+                    if (item.ref_type, item.key) not in deterministic_identities
+                )
+                semantic_refs = _merge_dynamic_goal_candidate_refs((), semantic_refs)
+                if semantic_refs:
+                    semantic_refs = _validate_dynamic_goal_candidate_refs(
+                        definition,
+                        db,
+                        scope,
+                        semantic_refs,
+                    )
+                role_evidence = _vnext_explicit_role_evidence(grounded.intent)
+        except GenericProviderError as exc:
+            last_error = exc
+            if recovery_attempt == 0 and exc.code in {
+                "MODEL_PROVIDER_RESPONSE_INVALID",
+                "PROVIDER_SCHEMA_INVALID",
+            }:
+                recovery_feedback = exc.grounding_recovery_feedback or tuple(
+                    exc.validation_diagnostics
+                )
+                continue
+            raise
+        except ValidationError as exc:
+            diagnostics = provider_validation_diagnostics(exc)
+            last_error = GenericProviderError(
+                "MODEL_PROVIDER_RESPONSE_INVALID",
+                "The model provider returned invalid VNext semantic evidence",
+                validation_diagnostics=diagnostics,
+            )
+            if recovery_attempt == 0:
+                recovery_feedback = tuple(diagnostics)
+                continue
+            raise last_error from exc
+        except FormalGoalError as exc:
+            last_error = GenericProviderError(
+                "PROVIDER_SCHEMA_INVALID",
+                "Semantic evidence failed exact-Version validation",
+                validation_diagnostics=({"code": exc.code, **dict(exc.details)},),
+            )
+            if recovery_attempt == 0:
+                recovery_feedback = last_error.validation_diagnostics
+                continue
+            raise last_error from exc
+
+        merged = _merge_dynamic_goal_candidate_refs(
+            _merge_dynamic_goal_candidate_refs(exact_refs, ambiguous_refs),
+            semantic_refs,
+        )
+        return _FrozenDynamicGoalEvidence(
+            deterministic_exact_refs=exact_refs,
+            deterministic_ambiguous_refs=ambiguous_refs,
+            semantic_refs=semantic_refs,
+            merged_refs=merged,
+            explicit_role_evidence=role_evidence,
+            semantic_status=grounded.status,
+        )
+    assert last_error is not None
+    raise last_error
+
+
+def _vnext_goal_observation(
+    evidence: _FrozenDynamicGoalEvidence,
+    *,
+    frozen_family: Literal["STATE", "OPERATION", "AMBIGUOUS"],
+    terminal_stage: str,
+    result: str,
+    attempt: int = 0,
+    rejection_code: str | None = None,
+    intermediate_stages: tuple[dict[str, object], ...] = (),
+) -> dict[str, object]:
+    stages: list[dict[str, object]] = [
+        {
+            "stage": "DETERMINISTIC_GROUNDING",
+            "provider_calls": 0,
+            "exact_refs": [
+                item.model_dump(mode="json") for item in evidence.deterministic_exact_refs
+            ],
+            "ambiguous_refs": [
+                item.model_dump(mode="json") for item in evidence.deterministic_ambiguous_refs
+            ],
+        },
+        {
+            "stage": "SEMANTIC_GROUNDING",
+            "status": evidence.semantic_status,
+            "semantic_refs": [item.model_dump(mode="json") for item in evidence.semantic_refs],
+            "explicit_role_evidence": evidence.explicit_role_evidence or {},
+        },
+        {
+            "stage": "EVIDENCE_FREEZE",
+            "merged_refs": [item.model_dump(mode="json") for item in evidence.merged_refs],
+        },
+        {"stage": "FAMILY_ROUTING", "frozen_family": frozen_family},
+        *intermediate_stages,
+        {"stage": terminal_stage, "attempt": attempt, "result": result},
+    ]
+    observation: dict[str, object] = {
+        "pipeline": "GOAL_RESOLVER_VNEXT",
+        "stage": terminal_stage,
+        "frozen_family": frozen_family,
+        "result": result,
+        "stages": stages,
+    }
+    if rejection_code is not None:
+        observation["rejection_code"] = rejection_code
+    return observation
 
 
 def _validate_dynamic_entity_grounding_keys(
