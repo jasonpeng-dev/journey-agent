@@ -813,7 +813,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         '{"status":"NEEDS_CLARIFICATION","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}',
     ],
 )
-def test_grounding_wire_invalid_variants_get_one_bounded_structural_recovery(
+def test_grounding_wire_invalid_variants_return_recovery_evidence_to_stage_owner(
     invalid_content: str,
 ) -> None:
     settings = _settings("openai_compatible")
@@ -834,22 +834,23 @@ def test_grounding_wire_invalid_variants_get_one_bounded_structural_recovery(
         )
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
-    result = provider.ground_dynamic_goal_entities(
-        DynamicGoalEntityGroundingRequest(
-            goal="repair the public road",
-            public_catalog={
-                "references": [{"ref_type": "NODE", "key": "public_node"}],
-            },
+    with pytest.raises(GenericProviderError) as caught:
+        provider.ground_dynamic_goal_entities(
+            DynamicGoalEntityGroundingRequest(
+                goal="repair the public road",
+                public_catalog={
+                    "references": [{"ref_type": "NODE", "key": "public_node"}],
+                },
+            )
         )
-    )
 
-    assert result.status == "RESOLVED"
-    assert [item.key for item in result.candidate_refs] == ["public_node"]
-    assert len(calls) == 2
-    recovery_payload = json.loads(calls[1]["messages"][1]["content"])
-    assert recovery_payload["recovery_attempt"] == 1
-    assert recovery_payload["recovery_feedback"]
-    assert "one bounded structural recovery attempt" in calls[1]["messages"][0]["content"]
+    assert caught.value.code in {
+        "MODEL_PROVIDER_RESPONSE_INVALID",
+        "PROVIDER_SCHEMA_INVALID",
+    }
+    assert len(calls) == 1
+    if invalid_content != "not-json":
+        assert caught.value.grounding_recovery_feedback
 
 
 def test_grounding_wire_valid_unresolved_variant_is_not_recovered() -> None:
@@ -888,7 +889,7 @@ def test_grounding_wire_valid_unresolved_variant_is_not_recovered() -> None:
     assert len(calls) == 1
 
 
-def test_grounding_amount_object_recovery_requires_native_scalar_and_preserves_refs() -> None:
+def test_grounding_amount_object_returns_native_scalar_recovery_contract() -> None:
     settings = _settings("openai_compatible")
     calls: list[dict[str, object]] = []
     candidate_refs = [
@@ -945,18 +946,16 @@ def test_grounding_amount_object_recovery_requires_native_scalar_and_preserves_r
         )
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
-    result = provider.ground_dynamic_goal_entities(
-        DynamicGoalEntityGroundingRequest(
-            goal="move 30 fuel from region a to region b",
-            public_catalog={"references": candidate_refs},
+    with pytest.raises(GenericProviderError) as caught:
+        provider.ground_dynamic_goal_entities(
+            DynamicGoalEntityGroundingRequest(
+                goal="move 30 fuel from region a to region b",
+                public_catalog={"references": candidate_refs},
+            )
         )
-    )
 
-    assert result.intent is not None
-    assert result.intent.amount.value == 30
-    assert len(calls) == 2
-    recovery_payload = json.loads(calls[1]["messages"][1]["content"])
-    feedback = recovery_payload["recovery_feedback"][0]
+    assert len(calls) == 1
+    feedback = caught.value.grounding_recovery_feedback[0]
     assert feedback["fix_only"] == ["intent.amount"]
     assert feedback["expected_field_shape"] == {
         "path": "intent.amount",
@@ -975,13 +974,6 @@ def test_grounding_amount_object_recovery_requires_native_scalar_and_preserves_r
         "region_b",
         "emergency_fuel",
     }
-    recovery_prompt = calls[1]["messages"][0]["content"]
-    assert "change only that slot so value is a native JSON scalar" in recovery_prompt
-    assert '"value":30' in recovery_prompt
-    assert (
-        "never interpret fields from the rejected object as a canonical identity"
-        in recovery_prompt
-    )
 
 
 def test_grounding_recovery_feedback_preserves_only_public_canonical_identity() -> None:
@@ -1004,15 +996,17 @@ def test_grounding_recovery_feedback_preserves_only_public_canonical_identity() 
         )
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
-    provider.ground_dynamic_goal_entities(
-        DynamicGoalEntityGroundingRequest(
-            goal="repair the public road",
-            public_catalog={
-                "references": [{"ref_type": "NODE", "key": "public_node"}],
-            },
+    with pytest.raises(GenericProviderError) as caught:
+        provider.ground_dynamic_goal_entities(
+            DynamicGoalEntityGroundingRequest(
+                goal="repair the public road",
+                public_catalog={
+                    "references": [{"ref_type": "NODE", "key": "public_node"}],
+                },
+            )
         )
-    )
-    feedback = json.loads(calls[1]["messages"][1]["content"])["recovery_feedback"][0]
+    assert len(calls) == 1
+    feedback = caught.value.grounding_recovery_feedback[0]
     assert feedback["preserve"] == [
         {"path": "candidate_refs[0]", "ref_type": "NODE", "key": "public_node"}
     ]

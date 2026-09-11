@@ -156,6 +156,7 @@ class _StateRoutingHistoryProvider(_HistoryResolutionProvider):
     def ground_dynamic_goal_operation(self, _request: object) -> object:
         raise AssertionError("STATE routing must not enter Operation Grounding")
 
+
 class _ErrorResolutionProvider(_ResolutionProvider):
     def interpret_dynamic_goal(
         self, _request: DynamicGoalInterpretationRequest
@@ -398,12 +399,13 @@ def test_routing_recovery_attempt_is_persisted_and_marks_recovery_used(
     session.expire_all()
     attempt = _attempt(session, game_id)
     assert attempt.recovery_used is True
-    assert [
-        call["recovery_attempt"] for call in attempt.provider_metadata["provider_calls"]
-    ] == [0, 1]
+    assert [call["recovery_attempt"] for call in attempt.provider_metadata["provider_calls"]] == [
+        0,
+        1,
+    ]
 
 
-def test_state_recursive_observation_keeps_outer_routing_call(
+def test_state_vnext_observation_keeps_outer_routing_call(
     client: TestClient,
     session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -429,7 +431,7 @@ def test_state_recursive_observation_keeps_outer_routing_call(
     assert [call["call_type"] for call in calls] == [
         "DYNAMIC_GOAL_GROUNDING",
         "DYNAMIC_GOAL_FAMILY_ROUTING",
-        "DYNAMIC_GOAL_INTERPRETATION",
+        "DYNAMIC_GOAL",
     ]
 
 

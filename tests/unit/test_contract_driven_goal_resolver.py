@@ -32,7 +32,6 @@ from app.agent.provider import (
     GoalFamilyMatchRequest,
     OperationContractSlot,
 )
-from app.domain.formal_goal import FormalGoalError
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
     ActionOperationBindingSource,
@@ -141,7 +140,7 @@ class _RoutingProvider(_ContractProvider):
         self, request: DynamicGoalFamilyRoutingRequest
     ) -> DynamicGoalFamilyRouting:
         self.family_requests.append(request)
-        assert self.routing.family in {"STATE", "OPERATION"}
+        assert self.routing.family in {"STATE", "OPERATION", "AMBIGUOUS"}
         return DynamicGoalFamilyRouting(family=self.routing.family)
 
     def route_dynamic_goal_action(
@@ -218,17 +217,13 @@ class _StateRoutingProvider(_RoutingProvider):
         if requirement is None:
             return DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="central_telecom_hub"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="central_telecom_hub"),
                 )
             )
         if requirement.kind == "RESOURCE_AT_LEAST":
             return DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="REGION", key=requirement.region_key
-                    ),
+                    DynamicGoalCandidateReference(ref_type="REGION", key=requirement.region_key),
                     DynamicGoalCandidateReference(
                         ref_type="RESOURCE", key=requirement.resource_key
                     ),
@@ -356,23 +351,18 @@ def test_action_routing_semantic_entities_are_public_safe() -> None:
     assert all(forbidden.isdisjoint(item) for item in request.relevant_public_entities)
 
 
-def test_routing_action_projection_filters_incompatible_target_capability() -> None:
+def test_routing_action_catalog_keeps_all_public_actions_for_transport_target() -> None:
     request = _routing_request("修复中央河底隧道")
     action_keys = {item["key"] for item in request.action_catalog}
 
-    assert {"clear_transport", "inspect"} <= action_keys
-    assert "repair_communications" not in action_keys
-    assert "supply_power" not in action_keys
+    assert action_keys == {item.key for item in LINJIANG_V2_TEST.actions}
 
 
-def test_routing_action_projection_filters_facility_incompatible_actions() -> None:
+def test_routing_action_catalog_keeps_all_public_actions_for_facility_target() -> None:
     request = _routing_request("让中央通信枢纽恢复运行")
     action_keys = {item["key"] for item in request.action_catalog}
 
-    assert {"inspect", "repair_communications"} <= action_keys
-    assert "clear_transport" not in action_keys
-    assert "supply_power" not in action_keys
-    assert "generate_power" not in action_keys
+    assert action_keys == {item.key for item in LINJIANG_V2_TEST.actions}
 
 
 def test_canonical_invocation_contract_preserves_sp1_and_a1_slot_semantics() -> None:
@@ -381,7 +371,9 @@ def test_canonical_invocation_contract_preserves_sp1_and_a1_slot_semantics() -> 
     transport = _dynamic_goal_action_contract(actions["transport_resource"])
 
     supply_source = next(
-        item for item in supply["parameters"] if item["slot_key"] == "source_key"  # type: ignore[union-attr]
+        item
+        for item in supply["parameters"]
+        if item["slot_key"] == "source_key"  # type: ignore[union-attr]
     )
     assert supply_source == {
         "slot_key": "source_key",
@@ -407,7 +399,8 @@ def test_canonical_invocation_contract_preserves_sp1_and_a1_slot_semantics() -> 
     }
 
     transport_slots = {
-        item["slot_key"]: item for item in transport["slots"]  # type: ignore[union-attr]
+        item["slot_key"]: item
+        for item in transport["slots"]  # type: ignore[union-attr]
     }
     assert transport_slots["source_region"]["semantic_reference_type"] == "REGION"
     assert transport_slots["source_region"]["logical_role"] == "source"
@@ -424,9 +417,7 @@ def test_relation_source_requires_one_typed_source_slot() -> None:
     result = ScenarioDefinitionValidator().validate(payload)
 
     assert not result.passed
-    assert "SCENARIO_ACTION_RELATION_SOURCE_SLOT_INVALID" in {
-        item.code for item in result.issues
-    }
+    assert "SCENARIO_ACTION_RELATION_SOURCE_SLOT_INVALID" in {item.code for item in result.issues}
 
 
 def test_routing_action_projection_assigns_supply_source_and_target_roles() -> None:
@@ -547,8 +538,7 @@ def test_routing_derived_state_catalog_uses_goal_addressable_state() -> None:
     )
 
     assert any(
-        item["kind"] == "DERIVED_STATE"
-        and item["key"] == "north_basic_engineering_support"
+        item["kind"] == "DERIVED_STATE" and item["key"] == "north_basic_engineering_support"
         for item in catalog
     )
 
@@ -671,13 +661,9 @@ def test_true_state_ambiguity_clarifies_inside_frozen_state_branch() -> None:
 
 def test_routing_topology_reference_remains_non_exact_candidate_evidence() -> None:
     request = _routing_request("从南部滨水区运30个应急燃料到东南高地区")
-    transport = next(
-        item for item in request.action_catalog if item["key"] == "transport_resource"
-    )
 
     assert {
-        (item["ref_type"], item["key"], item["provenance"])
-        for item in transport["candidate_refs"]
+        (item.ref_type, item.key, item.provenance) for item in request.deterministic_candidate_refs
     } >= {
         ("NODE", "southeast_access_corridor", "TOPOLOGY_ENRICHED"),
     }
@@ -702,9 +688,10 @@ def test_action_routing_exposes_only_goal_relevant_topology_relationship() -> No
         "provenance": "TOPOLOGY_ENRICHED",
     }
     assert len(request.public_topology["relations"]) == 2
-    assert {
-        item["target_node_key"] for item in request.public_topology["relations"]
-    } == {"central_district", "north_industrial_district"}
+    assert {item["target_node_key"] for item in request.public_topology["relations"]} == {
+        "central_district",
+        "north_industrial_district",
+    }
 
 
 def test_action_routing_without_derived_pair_has_empty_topology_context() -> None:
@@ -713,20 +700,23 @@ def test_action_routing_without_derived_pair_has_empty_topology_context() -> Non
     assert request.public_topology == {"relations": [], "transport_endpoint_pairs": []}
 
 
-def test_routing_rejects_action_outside_projected_catalog() -> None:
+def test_full_action_catalog_still_rejects_lossy_operation_grounding() -> None:
     provider = _RoutingProvider(
         routing=DynamicGoalSemanticRouting(
             family="OPERATION",
             action_match="MATCHED",
             action_key="clear_transport",
-        )
+        ),
+        operation_results=[_clear_transport_operation("southeast_access_corridor")],
     )
 
-    with pytest.raises(GenericProviderError, match="outside its candidate catalog"):
-        GenericGoalResolver(provider=provider).resolve(
-            "从南部滨水区运30个应急燃料到东南高地区",
-            LINJIANG_V2_TEST,
-        )
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "从南部滨水区运30个应急燃料到东南高地区",
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.source == "CANONICAL_IDENTITY_CONFLICT"
 
 
 def _transport_operation(*, amount: object = 12) -> dict[str, object]:
@@ -751,7 +741,7 @@ def _transport_operation(*, amount: object = 12) -> dict[str, object]:
     )
 
 
-def test_llm_all_grounding_runs_once_with_no_deterministic_short_circuit() -> None:
+def test_vnext_semantic_grounding_keeps_semantic_refs_separate_from_exact_refs() -> None:
     grounding = DynamicGoalEntityGrounding(
         candidate_refs=(
             DynamicGoalCandidateReference(ref_type="REGION", key="central_district"),
@@ -794,17 +784,17 @@ def test_llm_all_grounding_runs_once_with_no_deterministic_short_circuit() -> No
     assert resolution.status == "RESOLVED"
     assert len(provider.grounding_requests) == 1
     assert provider.grounding_requests[0].deterministic_candidate_refs == ()
+    assert provider.family_requests[0].deterministic_candidate_refs == ()
     assert {
-        (item.ref_type, item.key)
-        for item in provider.family_requests[0].deterministic_candidate_refs
+        (item.ref_type, item.key) for item in provider.family_requests[0].semantic_candidate_refs
     } >= {
         ("REGION", "central_district"),
         ("REGION", "south_waterfront_district"),
         ("RESOURCE", "emergency_fuel"),
     }
+    assert provider.operation_requests[0].deterministic_candidate_refs == ()
     assert {
-        (item.ref_type, item.key)
-        for item in provider.operation_requests[0].deterministic_candidate_refs
+        (item.ref_type, item.key) for item in provider.operation_requests[0].semantic_candidate_refs
     } >= {
         ("REGION", "central_district"),
         ("REGION", "south_waterfront_district"),
@@ -821,27 +811,30 @@ def test_llm_all_grounding_rejects_invented_public_identity() -> None:
         )
     )
 
-    with pytest.raises(FormalGoalError):
+    with pytest.raises(GenericProviderError, match="exact-Version validation"):
         GenericGoalResolver(provider=provider).resolve(
             "an unregistered semantic reference", LINJIANG_V2_TEST
         )
+    assert [item.recovery_attempt for item in provider.grounding_requests] == [0, 1]
 
 
-def test_llm_all_grounding_preserves_provider_ambiguity() -> None:
+def test_semantic_grounding_status_cannot_short_circuit_product_resolution() -> None:
     provider = _LLMAllRoutingProvider(
         grounding=DynamicGoalEntityGrounding(
             status="NEEDS_CLARIFICATION",
             clarification_prompt="Which public reference?",
-        )
+        ),
+        operation_results=[DynamicGoalOperationGrounding(status="UNSUPPORTED")],
     )
 
     resolution = GenericGoalResolver(provider=provider).resolve(
         "an ambiguous public reference", LINJIANG_V2_TEST
     )
 
-    assert resolution.status == "NEEDS_CLARIFICATION"
-    assert resolution.source == "PUBLIC_REFERENCE_AMBIGUOUS"
-    assert provider.family_requests == []
+    assert resolution.status == "UNSUPPORTED"
+    assert len(provider.family_requests) == 1
+    assert len(provider.routing_requests) == 1
+    assert len(provider.operation_requests) == 1
 
 
 def test_llm_all_grounding_does_not_add_unmentioned_refs() -> None:
@@ -858,10 +851,9 @@ def test_llm_all_grounding_does_not_add_unmentioned_refs() -> None:
         "a goal mentioning only emergency fuel", LINJIANG_V2_TEST
     )
 
-    refs = {
-        (item.ref_type, item.key)
-        for item in provider.family_requests[0].deterministic_candidate_refs
-    }
+    request = provider.family_requests[0]
+    assert request.deterministic_candidate_refs == ()
+    refs = {(item.ref_type, item.key) for item in request.semantic_candidate_refs}
     assert refs == {("RESOURCE", "emergency_fuel")}
 
 
@@ -926,9 +918,7 @@ def test_supply_power_source_is_a_canonical_node_through_formal_goal() -> None:
     requirement = resolution.dynamic_requirements[0]
     assert requirement.action_key == "supply_power"
     assert requirement.target_key == "east_distribution_station"
-    assert requirement.parameter_constraints == {
-        "source_key": "southeast_emergency_power_station"
-    }
+    assert requirement.parameter_constraints == {"source_key": "southeast_emergency_power_station"}
     source_contract = provider.operation_requests[0].action_contract["parameters"][0]  # type: ignore[index]
     assert source_contract["scalar_value_type"] == "STRING"  # type: ignore[index]
     assert source_contract["semantic_reference_type"] == "NODE"  # type: ignore[index]
@@ -1255,9 +1245,7 @@ def test_semantic_routing_distinguishes_action_ambiguity_from_no_match() -> None
     assert no_match_resolution.status == "UNSUPPORTED"
     assert no_match_resolution.source == "ACTION_NO_MATCH"
     assert no_match_resolution.provider_observation is not None
-    assert no_match_resolution.provider_observation["no_match_reason"] == (
-        "NO_SEMANTIC_ACTION"
-    )
+    assert no_match_resolution.provider_observation["no_match_reason"] == ("NO_SEMANTIC_ACTION")
 
 
 def test_semantic_routing_schema_failure_gets_one_structural_recovery() -> None:
@@ -1447,9 +1435,7 @@ def test_approved_references_feed_routing_and_existing_topology(
     topology_key: str,
 ) -> None:
     request = _routing_request(goal)
-    expected_action = "transport_resource" if "运" in goal else "clear_transport"
-    action = next(item for item in request.action_catalog if item["key"] == expected_action)
-    actual = {(item["ref_type"], item["key"]) for item in action["candidate_refs"]}
+    actual = {(item.ref_type, item.key) for item in request.deterministic_candidate_refs}
 
     assert expected_refs <= actual
     assert ("NODE", topology_key) in actual
@@ -1462,15 +1448,11 @@ def test_approved_references_feed_routing_and_existing_topology(
         ("从东南高地区运30个电力部件到南部滨水区", "electrical_repair_parts"),
     ],
 )
-def test_specific_resource_reference_is_deterministic(
-    goal: str, resource_key: str
-) -> None:
+def test_specific_resource_reference_is_deterministic(goal: str, resource_key: str) -> None:
     request = _routing_request(goal)
-    transport = next(item for item in request.action_catalog if item["key"] == "transport_resource")
 
     assert ("RESOURCE", resource_key, "EXACT_USER_MENTION") in {
-        (item["ref_type"], item["key"], item["provenance"])
-        for item in transport["candidate_refs"]
+        (item.ref_type, item.key, item.provenance) for item in request.deterministic_candidate_refs
     }
 
 
@@ -1522,14 +1504,11 @@ def test_unregistered_resource_expression_keeps_llm_semantic_grounding_open() ->
 
     assert resolution.status == "RESOLVED"
     request = provider.operation_requests[0]
-    assert not any(
-        item.ref_type == "RESOURCE" for item in request.deterministic_candidate_refs
-    )
+    assert not any(item.ref_type == "RESOURCE" for item in request.deterministic_candidate_refs)
     resource = next(
         item
         for item in request.public_references
-        if item["ref_type"] == "RESOURCE"
-        and item["key"] == "electrical_repair_parts"
+        if item["ref_type"] == "RESOURCE" and item["key"] == "electrical_repair_parts"
     )
     assert set(resource["public_references"]) == {
         "电力部件",

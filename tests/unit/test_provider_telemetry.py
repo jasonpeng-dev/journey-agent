@@ -180,15 +180,18 @@ def test_family_routing_request_excludes_action_and_state_catalogs() -> None:
     assert set(payload) == {
         "goal",
         "deterministic_candidate_refs",
+        "deterministic_ambiguous_refs",
+        "semantic_candidate_refs",
+        "explicit_role_evidence",
         "recovery_attempt",
         "recovery_feedback",
     }
     assert "action_catalog" not in payload
     assert "state_catalog" not in payload
     prompt = captured[0]["messages"][0]["content"]
-    assert "Return exactly STATE or OPERATION and freeze that choice" in prompt
+    assert "otherwise return STATE or OPERATION and freeze that choice" in prompt
     assert "Do not select, match, rank, or infer any Action or State requirement" in prompt
-    assert "candidate availability must not decide the family" in prompt
+    assert "Candidate availability must not decide the family" in prompt
     assert provider.call_metadata_history[-1].call_type == "DYNAMIC_GOAL_FAMILY_ROUTING"
 
 
@@ -336,17 +339,13 @@ def test_action_routing_rejects_missing_or_malformed_typed_no_match_reason(
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
 
     with pytest.raises(GenericProviderError) as captured:
         provider.route_dynamic_goal_action(
             DynamicGoalActionRoutingRequest(
                 goal="repair the facility",
-                action_catalog=(
-                    {"key": "repair", "name": "Repair", "description": "Repair"},
-                ),
+                action_catalog=({"key": "repair", "name": "Repair", "description": "Repair"},),
             )
         )
 
@@ -387,9 +386,7 @@ def test_action_routing_accepts_valid_typed_no_match_and_ambiguous_boundary() ->
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
     request = DynamicGoalActionRoutingRequest(
         goal="repair the facility",
         action_catalog=(
@@ -565,9 +562,7 @@ def test_operation_reference_key_with_conflicting_identity_is_rejected() -> None
     with pytest.raises(GenericProviderError) as captured:
         provider.ground_dynamic_goal_operation(_operation_request())
 
-    assert captured.value.validation_diagnostics[0]["code"] == (
-        "REFERENCE_KEY_AND_VALUE_BOTH_SET"
-    )
+    assert captured.value.validation_diagnostics[0]["code"] == ("REFERENCE_KEY_AND_VALUE_BOTH_SET")
 
 
 def test_operation_slot_contract_metadata_is_safely_removed() -> None:
@@ -649,9 +644,7 @@ def test_operation_typed_recovery_rejects_changed_frozen_action() -> None:
             _operation_request(recovery_attempt=1, recovery_feedback=feedback)
         )
 
-    assert captured.value.validation_diagnostics[0]["code"] == (
-        "RECOVERY_CHANGED_PRESERVED_FIELD"
-    )
+    assert captured.value.validation_diagnostics[0]["code"] == ("RECOVERY_CHANGED_PRESERVED_FIELD")
 
 
 def test_operation_invalid_top_level_status_gets_typed_recovery_feedback() -> None:
@@ -696,9 +689,7 @@ def test_semantic_routing_normalizes_only_redundant_matched_candidate_key() -> N
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
 
     result = provider.route_dynamic_goal(
         DynamicGoalSemanticRoutingRequest(goal="move cargo", action_catalog=())
@@ -736,16 +727,12 @@ def test_semantic_routing_does_not_normalize_non_equivalent_shapes(
         return httpx.Response(
             200,
             json={
-                "choices": [
-                    {"message": {"content": json.dumps(payload)}, "finish_reason": "stop"}
-                ]
+                "choices": [{"message": {"content": json.dumps(payload)}, "finish_reason": "stop"}]
             },
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
 
     with pytest.raises(GenericProviderError) as captured:
         provider.route_dynamic_goal(
@@ -753,9 +740,7 @@ def test_semantic_routing_does_not_normalize_non_equivalent_shapes(
         )
 
     if payload["action_match"] == "MATCHED":
-        assert captured.value.validation_diagnostics[0]["code"] == (
-            "MATCHED_HAS_CANDIDATE_KEYS"
-        )
+        assert captured.value.validation_diagnostics[0]["code"] == ("MATCHED_HAS_CANDIDATE_KEYS")
         assert captured.value.validation_diagnostics[0]["preserve"] == {
             "family": "OPERATION",
             "action_match": "MATCHED",
@@ -1212,10 +1197,10 @@ def test_dynamic_grounding_prompt_exposes_typed_roles_and_preserves_exact_refs()
         item.model_dump(mode="json") for item in deterministic_refs
     ]
     for term in (
-        "semantically parse the entire player's Goal",
+        "evidence-only Semantic Grounding",
         "public Action name, description, target_kind",
         "do not rely on a fixed",
-        "Exact identity matches supplied as deterministic_candidate_refs are evidence",
+        "Exact identities in deterministic_candidate_refs are authoritative",
         "GROUNDED, UNRESOLVED, or NOT_SPECIFIED",
         "source or target role may be a binding declared by the Action contract",
         "multiple compatible candidates remain equally plausible",
@@ -1253,7 +1238,7 @@ def test_dynamic_goal_prompt_exposes_explicit_slot_provenance() -> None:
 
     assert payload["intent"] == intent.model_dump(mode="json")
     for term in (
-        "semantically parse the entire player's Goal",
+        "evidence-only Semantic Grounding",
         "GROUNDED, UNRESOLVED, or NOT_SPECIFIED",
         "NOT_SPECIFIED means the player did not constrain it",
         "preserve",
