@@ -227,6 +227,7 @@ world:
     interaction_keys:
     - inspectable
     - power_targetable
+    - repairable
     facts:
     - key: operational
       name: 运行状态
@@ -281,6 +282,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -331,6 +333,7 @@ world:
     - inspectable
     - repairable
     - sustained_logistics_control
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -366,6 +369,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -508,6 +512,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -594,6 +599,8 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
+    - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -623,6 +630,7 @@ world:
     - inspectable
     - repairable
     - external_relief_intake
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -666,6 +674,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: heavy_engineering_support
       name: 重型工程支援
@@ -718,6 +727,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -761,6 +771,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -806,6 +817,8 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
+    - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -860,6 +873,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -905,6 +919,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1010,6 +1025,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1053,6 +1069,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1204,6 +1221,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1257,6 +1275,8 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
+    - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1284,6 +1304,8 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
+    - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1327,6 +1349,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1370,6 +1393,7 @@ world:
     interaction_keys:
     - inspectable
     - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1483,6 +1507,8 @@ world:
     initial_visibility: KNOWN
     interaction_keys:
     - inspectable
+    - repairable
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1556,6 +1582,7 @@ world:
     - inspectable
     - repairable
     - generation_control
+    - power_targetable
     facts:
     - key: operational
       name: 运行状态
@@ -1895,7 +1922,7 @@ actors:
     allowed_action_keys:
     - inspect
     - relay_message
-    - repair_communications
+    - repair_facility
     - survey_resources
     - travel
     authority_policy:
@@ -1911,7 +1938,7 @@ actors:
     allowed_action_keys:
     - inspect
     - relay_message
-    - repair_electrical
+    - repair_facility
     - supply_power
     - survey_resources
     - travel
@@ -1930,7 +1957,7 @@ actors:
     - deploy_heavy_engineering_support
     - inspect
     - relay_message
-    - repair_industrial_facility
+    - repair_facility
     - survey_resources
     - travel
     authority_policy:
@@ -1977,7 +2004,7 @@ actors:
     allowed_action_keys:
     - inspect
     - relay_message
-    - repair_water_facility
+    - repair_facility
     - survey_resources
     - travel
     authority_policy:
@@ -2132,150 +2159,96 @@ actions:
   behavior: RELAY_MESSAGE
   locality: ACTOR_REGION
   target_kind: ACTOR
-- key: repair_communications
-  name: 修复通信设施
-  description: 修复通信设施并恢复其通信能力。
+- key: repair_facility
+  name: 修复设施
+  description: 修复指定设施并恢复其运行状态。
   required_interaction_key: repairable
   execution_mode: IMMEDIATE
   parameters: []
   allowed_actor_capabilities:
   - EXECUTE_ACTION
-  required_actor_role_key: communications_repair_team
   authority_policy:
     autonomous_limits: []
     approval_required_values: []
   expected_outcomes:
+  - code: FACILITY_REPAIRED
+    name: 设施已修复
+    success: true
   - code: COMMUNICATIONS_REPAIRED
     name: 通信已恢复
     success: true
-  planning:
-    terminal_effects:
-    - node_key: central_telecom_hub
-      fact_key: operational
-    - node_key: north_communication_relay
-      fact_key: operational
-    - node_key: south_communication_core
-      fact_key: operational
-    supporting_effects: []
-    success_outcome_codes:
-    - COMMUNICATIONS_REPAIRED
-    wait_success_outcome_codes: []
-    hints: []
-  behavior: REPAIR_COMMUNICATIONS
-  locality: FACILITY_REGION
-- key: repair_electrical
-  name: 修复电力设施
-  description: 修复发电、变电或配电设施。
-  required_interaction_key: repairable
-  execution_mode: IMMEDIATE
-  parameters: []
-  allowed_actor_capabilities:
-  - EXECUTE_ACTION
-  required_actor_role_key: electrical_response_team
-  authority_policy:
-    autonomous_limits: []
-    approval_required_values: []
-  expected_outcomes:
   - code: ELECTRICAL_REPAIRED
     name: 电力设施已修复
     success: true
-  planning:
-    terminal_effects:
-    - node_key: east_distribution_station
-      fact_key: operational
-    - node_key: south_substation
-      fact_key: operational
-    - node_key: southeast_emergency_power_station
-      fact_key: operational
-    - node_key: southeast_fuel_emergency_power_plant
-      fact_key: operational
-    supporting_effects: []
-    success_outcome_codes:
-    - ELECTRICAL_REPAIRED
-    wait_success_outcome_codes: []
-    hints: []
-  behavior: RULE
-  locality: FACILITY_REGION
-- key: repair_industrial_facility
-  name: 修复工业设施
-  description: 修复工业基地或服务中心。
-  required_interaction_key: repairable
-  execution_mode: IMMEDIATE
-  parameters: []
-  allowed_actor_capabilities:
-  - EXECUTE_ACTION
-  required_actor_role_key: industrial_repair_team
-  authority_policy:
-    autonomous_limits: []
-    approval_required_values: []
-  expected_outcomes:
   - code: INDUSTRIAL_REPAIRED
     name: 工业设施已修复
     success: true
-  planning:
-    terminal_effects:
-    - node_key: district_service_center
-      fact_key: operational
-    - node_key: east_community_hospital
-      fact_key: operational
-    - node_key: heavy_equipment_yard
-      fact_key: operational
-    - node_key: riverside_shelter
-      fact_key: operational
-    - node_key: utility_service_depot
-      fact_key: operational
-    - node_key: emergency_supply_warehouse
-      fact_key: operational
-    - node_key: rail_freight_yard
-      fact_key: operational
-    - node_key: vehicle_depot
-      fact_key: operational
-    - node_key: city_distribution_center
-      fact_key: operational
-    - node_key: north_fuel_depot
-      fact_key: operational
-    - node_key: river_port
-      fact_key: operational
-    - node_key: south_fuel_terminal
-      fact_key: operational
-    supporting_effects: []
-    success_outcome_codes:
-    - INDUSTRIAL_REPAIRED
-    wait_success_outcome_codes: []
-    hints: []
-  behavior: RULE
-  locality: FACILITY_REGION
-- key: repair_water_facility
-  name: 修复水务设施
-  description: 修复水处理或供水设施。
-  required_interaction_key: repairable
-  execution_mode: IMMEDIATE
-  parameters: []
-  allowed_actor_capabilities:
-  - EXECUTE_ACTION
-  required_actor_role_key: water_repair_team
-  authority_policy:
-    autonomous_limits: []
-    approval_required_values: []
-  expected_outcomes:
   - code: WATER_FACILITY_REPAIRED
     name: 水务设施已修复
     success: true
   planning:
-    terminal_effects:
-    - node_key: east_water_pump_station
-      fact_key: operational
-    - node_key: south_pump_station
-      fact_key: operational
-    - node_key: water_treatment_plant
-      fact_key: operational
+    terminal_effects: []
+    target_terminal_fact_keys:
+    - operational
     supporting_effects: []
     success_outcome_codes:
+    - FACILITY_REPAIRED
+    - COMMUNICATIONS_REPAIRED
+    - ELECTRICAL_REPAIRED
+    - INDUSTRIAL_REPAIRED
     - WATER_FACILITY_REPAIRED
     wait_success_outcome_codes: []
     hints: []
   behavior: RULE
   locality: FACILITY_REGION
+  target_semantic_reference_type: NODE
+  target_node_type_keys:
+  - facility
+  target_actor_roles:
+  - target_key: central_telecom_hub
+    required_actor_role_key: communications_repair_team
+  - target_key: north_communication_relay
+    required_actor_role_key: communications_repair_team
+  - target_key: south_communication_core
+    required_actor_role_key: communications_repair_team
+  - target_key: east_distribution_station
+    required_actor_role_key: electrical_response_team
+  - target_key: south_substation
+    required_actor_role_key: electrical_response_team
+  - target_key: southeast_emergency_power_station
+    required_actor_role_key: electrical_response_team
+  - target_key: southeast_fuel_emergency_power_plant
+    required_actor_role_key: electrical_response_team
+  - target_key: city_distribution_center
+    required_actor_role_key: industrial_repair_team
+  - target_key: district_service_center
+    required_actor_role_key: industrial_repair_team
+  - target_key: east_community_hospital
+    required_actor_role_key: industrial_repair_team
+  - target_key: emergency_supply_warehouse
+    required_actor_role_key: industrial_repair_team
+  - target_key: heavy_equipment_yard
+    required_actor_role_key: industrial_repair_team
+  - target_key: north_fuel_depot
+    required_actor_role_key: industrial_repair_team
+  - target_key: rail_freight_yard
+    required_actor_role_key: industrial_repair_team
+  - target_key: river_port
+    required_actor_role_key: industrial_repair_team
+  - target_key: riverside_shelter
+    required_actor_role_key: industrial_repair_team
+  - target_key: south_fuel_terminal
+    required_actor_role_key: industrial_repair_team
+  - target_key: utility_service_depot
+    required_actor_role_key: industrial_repair_team
+  - target_key: vehicle_depot
+    required_actor_role_key: industrial_repair_team
+  - target_key: east_water_pump_station
+    required_actor_role_key: water_repair_team
+  - target_key: south_pump_station
+    required_actor_role_key: water_repair_team
+  - target_key: water_treatment_plant
+    required_actor_role_key: water_repair_team
 - key: supply_power
   name: 送电
   description: 从供电来源向目标设施输送电力。
@@ -2698,68 +2671,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_communications_target_profile_required
+- key: cost_repair_facility_communications_0_communication_equipment
   phase: PREFLIGHT
-  action_key: repair_communications
-  priority: 1000
-  condition:
-    kind: NOT
-    conditions: []
-    condition:
-      kind: FACT_IN
-      conditions: []
-      condition: null
-      node:
-        kind: CURRENT_TARGET
-        node_key: null
-        anchor_node_key: null
-        relation_type_key: null
-        direction: null
-        required_fact_key: null
-      fact_key: repair_profile
-      resource_key: null
-      resource_scope: null
-      parameter_key: null
-      operator: null
-      value: null
-      values:
-      - central_communication_core
-      - north_communication_relay
-      - south_communication_core
-      visibility: null
-      access: null
-      relation_type_key: null
-      relation_direction: null
-    node: null
-    fact_key: null
-    resource_key: null
-    resource_scope: null
-    parameter_key: null
-    operator: null
-    value: null
-    values: []
-    visibility: null
-    access: null
-    relation_type_key: null
-    relation_direction: null
-  effects:
-  - kind: EMIT_FAILURE
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: REPAIR_TARGET_UNSUPPORTED
-    message: 该专业队不能修复该目标。
-    retryable: true
-    memory_key: null
-    memory_content: null
-- key: cost_repair_communications_0_communication_equipment
-  phase: PREFLIGHT
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -2830,9 +2744,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_communications_1_communication_equipment
+- key: cost_repair_facility_communications_1_communication_equipment
   phase: PREFLIGHT
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -2903,9 +2817,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_communications_2_communication_equipment
+- key: cost_repair_facility_communications_2_communication_equipment
   phase: PREFLIGHT
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -2976,9 +2890,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_communications_0_general_engineering_parts
+- key: cost_repair_facility_communications_0_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -3049,9 +2963,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_communications_1_general_engineering_parts
+- key: cost_repair_facility_communications_1_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -3122,9 +3036,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_communications_2_general_engineering_parts
+- key: cost_repair_facility_communications_2_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -3195,9 +3109,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: repair_communications_central_communication_core_resolution
+- key: repair_facility_communications_central_communication_core_resolution
   phase: RESOLVE
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -3331,9 +3245,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_communications_north_communication_relay_resolution
+- key: repair_facility_communications_north_communication_relay_resolution
   phase: RESOLVE
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -3451,9 +3365,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_communications_south_communication_core_resolution
+- key: repair_facility_communications_south_communication_core_resolution
   phase: RESOLVE
-  action_key: repair_communications
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -3587,69 +3501,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_electrical_target_profile_required
+- key: cost_repair_facility_electrical_2_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_electrical
-  priority: 1000
-  condition:
-    kind: NOT
-    conditions: []
-    condition:
-      kind: FACT_IN
-      conditions: []
-      condition: null
-      node:
-        kind: CURRENT_TARGET
-        node_key: null
-        anchor_node_key: null
-        relation_type_key: null
-        direction: null
-        required_fact_key: null
-      fact_key: repair_profile
-      resource_key: null
-      resource_scope: null
-      parameter_key: null
-      operator: null
-      value: null
-      values:
-      - east_distribution_station
-      - southeast_emergency_power_station
-      - south_substation
-      - southeast_fuel_emergency_power_plant
-      visibility: null
-      access: null
-      relation_type_key: null
-      relation_direction: null
-    node: null
-    fact_key: null
-    resource_key: null
-    resource_scope: null
-    parameter_key: null
-    operator: null
-    value: null
-    values: []
-    visibility: null
-    access: null
-    relation_type_key: null
-    relation_direction: null
-  effects:
-  - kind: EMIT_FAILURE
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: REPAIR_TARGET_UNSUPPORTED
-    message: 该专业队不能修复该目标。
-    retryable: true
-    memory_key: null
-    memory_content: null
-- key: cost_repair_electrical_2_general_engineering_parts
-  phase: PREFLIGHT
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -3720,9 +3574,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_electrical_3_general_engineering_parts
+- key: cost_repair_facility_electrical_3_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -3793,9 +3647,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_electrical_4_general_engineering_parts
+- key: cost_repair_facility_electrical_4_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -3866,9 +3720,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_electrical_2_electrical_repair_parts
+- key: cost_repair_facility_electrical_2_electrical_repair_parts
   phase: PREFLIGHT
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -3939,9 +3793,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_electrical_3_electrical_repair_parts
+- key: cost_repair_facility_electrical_3_electrical_repair_parts
   phase: PREFLIGHT
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -4012,9 +3866,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_electrical_4_electrical_repair_parts
+- key: cost_repair_facility_electrical_4_electrical_repair_parts
   phase: PREFLIGHT
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -4085,9 +3939,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: repair_electrical_east_distribution_station_resolution
+- key: repair_facility_electrical_east_distribution_station_resolution
   phase: RESOLVE
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -4212,9 +4066,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_electrical_south_substation_resolution
+- key: repair_facility_electrical_south_substation_resolution
   phase: RESOLVE
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -4339,9 +4193,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_electrical_southeast_emergency_power_station_resolution
+- key: repair_facility_electrical_southeast_emergency_power_station_resolution
   phase: RESOLVE
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -4466,77 +4320,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_industrial_facility_target_profile_required
+- key: cost_repair_facility_industrial_0_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
-  priority: 1000
-  condition:
-    kind: NOT
-    conditions: []
-    condition:
-      kind: FACT_IN
-      conditions: []
-      condition: null
-      node:
-        kind: CURRENT_TARGET
-        node_key: null
-        anchor_node_key: null
-        relation_type_key: null
-        direction: null
-        required_fact_key: null
-      fact_key: repair_profile
-      resource_key: null
-      resource_scope: null
-      parameter_key: null
-      operator: null
-      value: null
-      values:
-      - utility_service_depot
-      - heavy_equipment_yard
-      - district_service_center
-      - east_community_hospital
-      - riverside_shelter
-      - city_distribution_center
-      - emergency_supply_warehouse
-      - north_fuel_depot
-      - rail_freight_yard
-      - river_port
-      - south_fuel_terminal
-      - vehicle_depot
-      visibility: null
-      access: null
-      relation_type_key: null
-      relation_direction: null
-    node: null
-    fact_key: null
-    resource_key: null
-    resource_scope: null
-    parameter_key: null
-    operator: null
-    value: null
-    values: []
-    visibility: null
-    access: null
-    relation_type_key: null
-    relation_direction: null
-  effects:
-  - kind: EMIT_FAILURE
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: REPAIR_TARGET_UNSUPPORTED
-    message: 该专业队不能修复该目标。
-    retryable: true
-    memory_key: null
-    memory_content: null
-- key: cost_repair_industrial_facility_0_general_engineering_parts
-  phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -4607,9 +4393,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_1_general_engineering_parts
+- key: cost_repair_facility_industrial_1_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -4680,9 +4466,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_2_general_engineering_parts
+- key: cost_repair_facility_industrial_2_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -4753,9 +4539,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_3_general_engineering_parts
+- key: cost_repair_facility_industrial_3_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -4826,9 +4612,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_4_general_engineering_parts
+- key: cost_repair_facility_industrial_4_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -4899,9 +4685,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_0_municipal_repair_materials
+- key: cost_repair_facility_industrial_0_municipal_repair_materials
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -4972,9 +4758,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_1_municipal_repair_materials
+- key: cost_repair_facility_industrial_1_municipal_repair_materials
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -5045,9 +4831,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_2_municipal_repair_materials
+- key: cost_repair_facility_industrial_2_municipal_repair_materials
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -5118,9 +4904,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_3_municipal_repair_materials
+- key: cost_repair_facility_industrial_3_municipal_repair_materials
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -5191,9 +4977,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_industrial_facility_4_municipal_repair_materials
+- key: cost_repair_facility_industrial_4_municipal_repair_materials
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -5264,9 +5050,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: repair_industrial_facility_district_service_center_resolution
+- key: repair_facility_industrial_district_service_center_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -5384,9 +5170,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_industrial_facility_east_community_hospital_resolution
+- key: repair_facility_industrial_east_community_hospital_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -5488,9 +5274,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_industrial_facility_heavy_equipment_yard_resolution
+- key: repair_facility_industrial_heavy_equipment_yard_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -5615,9 +5401,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_industrial_facility_riverside_shelter_resolution
+- key: repair_facility_industrial_riverside_shelter_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -5719,9 +5505,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_industrial_facility_utility_service_depot_resolution
+- key: repair_facility_industrial_utility_service_depot_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -5839,68 +5625,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_water_facility_target_profile_required
+- key: repair_facility_water_heavy_support_required
   phase: PREFLIGHT
-  action_key: repair_water_facility
-  priority: 1000
-  condition:
-    kind: NOT
-    conditions: []
-    condition:
-      kind: FACT_IN
-      conditions: []
-      condition: null
-      node:
-        kind: CURRENT_TARGET
-        node_key: null
-        anchor_node_key: null
-        relation_type_key: null
-        direction: null
-        required_fact_key: null
-      fact_key: repair_profile
-      resource_key: null
-      resource_scope: null
-      parameter_key: null
-      operator: null
-      value: null
-      values:
-      - water_treatment_plant
-      - south_pump_station
-      - east_water_pump_station
-      visibility: null
-      access: null
-      relation_type_key: null
-      relation_direction: null
-    node: null
-    fact_key: null
-    resource_key: null
-    resource_scope: null
-    parameter_key: null
-    operator: null
-    value: null
-    values: []
-    visibility: null
-    access: null
-    relation_type_key: null
-    relation_direction: null
-  effects:
-  - kind: EMIT_FAILURE
-    node: null
-    fact_key: null
-    value: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: REPAIR_TARGET_UNSUPPORTED
-    message: 该专业队不能修复该目标。
-    retryable: true
-    memory_key: null
-    memory_content: null
-- key: repair_water_facility_heavy_support_required
-  phase: PREFLIGHT
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -5975,9 +5702,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_water_facility_0_water_system_parts
+- key: cost_repair_facility_water_0_water_system_parts
   phase: PREFLIGHT
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -6048,9 +5775,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_water_facility_1_water_system_parts
+- key: cost_repair_facility_water_1_water_system_parts
   phase: PREFLIGHT
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -6121,9 +5848,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_water_facility_2_water_system_parts
+- key: cost_repair_facility_water_2_water_system_parts
   phase: PREFLIGHT
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 900
   condition:
     kind: ALL
@@ -6194,9 +5921,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_water_facility_0_general_engineering_parts
+- key: cost_repair_facility_water_0_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -6267,9 +5994,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_water_facility_1_general_engineering_parts
+- key: cost_repair_facility_water_1_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -6340,9 +6067,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_water_facility_2_general_engineering_parts
+- key: cost_repair_facility_water_2_general_engineering_parts
   phase: PREFLIGHT
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 899
   condition:
     kind: ALL
@@ -6413,9 +6140,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: cost_repair_water_facility_0_municipal_repair_materials
+- key: cost_repair_facility_water_0_municipal_repair_materials
   phase: PREFLIGHT
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 898
   condition:
     kind: ALL
@@ -6486,9 +6213,9 @@ rules:
     retryable: true
     memory_key: null
     memory_content: null
-- key: repair_water_facility_east_water_pump_station_resolution
+- key: repair_facility_water_east_water_pump_station_resolution
   phase: RESOLVE
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -6590,9 +6317,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_water_facility_south_pump_station_resolution
+- key: repair_facility_water_south_pump_station_resolution
   phase: RESOLVE
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -6694,9 +6421,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_water_facility_water_treatment_plant_resolution
+- key: repair_facility_water_water_treatment_plant_resolution
   phase: RESOLVE
-  action_key: repair_water_facility
+  action_key: repair_facility
   priority: 10
   condition:
     kind: FACT_EQUALS
@@ -7039,9 +6766,9 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-- key: repair_industrial_facility_emergency_supply_warehouse_genera_62631cf8
+- key: repair_facility_industrial_emergency_supply_warehouse_genera_62631cf8
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -7062,9 +6789,9 @@ rules:
     failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_emergency_supply_warehouse_task56_resolution
+- key: repair_facility_industrial_emergency_supply_warehouse_task56_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 500
   condition:
     kind: FACT_EQUALS
@@ -7095,9 +6822,9 @@ rules:
     availability: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
-- key: repair_industrial_facility_rail_freight_yard_heavy_support_required
+- key: repair_facility_industrial_rail_freight_yard_heavy_support_required
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 951
   condition:
     kind: ALL
@@ -7118,9 +6845,9 @@ rules:
     failure_code: ACTION_PRECONDITION
     message: 重型工程支援尚未就绪。
     retryable: true
-- key: repair_industrial_facility_rail_freight_yard_general_engi_03d5bf76
+- key: repair_facility_industrial_rail_freight_yard_general_engi_03d5bf76
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -7141,9 +6868,9 @@ rules:
     failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_rail_freight_yard_municipal_re_1dce693e
+- key: repair_facility_industrial_rail_freight_yard_municipal_re_1dce693e
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 949
   condition:
     kind: ALL
@@ -7164,9 +6891,9 @@ rules:
     failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_rail_freight_yard_task56_resolution
+- key: repair_facility_industrial_rail_freight_yard_task56_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 500
   condition:
     kind: FACT_EQUALS
@@ -7205,9 +6932,9 @@ rules:
       literal: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
-- key: repair_industrial_facility_vehicle_depot_general_en_4c3d9a9f
+- key: repair_facility_industrial_vehicle_depot_general_en_4c3d9a9f
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -7228,9 +6955,9 @@ rules:
     failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_vehicle_depot_municipal__76077f72
+- key: repair_facility_industrial_vehicle_depot_municipal__76077f72
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 949
   condition:
     kind: ALL
@@ -7251,9 +6978,9 @@ rules:
     failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_vehicle_depot_task56_resolution
+- key: repair_facility_industrial_vehicle_depot_task56_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 500
   condition:
     kind: FACT_EQUALS
@@ -7292,9 +7019,9 @@ rules:
       literal: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
-- key: repair_industrial_facility_city_distribution_center_general__88a6de5e
+- key: repair_facility_industrial_city_distribution_center_general__88a6de5e
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -7315,9 +7042,9 @@ rules:
     failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_city_distribution_center_municipa_935e048e
+- key: repair_facility_industrial_city_distribution_center_municipa_935e048e
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 949
   condition:
     kind: ALL
@@ -7338,9 +7065,9 @@ rules:
     failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_city_distribution_center_prerequisite_0
+- key: repair_facility_industrial_city_distribution_center_prerequisite_0
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 940
   condition:
     kind: ALL
@@ -7361,9 +7088,9 @@ rules:
     failure_code: ACTION_PRECONDITION
     message: 设施前置条件不满足。
     retryable: true
-- key: repair_industrial_facility_city_distribution_center_prerequisite_1
+- key: repair_facility_industrial_city_distribution_center_prerequisite_1
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 939
   condition:
     kind: ALL
@@ -7384,9 +7111,9 @@ rules:
     failure_code: ACTION_PRECONDITION
     message: 设施前置条件不满足。
     retryable: true
-- key: repair_industrial_facility_city_distribution_center_task56_resolution
+- key: repair_facility_industrial_city_distribution_center_task56_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 500
   condition:
     kind: FACT_EQUALS
@@ -7418,9 +7145,9 @@ rules:
       literal: true
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
-- key: repair_industrial_facility_north_fuel_depot_general_engineering_parts_required
+- key: repair_facility_industrial_north_fuel_depot_general_engineering_parts_required
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -7441,9 +7168,9 @@ rules:
     failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_north_fuel_depot_municipal_repair_materials_required
+- key: repair_facility_industrial_north_fuel_depot_municipal_repair_materials_required
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 949
   condition:
     kind: ALL
@@ -7464,9 +7191,9 @@ rules:
     failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_north_fuel_depot_task56_resolution
+- key: repair_facility_industrial_north_fuel_depot_task56_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 500
   condition:
     kind: FACT_EQUALS
@@ -7501,9 +7228,9 @@ rules:
     availability: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
-- key: repair_industrial_facility_river_port_general_engineering_parts_required
+- key: repair_facility_industrial_river_port_general_engineering_parts_required
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -7524,9 +7251,9 @@ rules:
     failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_river_port_municipal_repair_materials_required
+- key: repair_facility_industrial_river_port_municipal_repair_materials_required
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 949
   condition:
     kind: ALL
@@ -7547,9 +7274,9 @@ rules:
     failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_river_port_task56_resolution
+- key: repair_facility_industrial_river_port_task56_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 500
   condition:
     kind: FACT_EQUALS
@@ -7581,9 +7308,9 @@ rules:
       literal: true
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
-- key: repair_industrial_facility_south_fuel_terminal_general_engin_e3e787a6
+- key: repair_facility_industrial_south_fuel_terminal_general_engin_e3e787a6
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -7604,9 +7331,9 @@ rules:
     failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_south_fuel_terminal_municipal_rep_6fb1b5b8
+- key: repair_facility_industrial_south_fuel_terminal_municipal_rep_6fb1b5b8
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 949
   condition:
     kind: ALL
@@ -7627,9 +7354,9 @@ rules:
     failure_code: INSUFFICIENT_MUNICIPAL_REPAIR_MATERIALS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_industrial_facility_south_fuel_terminal_prerequisite_0
+- key: repair_facility_industrial_south_fuel_terminal_prerequisite_0
   phase: PREFLIGHT
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 940
   condition:
     kind: ALL
@@ -7650,9 +7377,9 @@ rules:
     failure_code: ACTION_PRECONDITION
     message: 设施前置条件不满足。
     retryable: true
-- key: repair_industrial_facility_south_fuel_terminal_task56_resolution
+- key: repair_facility_industrial_south_fuel_terminal_task56_resolution
   phase: RESOLVE
-  action_key: repair_industrial_facility
+  action_key: repair_facility
   priority: 500
   condition:
     kind: FACT_EQUALS
@@ -7687,9 +7414,9 @@ rules:
     availability: AVAILABLE
   - kind: EMIT_OUTCOME
     outcome_code: INDUSTRIAL_REPAIRED
-- key: repair_electrical_southeast_fuel_emergency_power_plant_gener_e78c3e23
+- key: repair_facility_electrical_southeast_fuel_emergency_power_plant_gener_e78c3e23
   phase: PREFLIGHT
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 950
   condition:
     kind: ALL
@@ -7710,9 +7437,9 @@ rules:
     failure_code: INSUFFICIENT_GENERAL_ENGINEERING_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_electrical_southeast_fuel_emergency_power_plant_elect_51704a62
+- key: repair_facility_electrical_southeast_fuel_emergency_power_plant_elect_51704a62
   phase: PREFLIGHT
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 949
   condition:
     kind: ALL
@@ -7733,9 +7460,9 @@ rules:
     failure_code: INSUFFICIENT_ELECTRICAL_REPAIR_PARTS
     message: 当前区域已知可用资源不足。
     retryable: true
-- key: repair_electrical_southeast_fuel_emergency_power_plant_task56_resolution
+- key: repair_facility_southeast_fuel_power_plant_task56_resolution
   phase: RESOLVE
-  action_key: repair_electrical
+  action_key: repair_facility
   priority: 500
   condition:
     kind: FACT_EQUALS
@@ -7905,6 +7632,21 @@ rules:
     failure_code: ACTION_PRECONDITION
     message: 行动前置条件尚未满足。
     retryable: true
+- key: repair_facility_base_resolution
+  phase: RESOLVE
+  action_key: repair_facility
+  priority: -100
+  condition: null
+  effects:
+  - kind: SET_FACT
+    node:
+      kind: CURRENT_TARGET
+    fact_key: operational
+    value:
+      source: LITERAL
+      literal: true
+  - kind: EMIT_OUTCOME
+    outcome_code: FACILITY_REPAIRED
 objectives:
 - key: restore_central_communication_capability
   name: 恢复中央通信能力

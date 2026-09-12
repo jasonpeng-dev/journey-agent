@@ -45,6 +45,20 @@ LEGACY_REPAIR_RULE_COUNT = 71
 LEGACY_REPAIR_RULE_SEMANTIC_HASH = (
     "1681ca966d39025464fd2e79ab8d790c74ddef014dc4b029e1267008bdff2d96"
 )
+LEGACY_FACILITY_FACT_SEMANTIC_HASH = (
+    "9bc794c0f53e3fe35e63e54e8766fa906d5ac59a596eb8ced230d1ba42eaa209"
+)
+LEGACY_INITIAL_FACT_SEMANTIC_HASH = (
+    "84207f4ecd64fc4901d017e66882ed0491ffac40d5958deb08b1db88f4643e5a"
+)
+LEGACY_POWER_TOPOLOGY_SEMANTIC_HASH = (
+    "a472c4331fb65d2d69d8096b753528eb84477a5b442ce57f6749a56469dcb29a"
+)
+
+
+def _semantic_hash(rows: object) -> str:
+    canonical = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def repair_rule_semantic_hash(definition: ScenarioDefinitionV2) -> tuple[int, str]:
@@ -55,21 +69,90 @@ def repair_rule_semantic_hash(definition: ScenarioDefinitionV2) -> tuple[int, st
     for rule in definition.rules:
         if rule.action_key not in {*LEGACY_REPAIR_ACTION_KEYS, "repair_facility"}:
             continue
-        if rule.key in family_gates or rule.key == "repair_facility_target_contract_required":
+        if rule.key in family_gates or rule.key in {
+            "repair_facility_target_contract_required",
+            "repair_facility_base_resolution",
+        }:
             continue
         payload = rule.model_dump(mode="json")
         payload.pop("key", None)
         payload["action_key"] = "repair_facility"
         rows.append(payload)
     rows.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
-    canonical = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return len(rows), hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return len(rows), _semantic_hash(rows)
+
+
+def facility_fact_semantic_hash(definition: ScenarioDefinitionV2) -> str:
+    """Freeze operational/power Fact authoring independently of Interactions."""
+
+    rows: list[dict[str, object]] = []
+    for node in definition.world.nodes:
+        if node.node_type_key != "facility":
+            continue
+        facts = []
+        for fact in node.facts:
+            if fact.key not in {"operational", "power_supply"}:
+                continue
+            facts.append(
+                {
+                    "key": fact.key,
+                    "initial_value": fact.initial_value,
+                    "initial_visibility": fact.initial_visibility.value,
+                    "goal_addressable": fact.goal_addressable,
+                    "allowed_values": list(fact.allowed_values),
+                }
+            )
+        rows.append({"node_key": node.key, "facts": sorted(facts, key=lambda item: item["key"])})
+    return _semantic_hash(sorted(rows, key=lambda item: item["node_key"]))
+
+
+def initial_fact_semantic_hash(definition: ScenarioDefinitionV2) -> str:
+    """Freeze every existing Fact initial value, visibility, and Goal contract."""
+
+    rows = [
+        {
+            "node_key": node.key,
+            "facts": sorted(
+                (
+                    {
+                        "key": fact.key,
+                        "initial_value": fact.initial_value,
+                        "initial_visibility": fact.initial_visibility.value,
+                        "goal_addressable": fact.goal_addressable,
+                        "allowed_values": list(fact.allowed_values),
+                    }
+                    for fact in node.facts
+                ),
+                key=lambda item: item["key"],
+            ),
+        }
+        for node in definition.world.nodes
+    ]
+    return _semantic_hash(sorted(rows, key=lambda item: item["node_key"]))
+
+
+def power_topology_semantic_hash(definition: ScenarioDefinitionV2) -> str:
+    """Freeze authored supplies_power_to Relations."""
+
+    rows = [
+        relation.model_dump(mode="json")
+        for relation in definition.world.relations
+        if relation.relation_type_key == "supplies_power_to"
+    ]
+    rows.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
+    return _semantic_hash(rows)
 
 
 __all__ = [
     "EXPECTED_REPAIR_TARGET_ROLES",
+    "LEGACY_FACILITY_FACT_SEMANTIC_HASH",
+    "LEGACY_INITIAL_FACT_SEMANTIC_HASH",
+    "LEGACY_POWER_TOPOLOGY_SEMANTIC_HASH",
     "LEGACY_REPAIR_ACTION_KEYS",
     "LEGACY_REPAIR_RULE_COUNT",
     "LEGACY_REPAIR_RULE_SEMANTIC_HASH",
+    "facility_fact_semantic_hash",
+    "initial_fact_semantic_hash",
+    "power_topology_semantic_hash",
     "repair_rule_semantic_hash",
 ]

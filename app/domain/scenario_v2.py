@@ -793,6 +793,7 @@ class DerivedStateDefinitionV2(FrozenDefinitionModel):
 
 class ActionPlanningProjectionV2(FrozenDefinitionModel):
     terminal_effects: tuple[FactReferenceV2, ...] = ()
+    target_terminal_fact_keys: tuple[StableKey, ...] = ()
     supporting_effects: tuple[FactReferenceV2, ...] = ()
     success_outcome_codes: tuple[SymbolicCode, ...] = ()
     wait_success_outcome_codes: tuple[SymbolicCode, ...] = ()
@@ -1761,6 +1762,28 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
             *action.planning.supporting_effects,
         ):
             _require_fact(nodes, fact_ref.node_key, fact_ref.fact_key, "Action planning Effect")
+        if action.planning.target_terminal_fact_keys:
+            if action.target_kind != ActionTargetKind.NODE:
+                raise ValueError(
+                    f"Action {action.key} target-relative planning Effects require a Node target"
+                )
+            eligible_targets = (
+                node
+                for node in nodes.values()
+                if (
+                    not action.target_node_type_keys
+                    or node.node_type_key in action.target_node_type_keys
+                )
+                and action.required_interaction_key in node.interaction_keys
+            )
+            for target in eligible_targets:
+                target_facts = {fact.key for fact in target.facts}
+                for fact_key in action.planning.target_terminal_fact_keys:
+                    _require_key(
+                        target_facts,
+                        fact_key,
+                        f"Action {action.key} target-relative planning Effect on {target.key}",
+                    )
         if action.planning.knowledge_gate is not None:
             _validate_gate(action.planning.knowledge_gate, nodes)
 

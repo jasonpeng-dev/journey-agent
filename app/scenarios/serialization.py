@@ -85,6 +85,7 @@ def _canonical_v2_payload(
         _sort_authority(action["authority_policy"])
         planning = action["planning"]
         planning["terminal_effects"].sort(key=lambda item: (item["node_key"], item["fact_key"]))
+        planning["target_terminal_fact_keys"].sort()
         planning["supporting_effects"].sort(key=lambda item: (item["node_key"], item["fact_key"]))
         planning["success_outcome_codes"].sort()
         planning["wait_success_outcome_codes"].sort()
