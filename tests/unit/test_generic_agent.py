@@ -36,6 +36,7 @@ from app.services.game_instances import GameInstanceService
 from app.services.play import PlayError, PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.goal_confirmation_helpers import submit_and_confirm
 from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
@@ -489,11 +490,10 @@ def test_player_pacing_recovers_missing_checkpoint_and_enforces_phase(
 ) -> None:
     _agent_service, runtime = _agent(session)
     orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
-    submission = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key="pacing-recovery"
+    task = submit_and_confirm(
+        orchestrator, "stabilize the patient", idempotency_key="pacing-recovery"
     )
-    assert submission.task is not None
-    checkpoint = session.get(PlayerExecutionCheckpoint, submission.task.id)
+    checkpoint = session.get(PlayerExecutionCheckpoint, task.id)
     assert checkpoint is not None
     session.delete(checkpoint)
     session.flush()
@@ -501,27 +501,26 @@ def test_player_pacing_recovers_missing_checkpoint_and_enforces_phase(
 
     orchestrator.start_initial_planning(expected_pacing_version=1)
     orchestrator.acknowledge_action(expected_pacing_version=2)
-    recovered = session.get(PlayerExecutionCheckpoint, submission.task.id)
+    recovered = session.get(PlayerExecutionCheckpoint, task.id)
     assert recovered is not None
     assert recovered.phase == "AWAITING_DEBRIEF_ACK"
     with pytest.raises(PlayError) as caught:
         orchestrator.acknowledge_action(expected_pacing_version=recovered.version)
     assert caught.value.code == "PLAYER_PACING_PHASE_INVALID"
-    submission.task.status = AgentTaskStatus.ABORTED
-    assert orchestrator._phase_after_cycle(submission.task).value == "ABORTED"
+    task.status = AgentTaskStatus.ABORTED
+    assert orchestrator._phase_after_cycle(task).value == "ABORTED"
 
 
 def test_player_pacing_blocks_when_plan_has_no_action(session: Session) -> None:
     _agent_service, runtime = _agent(session)
     orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
-    submission = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key="pacing-no-action"
+    task = submit_and_confirm(
+        orchestrator, "stabilize the patient", idempotency_key="pacing-no-action"
     )
-    assert submission.task is not None
     orchestrator.start_initial_planning(expected_pacing_version=1)
     plan = session.scalar(
         select(AgentPlan).where(
-            AgentPlan.task_id == submission.task.id,
+            AgentPlan.task_id == task.id,
             AgentPlan.status == AgentPlanStatus.ACTIVE,
         )
     )
@@ -635,12 +634,11 @@ def test_satisfied_objective_short_circuits_all_planning_and_execution(
         GameInstanceId(runtime.instance.id),
         provider=provider,
     )
-    submission = orchestrator.submit_goal(
+    task = submit_and_confirm(
+        orchestrator,
         "stabilize the patient",
         idempotency_key="already-complete",
     )
-    task = submission.task
-    assert task is not None
 
     assert task.status == AgentTaskStatus.SUCCEEDED
     checkpoint = session.get(PlayerExecutionCheckpoint, task.id)

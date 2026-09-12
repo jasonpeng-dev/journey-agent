@@ -52,6 +52,7 @@ from app.services.composition import configured_play_orchestrator
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
 from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
+from tests.goal_confirmation_helpers import parse_and_confirm_api, submit_and_confirm
 from tests.scenario_fixtures import GENERIC_TEST, create_test_scenario
 
 
@@ -214,13 +215,15 @@ def test_mock_composition_never_sends_model_http(
 
     monkeypatch.setattr(httpx, "post", fail_http)
     runtime, _scope = _runtime(session, GENERIC_TEST)
-    submission = configured_play_orchestrator(
+    orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("mock")
-    ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
+    )
+    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
-    assert submission.task is not None
+    assert submission.draft is not None
     assert submission.resolution.source == "DETERMINISTIC"
-    assert submission.task.planning_mode == "GENERIC"
+    task = orchestrator.confirm_goal_draft(submission.draft.id)
+    assert task.planning_mode == "GENERIC"
 
 
 def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
@@ -236,14 +239,15 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     )
     submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
-    assert submission.task is not None
+    assert submission.draft is not None
+    task = orchestrator.confirm_goal_draft(submission.draft.id)
     assert provider.goal_requests == []
     assert provider.plan_requests == []
     original_propose_plan = provider.propose_plan
     observed_started_calls: list[dict[str, object]] = []
 
     def inspect_persistence_boundary(request: PlanRequest) -> PlanProposal:
-        persisted = session.get(AgentTask, submission.task.id)
+        persisted = session.get(AgentTask, task.id)
         assert persisted is not None
         calls = (persisted.objective_resolution_metadata or {}).get("provider_calls", [])
         observed_started_calls.append(dict(calls[-1]))
@@ -259,12 +263,12 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
         return original_propose_plan(request)
 
     monkeypatch.setattr(provider, "propose_plan", inspect_persistence_boundary)
-    _start_initial_plan(orchestrator, submission.task)
+    _start_initial_plan(orchestrator, task)
     assert len(provider.plan_requests) == 1
     assert observed_started_calls[0]["outcome"] == "RUNNING"
     assert observed_started_calls[0]["call_type"] == "INITIAL_PLAN"
-    assert submission.task.planning_mode == "PROVIDER"
-    calls = (submission.task.objective_resolution_metadata or {}).get("provider_calls", [])
+    assert task.planning_mode == "PROVIDER"
+    calls = (task.objective_resolution_metadata or {}).get("provider_calls", [])
     assert calls[-1]["outcome"] == "SUCCESS"
     assert calls[-1]["call_type"] == "INITIAL_PLAN"
     assert calls[-1]["started_at"]
@@ -296,9 +300,8 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-    assert submission.task is not None
-    checkpoint = orchestrator._ensure_checkpoint(submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    checkpoint = orchestrator._ensure_checkpoint(task)
 
     task = orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
     assert orchestrator._ensure_checkpoint(task).phase == "BLOCKED"
@@ -335,8 +338,7 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
-    assert task is not None
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
 
     final_task = _start_initial_plan(orchestrator, task)
     assert final_task.status.value == "ACTIVE"
@@ -393,15 +395,16 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
         idempotency_key=str(uuid4()),
     )
 
-    assert accepted.task is not None
+    assert accepted.draft is not None
     assert accepted.resolution.objective_keys == ()
     assert accepted.resolution.dynamic_requirements == (dynamic_candidate,)
     assert accepted.resolution.source == "AD_HOC_DYNAMIC"
     assert provider.goal_requests == []
     assert len(provider.dynamic_requests) == 1
-    assert accepted.task.formal_goal_source_kind == "AD_HOC_DYNAMIC"
+    accepted_task = orchestrator.confirm_goal_draft(accepted.draft.id)
+    assert accepted_task.formal_goal_source_kind == "AD_HOC_DYNAMIC"
 
-    accepted.task.status = "SUCCEEDED"
+    accepted_task.status = "SUCCEEDED"
     invented = RecordingProvider(selected=("invented_objective",))
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: invented
@@ -409,7 +412,7 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
     rejected = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     ).submit_goal("do something the scenario never defined", idempotency_key=str(uuid4()))
-    assert rejected.task is None
+    assert rejected.draft is None
     assert rejected.resolution.status == "UNSUPPORTED"
     assert invented.goal_requests == []
     assert len(invented.dynamic_requests) == 2
@@ -479,10 +482,8 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-
-    assert submission.task is not None
-    _start_initial_plan(orchestrator, submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
     assert [item.call_type for item in provider.plan_requests] == [
         "INITIAL_PLAN",
         "REPAIR",
@@ -528,7 +529,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
 
     cycle = session.scalar(
         select(PlanningCycle)
-        .where(PlanningCycle.task_id == submission.task.id)
+        .where(PlanningCycle.task_id == task.id)
         .order_by(PlanningCycle.created_at.desc())
     )
     assert cycle is not None and cycle.status == "ACCEPTED"
@@ -564,7 +565,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         session.scalar(
             select(func.count())
             .select_from(AgentPlan)
-            .where(AgentPlan.task_id == submission.task.id)
+            .where(AgentPlan.task_id == task.id)
         )
         == 1
     )
@@ -572,7 +573,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         session.scalar(
             select(func.count())
             .select_from(WorldOperation)
-            .where(WorldOperation.task_id == submission.task.id)
+            .where(WorldOperation.task_id == task.id)
         )
         == 0
     )
@@ -580,30 +581,28 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: rejected_provider
     )
-    submission.task.status = "SUCCEEDED"
-    rejected = configured_play_orchestrator(
+    task.status = "SUCCEEDED"
+    rejected_orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    ).submit_goal("diagnose the patient", idempotency_key=str(uuid4()))
-    assert rejected.task is not None
-    _start_initial_plan(
-        configured_play_orchestrator(
-            session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-        ),
-        rejected.task,
     )
-    assert rejected.task.status.value == "BLOCKED"
-    assert rejected.task.last_error_code == "MODEL_PLAN_REJECTED"
+    rejected_task = submit_and_confirm(rejected_orchestrator, "diagnose the patient")
+    _start_initial_plan(
+        rejected_orchestrator,
+        rejected_task,
+    )
+    assert rejected_task.status.value == "BLOCKED"
+    assert rejected_task.last_error_code == "MODEL_PLAN_REJECTED"
     assert len(rejected_provider.plan_requests) == 3
     assert rejected_provider.plan_requests[1].anti_regression_memory == ()
     rejected_cycle = session.scalar(
         select(PlanningCycle)
-        .where(PlanningCycle.task_id == rejected.task.id)
+        .where(PlanningCycle.task_id == rejected_task.id)
         .order_by(PlanningCycle.created_at.desc())
     )
     assert rejected_cycle is not None and rejected_cycle.status == "REJECTED"
     assert (
         session.scalar(
-            select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == rejected.task.id)
+            select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == rejected_task.id)
         )
         == 0
     )
@@ -611,7 +610,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         session.scalar(
             select(func.count())
             .select_from(WorldOperation)
-            .where(WorldOperation.task_id == rejected.task.id)
+            .where(WorldOperation.task_id == rejected_task.id)
         )
         == 0
     )
@@ -634,10 +633,8 @@ def test_provider_repair_attempt_limit_comes_from_settings(
         session, GameInstanceId(runtime.instance.id), settings
     )
 
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-
-    assert submission.task is not None
-    _start_initial_plan(orchestrator, submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
     assert [request.call_type for request in provider.plan_requests] == [
         "INITIAL_PLAN",
         "REPAIR",
@@ -645,7 +642,7 @@ def test_provider_repair_attempt_limit_comes_from_settings(
         "REPAIR",
         "REPAIR",
     ]
-    assert submission.task.status.value == "ACTIVE"
+    assert task.status.value == "ACTIVE"
 
 
 def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
@@ -661,10 +658,8 @@ def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-
-    assert submission.task is not None
-    _start_initial_plan(orchestrator, submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
     assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN", "REPAIR"]
     diagnostic = provider.plan_requests[1].repair_diagnostics[0]
     assert diagnostic.code == "PLAN_ORDER_INVALID"
@@ -690,19 +685,14 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
     patient.visibility = "HIDDEN"
     session.flush()
 
-    submission = configured_play_orchestrator(
+    orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-
-    assert submission.task is not None
-    _start_initial_plan(
-        configured_play_orchestrator(
-            session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-        ),
-        submission.task,
     )
-    assert submission.task.status.value == "BLOCKED"
-    assert submission.task.last_error_code == "UNREACHABLE_IN_CURRENT_STATE"
+
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
+    assert task.status.value == "BLOCKED"
+    assert task.last_error_code == "UNREACHABLE_IN_CURRENT_STATE"
     assert provider.plan_requests == []
 
 
@@ -718,9 +708,8 @@ def test_generic_composition_uses_the_same_provider_wiring(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-    assert submission.task is not None
-    _start_initial_plan(orchestrator, submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
     assert len(provider.plan_requests) == 1
 
 
@@ -1232,13 +1221,7 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
     game_id = str(response.json()["id"])
     before_operations = session.scalar(select(func.count()).select_from(WorldOperation))
 
-    response = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-
-    assert response.status_code == 200
-    task = response.json()["task"]
+    task = parse_and_confirm_api(client, game_id, "stabilize the patient")
     response = client.post(
         f"/api/v1/games/{game_id}/play/start-planning",
         json={"expected_pacing_version": task["pacing_version"]},
@@ -1296,12 +1279,7 @@ def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
     )
     assert game.status_code == 201, game.text
     game_id = str(game.json()["id"])
-    goal = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-    assert goal.status_code == 200, goal.text
-    task = goal.json()["task"]
+    task = parse_and_confirm_api(client, game_id, "stabilize the patient")
 
     response = client.post(
         f"/api/v1/games/{game_id}/play/start-planning",
@@ -1339,12 +1317,7 @@ def test_replan_provider_failure_persists_failure_and_action_history(
             "idempotency_key": str(uuid4()),
         },
     ).json()
-    goal = client.post(
-        f"/api/v1/games/{game['id']}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-    assert goal.status_code == 200, goal.text
-    task = goal.json()["task"]
+    task = parse_and_confirm_api(client, str(game["id"]), "stabilize the patient")
     start = client.post(
         f"/api/v1/games/{game['id']}/play/start-planning",
         json={"expected_pacing_version": task["pacing_version"]},
@@ -1404,8 +1377,7 @@ def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
-    assert task is not None
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)
     plan = session.scalar(
         select(AgentPlan).where(AgentPlan.task_id == task.id).order_by(AgentPlan.version.desc())
@@ -1477,8 +1449,7 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
-    assert task is not None
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)
     assert "planning_continuity" not in provider.plan_requests[0].provider_payload()
     builder = PlanningContinuityBuilder(session, orchestrator.scope)

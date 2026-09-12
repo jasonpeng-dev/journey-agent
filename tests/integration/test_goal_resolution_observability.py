@@ -226,7 +226,8 @@ def test_unresolved_goal_attempt_survives_api_rollback(
 
     assert submitted.status_code == 200, submitted.text
     assert submitted.json()["status"] == status
-    assert submitted.json()["task"] is None
+    assert submitted.json()["draft_id"] is None
+    assert "task" not in submitted.json()
     assert len(provider.requests) == (2 if status == "UNSUPPORTED" else 1)
 
     attempt = _attempt(session, game_id)
@@ -286,7 +287,8 @@ def test_resolved_dynamic_attempt_records_safe_provider_diagnostics(
     )
 
     assert submitted.status_code == 200, submitted.text
-    assert submitted.json()["status"] == "ACCEPTED"
+    assert submitted.json()["status"] == "READY_FOR_CONFIRMATION"
+    assert submitted.json()["draft_id"] is not None
     attempt = _attempt(session, game_id)
     assert attempt.scenario_version_id == version_id
     assert attempt.original_goal_text == "make the patient better"
@@ -624,7 +626,8 @@ def test_authored_resolution_attempt_is_recorded_without_provider_call(
     )
     submitted = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
-    assert submitted.task is not None
+    assert submitted.draft is not None
+    assert submitted.draft is not None
     attempt = _attempt(session, str(runtime.instance.id))
     assert attempt.resolution_status == "RESOLVED"
     assert attempt.resolver_source == "DETERMINISTIC"
@@ -693,6 +696,7 @@ def test_resolution_checkpoint_does_not_commit_play_session(
         GameInstanceId(runtime.instance.id),
         provider=provider,
     )
+    game_id = str(runtime.instance.id)
 
     def fail_main_commit() -> None:
         raise AssertionError("Goal resolution audit must not commit the PLAY session")
@@ -700,7 +704,7 @@ def test_resolution_checkpoint_does_not_commit_play_session(
     monkeypatch.setattr(session, "commit", fail_main_commit)
     submitted = orchestrator.submit_goal("invent warp travel", idempotency_key=str(uuid4()))
 
-    assert submitted.task is None
+    assert submitted.draft is None
     assert submitted.resolution.status == "UNSUPPORTED"
     session.rollback()
-    assert _attempt(session, str(runtime.instance.id)).resolution_status == "UNSUPPORTED"
+    assert _attempt(session, game_id).resolution_status == "UNSUPPORTED"

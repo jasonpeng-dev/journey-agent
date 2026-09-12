@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.domain.enums import AgentPlanStatus, AgentStepStatus
 from app.infrastructure.db.models import AgentPlan, AgentStep
 from app.scenarios.builtin import require_builtin_v2_version
+from tests.goal_confirmation_helpers import parse_and_confirm_api
 from tests.scenario_fixtures import GENERIC_TEST
 
 
@@ -23,12 +24,7 @@ def _new_game(client: TestClient, session: Session) -> str:
 
 
 def _accepted_task(client: TestClient, game_id: str) -> dict[str, Any]:
-    response = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-    assert response.status_code == 200, response.text
-    return response.json()["task"]
+    return parse_and_confirm_api(client, game_id, "stabilize the patient")
 
 
 def _start_planning(client: TestClient, game_id: str, task: dict[str, Any]) -> dict[str, Any]:

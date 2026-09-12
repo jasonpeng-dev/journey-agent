@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.infrastructure.db.models import ActionDecisionRequest, AgentTask
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.scenarios import ScenarioService
+from tests.goal_confirmation_helpers import parse_and_confirm_api
 from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
@@ -34,12 +35,7 @@ def _start_approval_game(client: TestClient, version_id: str) -> tuple[str, dict
         "/api/v1/games",
         json={"scenario_version_id": version_id, "idempotency_key": str(uuid4())},
     ).json()
-    goal = client.post(
-        f"/api/v1/games/{game['id']}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-    assert goal.status_code == 200, goal.text
-    briefing = goal.json()["task"]
+    briefing = parse_and_confirm_api(client, str(game["id"]), "stabilize the patient")
     assert briefing["execution_phase"] == "AWAITING_PLAN_START"
     planning = client.post(
         f"/api/v1/games/{game['id']}/play/start-planning",

@@ -1,21 +1,30 @@
 # ruff: noqa: RUF001
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, func, select, update
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.generic import GenericGoalResolution, GenericGoalResolver
 from app.agent.provider import GenericProviderError
 from app.domain.enums import ResolvedGoalDraftStatus
+from app.domain.runtime_scope import GameInstanceId
+from app.infrastructure.db.base import Base
 from app.infrastructure.db.models import (
     AgentPlan,
     AgentTask,
     GoalResolutionAttempt,
+    Player,
     ResolvedGoalDraft,
 )
+from app.infrastructure.db.session import configure_sqlite_foreign_keys
 from app.scenarios.builtin import require_builtin_v2_version
+from app.services.play import PlayOrchestrator
+from app.services.runtime_initialization import RuntimeInitializationService
 from tests.scenario_fixtures import GENERIC_TEST
 
 
@@ -210,6 +219,57 @@ def test_repeated_confirm_returns_same_task(client: TestClient, session: Session
     assert first.status_code == second.status_code == 200
     assert second.json()["id"] == first.json()["id"]
     assert session.scalar(select(func.count()).select_from(AgentTask)) == 1
+
+
+def test_concurrent_confirm_returns_one_bound_task(tmp_path: Path) -> None:
+    database = tmp_path / "goal-confirm-concurrency.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{database.as_posix()}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    configure_sqlite_foreign_keys(engine)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as setup:
+        version = require_builtin_v2_version(setup, GENERIC_TEST)
+        player = Player(name=f"concurrent-confirm-{uuid4().hex[:8]}")
+        setup.add(player)
+        setup.flush()
+        runtime = RuntimeInitializationService(setup).create(
+            player_id=player.id,
+            scenario_version_id=version.id,
+            creation_key=str(uuid4()),
+        )
+        game_id = runtime.instance.id
+        setup.commit()
+    with factory() as parsing:
+        submitted = PlayOrchestrator(parsing, GameInstanceId(game_id)).submit_goal(
+            "stabilize the patient",
+            idempotency_key=str(uuid4()),
+        )
+        assert submitted.draft is not None
+        draft_id = submitted.draft.id
+        parsing.commit()
+
+    barrier = Barrier(2)
+
+    def confirm() -> UUID:
+        with factory() as db:
+            barrier.wait()
+            task = PlayOrchestrator(db, GameInstanceId(game_id)).confirm_goal_draft(draft_id)
+            db.commit()
+            return task.id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        task_ids = tuple(executor.map(lambda _index: confirm(), range(2)))
+
+    assert task_ids == (draft_id, draft_id)
+    with factory() as verification:
+        assert verification.scalar(select(func.count()).select_from(AgentTask)) == 1
+        draft = verification.get(ResolvedGoalDraft, draft_id)
+        assert draft is not None
+        assert draft.status == ResolvedGoalDraftStatus.CONFIRMED
+        assert draft.confirmed_task_id == draft_id
 
 
 def test_superseded_and_wrong_game_drafts_cannot_be_confirmed(

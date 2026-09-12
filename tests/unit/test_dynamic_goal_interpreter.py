@@ -1753,12 +1753,14 @@ def test_play_dynamic_goal_idempotency_reuses_frozen_contract(session) -> None:
     )
 
     first = orchestrator.submit_goal("Keep the patient stable", idempotency_key="dynamic-1")
+    session.commit()
     second = orchestrator.submit_goal("Keep the patient stable", idempotency_key="dynamic-1")
 
-    assert first.task is not None
+    assert first.draft is not None
     assert first.resolution.dynamic_requirements == (_stable_candidate(),)
     assert second.replayed is True
-    assert second.task is first.task
+    assert second.draft is not None
+    assert second.draft.id == first.draft.id
     assert second.resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
     assert len(provider.requests) == 1
 
@@ -2201,13 +2203,14 @@ def test_dynamic_fact_submit_does_not_publish_hidden_truth_completion(
         idempotency_key=f"dynamic-hidden-fact-{truth_value}",
     )
 
-    assert submission.task is not None
-    assert submission.task.status == AgentTaskStatus.ACTIVE
+    assert submission.draft is not None
+    task = orchestrator.confirm_goal_draft(submission.draft.id)
+    assert task.status == AgentTaskStatus.ACTIVE
     evaluation = GenericAgentService(
         session,
         GameInstanceService(session).load(GameInstanceId(runtime.instance.id)),
         provider=provider,
-    ).evaluate(submission.task)
+    ).evaluate(task)
     assert evaluation.completed is False
     assert evaluation.authoritative_completed is truth_value
 

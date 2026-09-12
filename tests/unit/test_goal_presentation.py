@@ -1,6 +1,98 @@
 # ruff: noqa: RUF001
 from app.agent.generic import GenericGoalResolution
-from app.services.goal_presentation import SYSTEM_FAILURE_TEXT, present_failed_goal
+from app.domain.formal_goal import (
+    AdHocActionCompletedRequirementCandidateV1,
+    AdHocDerivedStateRequirementCandidateV1,
+    AdHocFactRequirementCandidateV1,
+    AdHocResourceAtLeastRequirementCandidateV1,
+    compile_ad_hoc_dynamic_goal,
+    compile_ad_hoc_dynamic_goal_v2,
+    compile_predefined_formal_goal,
+)
+from app.scenarios.builtin import require_builtin_v2_version
+from app.scenarios.versions import ScenarioVersionRepository
+from app.services.goal_presentation import (
+    SYSTEM_FAILURE_TEXT,
+    present_failed_goal,
+    present_resolved_goal,
+)
+from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
+
+
+def test_success_presenter_is_deterministic_and_uses_public_names(session) -> None:  # type: ignore[no-untyped-def]
+    version = require_builtin_v2_version(session, GENERIC_TEST)
+    snapshot = ScenarioVersionRepository(session).load(version.id)
+    definition = snapshot.definition
+    objective = definition.objective_definitions["stabilize_patient"]
+    contracts = (
+        compile_predefined_formal_goal(snapshot, (objective,)),
+        compile_ad_hoc_dynamic_goal(
+            snapshot,
+            (
+                AdHocFactRequirementCandidateV1(
+                    kind="FACT",
+                    node_key="patient_one",
+                    fact_key="stable",
+                    accepted_values=(True,),
+                ),
+            ),
+        ),
+        compile_ad_hoc_dynamic_goal_v2(
+            snapshot,
+            (
+                AdHocActionCompletedRequirementCandidateV1(
+                    kind="ACTION_COMPLETED",
+                    action_key="diagnose_patient",
+                    target_key="patient_one",
+                ),
+            ),
+        ),
+    )
+
+    texts = tuple(present_resolved_goal(contract, definition) for contract in contracts)
+
+    assert texts == tuple(present_resolved_goal(contract, definition) for contract in contracts)
+    assert objective.name in texts[0]
+    assert definition.world.node("patient_one").name in texts[1]
+    assert definition.world.node("patient_one").fact("stable").name in texts[1]
+    assert (
+        next(item.name for item in definition.actions if item.key == "diagnose_patient")
+        in texts[2]
+    )
+    assert all("patient_one" not in text for text in texts)
+
+
+def test_success_presenter_covers_resource_and_derived_state(session) -> None:  # type: ignore[no-untyped-def]
+    version = require_builtin_v2_version(session, LINJIANG_V2_TEST)
+    snapshot = ScenarioVersionRepository(session).load(version.id)
+    definition = snapshot.definition
+    derived = definition.derived_state_definitions["north_basic_engineering_support"]
+    contract = compile_ad_hoc_dynamic_goal(
+        snapshot,
+        (
+            AdHocResourceAtLeastRequirementCandidateV1(
+                kind="RESOURCE_AT_LEAST",
+                region_key="north_industrial_district",
+                resource_key="general_engineering_parts",
+                minimum=30,
+            ),
+            AdHocDerivedStateRequirementCandidateV1(
+                kind="DERIVED_STATE",
+                derived_key="north_basic_engineering_support",
+                accepted_values=(derived.available_value,),
+            ),
+        ),
+    )
+
+    text = present_resolved_goal(contract, definition)
+
+    assert definition.world.node("north_industrial_district").name in text
+    assert next(
+        item.name for item in definition.world.resources if item.key == "general_engineering_parts"
+    ) in text
+    assert derived.name in text
+    assert "north_industrial_district" not in text
+    assert "general_engineering_parts" not in text
 
 
 def test_failure_presenter_uses_typed_family_and_not_provider_prompt() -> None:

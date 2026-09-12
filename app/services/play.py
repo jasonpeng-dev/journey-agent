@@ -5,13 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.generic import (
@@ -82,12 +82,6 @@ class GoalSubmission:
     presentation_text: str
     draft: ResolvedGoalDraft | None
     replayed: bool = False
-
-    @property
-    def task(self) -> None:
-        """Legacy shape guard: parsing never creates or returns an AgentTask."""
-
-        return None
 
 
 class PlayOrchestrator:
@@ -448,6 +442,24 @@ class PlayOrchestrator:
             replay = self.db.get(AgentTask, draft_id)
             if replay is not None and replay.game_instance_id == self.scope.game_instance_id:
                 return replay
+            raise PlayError(
+                "GOAL_DRAFT_CONFIRMATION_CONFLICT",
+                "The Goal Draft could not be confirmed concurrently",
+            ) from exc
+        except OperationalError as exc:
+            if self.db.get_bind().dialect.name != "sqlite" or "database is locked" not in str(exc):
+                raise
+            # SQLite has no SELECT ... FOR UPDATE. Two deferred transactions can
+            # therefore both read READY before one wins the deterministic Task
+            # insert. Roll back the losing snapshot and briefly wait for that
+            # exact Task id to become visible; no semantic work is repeated.
+            self.db.rollback()
+            for _ in range(100):
+                replay = self.db.get(AgentTask, draft_id)
+                if replay is not None and replay.game_instance_id == self.scope.game_instance_id:
+                    return replay
+                self.db.rollback()
+                sleep(0.01)
             raise PlayError(
                 "GOAL_DRAFT_CONFIRMATION_CONFLICT",
                 "The Goal Draft could not be confirmed concurrently",

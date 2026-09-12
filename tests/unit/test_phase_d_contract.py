@@ -68,13 +68,21 @@ def test_scenario_create_modes_have_one_explicit_source() -> None:
 
 def test_unresolved_goal_does_not_expose_an_agent_task() -> None:
     unsupported = GoalSubmissionResponse(
+        resolution_id=uuid4(),
+        submitted_goal="invent warp travel",
         status=GoalSubmissionStatus.UNSUPPORTED,
-        explanation="No exact-Version Objective matches the goal",
+        presentation_text="This goal is not supported.",
     )
-    assert unsupported.task is None
+    assert unsupported.draft_id is None
+    assert "task" not in unsupported.model_dump()
 
     with pytest.raises(ValidationError):
-        GoalSubmissionResponse(status=GoalSubmissionStatus.ACCEPTED)
+        GoalSubmissionResponse(
+            resolution_id=uuid4(),
+            submitted_goal="stabilize the patient",
+            status=GoalSubmissionStatus.READY_FOR_CONFIRMATION,
+            presentation_text="Stabilize the patient.",
+        )
 
 
 def test_player_contract_rejects_hidden_truth_and_developer_contract_owns_it() -> None:
