@@ -3800,6 +3800,17 @@ class GenericAgentService:
                     *action.planning.supporting_effects,
                 )
             }
+            effects.update(
+                (node.key, fact_key)
+                for node in definition.world.nodes
+                if action.required_interaction_key in node.interaction_keys
+                and (
+                    not action.target_node_type_keys
+                    or node.node_type_key in action.target_node_type_keys
+                )
+                for effect in action.planning.target_terminal_effects
+                for fact_key in (effect.fact_key,)
+            )
             matched = [item for item in needed if item in effects and item not in covered]
             if not matched:
                 continue
@@ -4575,13 +4586,16 @@ class GenericAgentService:
                 public_effects=tuple(
                     {
                         "kind": (
-                            "TERMINAL" if item in action.planning.terminal_effects else "SUPPORTING"
+                            "TERMINAL"
+                            if item
+                            in action.planning.terminal_effects_for_target(target_key)
+                            else "SUPPORTING"
                         ),
                         "node_key": item.node_key,
                         "fact_key": item.fact_key,
                     }
                     for item in (
-                        *action.planning.terminal_effects,
+                        *action.planning.terminal_effects_for_target(target_key),
                         *action.planning.supporting_effects,
                     )
                     if (item.node_key, item.fact_key) in effect_refs
@@ -6926,6 +6940,31 @@ class GenericAgentService:
                             current = projected_known_facts.get((node.key, fact.key))
                             if current is not None:
                                 current.visibility = Visibility.KNOWN
+        if any(
+            effect.kind == EffectKind.REVEAL_TARGET_REGION_FACILITY_FACTS
+            for effect in projected_resolution_effects
+        ):
+            facility_type = definition.metadata.locality.facility_node_type_key
+            if facility_type is not None:
+                try:
+                    region = region_for_node(definition, target_key)
+                except LocalityEngineError:
+                    region = None
+                if region is not None:
+                    for node in definition.world.nodes:
+                        if node.node_type_key != facility_type:
+                            continue
+                        try:
+                            node_region = region_for_node(definition, node.key)
+                        except LocalityEngineError:
+                            continue
+                        if node_region != region:
+                            continue
+                        projected_known_nodes.add(node.key)
+                        for fact in node.facts:
+                            current = projected_known_facts.get((node.key, fact.key))
+                            if current is not None:
+                                current.visibility = Visibility.KNOWN
 
         fact_values: dict[tuple[str, str], set[StrictScalar]] = {}
         fact_visibility: dict[tuple[str, str], set[Visibility]] = {}
@@ -7350,7 +7389,7 @@ class GenericAgentService:
         projected_refs = {
             (item.node_key, item.fact_key)
             for item in (
-                *action.planning.terminal_effects,
+                *action.planning.terminal_effects_for_target(candidate.target_key),
                 *action.planning.supporting_effects,
             )
         }
@@ -7462,6 +7501,11 @@ class GenericAgentService:
             )
             if target is None:
                 return "TARGET_INVALID"
+            if (
+                action.target_node_type_keys
+                and target.node_type_key not in action.target_node_type_keys
+            ):
+                return "TARGET_TYPE_INVALID"
             target_interaction_valid = bool(
                 target is not None and action.required_interaction_key in target.interaction_keys
             )
@@ -11448,7 +11492,7 @@ def _planning_failure_details(
     if failure_code == "ACTOR_ROLE_MISSING":
         return {
             "dimension": "ACTOR_ROLE",
-            "required": action.required_actor_role_key,
+            "required": action.required_actor_role_for_target(target_key),
             "actual": actor.role_key,
         }
     if failure_code == "ACTOR_BINDING_INVALID":
@@ -11524,7 +11568,7 @@ def _diagnostic_blocker(
     if failure_code == "ACTOR_ROLE_MISSING":
         return {
             "type": "ACTOR_ROLE",
-            "required_value": action.required_actor_role_key,
+            "required_value": action.required_actor_role_key or "TARGET_SPECIFIC_ROLE",
         }
     if failure_code in {
         "SUPPLY_POWER_RELATION_UNKNOWN",
@@ -11885,12 +11929,19 @@ def _actor_has_direct_known_target(
             for target in planner_input.actors
         )
     required_interaction = contract.target_contract.get("required_interaction_key")
+    target_node_types = contract.target_contract.get("node_type_keys")
     for node in nodes:
         target_key = node.get("key")
         interactions = node.get("interactions")
         if not isinstance(target_key, str) or not isinstance(interactions, list):
             continue
         if isinstance(required_interaction, str) and required_interaction not in interactions:
+            continue
+        if (
+            isinstance(target_node_types, list)
+            and target_node_types
+            and node.get("type") not in target_node_types
+        ):
             continue
         binding = bindings.get((contract.action_key, target_key))
         if binding is not None and not _direct_known_binding_requirements(

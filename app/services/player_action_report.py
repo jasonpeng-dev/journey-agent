@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from app.api.schemas.phase_d import PublicKnowledgeChangeResponse
 from app.domain.resources import resource_pool_initial_states
-from app.domain.scenario_v2 import ActionBehavior, ScenarioDefinitionV2
+from app.domain.scenario_v2 import ActionBehavior, EffectKind, ScenarioDefinitionV2
 from app.engine.locality import LocalityEngineError, region_for_node
 
 _FACT_LABELS = {
@@ -141,7 +141,17 @@ class PlayerActionReportFormatter:
         if action_key is None or target_key is None:
             return None
         action = next((item for item in self.definition.actions if item.key == action_key), None)
-        if action is None or action.behavior != ActionBehavior.REPAIR_COMMUNICATIONS:
+        if action is None:
+            return None
+        reveals_region_facilities = action.behavior == ActionBehavior.REPAIR_COMMUNICATIONS or any(
+            rule.action_key == action.key
+            and any(
+                effect.kind == EffectKind.REVEAL_TARGET_REGION_FACILITY_FACTS
+                for effect in rule.effects
+            )
+            for rule in self.definition.rules
+        )
+        if not reveals_region_facilities:
             return None
 
         target_region = self._safe_region_for_node(target_key)

@@ -226,6 +226,7 @@ class EffectKind(StrEnum):
     SET_REGION_RESOURCE_VISIBILITY = "SET_REGION_RESOURCE_VISIBILITY"
     SET_RESOURCE_POOL_VISIBILITY = "SET_RESOURCE_POOL_VISIBILITY"
     SET_RESOURCE_POOL_AVAILABILITY = "SET_RESOURCE_POOL_AVAILABILITY"
+    REVEAL_TARGET_REGION_FACILITY_FACTS = "REVEAL_TARGET_REGION_FACILITY_FACTS"
 
 
 class DerivedDependencyKind(StrEnum):
@@ -791,9 +792,16 @@ class DerivedStateDefinitionV2(FrozenDefinitionModel):
         return self.unavailable_value
 
 
+class ActionTargetFactEffectV2(FrozenDefinitionModel):
+    """A deterministic Fact mutation relative to the invocation target."""
+
+    fact_key: StableKey
+    value: StrictScalar
+
+
 class ActionPlanningProjectionV2(FrozenDefinitionModel):
     terminal_effects: tuple[FactReferenceV2, ...] = ()
-    target_terminal_fact_keys: tuple[StableKey, ...] = ()
+    target_terminal_effects: tuple[ActionTargetFactEffectV2, ...] = ()
     supporting_effects: tuple[FactReferenceV2, ...] = ()
     success_outcome_codes: tuple[SymbolicCode, ...] = ()
     wait_success_outcome_codes: tuple[SymbolicCode, ...] = ()
@@ -801,6 +809,25 @@ class ActionPlanningProjectionV2(FrozenDefinitionModel):
     knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @model_validator(mode="after")
+    def validate_target_effects(self) -> ActionPlanningProjectionV2:
+        _require_unique(
+            (effect.fact_key for effect in self.target_terminal_effects),
+            "Action target-relative planning Fact effects",
+        )
+        return self
+
+    def terminal_effects_for_target(self, target_key: StableKey) -> tuple[FactReferenceV2, ...]:
+        """Resolve static and current-target terminal effects for one invocation."""
+
+        return (
+            *self.terminal_effects,
+            *(
+                FactReferenceV2(node_key=target_key, fact_key=effect.fact_key)
+                for effect in self.target_terminal_effects
+            ),
+        )
 
 
 class ActionOperationBindingV2(FrozenDefinitionModel):
@@ -1762,7 +1789,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
             *action.planning.supporting_effects,
         ):
             _require_fact(nodes, fact_ref.node_key, fact_ref.fact_key, "Action planning Effect")
-        if action.planning.target_terminal_fact_keys:
+        if action.planning.target_terminal_effects:
             if action.target_kind != ActionTargetKind.NODE:
                 raise ValueError(
                     f"Action {action.key} target-relative planning Effects require a Node target"
@@ -1777,12 +1804,17 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 and action.required_interaction_key in node.interaction_keys
             )
             for target in eligible_targets:
-                target_facts = {fact.key for fact in target.facts}
-                for fact_key in action.planning.target_terminal_fact_keys:
-                    _require_key(
-                        target_facts,
-                        fact_key,
+                for target_effect in action.planning.target_terminal_effects:
+                    fact = _require_key(
+                        {fact.key: fact for fact in target.facts},
+                        target_effect.fact_key,
                         f"Action {action.key} target-relative planning Effect on {target.key}",
+                    )
+                    _validate_typed_values(
+                        fact.value_type,
+                        fact.allowed_values,
+                        (target_effect.value,),
+                        f"Action {action.key} target-relative planning Effect value",
                     )
         if action.planning.knowledge_gate is not None:
             _validate_gate(action.planning.knowledge_gate, nodes)

@@ -30,6 +30,7 @@ from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionParameters,
     ActionTargetKind,
+    EffectKind,
     ScenarioDefinitionV2,
     StrictScalar,
     normalize_action_parameters,
@@ -148,7 +149,14 @@ class GenericGameService:
                 )
         else:
             target = definition.world.node(target_node_key)
-            if target is None or action.required_interaction_key not in target.interaction_keys:
+            if (
+                target is None
+                or action.required_interaction_key not in target.interaction_keys
+                or (
+                    action.target_node_type_keys
+                    and target.node_type_key not in action.target_node_type_keys
+                )
+            ):
                 raise GenericGameError(
                     "ACTION_TARGET_INVALID",
                     "The target does not support the Action's required Interaction",
@@ -239,6 +247,25 @@ class GenericGameService:
             parameters,
             target_actor=target_actor,
         )
+        selected_rule = next(
+            (rule for rule in definition.rules if rule.key == outcome.selected_rule_key),
+            None,
+        )
+        if selected_rule is not None and any(
+            effect.kind == EffectKind.REVEAL_TARGET_REGION_FACILITY_FACTS
+            for effect in selected_rule.effects
+        ):
+            try:
+                target_region = region_for_node(definition, target_node_key)
+            except LocalityEngineError as exc:
+                raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+            outcome = replace(
+                outcome,
+                fact_visibility_updates=(
+                    *outcome.fact_visibility_updates,
+                    *self._facility_region_reveals(target_region, definition, state),
+                ),
+            )
         newly_known_facts = {
             (item.node_key, item.fact_key)
             for item in outcome.fact_visibility_updates
@@ -412,7 +439,14 @@ class GenericGameService:
                 )
         else:
             target = definition.world.node(target_node_key)
-            if target is None or action.required_interaction_key not in target.interaction_keys:
+            if (
+                target is None
+                or action.required_interaction_key not in target.interaction_keys
+                or (
+                    action.target_node_type_keys
+                    and target.node_type_key not in action.target_node_type_keys
+                )
+            ):
                 raise GenericGameError(
                     "ACTION_TARGET_INVALID",
                     "The target does not support the Action's required Interaction",

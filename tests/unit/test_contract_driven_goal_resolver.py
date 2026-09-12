@@ -426,7 +426,7 @@ def test_routing_action_projection_assigns_supply_source_and_target_roles() -> N
     source = LINJIANG_V2_TEST.world.node("southeast_emergency_power_station")
 
     assert source is not None
-    assert "power_targetable" not in source.interaction_keys
+    assert "power_targetable" in source.interaction_keys
     assert "supply_power" in action_keys
 
 
@@ -515,7 +515,7 @@ def test_routing_action_projection_has_no_goal_lexical_matcher() -> None:
         for item in catalog
     }
 
-    assert "repair_communications" in contracts
+    assert "repair_facility" in contracts
     assert "clear_transport" not in contracts
 
 

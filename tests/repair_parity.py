@@ -77,6 +77,11 @@ def repair_rule_semantic_hash(definition: ScenarioDefinitionV2) -> tuple[int, st
         payload = rule.model_dump(mode="json")
         payload.pop("key", None)
         payload["action_key"] = "repair_facility"
+        payload["effects"] = [
+            effect
+            for effect in payload["effects"]
+            if effect["kind"] != "REVEAL_TARGET_REGION_FACILITY_FACTS"
+        ]
         rows.append(payload)
     rows.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
     return len(rows), _semantic_hash(rows)

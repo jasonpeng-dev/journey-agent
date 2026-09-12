@@ -100,6 +100,10 @@ def action_planner_constraints(
         "kind": action.target_kind.value,
         "required_interaction_key": action.required_interaction_key,
     }
+    if action.target_semantic_reference_type is not None:
+        target["semantic_reference_type"] = action.target_semantic_reference_type.value
+    if action.target_node_type_keys:
+        target["node_type_keys"] = list(action.target_node_type_keys)
     if action.behavior == ActionBehavior.RELAY_MESSAGE:
         target["command_reachability"] = CommandReachability.DISCONNECTED.value
 
@@ -478,6 +482,16 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
 
     behavior = action.behavior
     effects: list[dict[str, object]] = []
+    effects.extend(
+        {
+            "type": "FACT_MUTATION",
+            "target": "target_key",
+            "fact_key": fact_key,
+            "value": effect.value,
+        }
+        for effect in action.planning.target_terminal_effects
+        for fact_key in (effect.fact_key,)
+    )
     if behavior == ActionBehavior.TRAVEL:
         effects.extend(
             [
@@ -631,12 +645,33 @@ def planner_target_contracts(
     known_relation_keys = known_relation_keys or set()
     known_pool_keys = known_pool_keys or set()
     effects_by_target: dict[str, list[dict[str, object]]] = {}
+    eligible_targets = {
+        node.key
+        for node in definition.world.nodes
+        if node.key in known_node_keys
+        and action.required_interaction_key in node.interaction_keys
+        and (
+            not action.target_node_type_keys
+            or node.node_type_key in action.target_node_type_keys
+        )
+    }
+    for target_key in eligible_targets:
+        effects_by_target[target_key] = [
+            {
+                "type": "FACT_MUTATION",
+                "target": "target_key",
+                "fact_key": fact_key,
+                "value": effect.value,
+            }
+            for effect in action.planning.target_terminal_effects
+            for fact_key in (effect.fact_key,)
+        ]
     for rule in definition.rules:
         if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
             continue
         if not _has_current_target_condition(rule.condition):
             continue
-        for target_key in known_node_keys:
+        for target_key in eligible_targets:
             if not _condition_matches_target(rule.condition, target_key, known_facts):
                 continue
             effects = [
@@ -687,6 +722,12 @@ def declarative_effect(effect: EffectV2) -> dict[str, object] | None:
             "type": "KNOWLEDGE_REVEAL" if kind == EffectKind.REVEAL_FACT else "KNOWLEDGE_HIDE",
             "target": _selector_name(effect.node),
             "fact_key": effect.fact_key,
+        }
+    if kind == EffectKind.REVEAL_TARGET_REGION_FACILITY_FACTS:
+        return {
+            "type": "KNOWLEDGE_REVEAL",
+            "target": "TARGET_REGION_FACILITIES",
+            "scope": "NON_RESOURCE_FACILITY_INFORMATION",
         }
     if kind in {
         EffectKind.ADJUST_RESOURCE,
@@ -803,6 +844,8 @@ def _effect_is_knowledge_safe(
     known_facts: dict[tuple[str, str], StrictScalar],
     target_key: str | None = None,
 ) -> bool:
+    if effect.kind == EffectKind.REVEAL_TARGET_REGION_FACILITY_FACTS:
+        return target_key is not None and target_key in known_node_keys
     if effect.node is not None and effect.node.kind == NodeSelectorKind.EXPLICIT:
         return effect.node.node_key in known_node_keys
     if projection.get("type") == "RELATION_KNOWLEDGE":

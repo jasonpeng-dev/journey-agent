@@ -1,5 +1,10 @@
 from typing import Any, cast
 
+from app.agent.planner_contract import (
+    action_planner_constraints,
+    action_planner_effects,
+    planner_target_contracts,
+)
 from app.domain.action_invocation import canonical_action_invocation_contract
 from app.domain.scenario_v2 import ActionDefinitionV2
 from tests.repair_parity import (
@@ -36,7 +41,9 @@ def test_linjiang_has_one_node_typed_facility_repair_action() -> None:
     assert action.target_node_type_keys == ("facility",)
     assert action.required_actor_role_key is None
     assert action.planning.terminal_effects == ()
-    assert action.planning.target_terminal_fact_keys == ("operational",)
+    assert [
+        (effect.fact_key, effect.value) for effect in action.planning.target_terminal_effects
+    ] == [("operational", True)]
 
     contract = canonical_action_invocation_contract(action)
     target_contract = cast(dict[str, Any], contract["target"])
@@ -119,4 +126,59 @@ def test_linjiang_catalog_and_rules_have_no_legacy_repair_action_identity() -> N
         rule.key.endswith("target_profile_required")
         and rule.action_key == "repair_facility"
         for rule in LINJIANG_V2_TEST.rules
+    )
+
+
+def test_repair_planner_contract_is_target_relative_and_reads_target_roles() -> None:
+    action = _repair_action()
+    constraints = action_planner_constraints(action)
+    effects = action_planner_effects(action)
+    known_nodes = {node.key for node in LINJIANG_V2_TEST.world.nodes}
+    known_facts = {
+        (node.key, fact.key): fact.initial_value
+        for node in LINJIANG_V2_TEST.world.nodes
+        for fact in node.facts
+    }
+    target_contracts = planner_target_contracts(
+        LINJIANG_V2_TEST,
+        action,
+        known_node_keys=known_nodes,
+        known_facts=known_facts,
+    )
+
+    target_constraints = cast(dict[str, object], constraints["target"])
+    executor_constraints = cast(dict[str, object], constraints["executor"])
+    assert target_constraints["node_type_keys"] == ["facility"]
+    assert len(cast(list[object], executor_constraints["target_role_requirements"])) == 22
+    assert effects == [
+        {
+            "type": "FACT_MUTATION",
+            "target": "target_key",
+            "fact_key": "operational",
+            "value": True,
+        },
+        {"type": "NO_IMPLIED_FACT_MUTATION", "fact_key": "power_supply"},
+    ]
+    assert set(target_contracts) == {
+        node.key
+        for node in LINJIANG_V2_TEST.world.nodes
+        if node.node_type_key == "facility"
+    }
+    assert target_contracts["east_telecom_station"] == {
+        "effects": [
+            {
+                "type": "FACT_MUTATION",
+                "target": "target_key",
+                "fact_key": "operational",
+                "value": True,
+            }
+        ]
+    }
+    central_effects = cast(
+        list[dict[str, object]],
+        target_contracts["central_telecom_hub"]["effects"],
+    )
+    assert any(effect.get("type") == "ACTOR_COMMAND_REACHABILITY" for effect in central_effects)
+    assert any(
+        effect.get("target") == "TARGET_REGION_FACILITIES" for effect in central_effects
     )

@@ -204,6 +204,55 @@ def test_semantic_action_and_family_guesses_have_no_authority_and_actor_stays_un
     ]
 
 
+def test_repair_facility_goal_freezes_target_and_leaves_actor_unspecified() -> None:
+    target = DynamicGoalMentionSlot(
+        status="GROUNDED",
+        ref_type="NODE",
+        key="central_telecom_hub",
+    )
+    provider = _VNextProvider(
+        grounding=[
+            _role_grounding(
+                (
+                    DynamicGoalCandidateReference(
+                        ref_type="NODE",
+                        key="central_telecom_hub",
+                    ),
+                ),
+                target=target,
+            )
+        ],
+        family="OPERATION",
+        action_key="repair_facility",
+        operation=[
+            _operation(
+                "repair_facility",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_telecom_hub",
+                ),
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "修复中央通信枢纽",
+        LINJIANG_V2_TEST,
+    )
+
+    requirement = resolution.dynamic_requirements[0]
+    assert resolution.status == "RESOLVED"
+    assert requirement.action_key == "repair_facility"
+    assert requirement.target_key == "central_telecom_hub"
+    assert requirement.actor_key is None
+    assert provider.operation_requests[0].explicit_role_evidence["actor"]["status"] == (
+        "NOT_SPECIFIED"
+    )
+
+
 def test_genuine_family_ambiguity_returns_focused_clarification_without_action_routing() -> None:
     provider = _VNextProvider(
         grounding=[DynamicGoalEntityGrounding(status="UNSUPPORTED")],

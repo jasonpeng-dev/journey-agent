@@ -861,6 +861,19 @@ class PlanningContextBuilder:
                     )
                     if (item.node_key, item.fact_key) in known_refs
                 }
+                visible_effects.update(
+                    (node.key, fact_key)
+                    for node in definition.world.nodes
+                    if node.key in known_nodes
+                    and action.required_interaction_key in node.interaction_keys
+                    and (
+                        not action.target_node_type_keys
+                        or node.node_type_key in action.target_node_type_keys
+                    )
+                    for effect in action.planning.target_terminal_effects
+                    for fact_key in (effect.fact_key,)
+                    if (node.key, fact_key) in known_refs
+                )
                 if not visible_effects and (
                     action.behavior == ActionBehavior.RULE
                     and action.locality == ActionLocality.NONE
@@ -898,6 +911,18 @@ class PlanningContextBuilder:
                     *action.planning.terminal_effects,
                     *action.planning.supporting_effects,
                 )
+            )
+            visible_effect = visible_effect or any(
+                node.key in known_nodes
+                and action.required_interaction_key in node.interaction_keys
+                and (
+                    not action.target_node_type_keys
+                    or node.node_type_key in action.target_node_type_keys
+                )
+                and (node.key, fact_key) in known_refs
+                for node in definition.world.nodes
+                for effect in action.planning.target_terminal_effects
+                for fact_key in (effect.fact_key,)
             )
             operational = (
                 action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
@@ -1578,12 +1603,25 @@ class PlanningActionCatalogBuilder:
                     and target_interaction not in target.interaction_keys
                 ):
                     continue
+                target_node_types = (
+                    canonical_contract.target_contract.get("node_type_keys")
+                    if canonical_contract is not None
+                    else list(action.target_node_type_keys)
+                )
+                if (
+                    target_kind == ActionTargetKind.NODE.value
+                    and target is not None
+                    and isinstance(target_node_types, list)
+                    and target_node_types
+                    and target.node_type_key not in target_node_types
+                ):
+                    continue
                 if target_kind == ActionTargetKind.ACTOR.value and target_actor is None:
                     continue
                 visible_effects = tuple(
                     item
                     for item in (
-                        *action.planning.terminal_effects,
+                        *action.planning.terminal_effects_for_target(target_key),
                         *action.planning.supporting_effects,
                     )
                     if (item.node_key, item.fact_key) in known_fact_refs

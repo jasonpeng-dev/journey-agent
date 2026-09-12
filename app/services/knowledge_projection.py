@@ -318,6 +318,13 @@ class SharedKnowledgeProjection:
         by_target: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
 
         for action in sorted(self.definition.actions, key=lambda item: item.key):
+            for target_role in action.target_actor_roles:
+                if target_role.target_key not in known_nodes:
+                    continue
+                by_target[target_role.target_key][action.key] = {
+                    "action_key": action.key,
+                    "required_actor_role_key": target_role.required_actor_role_key,
+                }
             for rule in self.definition.rules:
                 if rule.action_key != action.key or rule.phase.value != "PREFLIGHT":
                     continue
@@ -348,8 +355,12 @@ class SharedKnowledgeProjection:
                         {
                             "action_key": action.key,
                             **(
-                                {"required_actor_role_key": action.required_actor_role_key}
-                                if action.required_actor_role_key is not None
+                                {
+                                    "required_actor_role_key": (
+                                        action.required_actor_role_for_target(target_key)
+                                    )
+                                }
+                                if action.required_actor_role_for_target(target_key) is not None
                                 else {}
                             ),
                         },
@@ -445,11 +456,31 @@ class SharedKnowledgeProjection:
             for action in self.definition.actions
         }
 
+        requirements_by_key = {
+            str(target["target_key"]): list(target["requirements"])
+            for target in requirements_by_target
+        }
+        target_keys = set(requirements_by_key)
+        for action_effects in effects_by_action.values():
+            target_keys.update(action_effects)
+
         result: list[dict[str, Any]] = []
-        for target in requirements_by_target:
-            target_key = str(target["target_key"])
-            for raw_requirement in target["requirements"]:
-                action_key = str(raw_requirement["action_key"])
+        for target_key in sorted(target_keys):
+            requirements_for_target = {
+                str(item["action_key"]): item
+                for item in requirements_by_key.get(target_key, [])
+            }
+            action_keys = set(requirements_for_target)
+            action_keys.update(
+                action_key
+                for action_key, action_effects in effects_by_action.items()
+                if target_key in action_effects
+            )
+            for action_key in sorted(action_keys):
+                raw_requirement = requirements_for_target.get(
+                    action_key,
+                    {"action_key": action_key},
+                )
                 action = actions.get(action_key)
                 if action is None:
                     continue

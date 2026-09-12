@@ -2188,8 +2188,9 @@ actions:
     success: true
   planning:
     terminal_effects: []
-    target_terminal_fact_keys:
-    - operational
+    target_terminal_effects:
+    - fact_key: operational
+      value: true
     supporting_effects: []
     success_outcome_codes:
     - FACILITY_REPAIRED
@@ -3231,6 +3232,7 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
+  - kind: REVEAL_TARGET_REGION_FACILITY_FACTS
   - kind: EMIT_OUTCOME
     node: null
     fact_key: null
@@ -3351,6 +3353,7 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
+  - kind: REVEAL_TARGET_REGION_FACILITY_FACTS
   - kind: EMIT_OUTCOME
     node: null
     fact_key: null
@@ -3487,6 +3490,7 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
+  - kind: REVEAL_TARGET_REGION_FACILITY_FACTS
   - kind: EMIT_OUTCOME
     node: null
     fact_key: null

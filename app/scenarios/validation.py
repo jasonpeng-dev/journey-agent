@@ -136,6 +136,18 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
         if action.key in resolve_action_keys
         for reference in (*action.planning.terminal_effects, *action.planning.supporting_effects)
     }
+    projected_facts.update(
+        (node.key, effect.fact_key)
+        for action in definition.actions
+        if action.key in resolve_action_keys
+        for node in definition.world.nodes
+        if action.required_interaction_key in node.interaction_keys
+        and (
+            not action.target_node_type_keys
+            or node.node_type_key in action.target_node_type_keys
+        )
+        for effect in action.planning.target_terminal_effects
+    )
     projected_resource_effects: set[tuple[str, str]] = set()
     for action in definition.actions:
         if action.source_relation_type_key is not None and action.relation_source_slot() is None:
@@ -154,7 +166,11 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
         # The readiness contract is based on the Action's public planning
         # projection.  A rule-only resource mutation must not make a Scenario
         # appear playable when its planning projections have been removed.
-        if not (action.planning.terminal_effects or action.planning.supporting_effects):
+        if not (
+            action.planning.terminal_effects
+            or action.planning.target_terminal_effects
+            or action.planning.supporting_effects
+        ):
             continue
         for rule in definition.rules:
             if rule.action_key != action.key or rule.phase.value != "RESOLVE":

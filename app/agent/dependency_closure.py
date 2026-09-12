@@ -1729,6 +1729,13 @@ def _contract_can_produce_fact_for_target(
         not isinstance(interactions, list) or required_interaction not in interactions
     ):
         return False
+    target_node_types = contract.target_contract.get("node_type_keys")
+    if (
+        isinstance(target_node_types, list)
+        and target_node_types
+        and target.get("type") not in target_node_types
+    ):
+        return False
     accepted_values: object = dependency.required
     if isinstance(dependency.required, str):
         try:

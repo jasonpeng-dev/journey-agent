@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService, GenericGoalResolution
@@ -27,7 +28,7 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
-from app.services.generic_game import GenericGameService
+from app.services.generic_game import GenericGameError, GenericGameService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
@@ -462,18 +463,18 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
     )
 
 
-def test_repair_communications_reveals_target_region_facilities_not_resources(
+def test_repair_facility_communications_target_reveals_region_facilities_not_resources(
     session: Session,
 ) -> None:
     definition = _definition_with_pool(
-        "linjiang_v2_0_repair_communications",
+        "linjiang_v2_0_repair_facility_communications",
         pool_key="north_communication_test",
         resource_key="communication_equipment",
         region_key="north_industrial_district",
         quantity=10,
         hidden_facility_keys=("heavy_equipment_yard",),
     )
-    runtime, scope = _runtime(session, definition, "linjiang_v2_0_repair_communications")
+    runtime, scope = _runtime(session, definition, "linjiang_v2_0_repair_facility_communications")
     _set_actor(
         session,
         runtime.instance.id,
@@ -523,7 +524,7 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
 
     result = GenericGameService(session, scope).execute(
         actor_key="communications_repair_team_alpha",
-        action_key="repair_communications",
+        action_key="repair_facility",
         target_node_key="north_communication_relay",
         parameters={},
     )
@@ -556,6 +557,65 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
     )
     assert hidden_pool is not None
     assert hidden_pool.visibility == ResourcePoolVisibility.HIDDEN
+
+
+def test_unconstrained_facility_repair_has_no_role_cost_or_extra_effects(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(session, V2_0, "linjiang_v2_0_base_repair")
+    _set_actor(
+        session,
+        runtime.instance.id,
+        "industrial_repair_team_alpha",
+        "east_residential_district",
+    )
+    operational = _fact(session, runtime.instance.id, "east_telecom_station", "operational")
+    operational.truth_value = False
+    session.flush()
+
+    result = GenericGameService(session, scope).execute(
+        actor_key="industrial_repair_team_alpha",
+        action_key="repair_facility",
+        target_node_key="east_telecom_station",
+        parameters={},
+    )
+
+    assert result.outcome.failure is None
+    assert result.outcome.outcome_code == "FACILITY_REPAIRED"
+    assert result.outcome.resource_mutations == ()
+    assert result.outcome.actor_command_reachability_updates == ()
+    assert _fact(
+        session,
+        runtime.instance.id,
+        "east_telecom_station",
+        "operational",
+    ).truth_value is True
+
+
+def test_repair_facility_rejects_region_even_if_it_has_repairable_interaction(
+    session: Session,
+) -> None:
+    document = deepcopy(V2_0.model_dump(mode="json"))
+    region = next(node for node in document["world"]["nodes"] if node["key"] == "central_district")
+    region["interaction_keys"].append("repairable")
+    definition = ScenarioDefinitionV2.model_validate(document)
+    runtime, scope = _runtime(session, definition, "linjiang_v2_0_region_repair_invalid")
+    _set_actor(
+        session,
+        runtime.instance.id,
+        "industrial_repair_team_alpha",
+        "central_district",
+    )
+
+    with pytest.raises(GenericGameError) as exc_info:
+        GenericGameService(session, scope).execute(
+            actor_key="industrial_repair_team_alpha",
+            action_key="repair_facility",
+            target_node_key="central_district",
+            parameters={},
+        )
+
+    assert exc_info.value.code == "ACTION_TARGET_INVALID"
 
 
 def test_route_attempts_reveal_truth_and_clear_requires_known_blocked(
