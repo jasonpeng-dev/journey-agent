@@ -117,13 +117,12 @@ class DraftSandboxService:
                     submission = orchestrator.submit_goal(
                         goal, idempotency_key=f"draft-sandbox-goal:{uuid4()}"
                     )
-                    if submission.task is not None:
-                        orchestrator.advance_sandbox_until_pause(submission.task)
-                    goal_status = (
-                        submission.task.status.value
-                        if submission.task is not None
-                        else submission.resolution.status
-                    )
+                    if submission.draft is not None:
+                        task = orchestrator.confirm_goal_draft(submission.draft.id)
+                        orchestrator.advance_sandbox_until_pause(task)
+                        goal_status = task.status.value
+                    else:
+                        goal_status = submission.resolution.status
                 state = PlayerProjectionService(sandbox).game_state(
                     GameInstanceId(runtime.instance.id)
                 )

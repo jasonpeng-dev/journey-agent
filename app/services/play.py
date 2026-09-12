@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.generic import (
@@ -43,11 +44,14 @@ from app.infrastructure.db.models import (
     AgentPlan,
     AgentStep,
     AgentTask,
+    ConversationSession,
+    GoalResolutionAttempt,
     PlayerExecutionCheckpoint,
     ResolvedGoalDraft,
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.formal_goal import FormalGoalPersistenceError, load_formal_goal_for_draft
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import require_scope_writable
 from app.services.generic_actions import GenericActionService
@@ -373,6 +377,81 @@ class PlayOrchestrator:
         )
         checkpoint.version += 1
         self.db.flush()
+        return task
+
+    def confirm_goal_draft(self, draft_id: UUID) -> AgentTask:
+        """Create or replay one Task from an exact stored Draft contract."""
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        draft = self.db.scalar(
+            select(ResolvedGoalDraft)
+            .where(ResolvedGoalDraft.id == draft_id)
+            .with_for_update()
+        )
+        if draft is None or draft.game_instance_id != self.scope.game_instance_id:
+            raise PlayError("GOAL_DRAFT_NOT_FOUND", "The Goal Draft does not belong to this Game")
+        if draft.status == ResolvedGoalDraftStatus.CONFIRMED:
+            if draft.confirmed_task_id is None:
+                raise PlayError(
+                    "GOAL_DRAFT_CONFIRMATION_INCOMPLETE",
+                    "The confirmed Goal Draft has no bound Task",
+                )
+            task = self.db.get(AgentTask, draft.confirmed_task_id)
+            if task is None or task.game_instance_id != self.scope.game_instance_id:
+                raise PlayError(
+                    "GOAL_DRAFT_CONFIRMATION_INCOMPLETE",
+                    "The confirmed Goal Draft Task is unavailable",
+                )
+            self._ensure_checkpoint(task)
+            return task
+        if draft.status == ResolvedGoalDraftStatus.SUPERSEDED:
+            raise PlayError("GOAL_DRAFT_SUPERSEDED", "The Goal Draft is no longer confirmable")
+        if self._current_task() is not None:
+            raise PlayError("AGENT_TASK_ALREADY_ACTIVE", "The Game already has an active Task")
+        try:
+            formal_goal = load_formal_goal_for_draft(self.db, self.scope, draft)
+        except FormalGoalPersistenceError as exc:
+            raise PlayError(exc.code, exc.message) from exc
+        conversation = self.db.scalar(
+            select(ConversationSession).where(
+                ConversationSession.game_instance_id == self.scope.game_instance_id,
+                ConversationSession.actor_key.is_not(None),
+            )
+        )
+        if conversation is None:
+            raise PlayError("PLAY_SESSION_NOT_FOUND", "The Game has no playable Actor session")
+        try:
+            with self.db.begin_nested():
+                task = self.agent.create_task_from_formal_goal(
+                    conversation,
+                    draft.original_goal_text,
+                    formal_goal=formal_goal,
+                    resolver_source=draft.resolver_source,
+                    initialize_plan=False,
+                    task_id=draft.id,
+                )
+                task.submission_idempotency_key = f"goal-draft:{draft.id}"
+                attempt = self.db.get(GoalResolutionAttempt, draft.resolution_attempt_id)
+                if attempt is not None:
+                    self._record_operation_duration(
+                        task,
+                        kind="GOAL_RESOLUTION",
+                        duration_ms=attempt.resolution_duration_ms,
+                    )
+                self._ensure_checkpoint(task)
+                draft.status = ResolvedGoalDraftStatus.CONFIRMED
+                draft.confirmed_task_id = task.id
+                draft.confirmed_at = datetime.now(UTC)
+                self.db.flush()
+        except IntegrityError as exc:
+            self.db.expire_all()
+            replay = self.db.get(AgentTask, draft_id)
+            if replay is not None and replay.game_instance_id == self.scope.game_instance_id:
+                return replay
+            raise PlayError(
+                "GOAL_DRAFT_CONFIRMATION_CONFLICT",
+                "The Goal Draft could not be confirmed concurrently",
+            ) from exc
         return task
 
     def acknowledge_action(self, *, expected_pacing_version: int) -> AgentTask:

@@ -2882,6 +2882,7 @@ class GenericAgentService:
         resolver_source: str,
         provider_observation: dict[str, object] | None = None,
         initialize_plan: bool = True,
+        task_id: UUID | None = None,
     ) -> AgentTask:
         """Create a normal AgentTask from an already frozen FormalGoal contract."""
 
@@ -2919,6 +2920,7 @@ class GenericAgentService:
         )
         now = datetime.now(UTC)
         task = AgentTask(
+            **({"id": task_id} if task_id is not None else {}),
             player_id=self.scope.player_id,
             game_instance_id=self.scope.game_instance_id,
             owner_actor_key=session.actor_key,

@@ -24,6 +24,7 @@ from app.api.schemas.phase_d import (
     PlayerGameStateResponse,
     PlayerPacingRequest,
     PublicGameStatus,
+    PublicTaskResponse,
 )
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
@@ -128,6 +129,36 @@ def submit_goal(
             presentation_text=submission.presentation_text,
             draft_id=submission.draft.id if submission.draft is not None else None,
         )
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        GenericProviderError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc)
+
+
+@router.post(
+    "/{game_instance_id}/goal-drafts/{draft_id}/confirm",
+    response_model=PublicTaskResponse,
+)
+def confirm_goal_draft(
+    game_instance_id: UUID,
+    draft_id: UUID,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PublicTaskResponse:
+    try:
+        task = configured_play_orchestrator(
+            db, GameInstanceId(game_instance_id), settings
+        ).confirm_goal_draft(draft_id)
+        db.commit()
+        state = PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+        assert state.current_task is not None and state.current_task.id == task.id
+        return state.current_task
     except (
         GameInstanceError,
         GameLifecycleError,

@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericGoalResolution, GenericGoalResolver
@@ -153,3 +153,118 @@ def test_parse_idempotency_replays_without_resolver_and_conflicts_on_new_goal(
     assert conflict.json()["error"]["code"] == "GOAL_IDEMPOTENCY_CONFLICT"
     assert session.scalar(select(func.count()).select_from(GoalResolutionAttempt)) == 1
     assert session.scalar(select(func.count()).select_from(ResolvedGoalDraft)) == 1
+
+
+def test_confirm_creates_exact_task_checkpoint_without_resolver_or_planner(
+    client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    game_id = _new_game(client, session)
+    parsed = _parse(client, game_id, "stabilize the patient").json()
+    draft = session.get(ResolvedGoalDraft, UUID(parsed["draft_id"]))
+    assert draft is not None
+    expected_hash = draft.formal_goal_contract_hash
+
+    def forbidden(*_args):  # type: ignore[no-untyped-def]
+        raise AssertionError("Confirm must not call the Goal Resolver")
+
+    monkeypatch.setattr(GenericGoalResolver, "resolve", forbidden)
+    confirmed = client.post(
+        f"/api/v1/games/{game_id}/goal-drafts/{draft.id}/confirm"
+    )
+
+    assert confirmed.status_code == 200, confirmed.text
+    task = confirmed.json()
+    assert task["goal"] == "stabilize the patient"
+    assert task["execution_phase"] == "AWAITING_PLAN_START"
+    assert task["plan"] is None
+    persisted = session.get(AgentTask, UUID(task["id"]))
+    assert persisted is not None
+    assert persisted.formal_goal_contract_hash == expected_hash
+    assert session.scalar(select(func.count()).select_from(AgentTask)) == 1
+    assert session.scalar(select(func.count()).select_from(AgentPlan)) == 0
+    session.expire_all()
+    draft = session.get(ResolvedGoalDraft, draft.id)
+    assert draft is not None
+    assert draft.status == ResolvedGoalDraftStatus.CONFIRMED
+    assert draft.confirmed_task_id == persisted.id
+    assert draft.confirmed_at is not None
+
+    started = client.post(
+        f"/api/v1/games/{game_id}/play/start-planning",
+        json={"expected_pacing_version": task["pacing_version"]},
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["current_task"]["execution_phase"] != "AWAITING_PLAN_START"
+
+
+def test_repeated_confirm_returns_same_task(client: TestClient, session: Session) -> None:
+    game_id = _new_game(client, session)
+    parsed = _parse(client, game_id, "stabilize the patient").json()
+    url = f"/api/v1/games/{game_id}/goal-drafts/{parsed['draft_id']}/confirm"
+
+    first = client.post(url)
+    second = client.post(url)
+
+    assert first.status_code == second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert session.scalar(select(func.count()).select_from(AgentTask)) == 1
+
+
+def test_superseded_and_wrong_game_drafts_cannot_be_confirmed(
+    client: TestClient,
+    session: Session,
+) -> None:
+    first_game = _new_game(client, session)
+    second_game = _new_game(client, session)
+    first = _parse(client, first_game, "stabilize the patient").json()
+    _parse(client, first_game, "diagnose the patient")
+
+    superseded = client.post(
+        f"/api/v1/games/{first_game}/goal-drafts/{first['draft_id']}/confirm"
+    )
+    wrong_game = client.post(
+        f"/api/v1/games/{second_game}/goal-drafts/{first['draft_id']}/confirm"
+    )
+
+    assert superseded.status_code == 409
+    assert superseded.json()["error"]["code"] == "GOAL_DRAFT_SUPERSEDED"
+    assert wrong_game.status_code == 404
+    assert wrong_game.json()["error"]["code"] == "GOAL_DRAFT_NOT_FOUND"
+    assert session.scalar(select(func.count()).select_from(AgentTask)) == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("formal_goal_contract_hash", "0" * 64, "FORMAL_GOAL_CONTRACT_HASH_MISMATCH"),
+        ("formal_goal_contract_schema_version", 99, "FORMAL_GOAL_CONTRACT_VERSION_MISMATCH"),
+        ("scenario_content_hash", "0" * 64, "FORMAL_GOAL_SCENARIO_HASH_MISMATCH"),
+        ("formal_goal_compiler_version", "invalid@0", "FORMAL_GOAL_COMPILER_VERSION_MISMATCH"),
+    ],
+)
+def test_confirm_rejects_tampered_draft_integrity(
+    client: TestClient,
+    session: Session,
+    field: str,
+    value: object,
+    code: str,
+) -> None:
+    game_id = _new_game(client, session)
+    parsed = _parse(client, game_id, "stabilize the patient").json()
+    draft_id = UUID(parsed["draft_id"])
+    session.execute(
+        update(ResolvedGoalDraft)
+        .where(ResolvedGoalDraft.id == draft_id)
+        .values({field: value})
+    )
+    session.commit()
+
+    response = client.post(
+        f"/api/v1/games/{game_id}/goal-drafts/{draft_id}/confirm"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == code
+    assert session.scalar(select(func.count()).select_from(AgentTask)) == 0
