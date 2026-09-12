@@ -20,6 +20,7 @@ import {
 } from "../knowledgePresentation";
 import type {
   ActionLocation,
+  GoalSubmission,
   PublicPlanHistory,
   PublicPlanHistoryStep,
   PlayerGameState,
@@ -33,12 +34,12 @@ import type {
   PublicTargetActionContract,
   ResourceIntelligence,
   PublicTask,
+  PublicResolvedGoalDraft,
   PublicTimelineEvent,
   ScenarioVersionDetail,
 } from "../types";
 import {
   errorText,
-  goalResolutionPresentationText,
   goalSubmissionErrorText,
   resultLabel,
   stepDescription,
@@ -2259,10 +2260,13 @@ export function GoalComposer({
   startedAt,
   busy,
   feedback = null,
+  readyDraft = null,
+  confirming = false,
   goalPresets = [],
   presetsLoaded = false,
   onGoalChange,
   onSubmit,
+  onConfirm,
 }: {
   goal: string;
   pendingGoal: string | null;
@@ -2270,10 +2274,13 @@ export function GoalComposer({
   startedAt: number | null;
   busy: boolean;
   feedback?: string | null;
+  readyDraft?: PublicResolvedGoalDraft | null;
+  confirming?: boolean;
   goalPresets?: string[];
   presetsLoaded?: boolean;
   onGoalChange: (value: string) => void;
   onSubmit: () => void;
+  onConfirm?: (draftId: string) => void;
 }) {
   const [selectedPresetText, setSelectedPresetText] = useState("");
   const displayedGoal = resolving ? pendingGoal ?? goal : goal;
@@ -2311,7 +2318,7 @@ export function GoalComposer({
             disabled={resolving}
           />
           <button disabled={resolving || !goal.trim() || busy} type="submit">
-            {resolving ? "正在接收……" : "开始目标"}
+            {resolving ? "解析中…" : "解析目标"}
           </button>
         </div>
         <select
@@ -2326,7 +2333,19 @@ export function GoalComposer({
             <option key={preset} value={preset}>{preset}</option>
           ))}
         </select>
-        {feedback && (
+        {readyDraft && (
+          <div className="goal-confirmation-feedback" data-testid="goal-confirmation-feedback" role="status">
+            <span>{readyDraft.presentation_text}</span>
+            <button
+              type="button"
+              disabled={confirming || busy}
+              onClick={() => onConfirm?.(readyDraft.draft_id)}
+            >
+              {confirming ? "确认中…" : "确认目标"}
+            </button>
+          </div>
+        )}
+        {!readyDraft && feedback && (
           <p className="goal-submission-feedback" data-testid="goal-submission-feedback" role="status">
             {feedback}
           </p>
@@ -2334,7 +2353,7 @@ export function GoalComposer({
         {resolving && startedAt !== null && (
           <WaitingStatus
             startedAt={startedAt}
-            label="Agent 正在接收任务"
+            label="Agent 正在理解目标"
             testId="goal-resolving-status"
           />
         )}
@@ -2387,6 +2406,9 @@ export function GamePage() {
   const [developerToken, setDeveloperToken] = useState("");
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [goalFeedback, setGoalFeedback] = useState<string | null>(null);
+  const [lastParseResult, setLastParseResult] = useState<
+    GoalSubmission | { status: "SYSTEM_ERROR"; presentation_text: string; draft_id: null } | null
+  >(null);
   const play = useQuery({
     queryKey: ["play", gameId, selectedTaskId],
     queryFn: () => api.playState(gameId, selectedTaskId),
@@ -2431,41 +2453,44 @@ export function GamePage() {
   const submit = useMutation({
     mutationFn: () => api.submitGoal(gameId, goal, crypto.randomUUID()),
     onMutate: () => {
-      setGoalFeedback("");
+      setGoalFeedback(null);
+      setLastParseResult(null);
       setPendingGoal(goal);
       setAcceptedTask(null);
       setActiveOperation({ kind: "goal", taskId: null, startedAt: Date.now() });
     },
     onSuccess: (result) => {
-      if (result.status === "ACCEPTED") {
-        setGoalFeedback("");
-        setGoal("");
-        setAcceptedTask(result.task);
-        if (result.task) setSelectedTaskId(result.task.id);
-        setActiveOperation((operation) =>
-          operation?.kind === "goal"
-            ? { ...operation, taskId: result.task?.id ?? null }
-            : operation,
-        );
-      } else {
-        setGoalFeedback(
-          goalResolutionPresentationText(
-            result.status,
-            goal,
-            result.clarification_prompt,
-          ),
-        );
-      }
+      setLastParseResult(result);
+      setGoalFeedback(
+        result.status === "READY_FOR_CONFIRMATION" ? null : result.presentation_text,
+      );
       void refresh();
     },
     onError: (error) => {
-      setGoalFeedback(goalSubmissionErrorText(error));
+      const presentationText = goalSubmissionErrorText(error);
+      setGoalFeedback(presentationText);
+      setLastParseResult({
+        status: "SYSTEM_ERROR",
+        presentation_text: presentationText,
+        draft_id: null,
+      });
       setPendingGoal(null);
       setActiveOperation(null);
     },
     onSettled: () => {
       setPendingGoal(null);
       setActiveOperation((operation) => (operation?.kind === "goal" ? null : operation));
+    },
+  });
+  const confirmGoal = useMutation({
+    mutationFn: (draftId: string) => api.confirmGoalDraft(gameId, draftId),
+    onSuccess: (task) => {
+      setAcceptedTask(task);
+      setSelectedTaskId(task.id);
+      setLastParseResult(null);
+      setGoalFeedback(null);
+      setGoal("");
+      void refresh();
     },
   });
   const startPlanning = useMutation({
@@ -2607,6 +2632,7 @@ export function GamePage() {
   );
   const busy =
     submit.isPending ||
+    confirmGoal.isPending ||
     startPlanning.isPending ||
     abandon.isPending ||
     archive.isPending ||
@@ -2618,16 +2644,24 @@ export function GamePage() {
     continuousExecuting ||
     replan.isPending;
   const mutationError =
-    startPlanning.error ?? abandon.error ?? archive.error ?? checkpoint.error ?? fork.error ?? decision.error ?? pacing.error ?? continuous.error ?? replan.error;
-  const resolutionMessage =
-    submit.data && submit.data.status !== "ACCEPTED"
-      ? goalResolutionPresentationText(
-        submit.data.status,
-        pendingGoal ?? goal,
-        submit.data.clarification_prompt,
-      )
+    confirmGoal.error ?? startPlanning.error ?? abandon.error ?? archive.error ?? checkpoint.error ?? fork.error ?? decision.error ?? pacing.error ?? continuous.error ?? replan.error;
+  const projectedGoalDraft = livePlay.data.current_goal_draft ?? play.data.current_goal_draft ?? null;
+  const responseGoalDraft: PublicResolvedGoalDraft | null =
+    lastParseResult?.status === "READY_FOR_CONFIRMATION" && lastParseResult.draft_id
+      ? {
+        draft_id: lastParseResult.draft_id,
+        submitted_goal: lastParseResult.submitted_goal,
+        presentation_text: lastParseResult.presentation_text,
+        status: "READY",
+        created_at: "",
+      }
       : null;
-  const goalSubmissionFeedback = goalFeedback !== null ? goalFeedback : resolutionMessage;
+  const readyGoalDraft = resolvingGoal || acceptedTask
+    ? null
+    : lastParseResult === null
+      ? projectedGoalDraft
+      : responseGoalDraft;
+  const goalSubmissionFeedback = goalFeedback;
   const viewedTaskId =
     selectedTaskId ?? activeTaskId ?? task?.id ?? acceptedTask?.id ?? null;
   const operationSelected = Boolean(
@@ -2803,10 +2837,13 @@ export function GamePage() {
               startedAt={goalResolving ? activeOperation?.startedAt ?? null : null}
               busy={busy}
               feedback={goalSubmissionFeedback}
+              readyDraft={readyGoalDraft}
+              confirming={confirmGoal.isPending}
               goalPresets={goalPresets}
               presetsLoaded={scenarioVersion.isFetched}
               onGoalChange={setGoal}
               onSubmit={() => submit.mutate()}
+              onConfirm={(draftId) => confirmGoal.mutate(draftId)}
             />
           )}
         </div>

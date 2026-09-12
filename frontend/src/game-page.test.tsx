@@ -23,7 +23,6 @@ import {
   syncPlayStateCaches,
 } from "./playPresentation";
 import {
-  goalResolutionPresentationText,
   goalSubmissionErrorText,
   taskExplanationLabel,
   uiLabel,
@@ -745,16 +744,21 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText(/起点：|未指定|Internal operation description/)).not.toBeInTheDocument();
   });
 
-  it("does not expose raw Goal Resolver clarification text", () => {
-    const message = goalResolutionPresentationText(
-      "NEEDS_CLARIFICATION",
-      "transport 30 cargo alpha from source to target",
-      "the actor key and source region are ambiguous",
+  it("renders backend Goal feedback verbatim", () => {
+    const feedback = "后端给出的玩家安全反馈：请明确目标地点。";
+    render(
+      <GoalComposer
+        goal="transport supplies"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        feedback={feedback}
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
     );
-
-    expect(message).toContain("\u8d77\u70b9");
-    expect(message).not.toContain("actor key");
-    expect(message).not.toContain("ambiguous");
+    expect(screen.getByTestId("goal-submission-feedback")).toHaveTextContent(feedback);
   });
 
   it("keeps objective details closed when the task identity changes", () => {
@@ -1028,7 +1032,7 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText("自定义目标", { selector: "label" })).not.toBeInTheDocument();
     expect(screen.queryByText(/智能体只会选择当前精确版本/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("目标内容")).toHaveValue("打开北部贸易路线");
-    fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
+    fireEvent.click(screen.getByRole("button", { name: "解析目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 
@@ -1160,7 +1164,7 @@ describe("Formal Play player projections", () => {
       target: { value: "优先恢复东部应急供电网络" },
     });
     expect(onGoalChange).toHaveBeenLastCalledWith("优先恢复东部应急供电网络");
-    fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
+    fireEvent.click(screen.getByRole("button", { name: "解析目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 
@@ -1179,7 +1183,7 @@ describe("Formal Play player projections", () => {
       />,
     );
     expect(screen.getByTestId("goal-composer")).toBeVisible();
-    expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("Agent 正在接收任务");
+    expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("Agent 正在理解目标");
     act(() => vi.advanceTimersByTime(1250));
     expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("1s");
     vi.useRealTimers();
@@ -1207,13 +1211,99 @@ describe("Formal Play player projections", () => {
     );
   });
 
+  it("keeps READY A confirmable while the textarea is edited to B", () => {
+    const onGoalChange = vi.fn();
+    const onConfirm = vi.fn();
+    const draft = {
+      draft_id: "draft-a",
+      submitted_goal: "Goal A",
+      presentation_text: "已解析目标：Goal A。",
+      status: "READY" as const,
+      created_at: "2026-09-11T00:00:00Z",
+    };
+    const view = render(
+      <GoalComposer
+        goal="Goal A"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        readyDraft={draft}
+        onGoalChange={onGoalChange}
+        onSubmit={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("目标内容"), { target: { value: "Goal B" } });
+    expect(onGoalChange).toHaveBeenCalledWith("Goal B");
+    view.rerender(
+      <GoalComposer
+        goal="Goal B"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        readyDraft={draft}
+        onGoalChange={onGoalChange}
+        onSubmit={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+    expect(screen.getByText(draft.presentation_text)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "确认目标" }));
+    expect(onConfirm).toHaveBeenCalledWith("draft-a");
+  });
+
+  it("removes the old Confirm action as soon as a new Parse starts", () => {
+    render(
+      <GoalComposer
+        goal="Goal B"
+        pendingGoal="Goal B"
+        resolving
+        startedAt={Date.now()}
+        busy
+        readyDraft={null}
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "确认目标" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("Agent 正在理解目标");
+  });
+
+  it("restores a READY preview supplied by the authoritative projection", () => {
+    render(
+      <GoalComposer
+        goal="Goal A"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        readyDraft={{
+          draft_id: "restored-draft",
+          submitted_goal: "Goal A",
+          presentation_text: "已解析目标：Goal A。",
+          status: "READY",
+          created_at: "2026-09-11T00:00:00Z",
+        }}
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("goal-confirmation-feedback")).toHaveTextContent(
+      "已解析目标：Goal A。",
+    );
+    expect(screen.getByRole("button", { name: "确认目标" })).toBeEnabled();
+  });
+
   it("maps internal Goal errors to player-safe feedback", () => {
     const message = goalSubmissionErrorText({ code: "MODEL_PROVIDER_RESPONSE_INVALID" });
-    expect(message).toBe("\u76ee\u6807\u89e3\u6790\u6682\u65f6\u5931\u8d25，\u8bf7\u91cd\u65b0\u63d0\u4ea4\u4e00\u6b21\u3002");
+    expect(message).toBe("目标解析暂时失败，请重新解析。");
     expect(message).not.toContain("MODEL_PROVIDER_RESPONSE_INVALID");
-    expect(goalSubmissionErrorText({ code: "MODEL_PROVIDER_TIMEOUT" })).toBe(
-      "\u76ee\u6807\u89e3\u6790\u670d\u52a1\u6682\u65f6\u6ca1\u6709\u54cd\u5e94，\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002",
-    );
+    expect(goalSubmissionErrorText({ code: "MODEL_PROVIDER_TIMEOUT" })).toBe(message);
   });
 
   it("renders Knowledge sections with dynamic counts and controlled defaults", () => {

@@ -248,69 +248,11 @@ export function diagnosticMessage(code: string, fallback: string): string {
   return diagnosticLabels[code] ?? fallback;
 }
 
-function containsAny(value: string, terms: string[]): boolean {
-  return terms.some((term) => value.includes(term));
-}
-
-export function goalResolutionPresentationText(
-  status: string,
-  goal: string,
-  providerPrompt: string | null,
-): string {
-  if (status === "UNSUPPORTED") {
-    return "\u8fd9\u4e2a\u76ee\u6807\u6682\u65f6\u65e0\u6cd5\u8f6c\u6362\u4e3a\u53ef\u6267\u884c\u76ee\u6807\uff0c\u8bf7\u6362\u4e00\u79cd\u8bf4\u6cd5\u6216\u8865\u5145\u5177\u4f53\u8981\u6c42\u3002";
-  }
-  const text = `${goal} ${providerPrompt ?? ""}`.toLocaleLowerCase();
-  if (containsAny(text, ["not found", "no entity", "no match", "\u6ca1\u6709\u627e\u5230", "\u65e0\u6cd5\u627e\u5230"])) {
-    return "\u6ca1\u6709\u627e\u5230\u4e0e\u4f60\u63d0\u5230\u7684\u5730\u70b9\u6216\u5bf9\u8c61\u660e\u786e\u5bf9\u5e94\u7684\u516c\u5f00\u4fe1\u606f\uff0c\u8bf7\u4f7f\u7528\u66f4\u5b8c\u6574\u7684\u540d\u79f0\u3002";
-  }
-  const operation = containsAny(text, [
-    "transport",
-    "deliver",
-    "move",
-    "source",
-    "destination",
-    "amount",
-    "\u8fd0",
-    "\u8f93\u9001",
-    "\u4ece",
-    "\u5230",
-    "\u6570\u91cf",
-  ]);
-  if (operation) {
-    return "\u6211\u7406\u89e3\u4f60\u60f3\u6267\u884c\u4e00\u4e2a\u64cd\u4f5c\uff0c\u4f46\u8d77\u70b9\u3001\u7ec8\u70b9\u3001\u5bf9\u8c61\u6216\u6570\u91cf\u8fd8\u4e0d\u591f\u660e\u786e\uff0c\u8bf7\u8865\u5145\u8bf4\u660e\u3002";
-  }
-  if (containsAny(text, ["ambiguous", "which", "multiple", "\u54ea\u4e2a", "\u591a\u4e2a", "\u5206\u522b", "\u53ef\u80fd\u5bf9\u5e94"])) {
-    return "\u4f60\u63d0\u5230\u7684\u5730\u70b9\u6216\u5bf9\u8c61\u53ef\u80fd\u5bf9\u5e94\u591a\u4e2a\u516c\u5f00\u9009\u9879\uff0c\u8bf7\u8fdb\u4e00\u6b65\u8bf4\u660e\u5177\u4f53\u76ee\u6807\u3002";
-  }
-  return "\u76ee\u6807\u4e2d\u7684\u5730\u70b9\u3001\u5bf9\u8c61\u6216\u64cd\u4f5c\u8fd8\u4e0d\u591f\u660e\u786e\uff0c\u8bf7\u8865\u5145\u66f4\u5b8c\u6574\u7684\u4fe1\u606f\u3002";
-}
-
 export function goalSubmissionErrorText(
   error: unknown,
-  fallback = "\u76ee\u6807\u6682\u65f6\u65e0\u6cd5\u7ee7\u7eed\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002",
+  fallback = "\u76ee\u6807\u89e3\u6790\u6682\u65f6\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u89e3\u6790\u3002",
 ): string {
-  if (!error || typeof error !== "object") return fallback;
-  const code = "code" in error && typeof error.code === "string" ? error.code : null;
-  if (!code) return fallback;
-  if (code === "MODEL_PROVIDER_RESPONSE_INVALID" || code === "JSONDecodeError") {
-    return "\u76ee\u6807\u89e3\u6790\u6682\u65f6\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u63d0\u4ea4\u4e00\u6b21\u3002";
-  }
-  if (
-    code === "MODEL_PROVIDER_TIMEOUT" ||
-    code === "MODEL_PROVIDER_HTTP_ERROR" ||
-    code === "MODEL_PROVIDER_FAILURE" ||
-    code === "MODEL_PROVIDER_UNAVAILABLE"
-  ) {
-    return "\u76ee\u6807\u89e3\u6790\u670d\u52a1\u6682\u65f6\u6ca1\u6709\u54cd\u5e94\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002";
-  }
-  if (
-    code === "MODEL_PROVIDER_CONFIGURATION_INVALID" ||
-    code.startsWith("FORMAL_GOAL_") ||
-    code.startsWith("GOAL_RESOLUTION_")
-  ) {
-    return "\u76ee\u6807\u683c\u5f0f\u6682\u65f6\u65e0\u6cd5\u89e3\u6790\uff0c\u8bf7\u6362\u4e00\u79cd\u8bf4\u6cd5\u540e\u91cd\u8bd5\u3002";
-  }
+  void error;
   return fallback;
 }
 
