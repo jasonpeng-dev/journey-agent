@@ -1252,7 +1252,7 @@ def test_repair_adjust_resource_aggregates_multiple_visible_available_pools(
 
     result = GenericGameService(session, scope).execute(
         actor_key="electrical_repair_team_alpha",
-        action_key="repair_electrical",
+        action_key="repair_facility",
         target_node_key="east_distribution_station",
         parameters={},
     )
@@ -2177,7 +2177,7 @@ def test_runtime_transport_inflow_supports_local_rule_resource_consumption(
 
     repaired = game.execute(
         actor_key="water_repair_team_alpha",
-        action_key="repair_water_facility",
+        action_key="repair_facility",
         target_node_key="south_pump_station",
         parameters={},
     )

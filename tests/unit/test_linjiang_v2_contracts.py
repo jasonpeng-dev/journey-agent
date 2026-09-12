@@ -168,10 +168,7 @@ def test_linjiang_action_descriptions_are_semantic_only_authoring_text() -> None
         "deploy_heavy_engineering_support": "在设施或交通通道目标上部署重型工程支援。",
         "inspect": "调查设施或交通通道的状态。",
         "relay_message": "向目标行动人员传递命令或信息。",
-        "repair_communications": "修复通信设施并恢复其通信能力。",
-        "repair_electrical": "修复发电、变电或配电设施。",
-        "repair_industrial_facility": "修复工业基地或服务中心。",
-        "repair_water_facility": "修复水处理或供水设施。",
+        "repair_facility": "修复指定设施并恢复其运行状态。",
         "supply_power": "从供电来源向目标设施输送电力。",
         "survey_resources": "调查目标区域的资源库存及来源。",
         "transport_resource": "将资源从来源区域运输到目标区域。",
@@ -326,8 +323,8 @@ def test_linjiang_v2_0_planning_context_uses_sparse_target_requirements(
         for item in context.current_knowledge["known_action_requirements"]
     }
 
-    central_repair = requirements["central_telecom_hub"]["repair_communications"]
-    assert central_repair["action_key"] == "repair_communications"
+    central_repair = requirements["central_telecom_hub"]["repair_facility"]
+    assert central_repair["action_key"] == "repair_facility"
     assert central_repair["required_actor_role_key"] == "communications_repair_team"
     assert central_repair["cost"] == {
         "communication_equipment": 10,
@@ -345,7 +342,7 @@ def test_linjiang_v2_0_planning_context_uses_sparse_target_requirements(
             "minimum": 15,
         },
     ]
-    water_repair = requirements["water_treatment_plant"]["repair_water_facility"]
+    water_repair = requirements["water_treatment_plant"]["repair_facility"]
     assert water_repair["cost"] == {
         "water_system_parts": 15,
         "general_engineering_parts": 5,
@@ -394,10 +391,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
         "generate_power",
         "inspect",
         "relay_message",
-        "repair_communications",
-        "repair_electrical",
-        "repair_industrial_facility",
-        "repair_water_facility",
+        "repair_facility",
         "supply_power",
         "survey_resources",
         "transport_resource",
@@ -411,7 +405,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
         "known_blockers": [],
     }
     communications = actors["communications_repair_team_alpha"]
-    assert "repair_communications" in communications["allowed_action_keys"]
+    assert "repair_facility" in communications["allowed_action_keys"]
     assert communications["execution_state"]["status"] == "KNOWN_BLOCKED"
     assert communications["execution_state"]["known_blockers"][0]["type"] == (
         "COMMAND_REACHABILITY"
@@ -493,7 +487,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
         for effect in clear["planner_effects"]
     )
 
-    water = actions["repair_water_facility"]
+    water = actions["repair_facility"]
     water_target = water["target_contracts"]["water_treatment_plant"]
     known_requirements = {
         item["target_key"]: {entry["action_key"]: entry for entry in item["requirements"]}
@@ -501,7 +495,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     }
     assert any(
         requirement.get("fact_key") == "heavy_engineering_support_ready"
-        for requirement in known_requirements["water_treatment_plant"]["repair_water_facility"][
+        for requirement in known_requirements["water_treatment_plant"]["repair_facility"][
             "special_requirements"
         ]
     )
@@ -575,7 +569,13 @@ def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
     session.flush()
 
     sparse = SharedKnowledgeProjection(session, scope, definition).planner_action_requirements()
-    assert all(item["target_key"] != "water_treatment_plant" for item in sparse)
+    water = next(item for item in sparse if item["target_key"] == "water_treatment_plant")
+    assert water["requirements"] == [
+        {
+            "action_key": "repair_facility",
+            "required_actor_role_key": "water_repair_team",
+        }
+    ]
 
 
 def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
@@ -643,19 +643,19 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     repair_contract = next(
         item
         for item in payload["action_contracts"]
-        if item["action_key"] == "repair_communications"
+        if item["action_key"] == "repair_facility"
     )
     assert set(repair_contract["executor_requirements"]["required_capabilities"]).issubset(
         communications["capabilities"]
     )
-    assert "repair_communications" in communications["allowed_action_keys"]
+    assert "repair_facility" in communications["allowed_action_keys"]
     assert "north_heavy_equipment_stock" not in serialized
     action_keys = {item["action_key"] for item in payload["action_contracts"]}
     assert "transport_resource" not in action_keys, closure.relevance_reason.get(
         "transport_resource"
     )
     assert action_keys == {
-        "repair_communications",
+        "repair_facility",
         "relay_message",
         "survey_resources",
         "travel",
@@ -740,7 +740,7 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
         "communications_repair_team_alpha",
         "logistics_team_alpha",
     }
-    assert "repair_communications" in closure.relevance_reason
+    assert "repair_facility" in closure.relevance_reason
     assert "relevance_reason" not in serialized
     assert len(serialized.encode("utf-8")) < 30_000
     for duplicate in (
@@ -1169,7 +1169,7 @@ def test_dependency_closure_does_not_add_transport_when_target_has_resource(
         base,
     )
     action_keys = {item.action_key for item in closure.planner_input.action_contracts}
-    assert "repair_communications" in action_keys
+    assert "repair_facility" in action_keys
     assert "transport_resource" not in action_keys
 
 
@@ -1310,8 +1310,8 @@ def test_linjiang_v4_inspect_knowledge_replan_exposes_state_producer(
     )
 
     assert replanned.known_world.facts["central_telecom_hub.operational"] is False
-    assert "repair_communications" in {item.action_key for item in replanned.action_contracts}
-    assert ("repair_communications", "central_telecom_hub") in {
+    assert "repair_facility" in {item.action_key for item in replanned.action_contracts}
+    assert ("repair_facility", "central_telecom_hub") in {
         (item.action_key, item.target_key) for item in replanned.target_bindings
     }
     assert not any(
@@ -1400,7 +1400,7 @@ def test_locality_dependency_closure_keeps_relocation_capability_for_local_actio
         replan_reason="TRAVEL_BLOCKED",
     )
     action_keys = {item.action_key for item in closure.planner_input.action_contracts}
-    assert {"clear_transport", "repair_communications", "travel"}.issubset(action_keys)
+    assert {"clear_transport", "repair_facility", "travel"}.issubset(action_keys)
 
 
 def test_historical_travel_success_requires_current_location_redundancy_proof(
@@ -1509,7 +1509,7 @@ def test_linjiang_v2_0_known_resource_deficit_repair_diagnostic_is_typed(
             PlanStepProposal(
                 step_id="repair-central",
                 purpose="Repair Central communications.",
-                action_key="repair_communications",
+                action_key="repair_facility",
                 actor_key="communications_repair_team_alpha",
                 target_key="central_telecom_hub",
             ),
@@ -1529,7 +1529,7 @@ def test_linjiang_v2_0_known_resource_deficit_repair_diagnostic_is_typed(
         "step_id": "repair-central",
         "failure_code": "KNOWN_RESOURCE_INSUFFICIENT",
         "dimension": "RESOURCE_QUANTITY",
-        "action_key": "repair_communications",
+        "action_key": "repair_facility",
         "actor_key": "communications_repair_team_alpha",
         "target_key": "central_telecom_hub",
         "resource_key": "communication_equipment",
@@ -1591,7 +1591,7 @@ def test_linjiang_v2_0_known_preflight_repair_diagnostic_has_public_witness(
         (
             PlanStepProposal(
                 step_id="repair-water-without-support",
-                action_key="repair_water_facility",
+                action_key="repair_facility",
                 actor_key="water_repair_team_alpha",
                 target_key="water_treatment_plant",
             ),
@@ -1610,7 +1610,7 @@ def test_linjiang_v2_0_known_preflight_repair_diagnostic_has_public_witness(
     assert diagnostic.failure_code == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
     assert diagnostic.dimension == "ACTION_PRECONDITION"
     assert diagnostic.step_id == "repair-water-without-support"
-    assert diagnostic.action_key == "repair_water_facility"
+    assert diagnostic.action_key == "repair_facility"
     assert diagnostic.actor_key == "water_repair_team_alpha"
     assert diagnostic.target_key == "water_treatment_plant"
     assert diagnostic.required == "PREFLIGHT_CONDITION_NOT_MATCHED"
@@ -1646,7 +1646,7 @@ def test_validator_stops_projected_diagnostics_after_static_root_failure(
         (
             PlanStepProposal(
                 step_id="invalid-interaction",
-                action_key="repair_communications",
+                action_key="repair_facility",
                 actor_key="communications_repair_team_alpha",
                 target_key="central_district",
             ),
@@ -1658,7 +1658,7 @@ def test_validator_stops_projected_diagnostics_after_static_root_failure(
             ),
             PlanStepProposal(
                 step_id="downstream-command-resource",
-                action_key="repair_communications",
+                action_key="repair_facility",
                 actor_key="communications_repair_team_alpha",
                 target_key="central_telecom_hub",
             ),
@@ -1674,7 +1674,7 @@ def test_validator_stops_projected_diagnostics_after_static_root_failure(
 
     diagnostics = provider.requests[1].repair_diagnostics
     assert len(diagnostics) == 1
-    assert diagnostics[0].code == "TARGET_INTERACTION_INVALID"
+    assert diagnostics[0].code == "PROPOSAL_INVALID"
     assert diagnostics[0].step_id == "invalid-interaction"
 
 
@@ -1686,7 +1686,7 @@ def test_validator_reports_multiple_independent_static_root_failures(
         (
             PlanStepProposal(
                 step_id="invalid-interaction",
-                action_key="repair_communications",
+                action_key="repair_facility",
                 actor_key="communications_repair_team_alpha",
                 target_key="central_district",
             ),
@@ -1699,7 +1699,7 @@ def test_validator_reports_multiple_independent_static_root_failures(
             ),
             PlanStepProposal(
                 step_id="actor-not-allowed",
-                action_key="repair_communications",
+                action_key="repair_facility",
                 actor_key="logistics_team_alpha",
                 target_key="central_telecom_hub",
             ),
@@ -1715,7 +1715,7 @@ def test_validator_reports_multiple_independent_static_root_failures(
 
     diagnostics = provider.requests[1].repair_diagnostics
     assert [(item.step_id, item.code) for item in diagnostics] == [
-        ("invalid-interaction", "TARGET_INTERACTION_INVALID"),
+        ("invalid-interaction", "PROPOSAL_INVALID"),
         ("invalid-parameters", "ACTION_OUTSIDE_PLANNER_CONTEXT"),
         ("actor-not-allowed", "ACTOR_ACTION_OUTSIDE_PLANNER_CONTEXT"),
     ]
@@ -1738,7 +1738,7 @@ def test_validator_reports_actor_capability_mismatch_from_public_actor_state(
         (
             PlanStepProposal(
                 step_id="missing-capability",
-                action_key="repair_communications",
+                action_key="repair_facility",
                 actor_key="communications_repair_team_alpha",
                 target_key="central_telecom_hub",
             ),
@@ -1752,22 +1752,18 @@ def test_validator_reports_actor_capability_mismatch_from_public_actor_state(
             resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         )
 
-    planner_actor = next(
-        item
+    assert all(
+        item.actor_key != "communications_repair_team_alpha"
         for item in provider.requests[0].planner_input.actors
-        if item.actor_key == "communications_repair_team_alpha"
     )
-    assert "EXECUTE_ACTION" not in planner_actor.capabilities
     diagnostic = provider.requests[1].repair_diagnostics[0]
-    assert diagnostic.code == "ACTOR_CAPABILITY_MISSING"
-    assert diagnostic.failure_code == "ACTOR_CAPABILITY_MISSING"
-    assert diagnostic.dimension == "ACTOR_CAPABILITY"
+    assert diagnostic.code == "ACTOR_ACTION_OUTSIDE_PLANNER_CONTEXT"
+    assert diagnostic.failure_code == "ACTOR_ACTION_OUTSIDE_PLANNER_CONTEXT"
+    assert diagnostic.dimension == "ACTOR_ELIGIBILITY"
     assert diagnostic.step_id == "missing-capability"
-    assert diagnostic.action_key == "repair_communications"
+    assert diagnostic.action_key == "repair_facility"
     assert diagnostic.actor_key == "communications_repair_team_alpha"
     assert diagnostic.target_key == "central_telecom_hub"
-    assert diagnostic.required == ["EXECUTE_ACTION"]
-    assert diagnostic.actual == ["INSPECT_STATE", "PLAN"]
 
 
 def test_validator_stops_after_first_projected_state_root_failure(
@@ -1784,7 +1780,7 @@ def test_validator_stops_after_first_projected_state_root_failure(
             ),
             PlanStepProposal(
                 step_id="downstream-command",
-                action_key="repair_communications",
+                action_key="repair_facility",
                 actor_key="communications_repair_team_alpha",
                 target_key="central_telecom_hub",
             ),
@@ -1853,7 +1849,7 @@ def test_linjiang_v2_0_projected_repair_applies_selected_target_cost_once(
             PlanStepProposal(
                 step_id="repair-central",
                 purpose="Repair Central communications.",
-                action_key="repair_communications",
+                action_key="repair_facility",
                 actor_key="communications_repair_team_alpha",
                 target_key="central_telecom_hub",
             ),
@@ -1876,7 +1872,7 @@ def test_linjiang_v2_0_projected_repair_does_not_leak_cross_target_reachability(
     runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-target-reachability")
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
-    action = next(item for item in definition.actions if item.key == "repair_communications")
+    action = next(item for item in definition.actions if item.key == "repair_facility")
     facts = agent._known_fact_projection()
     nodes = agent._known_node_keys()
     relations = agent._known_relation_keys(definition)
@@ -1917,7 +1913,7 @@ def test_projected_ambiguous_rules_apply_only_common_effects_once(
     _runtime, scope = _v2_0_runtime(session, "linjiang-v2_0-ambiguous-effects")
     agent = GenericAgentService(session, scope)
     definition = agent._definition()
-    action = next(item for item in definition.actions if item.key == "repair_communications")
+    action = next(item for item in definition.actions if item.key == "repair_facility")
     facts = agent._known_fact_projection()
     nodes = agent._known_node_keys()
     relations = agent._known_relation_keys(definition)
@@ -1939,10 +1935,7 @@ def test_projected_ambiguous_rules_apply_only_common_effects_once(
         item for item in effect_payloads if item["kind"] == "SET_ACTOR_COMMAND_REACHABILITY"
     ]
 
-    assert [(item["resource_key"], item["amount"]["literal"]) for item in resource_effects] == [
-        ("communication_equipment", -10),
-        ("general_engineering_parts", -15),
-    ]
+    assert resource_effects == []
     assert reachability_effects == []
     assert facts[("central_telecom_hub", "operational")].value is False
 
@@ -2292,7 +2285,7 @@ def test_linjiang_v2_0_relay_recovery_path_is_sequentially_validated(
         ("travel", "logistics_team_alpha", "east_residential_district"),
         ("relay_message", "logistics_team_alpha", "communications_repair_team_alpha"),
         ("travel", "communications_repair_team_alpha", "central_district"),
-        ("repair_communications", "communications_repair_team_alpha", "central_telecom_hub"),
+        ("repair_facility", "communications_repair_team_alpha", "central_telecom_hub"),
     )
 
     for action_key, actor_key, target_key in path:
@@ -2370,7 +2363,7 @@ def test_projected_canonical_actor_location_effect_updates_following_step(
     projected_reachability = {
         key: CommandReachability(actor.command_reachability) for key, actor in actors.items()
     }
-    action = next(item for item in definition.actions if item.key == "repair_communications")
+    action = next(item for item in definition.actions if item.key == "repair_facility")
     planner_input = PlannerInput(
         action_contracts=(
             PlannerActionContract(
@@ -2443,12 +2436,17 @@ def test_linjiang_v2_0_known_route_remains_one_hop_after_hidden_route_failure() 
 
 def test_linjiang_v2_power_and_support_rules() -> None:
     definition = LINJIANG_V2_TEST
-    action = next(item for item in definition.actions if item.key == "repair_industrial_facility")
-    assert action.required_actor_role_key == "industrial_repair_team"
-    assert {item.node_key for item in action.planning.terminal_effects} >= {
-        "east_community_hospital",
-        "riverside_shelter",
-    }
+    action = next(item for item in definition.actions if item.key == "repair_facility")
+    assert action.required_actor_role_key is None
+    assert action.required_actor_role_for_target("east_community_hospital") == (
+        "industrial_repair_team"
+    )
+    assert action.required_actor_role_for_target("riverside_shelter") == (
+        "industrial_repair_team"
+    )
+    assert [(item.fact_key, item.value) for item in action.planning.target_terminal_effects] == [
+        ("operational", True)
+    ]
 
     engine = DeclarativeRuleEngine(definition)
     repair_resources = {
@@ -2459,7 +2457,7 @@ def test_linjiang_v2_power_and_support_rules() -> None:
         outcome = engine.evaluate(
             _rule_state(definition, resources=repair_resources),
             ActionRuleContext(
-                action_key="repair_industrial_facility",
+                action_key="repair_facility",
                 target_node_key=target_key,
                 parameters={},
                 actor_key="industrial_repair_team_alpha",
@@ -2482,7 +2480,7 @@ def test_linjiang_v2_power_and_support_rules() -> None:
         for node in definition.world.nodes
         for fact in node.facts
     }
-    water_action = next(item for item in definition.actions if item.key == "repair_water_facility")
+    water_action = next(item for item in definition.actions if item.key == "repair_facility")
     known_failure = GenericAgentService._known_preflight_failure(
         definition,
         water_action,
@@ -2524,7 +2522,7 @@ def test_linjiang_v2_power_and_support_rules() -> None:
     blocked = engine.evaluate_preflight(
         _rule_state(definition, resources=water_resources),
         ActionRuleContext(
-            action_key="repair_water_facility",
+            action_key="repair_facility",
             target_node_key="water_treatment_plant",
             parameters={},
             actor_key="water_repair_team_alpha",
@@ -2543,7 +2541,7 @@ def test_linjiang_v2_power_and_support_rules() -> None:
             },
         ),
         ActionRuleContext(
-            action_key="repair_water_facility",
+            action_key="repair_facility",
             target_node_key="water_treatment_plant",
             parameters={},
             actor_key="water_repair_team_alpha",

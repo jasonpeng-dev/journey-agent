@@ -73,7 +73,7 @@ def test_action_location_formats_route_transport_facility_and_connector() -> Non
     assert "\u00d715" in (multi_transport.detail or "")
 
     repair = projector.action_location(
-        actions["repair_electrical"],
+        actions["repair_facility"],
         target_node_key="east_distribution_station",
     )
     assert repair is not None

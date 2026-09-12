@@ -1,4 +1,7 @@
+from copy import deepcopy
 from typing import Any, cast
+
+import pytest
 
 from app.agent.planner_contract import (
     action_planner_constraints,
@@ -182,3 +185,12 @@ def test_repair_planner_contract_is_target_relative_and_reads_target_roles() -> 
     assert any(
         effect.get("target") == "TARGET_REGION_FACILITIES" for effect in central_effects
     )
+
+
+def test_target_relative_planning_effect_is_schema_validated_for_every_target() -> None:
+    document = deepcopy(LINJIANG_V2_TEST.model_dump(mode="json"))
+    action = next(item for item in document["actions"] if item["key"] == "repair_facility")
+    action["planning"]["target_terminal_effects"][0]["value"] = "AVAILABLE"
+
+    with pytest.raises(ValueError, match="target-relative planning Effect value"):
+        type(LINJIANG_V2_TEST).model_validate(document)

@@ -516,7 +516,7 @@ def test_plan_history_projects_display_outcome_duration_and_planned_resources(
         **cycle.planner_input,
         "target_bindings": [
             {
-                "action_key": "repair_industrial_facility",
+                "action_key": "repair_facility",
                 "target_key": "utility_service_depot",
                 "requirements": [
                     {
@@ -540,7 +540,7 @@ def test_plan_history_projects_display_outcome_duration_and_planned_resources(
         started_at=base,
         finished_at=base + timedelta(seconds=130),
         latency_ms=130_000,
-        proposal={"steps": [{"action_key": "repair_industrial_facility"}]},
+        proposal={"steps": [{"action_key": "repair_facility"}]},
     )
     session.add(attempt)
     session.flush()
@@ -551,7 +551,7 @@ def test_plan_history_projects_display_outcome_duration_and_planned_resources(
     step = _step(
         plan.id,
         1,
-        "repair_industrial_facility",
+        "repair_facility",
         "utility_service_depot",
         {},
     )
@@ -890,7 +890,9 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     contracts = {
         (item.target_key, item.action_key): item for item in state.known_target_action_contracts
     }
-    assert ("utility_service_depot", "repair_industrial_facility") not in contracts
+    base_contract = contracts[("utility_service_depot", "repair_facility")]
+    assert base_contract.required_actor_role_key == "industrial_repair_team"
+    assert base_contract.cost == {}
     repair_profile = session.get(
         GameInstanceFactState,
         (runtime.instance.id, "utility_service_depot", "repair_profile"),
@@ -912,7 +914,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
         (item.target_key, item.action_key): item
         for item in known_state.known_target_action_contracts
     }
-    utility = known_contracts[("utility_service_depot", "repair_industrial_facility")]
+    utility = known_contracts[("utility_service_depot", "repair_facility")]
     assert utility.cost == {
         "general_engineering_parts": 5,
         "municipal_repair_materials": 20,
@@ -924,7 +926,11 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     repair_profile.visibility = Visibility.HIDDEN
     session.flush()
     hidden_state = projection.game_state(GameInstanceId(runtime.instance.id))
-    assert all(
-        item.target_key != "utility_service_depot"
+    hidden_contract = next(
+        item
         for item in hidden_state.known_target_action_contracts
+        if item.target_key == "utility_service_depot"
+        and item.action_key == "repair_facility"
     )
+    assert hidden_contract.required_actor_role_key == "industrial_repair_team"
+    assert hidden_contract.cost == {}

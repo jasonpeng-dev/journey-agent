@@ -335,7 +335,7 @@ def test_task5_warehouse_bootstrap_unlocks_aid_and_supports_completion(
     actions = GenericActionService(session, scope)
     warehouse = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="emergency_supply_warehouse",
         parameters={},
         idempotency_key="task56-repair-warehouse",
@@ -534,13 +534,13 @@ def test_task5_capability_facts_are_real_base_contracts() -> None:
     expected = {
         "rail_freight_capability": (
             "rail_freight_yard",
-            "repair_industrial_facility_rail_freight_yard_task56_resolution",
+            "repair_facility_industrial_rail_freight_yard_task56_resolution",
             {"receive_relief_requires_rail"},
         ),
         "emergency_delivery_support": (
             "vehicle_depot",
-            "repair_industrial_facility_vehicle_depot_task56_resolution",
-            {"repair_industrial_facility_city_distribution_center_prerequisite_1"},
+            "repair_facility_industrial_vehicle_depot_task56_resolution",
+            {"repair_facility_industrial_city_distribution_center_prerequisite_1"},
         ),
     }
 
@@ -1061,7 +1061,7 @@ def test_task6_fuel_repairs_explicitly_unlock_north_and_south_pools(
     actions = GenericActionService(session, scope)
     north_result = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="north_fuel_depot",
         parameters={},
         idempotency_key="task56-repair-north-fuel-depot",
@@ -1104,7 +1104,7 @@ def test_task6_fuel_repairs_explicitly_unlock_north_and_south_pools(
 
     south_result = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="south_fuel_terminal",
         parameters={},
         idempotency_key="task56-repair-south-fuel-terminal",
@@ -1177,7 +1177,7 @@ def test_task6_unlocked_fuel_supports_generation_and_commission_chain(
 
     north_repair = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="north_fuel_depot",
         parameters={},
         idempotency_key="task56-chain-repair-north",
@@ -1211,7 +1211,7 @@ def test_task6_unlocked_fuel_supports_generation_and_commission_chain(
     session.flush()
     plant_repair = actions.execute_action(
         actor_key=electrical.actor_key,
-        action_key="repair_electrical",
+        action_key="repair_facility",
         target_key="southeast_fuel_emergency_power_plant",
         parameters={},
         idempotency_key="task56-chain-repair-power-plant",
@@ -1259,7 +1259,7 @@ def test_task6_unlocked_fuel_supports_generation_and_commission_chain(
     session.flush()
     south_repair = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="south_fuel_terminal",
         parameters={},
         idempotency_key="task56-chain-repair-south-terminal",

@@ -329,6 +329,7 @@ def test_warning_does_not_block_publish_but_missing_playability_does(
     blocked_document = blocked_draft["definition_document"]
     for action in blocked_document["actions"]:
         action["planning"]["terminal_effects"] = []
+        action["planning"]["target_terminal_effects"] = []
         action["planning"]["supporting_effects"] = []
     saved_blocked = client.put(
         f"/api/v1/scenarios/{blocked_id}/draft",

@@ -618,6 +618,66 @@ def test_repair_facility_rejects_region_even_if_it_has_repairable_interaction(
     assert exc_info.value.code == "ACTION_TARGET_INVALID"
 
 
+def test_legacy_repair_communications_snapshot_behavior_remains_executable(
+    session: Session,
+) -> None:
+    document = deepcopy(V2_0.model_dump(mode="json"))
+    repair = next(action for action in document["actions"] if action["key"] == "repair_facility")
+    repair["key"] = "repair_communications"
+    repair["behavior"] = "REPAIR_COMMUNICATIONS"
+    repair["required_actor_role_key"] = "communications_repair_team"
+    repair["target_actor_roles"] = []
+    repair["planning"]["target_terminal_effects"] = []
+    for actor in document["actors"]["actor_profiles"]:
+        actor["allowed_action_keys"] = [
+            "repair_communications" if key == "repair_facility" else key
+            for key in actor["allowed_action_keys"]
+        ]
+    document["rules"] = [
+        rule
+        for rule in document["rules"]
+        if rule["action_key"] != "repair_facility"
+        or rule["key"] == "repair_facility_base_resolution"
+    ]
+    for rule in document["rules"]:
+        if rule["action_key"] != "repair_facility":
+            continue
+        rule["action_key"] = "repair_communications"
+        rule["effects"] = [
+            effect
+            for effect in rule["effects"]
+            if effect["kind"] != "REVEAL_TARGET_REGION_FACILITY_FACTS"
+        ]
+    definition = ScenarioDefinitionV2.model_validate(document)
+    runtime, scope = _runtime(session, definition, "legacy_repair_communications_snapshot")
+    _set_actor(
+        session,
+        runtime.instance.id,
+        "communications_repair_team_alpha",
+        "central_district",
+    )
+    operational = _fact(session, runtime.instance.id, "central_hospital", "operational")
+    operational.truth_value = False
+    session.flush()
+
+    result = GenericGameService(session, scope).execute(
+        actor_key="communications_repair_team_alpha",
+        action_key="repair_communications",
+        target_node_key="central_hospital",
+        parameters={},
+    )
+
+    assert result.outcome.failure is None
+    assert result.outcome.outcome_code == "FACILITY_REPAIRED"
+    assert _fact(
+        session,
+        runtime.instance.id,
+        "central_hospital",
+        "operational",
+    ).truth_value is True
+    assert any(item.kind == "FACT_REVEALED" for item in result.knowledge_changes)
+
+
 def test_route_attempts_reveal_truth_and_clear_requires_known_blocked(
     session: Session,
 ) -> None:
