@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from sqlalchemy.orm import Session
 
@@ -224,7 +225,31 @@ def _load_persisted_formal_goal(
     task: AgentTask,
     snapshot: ScenarioVersionSnapshot,
 ) -> FormalGoalContract:
-    payload = task.formal_goal_contract_json
+    return load_and_validate_formal_goal_contract(
+        payload=task.formal_goal_contract_json,
+        contract_hash=task.formal_goal_contract_hash,
+        schema_version=task.formal_goal_contract_schema_version,
+        source_kind=task.formal_goal_source_kind,
+        scenario_version_id=task.formal_goal_scenario_version_id,
+        scenario_content_hash=task.formal_goal_scenario_content_hash,
+        compiler_version=task.formal_goal_compiler_version,
+        snapshot=snapshot,
+    )
+
+
+def load_and_validate_formal_goal_contract(
+    *,
+    payload: object,
+    contract_hash: str | None,
+    schema_version: int | None,
+    source_kind: str | None,
+    scenario_version_id: UUID | None,
+    scenario_content_hash: str | None,
+    compiler_version: str | None,
+    snapshot: ScenarioVersionSnapshot,
+) -> FormalGoalContract:
+    """Deserialize and prove one persisted FormalGoal envelope without semantic inference."""
+
     if not isinstance(payload, dict):
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_PERSISTENCE_INVALID",
@@ -240,30 +265,35 @@ def _load_persisted_formal_goal(
             "FORMAL_GOAL_PERSISTENCE_INVALID",
             "Persisted Formal Goal contract is invalid",
         ) from exc
-    if task.formal_goal_contract_hash != contract.content_hash:
+    if contract_hash != contract.content_hash:
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_CONTRACT_HASH_MISMATCH",
             "Persisted Formal Goal contract hash does not match its canonical semantics",
         )
-    if task.formal_goal_contract_schema_version != contract.schema_version:
+    if schema_version != contract.schema_version:
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_CONTRACT_VERSION_MISMATCH",
             "Persisted Formal Goal schema version does not match its contract",
         )
-    if task.formal_goal_source_kind != contract.source_kind.value:
+    if source_kind != contract.source_kind.value:
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_SOURCE_KIND_MISMATCH",
             "Persisted Formal Goal source kind does not match its contract",
         )
-    if task.formal_goal_scenario_version_id != snapshot.id:
+    if scenario_version_id != snapshot.id:
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_SCENARIO_VERSION_MISMATCH",
             "Persisted Formal Goal points to a different ScenarioVersion",
         )
-    if task.formal_goal_scenario_content_hash != snapshot.content_hash:
+    if scenario_content_hash != snapshot.content_hash:
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_SCENARIO_HASH_MISMATCH",
             "Persisted Formal Goal Scenario proof does not match the exact Version",
+        )
+    if compiler_version != contract.compiler_version:
+        raise FormalGoalPersistenceError(
+            "FORMAL_GOAL_COMPILER_VERSION_MISMATCH",
+            "Persisted Formal Goal compiler version does not match its contract",
         )
     try:
         contract.assert_bound_to(snapshot)
@@ -315,5 +345,6 @@ __all__ = [
     "FormalGoalEvaluation",
     "FormalGoalPersistenceError",
     "FormalGoalRequirementEvaluation",
+    "load_and_validate_formal_goal_contract",
     "load_formal_goal_for_task",
 ]

@@ -32,6 +32,7 @@ from app.domain.enums import (
     NodeStatus,
     PlayerStatus,
     RelationVisibility,
+    ResolvedGoalDraftStatus,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
@@ -287,6 +288,54 @@ class GoalResolutionAttempt(UUIDPrimaryKey, TimestampMixin, Base):
     provider_model: Mapped[str | None] = mapped_column(String(100))
     provider_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     resolution_duration_ms: Mapped[int] = mapped_column(Integer)
+
+
+class ResolvedGoalDraft(UUIDPrimaryKey, TimestampMixin, Base):
+    """One immutable, compiled Goal proposal awaiting player confirmation."""
+
+    __tablename__ = "resolved_goal_drafts"
+    __table_args__ = (
+        Index(
+            "uq_resolved_goal_drafts_instance_ready",
+            "game_instance_id",
+            unique=True,
+            sqlite_where=text("status = 'READY'"),
+            postgresql_where=text("status = 'READY'"),
+        ),
+        CheckConstraint(
+            "(status = 'CONFIRMED' AND confirmed_task_id IS NOT NULL "
+            "AND confirmed_at IS NOT NULL) OR "
+            "(status IN ('READY','SUPERSEDED') AND confirmed_task_id IS NULL "
+            "AND confirmed_at IS NULL)",
+            name="ck_resolved_goal_drafts_confirmation",
+        ),
+    )
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), index=True
+    )
+    resolution_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("goal_resolution_attempts.id", ondelete="RESTRICT"), unique=True
+    )
+    original_goal_text: Mapped[str] = mapped_column(String(4000))
+    scenario_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("scenario_versions.id", ondelete="RESTRICT")
+    )
+    scenario_content_hash: Mapped[str] = mapped_column(String(64))
+    formal_goal_contract_schema_version: Mapped[int] = mapped_column(Integer)
+    formal_goal_source_kind: Mapped[str] = mapped_column(String(30))
+    formal_goal_contract_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    formal_goal_contract_hash: Mapped[str] = mapped_column(String(64))
+    formal_goal_compiler_version: Mapped[str] = mapped_column(String(100))
+    resolver_source: Mapped[str] = mapped_column(String(100))
+    status: Mapped[ResolvedGoalDraftStatus] = mapped_column(
+        Enum(ResolvedGoalDraftStatus, native_enum=False, length=30),
+        default=ResolvedGoalDraftStatus.READY,
+    )
+    confirmed_task_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="RESTRICT"), unique=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GameInstanceNodeState(TimestampMixin, Base):
@@ -654,6 +703,44 @@ class ObjectiveScopeImmutableError(RuntimeError):
 
 class FormalGoalImmutableError(RuntimeError):
     """Raised if persisted code attempts to drift a frozen Formal Goal."""
+
+
+class ResolvedGoalDraftImmutableError(RuntimeError):
+    """Raised if a Draft payload or terminal lifecycle state is changed."""
+
+
+@event.listens_for(ResolvedGoalDraft, "before_update")
+def _reject_resolved_goal_draft_drift(
+    _mapper: object, _connection: object, target: ResolvedGoalDraft
+) -> None:
+    state = inspect(target)
+    assert state is not None
+    payload_fields = (
+        "game_instance_id",
+        "resolution_attempt_id",
+        "original_goal_text",
+        "scenario_version_id",
+        "scenario_content_hash",
+        "formal_goal_contract_schema_version",
+        "formal_goal_source_kind",
+        "formal_goal_contract_json",
+        "formal_goal_contract_hash",
+        "formal_goal_compiler_version",
+        "resolver_source",
+    )
+    if any(state.attrs[name].history.has_changes() for name in payload_fields):
+        raise ResolvedGoalDraftImmutableError("A resolved Goal Draft payload is immutable")
+    status_history = state.attrs.status.history
+    if status_history.has_changes():
+        previous = status_history.deleted[0] if status_history.deleted else None
+        current = target.status
+        if previous != ResolvedGoalDraftStatus.READY or current not in (
+            ResolvedGoalDraftStatus.CONFIRMED,
+            ResolvedGoalDraftStatus.SUPERSEDED,
+        ):
+            raise ResolvedGoalDraftImmutableError(
+                "A resolved Goal Draft only transitions from READY to a terminal status"
+            )
 
 
 @event.listens_for(AgentTask, "before_update")

@@ -2795,20 +2795,37 @@ class GenericAgentService:
             )
         snapshot = self._snapshot()
         definition = snapshot.definition
-        if session.game_instance_id != self.scope.game_instance_id or not session.actor_key:
-            raise GenericAgentError(
-                "GENERIC_SESSION_SCOPE_INVALID",
-                "Generic task creation requires the Instance primary Actor session",
-            )
         resolution = resolved_goal or self.goal_resolver.resolve(goal, definition)
         if resolution.status != "RESOLVED":
             raise GenericAgentError(
                 f"GOAL_{resolution.status}",
                 resolution.clarification_prompt or "Goal does not resolve in the exact Version",
             )
-        objective_keys: tuple[str, ...] = ()
-        objective_scope: ObjectiveScope | None = None
-        formal_goal: FormalGoalContract
+        formal_goal = self.compile_formal_goal_for_resolution(resolution, snapshot=snapshot)
+        return self.create_task_from_formal_goal(
+            session,
+            goal,
+            formal_goal=formal_goal,
+            resolver_source=resolution.source,
+            provider_observation=resolution.provider_observation,
+            initialize_plan=initialize_plan,
+        )
+
+    def compile_formal_goal_for_resolution(
+        self,
+        resolution: GenericGoalResolution,
+        *,
+        snapshot: ScenarioVersionSnapshot | None = None,
+    ) -> FormalGoalContract:
+        """Compile one resolved semantic proposal against the exact Version."""
+
+        if resolution.status != "RESOLVED":
+            raise GenericAgentError(
+                f"GOAL_{resolution.status}",
+                resolution.clarification_prompt or "Goal does not resolve in the exact Version",
+            )
+        exact_snapshot = snapshot or self._snapshot()
+        definition = exact_snapshot.definition
         try:
             if resolution.objective_keys and resolution.dynamic_requirements:
                 raise FormalGoalError(
@@ -2825,11 +2842,7 @@ class GenericAgentService:
                     )
                 objective_keys = normalize_objective_keys(definition, resolution.objective_keys)
                 objectives = tuple(definition.objective_definitions[key] for key in objective_keys)
-                formal_goal = compile_predefined_formal_goal(snapshot, objectives)
-                objective_scope = ObjectiveScope.create(
-                    objective_keys,
-                    f"scenario-version:{self.scope.scenario_version_id}",
-                )
+                return compile_predefined_formal_goal(exact_snapshot, objectives)
             elif resolution.dynamic_requirements:
                 candidate_set = AdHocGoalCandidateSetV2(
                     requirements=resolution.dynamic_requirements
@@ -2844,12 +2857,12 @@ class GenericAgentService:
                     isinstance(item, AdHocActionCompletedRequirementCandidateV1)
                     for item in candidate_set.requirements
                 ):
-                    formal_goal = compile_ad_hoc_dynamic_goal_v2(snapshot, candidate_set)
+                    return compile_ad_hoc_dynamic_goal_v2(exact_snapshot, candidate_set)
                 else:
                     # Preserve the exact V1 contract/hash for state-only
                     # dynamic Goals and their existing persisted payloads.
-                    formal_goal = compile_ad_hoc_dynamic_goal(
-                        snapshot,
+                    return compile_ad_hoc_dynamic_goal(
+                        exact_snapshot,
                         AdHocGoalCandidateSetV1(requirements=tuple(candidate_set.requirements)),
                     )
             else:
@@ -2859,6 +2872,51 @@ class GenericAgentService:
                 )
         except FormalGoalError as exc:
             raise GenericAgentError(exc.code, exc.message) from exc
+
+    def create_task_from_formal_goal(
+        self,
+        session: ConversationSession,
+        goal: str,
+        *,
+        formal_goal: FormalGoalContract,
+        resolver_source: str,
+        provider_observation: dict[str, object] | None = None,
+        initialize_plan: bool = True,
+    ) -> AgentTask:
+        """Create a normal AgentTask from an already frozen FormalGoal contract."""
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        existing = self.db.scalar(
+            select(AgentTask).where(
+                AgentTask.game_instance_id == self.scope.game_instance_id,
+                AgentTask.status.in_(_NON_TERMINAL_TASK_STATUSES),
+            )
+        )
+        if existing is not None:
+            raise GenericAgentError(
+                "AGENT_TASK_ALREADY_ACTIVE",
+                "A GameInstance may have only one active Task",
+            )
+        snapshot = self._snapshot()
+        definition = snapshot.definition
+        if session.game_instance_id != self.scope.game_instance_id or not session.actor_key:
+            raise GenericAgentError(
+                "GENERIC_SESSION_SCOPE_INVALID",
+                "Generic task creation requires the Instance primary Actor session",
+            )
+        try:
+            formal_goal.assert_bound_to(snapshot)
+        except FormalGoalError as exc:
+            raise GenericAgentError(exc.code, exc.message) from exc
+        objective_keys = tuple(item.objective_key for item in formal_goal.predefined_objectives)
+        objective_scope = (
+            ObjectiveScope.create(
+                objective_keys,
+                f"scenario-version:{self.scope.scenario_version_id}",
+            )
+            if objective_keys
+            else None
+        )
         now = datetime.now(UTC)
         task = AgentTask(
             player_id=self.scope.player_id,
@@ -2890,19 +2948,19 @@ class GenericAgentService:
             formal_goal_scenario_version_id=formal_goal.scenario.scenario_version_id,
             formal_goal_scenario_content_hash=formal_goal.scenario.scenario_content_hash,
             formal_goal_compiler_version=formal_goal.compiler_version,
-            objective_resolver_source=resolution.source,
+            objective_resolver_source=resolver_source,
             objective_resolver_version="generic-goal-resolver@1",
             objective_resolution_metadata={
                 "exact_version": str(self.scope.scenario_version_id),
                 "provider_calls": (
-                    [resolution.provider_observation]
-                    if resolution.provider_observation is not None
+                    [provider_observation]
+                    if provider_observation is not None
                     else []
                 ),
             },
             objective_resolved_at=now,
             objective_confirmed_at=now,
-            objective_confirmation_source=resolution.source,
+            objective_confirmation_source=resolver_source,
             objective_frozen_at=now,
             objective_freeze_source="GENERIC_AGENT",
             planning_mode="PROVIDER" if self.provider is not None else "GENERIC",
