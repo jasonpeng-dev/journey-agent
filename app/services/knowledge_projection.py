@@ -220,6 +220,7 @@ class SharedKnowledgeProjection:
             )
             if not (
                 action.required_actor_role_key is not None
+                or action.target_actor_roles
                 or action.source_relation_type_key is not None
                 or action.behavior
                 in {
@@ -239,6 +240,18 @@ class SharedKnowledgeProjection:
                     action.required_actor_role_key,
                     action.required_actor_role_key,
                 )
+            if action.target_actor_roles:
+                entry["target_actor_roles"] = [
+                    {
+                        "target_key": item.target_key,
+                        "required_actor_role_key": item.required_actor_role_key,
+                        "required_actor_role_name": role_names.get(
+                            item.required_actor_role_key,
+                            item.required_actor_role_key,
+                        ),
+                    }
+                    for item in action.target_actor_roles
+                ]
             if action.source_relation_type_key is not None:
                 entry["source_relation_type_key"] = action.source_relation_type_key
             known_preconditions: list[dict[str, Any]] = []
@@ -445,11 +458,12 @@ class SharedKnowledgeProjection:
                     "action_key": action_key,
                     "action_name": action.name,
                 }
-                if action.required_actor_role_key is not None:
-                    entry["required_actor_role_key"] = action.required_actor_role_key
+                required_actor_role = action.required_actor_role_for_target(target_key)
+                if required_actor_role is not None:
+                    entry["required_actor_role_key"] = required_actor_role
                     entry["required_actor_role_name"] = role_names.get(
-                        action.required_actor_role_key,
-                        action.required_actor_role_key,
+                        required_actor_role,
+                        required_actor_role,
                     )
                 if action.source_relation_type_key is not None:
                     entry["source_relation_type_key"] = action.source_relation_type_key

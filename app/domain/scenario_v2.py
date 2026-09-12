@@ -820,6 +820,13 @@ class ActionOperationBindingV2(FrozenDefinitionModel):
         return self
 
 
+class ActionTargetActorRoleV2(FrozenDefinitionModel):
+    """A target-specific executor Role requirement for one Action."""
+
+    target_key: StableKey
+    required_actor_role_key: StableKey
+
+
 class ActionDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -850,7 +857,20 @@ class ActionDefinitionV2(FrozenDefinitionModel):
         exclude_if=lambda value: value is None,
     )
     target_node_type_keys: tuple[StableKey, ...] = ()
+    target_actor_roles: tuple[ActionTargetActorRoleV2, ...] = ()
     operation_bindings: tuple[ActionOperationBindingV2, ...] = ()
+
+    def required_actor_role_for_target(self, target_key: str | None) -> StableKey | None:
+        """Resolve the exact executor Role, preserving the Action-level fallback."""
+
+        if target_key is not None:
+            match = next(
+                (item for item in self.target_actor_roles if item.target_key == target_key),
+                None,
+            )
+            if match is not None:
+                return match.required_actor_role_key
+        return self.required_actor_role_key
 
     def relation_source_slot(self) -> tuple[str, StableKey] | None:
         """Return the one typed invocation slot backing a relation source."""
@@ -885,9 +905,15 @@ class ActionDefinitionV2(FrozenDefinitionModel):
         )
         _require_unique((item.code for item in self.expected_outcomes), "Action outcome codes")
         _require_unique(self.target_node_type_keys, "Action target Node types")
+        _require_unique(
+            (item.target_key for item in self.target_actor_roles),
+            "Action target-specific Actor Roles",
+        )
         _require_unique((item.role for item in self.operation_bindings), "Action binding roles")
         if self.target_kind != ActionTargetKind.NODE and self.target_node_type_keys:
             raise ValueError("Only NODE-target Actions may constrain target Node types")
+        if self.target_kind != ActionTargetKind.NODE and self.target_actor_roles:
+            raise ValueError("Only NODE-target Actions may declare target-specific Actor Roles")
         if (
             self.target_kind == ActionTargetKind.NODE
             and self.target_semantic_reference_type
@@ -1681,6 +1707,29 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 action.required_actor_role_key,
                 f"Action {action.key} required Actor Role",
             )
+        for target_role in action.target_actor_roles:
+            target = _require_key(
+                nodes,
+                target_role.target_key,
+                f"Action {action.key} target-specific Actor Role target",
+            )
+            _require_key(
+                roles,
+                target_role.required_actor_role_key,
+                f"Action {action.key} target-specific required Actor Role",
+            )
+            if (
+                action.target_node_type_keys
+                and target.node_type_key not in action.target_node_type_keys
+            ):
+                raise ValueError(
+                    f"Action {action.key} target-specific Actor Role target "
+                    "has an invalid Node type"
+                )
+            if action.required_interaction_key not in target.interaction_keys:
+                raise ValueError(
+                    f"Action {action.key} target-specific Actor Role target lacks its Interaction"
+                )
         if (
             action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
         ) and not definition.metadata.locality.enabled:

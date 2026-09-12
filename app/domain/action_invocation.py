@@ -115,6 +115,11 @@ def canonical_action_invocation_contract(action: ActionDefinitionV2) -> dict[str
         "goal_required": False,
         "runtime_required": True,
         "cardinality": "ONE",
+        **(
+            {"required_role_key": action.required_actor_role_key}
+            if action.required_actor_role_key is not None
+            else {}
+        ),
     }
     target = {
         # Compatibility aliases retained for existing public projections.
@@ -206,6 +211,13 @@ def canonical_action_invocation_contract(action: ActionDefinitionV2) -> dict[str
         "parameters": parameters,
         "slots": slots,
         "relation_semantics": relation_semantics,
+        "target_actor_roles": [
+            {
+                "target_key": item.target_key,
+                "required_actor_role_key": item.required_actor_role_key,
+            }
+            for item in action.target_actor_roles
+        ],
     }
 
 

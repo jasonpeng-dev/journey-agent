@@ -3896,8 +3896,8 @@ class GenericAgentService:
                 set(actor.capabilities)
             )
             and (
-                action.required_actor_role_key is None
-                or actor.role_key == action.required_actor_role_key
+                action.required_actor_role_for_target(target_key) is None
+                or actor.role_key == action.required_actor_role_for_target(target_key)
             )
         )
 
@@ -3917,7 +3917,7 @@ class GenericAgentService:
         for actor in sorted(actors, key=lambda item: (item.is_primary, item.actor_key)):
             if not self._validate_known_action(definition, action, actor, target_key):
                 continue
-            authority = evaluate_authority(actor, action, parameters)
+            authority = evaluate_authority(actor, action, parameters, target_key=target_key)
             if authority.outcome != AuthorityOutcome.DENY:
                 return actor
         return None
@@ -5649,10 +5649,11 @@ class GenericAgentService:
         ):
             raise GenericAgentError("RELAY_TARGET_INVALID", "The Actor target does not exist")
         actor = actors.get(actor_key) if actors is not None else None
+        required_actor_role = action.required_actor_role_for_target(target_key)
         if (
             actor is not None
-            and action.required_actor_role_key is not None
-            and actor.role_key != action.required_actor_role_key
+            and required_actor_role is not None
+            and actor.role_key != required_actor_role
         ):
             raise GenericAgentError(
                 "ACTOR_ROLE_MISSING",
@@ -5660,7 +5661,7 @@ class GenericAgentService:
                 details={
                     "dimension": "ACTOR_ROLE",
                     "actor_key": actor_key,
-                    "required": action.required_actor_role_key,
+                    "required": required_actor_role,
                     "actual": actor.role_key,
                 },
             )
@@ -5675,7 +5676,7 @@ class GenericAgentService:
                 ActionBehavior.SUPPLY_POWER,
                 ActionBehavior.DEPLOY_HEAVY_ENGINEERING_SUPPORT,
             }
-            or action.required_actor_role_key is not None
+            or required_actor_role is not None
         )
         known_failure = self._known_preflight_failure(
             definition,
@@ -7369,7 +7370,12 @@ class GenericAgentService:
                     "actual": "NO_DECLARED_RELEVANT_EFFECT",
                 },
             )
-        authority = evaluate_authority(actor, action, parameters)
+        authority = evaluate_authority(
+            actor,
+            action,
+            parameters,
+            target_key=candidate.target_key,
+        )
         if authority.outcome == AuthorityOutcome.DENY:
             raise GenericAgentError(authority.reason_code, "Action authority denied")
         arguments = {
@@ -7472,10 +7478,8 @@ class GenericAgentService:
             set(actor.capabilities)
         ):
             return "ACTOR_CAPABILITY_MISSING"
-        if (
-            action.required_actor_role_key is not None
-            and actor.role_key != action.required_actor_role_key
-        ):
+        required_actor_role = action.required_actor_role_for_target(target_key)
+        if required_actor_role is not None and actor.role_key != required_actor_role:
             return "ACTOR_ROLE_MISSING"
         if not actor_binding_matches(definition, actor):
             return "ACTOR_BINDING_INVALID"
@@ -9691,10 +9695,8 @@ def _validate_explicit_actor_action_compatibility(
     conflicts: list[str] = []
     if action.key not in actor.allowed_action_keys:
         conflicts.append("ACTION_NOT_ALLOWED")
-    if (
-        action.required_actor_role_key is not None
-        and actor.role_key != action.required_actor_role_key
-    ):
+    required_actor_role = action.required_actor_role_for_target(operation.target_key)
+    if required_actor_role is not None and actor.role_key != required_actor_role:
         conflicts.append("ROLE_MISMATCH")
     if not required_capabilities.issubset(actor_capabilities):
         conflicts.append("CAPABILITY_MISMATCH")
@@ -11040,6 +11042,19 @@ def _dynamic_goal_ontology(
             **(
                 {"required_actor_role_key": action.required_actor_role_key}
                 if action.required_actor_role_key is not None
+                else {}
+            ),
+            **(
+                {
+                    "target_actor_roles": [
+                        {
+                            "target_key": item.target_key,
+                            "required_actor_role_key": item.required_actor_role_key,
+                        }
+                        for item in action.target_actor_roles
+                    ]
+                }
+                if action.target_actor_roles
                 else {}
             ),
             "parameters": [item.model_dump(mode="json") for item in action.parameters],

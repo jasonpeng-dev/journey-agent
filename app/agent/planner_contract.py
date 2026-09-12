@@ -87,6 +87,14 @@ def action_planner_constraints(
     }
     if action.required_actor_role_key is not None:
         executor["required_role_key"] = action.required_actor_role_key
+    if action.target_actor_roles:
+        executor["target_role_requirements"] = [
+            {
+                "target_key": item.target_key,
+                "required_role_key": item.required_actor_role_key,
+            }
+            for item in action.target_actor_roles
+        ]
 
     target: dict[str, object] = {
         "kind": action.target_kind.value,

@@ -1092,6 +1092,19 @@ class PlanningContextBuilder:
                         if action.required_actor_role_key is not None
                         else {}
                     ),
+                    **(
+                        {
+                            "target_actor_roles": [
+                                {
+                                    "target_key": item.target_key,
+                                    "required_actor_role_key": item.required_actor_role_key,
+                                }
+                                for item in action.target_actor_roles
+                            ]
+                        }
+                        if action.target_actor_roles
+                        else {}
+                    ),
                     "static_authority": action.authority_policy.model_dump(mode="json"),
                 },
                 "execution_mode": action.execution_mode.value,

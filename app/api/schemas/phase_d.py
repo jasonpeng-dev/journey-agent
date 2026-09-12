@@ -624,6 +624,7 @@ class PublicActionRequirementResponse(ApiModel):
     action_name: str
     required_actor_role_key: str | None = None
     required_actor_role_name: str | None = None
+    target_actor_roles: list[dict[str, Any]] = Field(default_factory=list)
     source_relation_type_key: str | None = None
     known_preconditions: list[dict[str, Any]] = Field(default_factory=list)
     resource_requirements: list[dict[str, Any]] = Field(default_factory=list)

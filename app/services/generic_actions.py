@@ -134,7 +134,7 @@ class GenericActionService:
                 "RUNTIME_ACTOR_BINDING_INVALID",
                 "Actor authority does not match the exact ScenarioVersion",
             )
-        authority = evaluate_authority(actor, action, parameters)
+        authority = evaluate_authority(actor, action, parameters, target_key=target_key)
         if authority.outcome == AuthorityOutcome.DENY:
             raise GenericActionError(authority.reason_code, "Actor authority denied the Action")
         approval_granted = False

@@ -154,7 +154,13 @@ class GenericGameService:
                     "The target does not support the Action's required Interaction",
                 )
         self._require_command_reachability(actor, action, target_actor)
-        self._require_authority(actor, action, parameters, approval_granted)
+        self._require_authority(
+            actor,
+            action,
+            target_node_key,
+            parameters,
+            approval_granted,
+        )
         self._validate_locality(
             definition,
             action,
@@ -412,7 +418,13 @@ class GenericGameService:
                     "The target does not support the Action's required Interaction",
                 )
         self._require_command_reachability(actor, action, target_actor)
-        self._require_authority(actor, action, parameters, approval_granted)
+        self._require_authority(
+            actor,
+            action,
+            target_node_key,
+            parameters,
+            approval_granted,
+        )
         self._validate_locality(
             definition,
             action,
@@ -1007,13 +1019,19 @@ class GenericGameService:
     def _require_authority(
         actor: GameInstanceActor,
         action: object,
+        target_node_key: str,
         parameters: ActionParameters,
         approval_granted: bool,
     ) -> None:
         from app.domain.scenario_v2 import ActionDefinitionV2
 
         assert isinstance(action, ActionDefinitionV2)
-        decision = evaluate_authority(actor, action, parameters)
+        decision = evaluate_authority(
+            actor,
+            action,
+            parameters,
+            target_key=target_node_key,
+        )
         if decision.outcome == AuthorityOutcome.DENY:
             raise GenericGameError(decision.reason_code, "Actor authority denied the Action")
         if decision.outcome == AuthorityOutcome.REQUIRE_PLAYER_DECISION and not approval_granted:
