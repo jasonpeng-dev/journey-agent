@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import pytest
+
 from app.agent.generic import GenericGoalResolver
 from app.agent.provider import (
     DynamicGoalActionMatchRequest,
@@ -19,6 +21,7 @@ from app.agent.provider import (
     DynamicGoalOperationGrounding,
     DynamicGoalOperationGroundingRequest,
     DynamicGoalScalarMentionSlot,
+    GenericProviderError,
     GoalFamilyMatchRequest,
 )
 from tests.scenario_fixtures import LINJIANG_V2_TEST
@@ -123,13 +126,105 @@ def _role_grounding(
     )
 
 
+def _travel_grounding(
+    *,
+    action: str = "travel",
+    actor: DynamicGoalMentionSlot | None = None,
+) -> DynamicGoalEntityGrounding:
+    unspecified = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+    return DynamicGoalEntityGrounding(
+        candidate_refs=(
+            DynamicGoalCandidateReference(ref_type="ACTION", key=action),
+            DynamicGoalCandidateReference(ref_type="REGION", key="east_residential_district"),
+        ),
+        intent=DynamicGoalIntentDraft(
+            intent_kind="OPERATION",
+            action=DynamicGoalMentionSlot(
+                status="GROUNDED",
+                ref_type="ACTION",
+                key=action,
+                surface="前往",
+                match_semantics="EXACT_OR_AUTHORED",
+            ),
+            actor=actor or unspecified,
+            target=DynamicGoalMentionSlot(
+                status="GROUNDED",
+                ref_type="REGION",
+                key="east_residential_district",
+                surface="东部居住区",
+                match_semantics="EXACT_OR_AUTHORED",
+            ),
+        ),
+    )
+
+
+def _transport_role_grounding(
+    *,
+    target_key: str = "central_district",
+    target_surface: str = "中央城区",
+    resource_status: str = "GROUNDED",
+    resource_key: str = "emergency_relief_supplies",
+    resource_match_semantics: str | None = "SEMANTIC_EQUIVALENT",
+    resource_surface: str = "救灾用品",
+    source_status: str = "NOT_SPECIFIED",
+    source_key: str | None = None,
+    source_surface: str | None = None,
+) -> DynamicGoalEntityGrounding:
+    resource = (
+        DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+        if resource_status == "NOT_SPECIFIED"
+        else DynamicGoalMentionSlot(
+            status=resource_status,  # type: ignore[arg-type]
+            ref_type="RESOURCE",
+            key=resource_key if resource_status == "GROUNDED" else None,
+            surface=resource_surface,
+            match_semantics=resource_match_semantics,  # type: ignore[arg-type]
+        )
+    )
+    source = (
+        DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+        if source_status == "NOT_SPECIFIED"
+        else DynamicGoalMentionSlot(
+            status=source_status,  # type: ignore[arg-type]
+            ref_type="REGION",
+            key=source_key if source_status == "GROUNDED" else None,
+            surface=source_surface,
+            match_semantics=(
+                "SEMANTIC_EQUIVALENT" if source_status == "GROUNDED" else None
+            ),
+        )
+    )
+    refs = [
+        DynamicGoalCandidateReference(ref_type="REGION", key=target_key),
+    ]
+    if resource_status == "GROUNDED":
+        refs.append(
+            DynamicGoalCandidateReference(ref_type="RESOURCE", key=resource_key)
+        )
+    if source_status == "GROUNDED" and source_key is not None:
+        refs.append(DynamicGoalCandidateReference(ref_type="REGION", key=source_key))
+    return _role_grounding(
+        refs,
+        target=DynamicGoalMentionSlot(
+            status="GROUNDED",
+            ref_type="REGION",
+            key=target_key,
+            surface=target_surface,
+            match_semantics="EXACT_OR_AUTHORED",
+        ),
+        source=source,
+        resource=resource,
+        amount=DynamicGoalScalarMentionSlot(status="GROUNDED", value=30, surface="30"),
+    )
+
+
 def test_exact_derived_state_survives_semantic_grounding_and_uses_vnext_state_path() -> None:
     provider = _VNextProvider(
         grounding=[
             DynamicGoalEntityGrounding(
                 candidate_refs=(
                     DynamicGoalCandidateReference(
-                        ref_type="DERIVED_STATE", key="north_basic_engineering_support"
+                        ref_type="DERIVED_STATE", key="east_emergency_water_supply"
                     ),
                 )
             )
@@ -190,6 +285,7 @@ def test_semantic_action_and_family_guesses_have_no_authority_and_actor_stays_un
     assert requirement.action_key == "inspect"
     assert requirement.target_key == "central_hospital"
     assert requirement.actor_key is None
+    assert provider.action_requests[0].semantic_action_evidence is None
     evidence = provider.operation_requests[0].explicit_role_evidence
     assert evidence["actor"]["status"] == "NOT_SPECIFIED"
     assert [item["stage"] for item in resolution.provider_observation["stages"]] == [
@@ -253,6 +349,56 @@ def test_repair_facility_goal_freezes_target_and_leaves_actor_unspecified() -> N
     )
 
 
+def test_repair_facility_semantics_discard_contaminating_region_hint() -> None:
+    target = DynamicGoalMentionSlot(
+        status="GROUNDED",
+        ref_type="NODE",
+        key="central_telecom_hub",
+        surface="中央通信塔",
+    )
+    provider = _VNextProvider(
+        grounding=[
+            _role_grounding(
+                (DynamicGoalCandidateReference(ref_type="NODE", key="central_telecom_hub"),),
+                target=target,
+            )
+        ],
+        family="OPERATION",
+        action_key="repair_facility",
+        operation=[
+            _operation(
+                "repair_facility",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_telecom_hub",
+                ),
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "修复中央通信塔", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.dynamic_requirements[0].target_key == "central_telecom_hub"
+    assert {
+        (item.ref_type, item.key)
+        for item in provider.grounding_requests[0].deterministic_candidate_refs
+    } == {("REGION", "central_district")}
+    assert {
+        (item.ref_type, item.key)
+        for item in provider.operation_requests[0].semantic_candidate_refs
+    } == {("NODE", "central_telecom_hub")}
+    frozen = resolution.provider_observation["stages"][2]["merged_refs"]
+    assert {(item["ref_type"], item["key"]) for item in frozen} == {
+        ("NODE", "central_telecom_hub")
+    }
+
+
 def test_genuine_family_ambiguity_returns_focused_clarification_without_action_routing() -> None:
     provider = _VNextProvider(
         grounding=[DynamicGoalEntityGrounding(status="UNSUPPORTED")],
@@ -270,7 +416,7 @@ def test_genuine_family_ambiguity_returns_focused_clarification_without_action_r
     assert provider.action_requests == []
 
 
-def test_exact_aliases_remain_authoritative_when_semantic_grounding_disagrees() -> None:
+def test_exact_aliases_are_forwarded_as_advisory_grounding_hints() -> None:
     aliases = {
         "南部": ("REGION", "south_waterfront_district"),
         "东南区": ("REGION", "southeast_heights_district"),
@@ -390,13 +536,33 @@ def test_bare_resource_ambiguity_preserves_known_amount_and_target() -> None:
                     ),
                 ),
                 target=DynamicGoalMentionSlot(
-                    status="GROUNDED", ref_type="REGION", key="south_waterfront_district"
+                    status="GROUNDED",
+                    ref_type="REGION",
+                    key="south_waterfront_district",
+                    surface="南部",
                 ),
                 resource=DynamicGoalMentionSlot(
                     status="UNRESOLVED", ref_type="RESOURCE", surface="部件"
                 ),
                 amount=DynamicGoalScalarMentionSlot(status="GROUNDED", value=30),
-            )
+            ),
+            _role_grounding(
+                (
+                    DynamicGoalCandidateReference(
+                        ref_type="REGION", key="south_waterfront_district"
+                    ),
+                ),
+                target=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="REGION",
+                    key="south_waterfront_district",
+                    surface="南部",
+                ),
+                resource=DynamicGoalMentionSlot(
+                    status="UNRESOLVED", ref_type="RESOURCE", surface="部件"
+                ),
+                amount=DynamicGoalScalarMentionSlot(status="GROUNDED", value=30),
+            ),
         ],
         family="OPERATION",
         action_key="transport_resource",
@@ -454,9 +620,14 @@ def test_explicit_actor_static_conflict_is_rejected_but_unspecified_actor_is_not
                     DynamicGoalCandidateReference(ref_type="ACTOR", key=actor_key),
                     DynamicGoalCandidateReference(ref_type="NODE", key="south_bridge"),
                 ),
-                actor=DynamicGoalMentionSlot(status="GROUNDED", ref_type="ACTOR", key=actor_key),
+                actor=DynamicGoalMentionSlot(
+                    status="GROUNDED", ref_type="ACTOR", key=actor_key, surface="通信抢修一队"
+                ),
                 target=DynamicGoalMentionSlot(
-                    status="GROUNDED", ref_type="NODE", key="south_bridge"
+                    status="GROUNDED",
+                    ref_type="NODE",
+                    key="south_bridge",
+                    surface="南港大桥",
                 ),
             )
         ],
@@ -527,7 +698,22 @@ def test_generic_relation_contract_rejects_explicit_source_target_conflict() -> 
     )
 
     assert resolution.status == "UNSUPPORTED"
-    assert resolution.source == "EXPLICIT_RELATION_CONFLICT"
+    assert resolution.source == "SOURCE_TARGET_RELATION_CONFLICT"
+    assert resolution.dynamic_requirements == ()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def test_nonlocal_transport_is_frozen_without_route_legality_validation() -> None:
@@ -542,7 +728,12 @@ def test_nonlocal_transport_is_frozen_without_route_legality_validation() -> Non
                         ref_type="REGION", key="east_residential_district"
                     ),
                     DynamicGoalCandidateReference(ref_type="RESOURCE", key="emergency_fuel"),
-                )
+                ),
+                source=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="REGION",
+                    key="north_industrial_district",
+                ),
             )
         ],
         family="OPERATION",
@@ -645,7 +836,18 @@ def test_family_recovery_does_not_repeat_grounding_or_downstream_stages() -> Non
         family="OPERATION",
         family_results=[{"family": "INVALID"}, {"family": "OPERATION"}],
         action_key="inspect",
-        operation=[_operation("inspect", target=_slot("target", "NODE", "NOT_SPECIFIED"))],
+        operation=[
+            _operation(
+                "inspect",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+            )
+        ],
     )
 
     resolution = GenericGoalResolver(provider=provider).resolve(
@@ -667,7 +869,18 @@ def test_action_recovery_keeps_family_frozen_and_retries_only_action() -> None:
             {"action_match": "MATCHED", "action_key": None},
             {"action_match": "MATCHED", "action_key": "inspect"},
         ],
-        operation=[_operation("inspect", target=_slot("target", "NODE", "NOT_SPECIFIED"))],
+        operation=[
+            _operation(
+                "inspect",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+            )
+        ],
     )
 
     resolution = GenericGoalResolver(provider=provider).resolve(
@@ -688,7 +901,16 @@ def test_operation_recovery_keeps_action_frozen_and_retries_only_operation() -> 
         action_key="inspect",
         operation=[
             {"status": "RESOLVED", "intent": {"action_key": "repair_electrical"}},
-            _operation("inspect", target=_slot("target", "NODE", "NOT_SPECIFIED")),
+            _operation(
+                "inspect",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+            ),
         ],
     )
 
@@ -702,3 +924,456 @@ def test_operation_recovery_keeps_action_frozen_and_retries_only_operation() -> 
     assert len(provider.action_requests) == 1
     assert len(provider.operation_requests) == 2
     assert {request.action_key for request in provider.operation_requests} == {"inspect"}
+
+
+def test_family_state_drift_recovers_to_operation_without_terminal_equivalent() -> None:
+    provider = _VNextProvider(
+        grounding=[
+            DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),
+                ),
+                intent=DynamicGoalIntentDraft(
+                    intent_kind="OPERATION",
+                    action=DynamicGoalMentionSlot(
+                        status="GROUNDED",
+                        ref_type="ACTION",
+                        key="travel",
+                    ),
+                    actor=DynamicGoalMentionSlot(
+                        status="GROUNDED",
+                        ref_type="ACTOR",
+                        key="electrical_repair_team_alpha",
+                        surface="actor",
+                        match_semantics="SEMANTIC_EQUIVALENT",
+                    ),
+                    target=DynamicGoalMentionSlot(
+                        status="GROUNDED",
+                        ref_type="NODE",
+                        key="central_hospital",
+                        surface="central hospital",
+                    ),
+                ),
+            )
+        ],
+        family="OPERATION",
+        family_results=[{"family": "STATE"}, {"family": "OPERATION"}],
+        action_key="travel",
+        operation=[
+            _operation(
+                "travel",
+                actor=_slot(
+                    "actor",
+                    "ACTOR",
+                    "GROUNDED",
+                    ref_type="ACTOR",
+                    key="electrical_repair_team_alpha",
+                ),
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "actor travel to central hospital", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.family_requests) == 2
+    assert provider.family_requests[0].semantic_family_evidence.operation_expressed is True
+    assert provider.family_requests[0].semantic_family_evidence.state_equivalent_available is False
+    assert provider.family_requests[1].recovery_feedback[0]["code"] == (
+        "FAMILY_OPERATION_STATE_EQUIVALENCE_CONFLICT"
+    )
+
+
+def test_family_state_drift_without_recovery_is_typed_provider_failure() -> None:
+    provider = _VNextProvider(
+        grounding=[
+            DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),
+                ),
+                intent=DynamicGoalIntentDraft(
+                    intent_kind="OPERATION",
+                    action=DynamicGoalMentionSlot(
+                        status="GROUNDED", ref_type="ACTION", key="travel"
+                    ),
+                    target=DynamicGoalMentionSlot(
+                        status="GROUNDED",
+                        ref_type="NODE",
+                        key="central_hospital",
+                        surface="central hospital",
+                    ),
+                ),
+            )
+        ],
+        family="STATE",
+        family_results=[{"family": "STATE"}, {"family": "STATE"}],
+    )
+
+    with pytest.raises(Exception) as caught:
+        GenericGoalResolver(provider=provider).resolve(
+            "travel to central hospital", LINJIANG_V2_TEST
+        )
+    assert getattr(caught.value, "code", None) == "PROVIDER_SCHEMA_INVALID"
+
+
+def test_invalid_unresolved_role_uses_one_bounded_recovery_then_omitted_role() -> None:
+    target = DynamicGoalMentionSlot(
+        status="GROUNDED",
+        ref_type="NODE",
+        key="central_hospital",
+        surface="central hospital",
+    )
+    invalid = _role_grounding(
+        (DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),),
+        target=target,
+        source=DynamicGoalMentionSlot(
+            status="UNRESOLVED",
+            provenance="SEMANTIC_ROLE_EVIDENCE",
+        ),
+    )
+    recovered = _role_grounding(
+        (DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),),
+        target=target,
+        source=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+    )
+    provider = _VNextProvider(
+        grounding=[invalid, recovered],
+        family="OPERATION",
+        action_key="inspect",
+        operation=[
+            _operation(
+                "inspect",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "inspect central hospital", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 2
+    assert provider.grounding_requests[1].recovery_attempt == 1
+    assert provider.operation_requests[0].explicit_role_evidence["source"]["status"] == (
+        "NOT_SPECIFIED"
+    )
+
+
+def test_action_semantic_evidence_conflict_retries_then_accepts_router_choice() -> None:
+    provider = _VNextProvider(
+        grounding=[
+            _travel_grounding(
+                actor=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="ACTOR",
+                    key="electrical_repair_team_alpha",
+                    surface="actor",
+                    match_semantics="SEMANTIC_EQUIVALENT",
+                )
+            )
+        ],
+        family="OPERATION",
+        action_results=[
+            {"action_match": "MATCHED", "action_key": "transport_resource"},
+            {"action_match": "MATCHED", "action_key": "travel"},
+        ],
+        operation=[
+            _operation(
+                "travel",
+                actor=_slot(
+                    "actor",
+                    "ACTOR",
+                    "GROUNDED",
+                    ref_type="ACTOR",
+                    key="electrical_repair_team_alpha",
+                ),
+                target=_slot(
+                    "target",
+                    "REGION",
+                    "GROUNDED",
+                    ref_type="REGION",
+                    key="east_residential_district",
+                ),
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "actor 前往东部居住区", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.dynamic_requirements[0].action_key == "travel"
+    assert len(provider.action_requests) == 2
+    evidence = provider.action_requests[0].semantic_action_evidence
+    assert evidence is not None
+    assert evidence.action_key == "travel"
+    assert evidence.surface == "前往"
+    assert provider.action_requests[1].recovery_feedback[0]["code"] == (
+        "ACTION_SEMANTIC_EVIDENCE_CONFLICT"
+    )
+    assert provider.operation_requests[0].action_key == "travel"
+
+
+def test_action_semantic_evidence_conflict_fails_closed_after_bounded_retry() -> None:
+    provider = _VNextProvider(
+        grounding=[_travel_grounding()],
+        family="OPERATION",
+        action_results=[
+            {"action_match": "MATCHED", "action_key": "transport_resource"},
+            {"action_match": "MATCHED", "action_key": "transport_resource"},
+        ],
+    )
+
+    with pytest.raises(GenericProviderError) as caught:
+        GenericGoalResolver(provider=provider).resolve(
+            "前往东部居住区", LINJIANG_V2_TEST
+        )
+
+    assert caught.value.code == "PROVIDER_SCHEMA_INVALID"
+    assert caught.value.validation_diagnostics[0]["code"] == (
+        "ACTION_SEMANTIC_EVIDENCE_CONFLICT"
+    )
+    assert provider.operation_requests == []
+
+
+def test_grounded_invalid_exact_claim_triggers_one_semantic_recheck() -> None:
+    invalid = _transport_role_grounding(
+        source_status="GROUNDED",
+        source_key="west_logistics_district",
+        source_surface="30",
+        target_key="east_residential_district",
+        target_surface="东边",
+        resource_match_semantics="EXACT_OR_AUTHORED",
+    )
+    recovered = _transport_role_grounding(
+        source_status="GROUNDED",
+        source_key="west_logistics_district",
+        source_surface="30",
+        target_key="east_residential_district",
+        target_surface="东边",
+        resource_match_semantics="SEMANTIC_EQUIVALENT",
+    )
+    operation = _operation(
+        "transport_resource",
+        target=_slot(
+            "target",
+            "REGION",
+            "GROUNDED",
+            ref_type="REGION",
+            key="east_residential_district",
+        ),
+        bindings=[
+            _slot(
+                "source_region",
+                "REGION",
+                "GROUNDED",
+                ref_type="REGION",
+                key="west_logistics_district",
+            )
+        ],
+        parameters=[
+            _slot("amount", "INTEGER", "GROUNDED", value=30),
+            _slot(
+                "resource_key",
+                "RESOURCE",
+                "GROUNDED",
+                ref_type="RESOURCE",
+                key="emergency_relief_supplies",
+            ),
+        ],
+    )
+    provider = _VNextProvider(
+        grounding=[invalid, recovered],
+        family="OPERATION",
+        action_key="transport_resource",
+        operation=[operation],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "把30个救灾用品运到东边", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 2
+    assert provider.grounding_requests[1].recovery_feedback[0]["code"] == (
+        "ROLE_MATCH_SEMANTICS_RECHECK"
+    )
+    assert resolution.dynamic_requirements[0].parameter_constraints == {
+        "resources": [{"resource_key": "emergency_relief_supplies", "amount": 30}]
+    }
+
+
+def test_invalid_exact_claim_remaining_unresolved_clarifies_after_recheck() -> None:
+    invalid = _transport_role_grounding(
+        target_key="east_residential_district",
+        target_surface="东边",
+        resource_match_semantics="EXACT_OR_AUTHORED",
+    )
+    unresolved = _transport_role_grounding(
+        target_key="east_residential_district",
+        target_surface="东边",
+        resource_status="UNRESOLVED",
+        resource_match_semantics=None,
+    )
+    provider = _VNextProvider(
+        grounding=[invalid, unresolved],
+        family="OPERATION",
+        action_key="transport_resource",
+        operation=[
+            DynamicGoalOperationGrounding(
+                status="NEEDS_CLARIFICATION",
+                clarification_prompt="请明确资源。",
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "把30个救灾用品运到东边", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert len(provider.grounding_requests) == 2
+    assert provider.grounding_requests[1].recovery_feedback[0]["code"] == (
+        "ROLE_MATCH_SEMANTICS_RECHECK"
+    )
+
+
+def test_explicit_unresolved_source_triggers_one_semantic_grounding_recheck() -> None:
+    first = _transport_role_grounding(
+        target_key="central_district",
+        target_surface="中央城区",
+        resource_key="emergency_fuel",
+        resource_surface="应急燃料",
+        resource_match_semantics="EXACT_OR_AUTHORED",
+        source_status="UNRESOLVED",
+        source_surface="仓储物流一带",
+    )
+    second = _transport_role_grounding(
+        target_key="central_district",
+        target_surface="中央城区",
+        resource_key="emergency_fuel",
+        resource_surface="应急燃料",
+        resource_match_semantics="EXACT_OR_AUTHORED",
+        source_status="GROUNDED",
+        source_key="west_logistics_district",
+        source_surface="仓储物流一带",
+    )
+    operation = _operation(
+        "transport_resource",
+        target=_slot(
+            "target",
+            "REGION",
+            "GROUNDED",
+            ref_type="REGION",
+            key="central_district",
+        ),
+        bindings=[
+            _slot(
+                "source_region",
+                "REGION",
+                "GROUNDED",
+                ref_type="REGION",
+                key="west_logistics_district",
+            )
+        ],
+        parameters=[
+            _slot("amount", "INTEGER", "GROUNDED", value=30),
+            _slot(
+                "resource_key",
+                "RESOURCE",
+                "GROUNDED",
+                ref_type="RESOURCE",
+                key="emergency_fuel",
+            ),
+        ],
+    )
+    provider = _VNextProvider(
+        grounding=[first, second],
+        family="OPERATION",
+        action_key="transport_resource",
+        operation=[operation],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "从仓储物流一带运30个应急燃料到中央城区", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 2
+    assert provider.grounding_requests[1].recovery_feedback[0]["code"] == (
+        "ROLE_SEMANTIC_GROUNDING_RECHECK"
+    )
+    assert resolution.dynamic_requirements[0].binding_constraints[0].value == (
+        "west_logistics_district"
+    )
+
+
+def test_first_valid_semantic_equivalent_grounding_needs_no_extra_confirmation() -> None:
+    grounding = _transport_role_grounding(
+        source_status="GROUNDED",
+        source_key="west_logistics_district",
+        source_surface="30",
+        target_key="east_residential_district",
+        target_surface="东边",
+        resource_match_semantics="SEMANTIC_EQUIVALENT",
+    )
+    provider = _VNextProvider(
+        grounding=[grounding],
+        family="OPERATION",
+        action_key="transport_resource",
+        operation=[
+            _operation(
+                "transport_resource",
+                target=_slot(
+                    "target",
+                    "REGION",
+                    "GROUNDED",
+                    ref_type="REGION",
+                    key="east_residential_district",
+                ),
+                bindings=[
+                    _slot(
+                        "source_region",
+                        "REGION",
+                        "GROUNDED",
+                        ref_type="REGION",
+                        key="west_logistics_district",
+                    )
+                ],
+                parameters=[
+                    _slot("amount", "INTEGER", "GROUNDED", value=30),
+                    _slot(
+                        "resource_key",
+                        "RESOURCE",
+                        "GROUNDED",
+                        ref_type="RESOURCE",
+                        key="emergency_relief_supplies",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "把30个救灾用品运到东边", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert len(provider.grounding_requests) == 1

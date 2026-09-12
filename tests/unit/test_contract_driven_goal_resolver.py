@@ -430,6 +430,12 @@ def test_routing_action_projection_assigns_supply_source_and_target_roles() -> N
     assert "supply_power" in action_keys
 
 
+
+
+
+
+
+
 def test_routing_action_projection_rejects_impossible_role_assignment() -> None:
     public_action_keys = {item.key for item in LINJIANG_V2_TEST.actions}
     catalog = _dynamic_goal_routing_action_catalog(
@@ -700,7 +706,7 @@ def test_action_routing_without_derived_pair_has_empty_topology_context() -> Non
     assert request.public_topology == {"relations": [], "transport_endpoint_pairs": []}
 
 
-def test_full_action_catalog_still_rejects_lossy_operation_grounding() -> None:
+def test_lexical_candidates_do_not_reject_semantically_grounded_operation() -> None:
     provider = _RoutingProvider(
         routing=DynamicGoalSemanticRouting(
             family="OPERATION",
@@ -715,8 +721,8 @@ def test_full_action_catalog_still_rejects_lossy_operation_grounding() -> None:
         LINJIANG_V2_TEST,
     )
 
-    assert resolution.status == "UNSUPPORTED"
-    assert resolution.source == "CANONICAL_IDENTITY_CONFLICT"
+    assert resolution.status == "RESOLVED"
+    assert resolution.dynamic_requirements[0].target_key == "southeast_access_corridor"
 
 
 def _transport_operation(*, amount: object = 12) -> dict[str, object]:
@@ -1140,7 +1146,7 @@ def test_exact_canonical_resource_cannot_be_replaced_by_semantic_grounding() -> 
     assert resolution.source == "CANONICAL_IDENTITY_CONFLICT"
 
 
-def test_canonical_a1_preserves_only_exact_mentions_and_filters_operation_context() -> None:
+def test_advisory_candidates_do_not_narrow_operation_public_context() -> None:
     operation = _operation(
         "transport_resource",
         target=_slot(
@@ -1209,7 +1215,7 @@ def test_canonical_a1_preserves_only_exact_mentions_and_filters_operation_contex
         "REGION",
         "RESOURCE",
     }
-    assert {(item["ref_type"], item["key"]) for item in request.public_references} == {
+    assert {(item["ref_type"], item["key"]) for item in request.public_references} >= {
         ("REGION", "south_waterfront_district"),
         ("REGION", "southeast_heights_district"),
         ("RESOURCE", "emergency_fuel"),
@@ -1378,7 +1384,7 @@ def test_routed_transport_without_source_keeps_source_unspecified() -> None:
     assert requirement.target_key == "south_waterfront_district"
 
 
-def test_routed_region_pair_uses_only_local_topology_for_unique_node() -> None:
+def test_advisory_region_pair_does_not_create_authoritative_topology_target() -> None:
     provider = _RoutingProvider(
         routing=DynamicGoalSemanticRouting(
             family="OPERATION",
@@ -1397,12 +1403,10 @@ def test_routed_region_pair_uses_only_local_topology_for_unique_node() -> None:
         "repair central_district to north_industrial_district", LINJIANG_V2_TEST
     )
 
-    assert resolution.status == "RESOLVED"
-    assert resolution.dynamic_requirements[0].target_key == "north_service_corridor"
+    assert resolution.status == "NEEDS_CLARIFICATION"
     topology = provider.operation_requests[0].public_topology
-    assert len(topology["transport_endpoint_pairs"]) == 1
-    assert len(topology["relations"]) == 2
-    assert topology["transport_endpoint_pairs"][0]["entity_key"] == "north_service_corridor"
+    assert topology["transport_endpoint_pairs"] == []
+    assert topology["relations"] == []
 
 
 @pytest.mark.parametrize(

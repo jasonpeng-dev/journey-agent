@@ -11,11 +11,15 @@ from app.agent.generic import (
     _FrozenDynamicGoalEvidence,
     _vnext_allowed_clarification_fields,
     _vnext_normalize_frozen_intent,
+    _vnext_operation_slot_matches_frozen,
     _vnext_sanitize_clarification_prompt,
+    _vnext_semantic_family_evidence,
 )
+from app.agent.planner_contract import action_goal_terminal_effects
 from app.agent.provider import (
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
+    DynamicGoalIntentDraft,
     DynamicGoalMentionSlot,
     DynamicGoalOperationGrounding,
     DynamicGoalScalarMentionSlot,
@@ -65,7 +69,125 @@ def _transport_grounding(
     )
 
 
-def test_deterministic_exact_target_survives_operation_grounding() -> None:
+def _reference_slot(
+    *,
+    expected_type: str,
+    ref_type: str,
+    key: str,
+) -> OperationContractSlot:
+    return OperationContractSlot(
+        slot_key="target",
+        expected_type=expected_type,  # type: ignore[arg-type]
+        status="GROUNDED",
+        ref_type=ref_type,  # type: ignore[arg-type]
+        key=key,
+    )
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "matches"),
+    [
+        (
+            _reference_slot(
+                expected_type="NODE",
+                ref_type="REGION",
+                key="east_residential_district",
+            ),
+            _reference_slot(
+                expected_type="NODE",
+                ref_type="NODE",
+                key="east_residential_district",
+            ),
+            True,
+        ),
+        (
+            _reference_slot(
+                expected_type="REGION",
+                ref_type="REGION",
+                key="east_residential_district",
+            ),
+            _reference_slot(
+                expected_type="REGION",
+                ref_type="NODE",
+                key="east_residential_district",
+            ),
+            False,
+        ),
+        (
+            _reference_slot(expected_type="RESOURCE", ref_type="RESOURCE", key="foo"),
+            _reference_slot(expected_type="RESOURCE", ref_type="NODE", key="foo"),
+            False,
+        ),
+        (
+            _reference_slot(expected_type="NODE", ref_type="NODE", key="foo"),
+            _reference_slot(expected_type="NODE", ref_type="NODE", key="bar"),
+            False,
+        ),
+        (
+            _reference_slot(expected_type="NODE", ref_type="NODE", key="foo"),
+            _reference_slot(expected_type="NODE", ref_type="NODE", key="foo"),
+            True,
+        ),
+    ],
+    ids=[
+        "node-contract-region-node-same-key",
+        "region-contract-region-node-same-key",
+        "resource-contract-node-same-key",
+        "node-contract-different-key",
+        "exact-reference-match",
+    ],
+)
+def test_frozen_reference_slot_compatibility_is_contract_driven(
+    expected: OperationContractSlot,
+    actual: OperationContractSlot,
+    matches: bool,
+) -> None:
+    assert _vnext_operation_slot_matches_frozen(actual, expected) is matches
+
+
+def test_travel_accepts_same_canonical_target_with_node_region_representation() -> None:
+    target_key = "east_residential_district"
+    provider = _VNextProvider(
+        grounding=[
+            _role_grounding(
+                (DynamicGoalCandidateReference(ref_type="REGION", key=target_key),),
+                actor=_slot_surface("GROUNDED", "ACTOR", "electrical_repair_team_alpha", "actor"),
+                target=_slot_surface("GROUNDED", "REGION", target_key, "east residential"),
+            )
+        ],
+        family="OPERATION",
+        action_key="travel",
+        operation=[
+            _operation(
+                "travel",
+                actor=_slot(
+                    "actor",
+                    "ACTOR",
+                    "GROUNDED",
+                    ref_type="ACTOR",
+                    key="electrical_repair_team_alpha",
+                ),
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key=target_key,
+                ),
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "actor travel to east residential", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.dynamic_requirements[0].target_key == target_key
+    assert len(provider.operation_requests) == 1
+
+
+def test_deterministic_exact_target_does_not_create_a_semantic_role() -> None:
     provider = _VNextProvider(
         grounding=[
             _transport_grounding(
@@ -86,7 +208,7 @@ def test_deterministic_exact_target_survives_operation_grounding() -> None:
     )
 
     assert resolution.status == "RESOLVED"
-    assert resolution.dynamic_requirements[0].target_key == "east_residential_district"
+    assert resolution.dynamic_requirements[0].target_key is None
 
 
 def test_semantic_frozen_source_survives_operation_grounding() -> None:
@@ -170,10 +292,10 @@ def test_operation_cannot_erase_or_replace_frozen_target(
     provider = _VNextProvider(
         grounding=[grounding],
         family="OPERATION",
-        action_key="travel",
+        action_key="inspect",
         operation=[
-            _operation("travel", target=bad_target),
-            _operation("travel", target=bad_target),
+            _operation("inspect", target=bad_target),
+            _operation("inspect", target=bad_target),
         ],
     )
 
@@ -195,24 +317,26 @@ def test_operation_cannot_erase_or_replace_frozen_target(
     assert len(provider.action_requests) == 1
 
 
-def test_omitted_actor_stays_not_specified_despite_semantic_suggestion() -> None:
-    actor = DynamicGoalMentionSlot(
-        status="GROUNDED", ref_type="ACTOR", key="logistics_team_alpha"
-    )
+def test_contextual_actor_candidate_does_not_override_not_specified_role() -> None:
+    actor = DynamicGoalMentionSlot(status="NOT_SPECIFIED")
     target = _slot_surface("GROUNDED", "NODE", "central_hospital", "hospital")
     provider = _VNextProvider(
         grounding=[
             _transport_grounding(
-                refs=(DynamicGoalCandidateReference(ref_type="ACTOR", key=actor.key),),
+                refs=(
+                    DynamicGoalCandidateReference(
+                        ref_type="ACTOR", key="logistics_team_alpha"
+                    ),
+                ),
                 actor=actor,
                 target=target,
             )
         ],
         family="OPERATION",
-        action_key="travel",
+        action_key="inspect",
         operation=[
             _operation(
-                "travel",
+                "inspect",
                 target=_slot(
                     "target", "NODE", "GROUNDED", ref_type="NODE", key="central_hospital"
                 ),
@@ -228,7 +352,7 @@ def test_omitted_actor_stays_not_specified_despite_semantic_suggestion() -> None
     assert resolution.dynamic_requirements[0].actor_key is None
 
 
-def test_omitted_source_is_not_frozen_without_surface_evidence() -> None:
+def test_semantic_source_role_is_frozen_without_optional_surface() -> None:
     intent = _transport_grounding(
         refs=(DynamicGoalCandidateReference(ref_type="REGION", key="north_industrial_district"),),
         source=DynamicGoalMentionSlot(
@@ -242,10 +366,11 @@ def test_omitted_source_is_not_frozen_without_surface_evidence() -> None:
         (),
     )
     assert normalized is not None
-    assert normalized.source.status == "NOT_SPECIFIED"
+    assert normalized.source.status == "GROUNDED"
+    assert normalized.source.key == "north_industrial_district"
 
 
-def test_grounded_semantic_role_without_surface_cannot_freeze() -> None:
+def test_grounded_semantic_role_without_surface_is_frozen() -> None:
     intent = _transport_grounding(
         refs=(DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),),
         target=DynamicGoalMentionSlot(
@@ -255,7 +380,8 @@ def test_grounded_semantic_role_without_surface_cannot_freeze() -> None:
     assert intent is not None
     normalized = _vnext_normalize_frozen_intent("inspect something", intent, ())
     assert normalized is not None
-    assert normalized.target.status == "NOT_SPECIFIED"
+    assert normalized.target.status == "GROUNDED"
+    assert normalized.target.key == "central_hospital"
 
 
 @pytest.mark.parametrize(
@@ -267,7 +393,7 @@ def test_grounded_semantic_role_without_surface_cannot_freeze() -> None:
         ("resource", "RESOURCE", "emergency_fuel", "emergency fuel"),
     ],
 )
-def test_hallucinated_semantic_surface_cannot_freeze_role(
+def test_validated_semantic_role_is_not_reinterpreted_from_surface(
     role: str,
     ref_type: str,
     key: str,
@@ -292,7 +418,8 @@ def test_hallucinated_semantic_surface_cannot_freeze_role(
     )
 
     assert normalized is not None
-    assert getattr(normalized, role).status == "NOT_SPECIFIED"
+    assert getattr(normalized, role).status == "GROUNDED"
+    assert getattr(normalized, role).key == key
 
 
 def test_real_semantic_surface_is_preserved_after_normalization() -> None:
@@ -334,7 +461,7 @@ def test_normalized_equivalent_semantic_surface_is_preserved() -> None:
     assert normalized.source.status == "GROUNDED"
 
 
-def test_deterministic_exact_identity_survives_missing_semantic_surface() -> None:
+def test_semantic_identity_does_not_need_deterministic_or_surface_authority() -> None:
     intent = _transport_grounding(
         target=DynamicGoalMentionSlot(
             status="GROUNDED",
@@ -361,7 +488,110 @@ def test_deterministic_exact_identity_survives_missing_semantic_surface() -> Non
     assert normalized.target.key == "east_residential_district"
 
 
-def test_deterministic_exact_identity_outranks_semantic_suggestion() -> None:
+def test_provider_role_provenance_without_goal_evidence_cannot_freeze_in_production_path() -> None:
+    intent = _transport_grounding(
+        target=DynamicGoalMentionSlot(
+            status="GROUNDED",
+            ref_type="NODE",
+            key="central_hospital",
+            provenance="SEMANTIC_ROLE_EVIDENCE",
+        )
+    ).intent
+    assert intent is not None
+    catalog = {
+        "references": [{"ref_type": "NODE", "key": "central_hospital", "name": "Central Hospital"}]
+    }
+
+    normalized = _vnext_normalize_frozen_intent(
+        "inspect the facility",
+        intent,
+        (),
+        catalog,
+    )
+
+    assert normalized is not None
+    assert normalized.target.status == "NOT_SPECIFIED"
+    assert normalized.target.provenance == "NOT_SPECIFIED"
+
+
+def test_explicit_semantic_surface_is_backend_marked_and_omitted_source_stays_unspecified() -> None:
+    intent = _transport_grounding(
+        source=DynamicGoalMentionSlot(
+            status="GROUNDED",
+            ref_type="NODE",
+            key="east_distribution_station",
+            surface="east station",
+            match_semantics="SEMANTIC_EQUIVALENT",
+            provenance="INFERRED",
+        )
+    ).intent
+    assert intent is not None
+    catalog = {
+        "references": [
+            {
+                "ref_type": "NODE",
+                "key": "east_distribution_station",
+                "name": "East Distribution Station",
+            }
+        ]
+    }
+    normalized = _vnext_normalize_frozen_intent(
+        "supply power from east station",
+        intent,
+        (),
+        catalog,
+    )
+    assert normalized is not None
+    assert normalized.source.status == "GROUNDED"
+    assert normalized.source.key == "east_distribution_station"
+    assert normalized.source.provenance == "SEMANTIC_ROLE_EVIDENCE"
+
+    omitted = intent.model_copy(
+        update={
+            "source": DynamicGoalMentionSlot(
+                status="GROUNDED",
+                ref_type="NODE",
+                key="east_distribution_station",
+                provenance="SEMANTIC_ROLE_EVIDENCE",
+            )
+        }
+    )
+    normalized_omitted = _vnext_normalize_frozen_intent(
+        "supply power to the hospital",
+        omitted,
+        (),
+        catalog,
+    )
+    assert normalized_omitted is not None
+    assert normalized_omitted.source.status == "NOT_SPECIFIED"
+
+
+
+
+def test_family_advisory_evidence_distinguishes_operation_equivalence() -> None:
+    supply = next(item for item in LINJIANG_V2_TEST.actions if item.key == "supply_power")
+    intent = DynamicGoalIntentDraft(
+        intent_kind="OPERATION",
+        action=DynamicGoalMentionSlot(
+            status="GROUNDED",
+            ref_type="ACTION",
+            key="supply_power",
+            match_semantics="SEMANTIC_EQUIVALENT",
+        ),
+        target=DynamicGoalMentionSlot(
+            status="GROUNDED",
+            ref_type="NODE",
+            key="central_hospital",
+        ),
+    )
+    evidence = _FrozenDynamicGoalEvidence(frozen_intent=intent)
+    advisory = _vnext_semantic_family_evidence(evidence, LINJIANG_V2_TEST)
+    assert advisory.operation_expressed is True
+    assert advisory.state_equivalent_available is True
+    assert supply.key == "supply_power"
+
+
+def test_semantic_role_binding_is_authoritative_even_with_deterministic_hint() -> None:
     target = _slot_surface(
         "GROUNDED",
         "REGION",
@@ -380,10 +610,10 @@ def test_deterministic_exact_identity_outranks_semantic_suggestion() -> None:
             )
         ],
         family="OPERATION",
-        action_key="travel",
+        action_key="inspect",
         operation=[
             _operation(
-                "travel",
+                "inspect",
                 target=_slot(
                     "target",
                     "NODE",
@@ -425,7 +655,14 @@ def test_survey_resources_generic_noun_does_not_require_resource_identity() -> N
                 resource=DynamicGoalMentionSlot(
                     status="UNRESOLVED", ref_type="RESOURCE", surface="resources"
                 ),
-            )
+            ),
+            _transport_grounding(
+                refs=(DynamicGoalCandidateReference(ref_type="REGION", key="central_district"),),
+                target=target,
+                resource=DynamicGoalMentionSlot(
+                    status="UNRESOLVED", ref_type="RESOURCE", surface="resources"
+                ),
+            ),
         ],
         family="OPERATION",
         action_key="survey_resources",
@@ -532,7 +769,7 @@ def test_no_allowed_clarification_fields_cannot_fall_back_to_provider_prompt() -
             )
         ],
         family="OPERATION",
-        action_key="travel",
+        action_key="clear_transport",
         operation=[
             DynamicGoalOperationGrounding(
                 status="NEEDS_CLARIFICATION",
@@ -559,7 +796,16 @@ def test_operation_recovery_is_local_and_action_stays_frozen() -> None:
         action_key="inspect",
         operation=[
             {"status": "RESOLVED", "intent": {"action_key": "travel"}},
-            _operation("inspect", target=_slot("target", "NODE", "NOT_SPECIFIED")),
+            _operation(
+                "inspect",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+            ),
         ],
     )
 
@@ -583,7 +829,18 @@ def test_action_response_cannot_change_frozen_family() -> None:
             {"frozen_family": "STATE", "action_match": "MATCHED", "action_key": "inspect"},
             {"action_match": "MATCHED", "action_key": "inspect"},
         ],
-        operation=[_operation("inspect", target=_slot("target", "NODE", "NOT_SPECIFIED"))],
+        operation=[
+            _operation(
+                "inspect",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+            )
+        ],
     )
 
     resolution = GenericGoalResolver(provider=provider).resolve(

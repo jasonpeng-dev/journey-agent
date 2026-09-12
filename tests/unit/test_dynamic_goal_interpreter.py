@@ -800,10 +800,16 @@ def test_partial_typed_operation_grounding_adds_semantic_resource_candidate() ->
     assert grounding_request.deterministic_candidate_refs
     assert set(grounding_request.deterministic_candidate_refs) >= {
         DynamicGoalCandidateReference(
-            ref_type="REGION", key="region_a", provenance="EXACT_USER_MENTION"
+            ref_type="REGION",
+            key="region_a",
+            provenance="EXACT_USER_MENTION",
+            match_semantics="EXACT_OR_AUTHORED",
         ),
         DynamicGoalCandidateReference(
-            ref_type="REGION", key="region_b", provenance="EXACT_USER_MENTION"
+            ref_type="REGION",
+            key="region_b",
+            provenance="EXACT_USER_MENTION",
+            match_semantics="EXACT_OR_AUTHORED",
         ),
     }
     action_reference = next(

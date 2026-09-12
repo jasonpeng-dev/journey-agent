@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Literal, cast
@@ -21,7 +21,7 @@ from app.agent.formal_goal_projection import (
     formal_goal_planning_objectives,
 )
 from app.agent.objective_scope import ObjectiveScope
-from app.agent.planner_contract import action_planner_effects
+from app.agent.planner_contract import action_goal_terminal_effects, action_planner_effects
 from app.agent.planning_context import (
     PlanningActionCatalogBuilder,
     PlanningContextBuilder,
@@ -51,6 +51,8 @@ from app.agent.provider import (
     DynamicGoalOperationGroundingRequest,
     DynamicGoalRecoveryFeedback,
     DynamicGoalScalarMentionSlot,
+    DynamicGoalSemanticActionEvidence,
+    DynamicGoalSemanticFamilyEvidence,
     GenericModelProvider,
     GenericProviderError,
     GoalFamilyMatch,
@@ -373,9 +375,11 @@ class _DynamicGoalGrounding:
 class _FrozenDynamicGoalEvidence:
     """Immutable public evidence shared by every VNext semantic owner.
 
-    Deterministic identities remain separate from model-supplemented evidence so
-    downstream fields named ``deterministic_candidate_refs`` are truthful.  The
-    legacy Stage-1 intent kind and Action guess are deliberately not retained.
+    Deterministic identities remain separate retrieval hints so downstream fields
+    named ``deterministic_candidate_refs`` are truthful. Only semantic references
+    and semantic role bindings enter the authoritative frozen evidence. The legacy
+    Stage-1 intent kind and Action guess are not authoritative; a typed Action
+    hint is retained separately as advisory input for the Action Router.
     """
 
     deterministic_exact_refs: tuple[DynamicGoalCandidateReference, ...] = ()
@@ -387,6 +391,7 @@ class _FrozenDynamicGoalEvidence:
     # gives later stages one immutable source of explicit provenance.
     frozen_intent: DynamicGoalIntentDraft | None = None
     explicit_role_evidence: dict[str, object] | None = None
+    semantic_action_evidence: DynamicGoalSemanticActionEvidence | None = None
     semantic_status: str = "UNAVAILABLE"
 
 
@@ -595,10 +600,17 @@ class GenericGoalResolver:
                 provider,
                 deterministic_grounding,
             )
-            routing_refs = frozen_evidence.merged_refs
+            routing_refs = _merge_dynamic_goal_candidate_refs(
+                _merge_dynamic_goal_candidate_refs(
+                    frozen_evidence.deterministic_exact_refs,
+                    frozen_evidence.deterministic_ambiguous_refs,
+                ),
+                frozen_evidence.semantic_refs,
+            )
 
             family_routing: DynamicGoalFamilyRouting | None = None
             family_recovery: tuple[dict[str, object], ...] = ()
+            family_evidence = _vnext_semantic_family_evidence(frozen_evidence, definition)
             for recovery_attempt in range(2):
                 try:
                     family_routing = DynamicGoalFamilyRouting.model_validate(
@@ -615,6 +627,7 @@ class GenericGoalResolver:
                                 explicit_role_evidence=(
                                     frozen_evidence.explicit_role_evidence or {}
                                 ),
+                                semantic_family_evidence=family_evidence,
                                 recovery_attempt=recovery_attempt,
                                 recovery_feedback=family_recovery,
                             )
@@ -624,6 +637,42 @@ class GenericGoalResolver:
                         family_routing,
                         family_recovery,
                     )
+                    if (
+                        family_routing.family == "STATE"
+                        and family_evidence.operation_expressed
+                        and family_evidence.state_equivalent_available is False
+                    ):
+                        if recovery_attempt == 0:
+                            family_recovery = (
+                                {
+                                    "code": "FAMILY_OPERATION_STATE_EQUIVALENCE_CONFLICT",
+                                    "expected": (
+                                        "Return OPERATION when operation_expressed is true "
+                                        "and state_equivalent_available is false."
+                                    ),
+                                    "fix_only": ["family"],
+                                },
+                            )
+                            continue
+                        raise GenericProviderError(
+                            "PROVIDER_SCHEMA_INVALID",
+                            (
+                                "Family routing contradicted an explicit operation without "
+                                "a terminal equivalent"
+                            ),
+                            validation_diagnostics=(
+                                {
+                                    "code": "FAMILY_OPERATION_STATE_EQUIVALENCE_CONFLICT",
+                                    "field_path": "family",
+                                },
+                            ),
+                            resolution_observation={
+                                "stage": "FAMILY_ROUTING",
+                                "status": "ERROR",
+                                "result": "FAMILY_OPERATION_STATE_EQUIVALENCE_CONFLICT",
+                                "rejection_code": "FAMILY_OPERATION_STATE_EQUIVALENCE_CONFLICT",
+                            },
+                        )
                     break
                 except GenericProviderError as exc:
                     if recovery_attempt == 0 and exc.code in {
@@ -722,6 +771,9 @@ class GenericGoalResolver:
                                 explicit_role_evidence=(
                                     frozen_evidence.explicit_role_evidence or {}
                                 ),
+                                semantic_action_evidence=(
+                                    frozen_evidence.semantic_action_evidence
+                                ),
                                 recovery_attempt=recovery_attempt,
                                 recovery_feedback=action_recovery,
                             )
@@ -731,6 +783,55 @@ class GenericGoalResolver:
                         action_routing,
                         action_recovery,
                     )
+                    semantic_action_evidence = frozen_evidence.semantic_action_evidence
+                    if (
+                        semantic_action_evidence is not None
+                        and action_routing.action_match == "MATCHED"
+                        and action_routing.action_key is not None
+                        and action_routing.action_key != semantic_action_evidence.action_key
+                    ):
+                        if recovery_attempt == 0:
+                            action_recovery = (
+                                {
+                                    "code": "ACTION_SEMANTIC_EVIDENCE_CONFLICT",
+                                    "expected": (
+                                        "Re-compare the raw Goal with the complete authored "
+                                        "semantics of the upstream and returned Actions."
+                                    ),
+                                    "upstream_action_key": semantic_action_evidence.action_key,
+                                    "returned_action_key": action_routing.action_key,
+                                    "surface": semantic_action_evidence.surface,
+                                    "fix_only": [
+                                        "action_match",
+                                        "action_key",
+                                        "candidate_keys",
+                                        "clarification_prompt",
+                                        "no_match_reason",
+                                    ],
+                                },
+                            )
+                            continue
+                        raise GenericProviderError(
+                            "PROVIDER_SCHEMA_INVALID",
+                            "Action routing contradicted Stage-1 semantic Action evidence",
+                            validation_diagnostics=(
+                                {
+                                    "code": "ACTION_SEMANTIC_EVIDENCE_CONFLICT",
+                                    "upstream_action_key": semantic_action_evidence.action_key,
+                                    "returned_action_key": action_routing.action_key,
+                                    "surface": semantic_action_evidence.surface,
+                                },
+                            ),
+                            resolution_observation={
+                                "stage": "ACTION_ROUTING",
+                                "status": "ERROR",
+                                "result": "ACTION_SEMANTIC_EVIDENCE_CONFLICT",
+                                "rejection_code": "ACTION_SEMANTIC_EVIDENCE_CONFLICT",
+                                "upstream_action_key": semantic_action_evidence.action_key,
+                                "returned_action_key": action_routing.action_key,
+                                "surface": semantic_action_evidence.surface,
+                            },
+                        )
                     break
                 except GenericProviderError as exc:
                     if recovery_attempt == 0 and exc.code in {
@@ -947,9 +1048,9 @@ class GenericGoalResolver:
                     "grounding_round": grounding_round,
                     "request_hash": _dynamic_goal_payload_hash(request_payload),
                     "prompt_template_version": (
-                        "dynamic-goal-grounding-v3"
+                        "dynamic-goal-grounding-v7"
                         if purpose == "dynamic_goal_grounding"
-                        else "dynamic-goal-interpretation-v1"
+                        else "dynamic-goal-interpretation-v2"
                     ),
                 }
             )
@@ -2038,6 +2139,7 @@ class GenericGoalResolver:
             self.scope,
             definition,
             grounding,
+            include_authored_matches=False,
         )
         if grounding.status != "RESOLVED":
             return GenericGoalResolution(
@@ -2152,6 +2254,11 @@ class GenericGoalResolver:
                         "FROZEN_FAMILY_CONFLICT",
                         "Frozen STATE interpretation cannot produce ACTION_COMPLETED",
                     )
+                _validate_vnext_state_minimality(
+                    definition,
+                    frozen_evidence,
+                    candidate_set,
+                )
                 canonical = canonicalize_ad_hoc_dynamic_candidates_v2(
                     definition,
                     candidate_set,
@@ -2165,6 +2272,23 @@ class GenericGoalResolver:
                 )
             except FormalGoalError as exc:
                 if recovery_attempt == 0:
+                    if exc.code in {
+                        "STATE_REQUIREMENT_NOT_MINIMAL",
+                        "STATE_OPERATION_EQUIVALENCE_CONFLICT",
+                    }:
+                        recovery_feedback = (
+                            DynamicGoalRecoveryFeedback(
+                                requirement_index=0,
+                                issue="INVALID_REQUIREMENT_SHAPE",
+                                expected_shape={
+                                    "rule": (
+                                        "Return only the minimal terminal-WHAT requirement "
+                                        "directly expressed by the player; do not add sibling "
+                                        "or consequence states."
+                                    )
+                                },
+                            ),
+                        )
                     continue
                 return GenericGoalResolution(
                     "UNSUPPORTED",
@@ -2246,11 +2370,19 @@ class GenericGoalResolver:
                 },
             )
         deterministic_refs = (
+            deterministic.candidate_refs
+            if frozen_evidence is None and deterministic.status == "RESOLVED"
+            else ()
+        )
+        deterministic_hints = (
             frozen_evidence.deterministic_exact_refs
             if frozen_evidence is not None
-            else deterministic.candidate_refs
-            if deterministic.status == "RESOLVED"
-            else ()
+            else deterministic_refs
+        )
+        authoritative_refs = (
+            frozen_evidence.semantic_refs
+            if frozen_evidence is not None
+            else deterministic_refs
         )
         public_catalog = _dynamic_goal_entity_catalog(self.db, self.scope, definition)
         raw_references = public_catalog.get("references", ())
@@ -2268,7 +2400,7 @@ class GenericGoalResolver:
                         DynamicGoalActionMatchRequest(
                             goal=goal,
                             action_catalog=action_catalog,
-                            deterministic_candidate_refs=deterministic_refs,
+                            deterministic_candidate_refs=deterministic_hints,
                         )
                     )
                 )
@@ -2336,7 +2468,7 @@ class GenericGoalResolver:
             action_contract,
             references,
             topology if isinstance(topology, dict) else {},
-            deterministic_refs,
+            authoritative_refs,
         )
         recovery_feedback: tuple[dict[str, object], ...] = ()
         last_error: GenericProviderError | None = None
@@ -2347,7 +2479,7 @@ class GenericGoalResolver:
                 action_contract=action_contract,
                 public_references=operation_references,
                 public_topology=operation_topology,
-                deterministic_candidate_refs=deterministic_refs,
+                deterministic_candidate_refs=deterministic_hints,
                 deterministic_ambiguous_refs=(
                     frozen_evidence.deterministic_ambiguous_refs
                     if frozen_evidence is not None
@@ -2424,6 +2556,7 @@ class GenericGoalResolver:
                                     definition,
                                     action,
                                     frozen_evidence,
+                                    public_catalog,
                                 ),
                             )
                             grounded_from_contract = True
@@ -2538,6 +2671,7 @@ class GenericGoalResolver:
                         action_contract,
                         grounded.intent,
                         frozen_evidence,
+                        public_catalog,
                     )
                     if frozen_evidence is not None
                     else grounded.intent
@@ -8057,6 +8191,7 @@ def _dynamic_goal_exact_public_matches(
             ref_type=identity.ref_type.value,
             key=identity.ref_key,
             provenance="EXACT_USER_MENTION",
+            match_semantics="EXACT_OR_AUTHORED",
         )
         for identity in lookup.identities
     )
@@ -8113,6 +8248,12 @@ def _merge_dynamic_goal_candidate_refs(
         "TOPOLOGY_ENRICHED": 2,
         "EXACT_USER_MENTION": 3,
     }
+    match_semantics_priority = {
+        None: -1,
+        "RELATED_ONLY": 0,
+        "SEMANTIC_EQUIVALENT": 1,
+        "EXACT_OR_AUTHORED": 2,
+    }
     unique: dict[tuple[str, str], DynamicGoalCandidateReference] = {}
     for item in (*deterministic_refs, *semantic_refs):
         identity = (item.ref_type, item.key)
@@ -8120,6 +8261,11 @@ def _merge_dynamic_goal_candidate_refs(
         if (
             previous is None
             or provenance_priority[item.provenance] > provenance_priority[previous.provenance]
+            or (
+                provenance_priority[item.provenance] == provenance_priority[previous.provenance]
+                and match_semantics_priority[item.match_semantics]
+                > match_semantics_priority[previous.match_semantics]
+            )
         ):
             unique[identity] = item
     return tuple(unique[key] for key in sorted(unique))
@@ -8140,9 +8286,18 @@ def _dynamic_goal_intent_candidate_refs(
         intent.resource,
     )
     refs = tuple(
-        DynamicGoalCandidateReference(ref_type=slot.ref_type, key=slot.key)
+        DynamicGoalCandidateReference(
+            ref_type=slot.ref_type,
+            key=slot.key,
+            match_semantics=slot.match_semantics,
+        )
         for slot in slots
-        if slot.status == "GROUNDED" and slot.ref_type is not None and slot.key is not None
+        if (
+            slot.status == "GROUNDED"
+            and slot.match_semantics != "RELATED_ONLY"
+            and slot.ref_type is not None
+            and slot.key is not None
+        )
     )
     unique = {(item.ref_type, item.key): item for item in refs}
     return tuple(unique[key] for key in sorted(unique))
@@ -8588,6 +8743,8 @@ def _dynamic_goal_frozen_state_grounding(
     scope: RuntimeScope | None,
     definition: ScenarioDefinitionV2,
     deterministic: _DynamicGoalGrounding,
+    *,
+    include_authored_matches: bool = True,
 ) -> _DynamicGoalGrounding:
     """Build STATE-only public evidence without reopening family or Action intent."""
 
@@ -8605,7 +8762,7 @@ def _dynamic_goal_frozen_state_grounding(
         if item.ref_type in {"NODE", "REGION", "RESOURCE", "DERIVED_STATE"}
     }
     state_catalog = _dynamic_goal_routing_state_catalog(
-        goal,
+        goal if include_authored_matches else "",
         db,
         scope,
         definition,
@@ -8663,7 +8820,7 @@ def _contract_driven_operation_context(
     action_contract: dict[str, object],
     references: tuple[dict[str, object], ...],
     public_topology: dict[str, object],
-    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    candidate_refs: tuple[DynamicGoalCandidateReference, ...],
 ) -> tuple[tuple[dict[str, object], ...], dict[str, object]]:
     """Shrink grounding context only from the selected Action's declared types."""
 
@@ -8682,7 +8839,7 @@ def _contract_driven_operation_context(
     }
     exact_actor_requested = any(
         item.provenance == "EXACT_USER_MENTION" and item.ref_type == "ACTOR"
-        for item in deterministic_refs
+        for item in candidate_refs
     )
     explicit_actor_contract = any(expected_type == "ACTOR" for expected_type in expected_types)
     if exact_actor_requested or explicit_actor_contract:
@@ -8698,7 +8855,7 @@ def _contract_driven_operation_context(
         if ref_type is not None:
             slot_type_counts[ref_type] = slot_type_counts.get(ref_type, 0) + 1
     exact_keys_by_type: dict[str, set[str]] = {}
-    for item in deterministic_refs:
+    for item in candidate_refs:
         if item.provenance == "EXACT_USER_MENTION":
             exact_keys_by_type.setdefault(item.ref_type, set()).add(item.key)
 
@@ -8726,7 +8883,7 @@ def _contract_driven_operation_context(
 
     exact_regions = {
         item.key
-        for item in deterministic_refs
+        for item in candidate_refs
         if item.provenance == "EXACT_USER_MENTION" and item.ref_type == "REGION"
     }
     if target_type not in {"NODE", "FACILITY"} or not exact_regions:
@@ -8961,35 +9118,6 @@ def _vnext_operation_slot_for_spec(
     return None
 
 
-def _vnext_exact_role_refs(
-    definition: ScenarioDefinitionV2,
-    role: Literal["actor", "source", "target", "resource", "amount"],
-    specs: tuple[dict[str, object], ...],
-    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
-) -> tuple[DynamicGoalCandidateReference, ...]:
-    """Find one unambiguous deterministic identity for a contract role."""
-
-    if role == "amount" or len(specs) != 1:
-        return ()
-    exact = tuple(
-        item
-        for item in deterministic_refs
-        if item.provenance == "EXACT_USER_MENTION" and item.ref_type != "ACTION"
-    )
-    spec = specs[0]
-    matches: list[DynamicGoalCandidateReference] = []
-    for item in exact:
-        if role in {"target", "source"}:
-            if _reference_matches_operation_type(definition, spec, item):
-                matches.append(item)
-        else:
-            expected_ref = _slot_expected_reference_type(str(spec.get("expected_type")))
-            if expected_ref == item.ref_type:
-                matches.append(item)
-    unique = {(item.ref_type, item.key): item for item in matches}
-    return tuple(unique[key] for key in sorted(unique)) if len(unique) == 1 else ()
-
-
 def _vnext_operation_slot_from_frozen_role(
     definition: ScenarioDefinitionV2,
     role: Literal["actor", "source", "target", "resource", "amount"],
@@ -9094,9 +9222,38 @@ def _vnext_operation_slot_matches_frozen(
         return False
     if expected.status == "GROUNDED":
         if expected.ref_type is not None or expected.key is not None:
-            return slot.ref_type == expected.ref_type and slot.key == expected.key
+            return _vnext_operation_reference_slots_equivalent(slot, expected)
         return slot.value == expected.value and type(slot.value) is type(expected.value)
     return True
+
+
+def _vnext_operation_reference_slots_equivalent(
+    slot: OperationContractSlot,
+    expected: OperationContractSlot,
+) -> bool:
+    """Compare frozen/reference identities using the owning contract type.
+
+    A ``NODE`` Action slot may be represented by either a NODE or REGION
+    reference when the canonical key is identical.  Other contract types do
+    not inherit that compatibility; their reference type remains part of the
+    frozen identity.
+    """
+
+    if (
+        slot.key is None
+        or expected.key is None
+        or slot.ref_type is None
+        or expected.ref_type is None
+        or slot.key != expected.key
+    ):
+        return False
+    if slot.ref_type == expected.ref_type:
+        return True
+    return (
+        slot.expected_type == "NODE"
+        and expected.expected_type == "NODE"
+        and {slot.ref_type, expected.ref_type} <= {"NODE", "REGION"}
+    )
 
 
 def _vnext_operation_frozen_conflict(
@@ -9122,28 +9279,59 @@ def _vnext_enforce_frozen_operation_intent(
     action_contract: dict[str, object],
     intent: OperationIntentDraft,
     evidence: _FrozenDynamicGoalEvidence,
+    public_catalog: dict[str, object] | None = None,
 ) -> OperationIntentDraft:
     """Apply the immutable Stage-1 role lock to an Operation response.
 
     The provider still returns a complete contract-shaped DTO for wire
     compatibility, but every frozen role is checked and then serialized from
-    the frozen value.  Deterministic exact identities are allowed to fill a
-    matching unbound slot; they outrank semantic and Operation output.
+    the frozen value. Deterministic lookup results are retrieval hints only and
+    never fill or override a semantic role.
     """
 
     frozen_intent = evidence.frozen_intent
-    if frozen_intent is None and not evidence.deterministic_exact_refs:
+    if frozen_intent is None:
         return intent
 
     actor = intent.actor
     target = intent.target
     bindings = list(intent.bindings)
     parameters = list(intent.parameters)
-    assigned_exact: set[tuple[str, str]] = set()
-    assigned_semantic: set[tuple[str, str]] = set()
-    semantic_identities = {
-        (item.ref_type, item.key) for item in evidence.semantic_refs
+    # Keep identities already owned by explicit Actor/source evidence out of
+    # the omitted-target promotion path below.  A single public identity can
+    # legitimately appear in several catalog views, but an omitted role must
+    # never be filled merely because another role happened to name the same
+    # identity.
+    assigned_semantic: set[tuple[str, str]] = {
+        (slot.ref_type, slot.key)
+        for slot in (frozen_intent.actor, frozen_intent.source)
+        if slot.status == "GROUNDED" and slot.ref_type is not None and slot.key is not None
     }
+    explicit_semantic_identities = {
+        (item.ref_type, item.key)
+        for item in (
+            *evidence.deterministic_exact_refs,
+            *evidence.semantic_refs,
+        )
+        if item.provenance == "EXACT_USER_MENTION"
+        or (
+            item.provenance != "TOPOLOGY_ENRICHED"
+            and (
+                item.match_semantics == "EXACT_OR_AUTHORED"
+                or _vnext_reference_is_named_in_goal(goal, item, public_catalog)
+            )
+        )
+    }
+    explicit_semantic_identities.update(
+        (slot.ref_type, slot.key)
+        for slot in (
+            frozen_intent.actor,
+            frozen_intent.source,
+            frozen_intent.target,
+            frozen_intent.resource,
+        )
+        if slot.status == "GROUNDED" and slot.ref_type is not None and slot.key is not None
+    )
 
     def replace(spec: dict[str, object], slot: OperationContractSlot) -> None:
         nonlocal actor, target
@@ -9185,37 +9373,6 @@ def _vnext_enforce_frozen_operation_intent(
     )
     for role, frozen in role_slots:
         specs = _vnext_role_contract_specs(action_contract, role)
-        exact_refs = _vnext_exact_role_refs(
-            definition,
-            role,
-            specs,
-            evidence.deterministic_exact_refs,
-        )
-        exact_refs = tuple(
-            item for item in exact_refs if (item.ref_type, item.key) not in assigned_exact
-        )
-        # Deterministic identity wins over semantic role output.  It is only
-        # applied when the contract offers one unambiguous compatible slot.
-        if exact_refs and len(specs) == 1:
-            spec = specs[0]
-            actual = current(spec)
-            exact = exact_refs[0]
-            expected = OperationContractSlot(
-                slot_key=cast(str, spec["slot_key"]),
-                expected_type=cast(Any, spec["expected_type"]),
-                status="GROUNDED",
-                ref_type=cast(Any, exact.ref_type),
-                key=exact.key,
-            )
-            if (
-                actual is not None
-                and actual.status == "GROUNDED"
-                and not _vnext_operation_slot_matches_frozen(actual, expected)
-            ):
-                raise _vnext_operation_frozen_conflict(role, expected, actual)
-            replace(spec, expected)
-            assigned_exact.add((exact.ref_type, exact.key))
-            continue
         if frozen is None:
             continue
         if not specs:
@@ -9252,39 +9409,21 @@ def _vnext_enforce_frozen_operation_intent(
             continue
         if (
             frozen.status == "NOT_SPECIFIED"
+            and role not in {"actor", "source"}
             and actual is not None
             and actual.status == "GROUNDED"
             and actual.ref_type is not None
             and actual.key is not None
-            and (actual.ref_type, actual.key)
-            in {
-                (item.ref_type, item.key)
-                for item in evidence.deterministic_exact_refs
-            }
-            and (actual.ref_type, actual.key) not in assigned_exact
-        ):
-            # When deterministic evidence contains multiple compatible
-            # identities (for example a source and destination Region pair),
-            # Operation may assign each exact identity to its contract role.
-            # This is still exact evidence, not a semantic/planner guess.
-            replace(spec, actual)
-            assigned_exact.add((actual.ref_type, actual.key))
-            continue
-        if (
-            frozen.status == "NOT_SPECIFIED"
-            and role != "actor"
-            and actual is not None
-            and actual.status == "GROUNDED"
-            and actual.ref_type is not None
-            and actual.key is not None
-            and not evidence.deterministic_exact_refs
-            and (actual.ref_type, actual.key) in semantic_identities
+            and (actual.ref_type, actual.key) in explicit_semantic_identities
             and (actual.ref_type, actual.key) not in assigned_semantic
         ):
-            # Compatibility providers sometimes return a complete semantic
-            # role assignment while Stage 1 only supplied contextual refs.
-            # Permit non-Actor identities only in that legacy/no-deterministic
-            # context, and never reuse one identity for two roles.
+            # A semantic candidate may fill an omitted non-actor/source slot
+            # only when the candidate itself is explicit evidence (deterministic
+            # exact, authored exact, a named public identity, or a frozen
+            # grounded role). Contextual/topology candidates are never promoted
+            # to a Goal constraint. Actor/source remain Planner-owned unless
+            # their own frozen role evidence is explicit; this prevents a target
+            # identity from accidentally becoming an omitted source.
             replace(spec, actual)
             assigned_semantic.add((actual.ref_type, actual.key))
             continue
@@ -9511,6 +9650,7 @@ def _vnext_synthetic_operation_intent(
     definition: ScenarioDefinitionV2,
     action: ActionDefinitionV2,
     evidence: _FrozenDynamicGoalEvidence,
+    public_catalog: dict[str, object] | None = None,
 ) -> OperationIntentDraft:
     """Construct a contract-shaped intent when clarification has no legal field.
 
@@ -9527,6 +9667,7 @@ def _vnext_synthetic_operation_intent(
         _dynamic_goal_action_contract(action),
         blank,
         evidence,
+        public_catalog,
     )
 
 
@@ -9786,8 +9927,9 @@ def _validate_explicit_operation_relation(
             (item.value for item in operation.binding_constraints if item.role == source_slot_key),
             None,
         )
-    elif source_channel == "parameter" and operation.parameter_constraints is not None:
-        source_key = operation.parameter_constraints.get(str(source_slot_key))
+    elif source_channel == "parameter":
+        if operation.parameter_constraints is not None:
+            source_key = operation.parameter_constraints.get(str(source_slot_key))
     else:
         raise FormalGoalError(
             "CONTRACT_SCHEMA_MISMATCH",
@@ -9814,7 +9956,7 @@ def _validate_explicit_operation_relation(
         )
     if not matches:
         raise FormalGoalError(
-            "EXPLICIT_RELATION_CONFLICT",
+            "SOURCE_TARGET_RELATION_CONFLICT",
             "The explicit source and target violate the frozen Action relation contract",
             details={
                 "relation_type_key": relation_type_key,
@@ -10211,6 +10353,7 @@ def _deterministic_dynamic_goal_grounding(
                 ref_type=identity.ref_type.value,
                 key=identity.ref_key,
                 provenance="EXACT_USER_MENTION",
+                match_semantics="EXACT_OR_AUTHORED",
             )
             for identity in sorted(
                 ambiguous_identities,
@@ -10228,6 +10371,7 @@ def _deterministic_dynamic_goal_grounding(
             ref_type=identity.ref_type.value,
             key=identity.ref_key,
             provenance="EXACT_USER_MENTION",
+            match_semantics="EXACT_OR_AUTHORED",
         )
         for identity in lookup.identities
     )
@@ -10331,7 +10475,14 @@ def _llm_all_dynamic_goal_grounding(
 
     candidate_refs = _merge_dynamic_goal_candidate_refs(
         (),
-        (*grounded.candidate_refs, *_dynamic_goal_intent_candidate_refs(grounded.intent)),
+        (
+            *(
+                item
+                for item in grounded.candidate_refs
+                if item.match_semantics != "RELATED_ONLY"
+            ),
+            *_dynamic_goal_intent_candidate_refs(grounded.intent),
+        ),
     )
     candidate_refs = _validate_dynamic_goal_candidate_refs(
         definition,
@@ -10364,46 +10515,699 @@ def _vnext_explicit_role_evidence(
     }
 
 
-def _vnext_surface_is_explicit(surface: str | None, goal: str | None = None) -> bool:
-    """Return whether a provider surface is present in the raw Goal.
+_EXPLICIT_ROLE_PROVENANCE = frozenset(
+    {
+        "EXPLICIT_USER_MENTION",
+        "DETERMINISTIC_EXACT",
+        "SEMANTIC_ROLE_EVIDENCE",
+    }
+)
+_NON_EXPLICIT_ROLE_PROVENANCE = frozenset({"INFERRED", "NOT_SPECIFIED"})
 
-    ``surface`` is model output too, so a non-empty value is not sufficient
-    provenance.  When the raw Goal is supplied, compare only normalized text;
-    this deliberately excludes fuzzy or nearest-canonical matching.
-    """
 
-    if not isinstance(surface, str) or not surface.strip():
+def _vnext_public_reference_terms(
+    public_catalog: dict[str, object] | None,
+    *,
+    ref_type: str | None,
+    key: str | None,
+) -> tuple[str, ...] | None:
+    """Return public names/aliases for one candidate, if the catalog has it."""
+
+    if public_catalog is None or not isinstance(ref_type, str) or not isinstance(key, str):
+        return None
+    references = public_catalog.get("references")
+    if not isinstance(references, (list, tuple)):
+        return None
+    expected_type = "NODE" if ref_type == "FACILITY" else ref_type
+    reference = next(
+        (
+            item
+            for item in references
+            if isinstance(item, dict)
+            and item.get("ref_type") == expected_type
+            and item.get("key") == key
+        ),
+        None,
+    )
+    if reference is None:
+        return None
+    terms: list[str] = [key]
+    name = reference.get("name")
+    if isinstance(name, str) and name.strip():
+        terms.append(name)
+    aliases = reference.get("public_references")
+    if isinstance(aliases, (list, tuple)):
+        terms.extend(item for item in aliases if isinstance(item, str) and item.strip())
+    return tuple(dict.fromkeys(terms))
+
+
+def _vnext_reference_is_named_in_goal(
+    goal: str,
+    reference: DynamicGoalCandidateReference,
+    public_catalog: dict[str, object] | None,
+) -> bool:
+    terms = _vnext_public_reference_terms(
+        public_catalog,
+        ref_type=reference.ref_type,
+        key=reference.key,
+    )
+    if not terms:
         return False
-    if goal is None:
-        return True
-    normalized_surface = _normalize(surface)
     normalized_goal = _normalize(goal)
-    return bool(normalized_surface) and _contains_public_term(
-        normalized_goal,
-        normalized_surface,
+    return any(_contains_public_term(normalized_goal, _normalize(term)) for term in terms)
+
+
+def _vnext_surface_is_in_goal(goal: str, surface: object) -> bool:
+    return isinstance(surface, str) and bool(surface.strip()) and _contains_public_term(
+        _normalize(goal),
+        _normalize(surface),
     )
 
 
-def _vnext_scalar_surface_is_explicit(
+def _vnext_surface_matches_public_identity(
+    surface: object,
+    *,
+    ref_type: str | None,
+    key: str | None,
+    public_catalog: dict[str, object] | None,
+) -> bool | None:
+    """Prove or disprove that a player surface names the returned identity.
+
+    ``None`` means no catalog proof is available (the compatibility path keeps
+    accepting old providers that omitted role surfaces).
+    """
+
+    if not isinstance(surface, str) or not surface.strip():
+        return None
+    terms = _vnext_public_reference_terms(
+        public_catalog,
+        ref_type=ref_type,
+        key=key,
+    )
+    if terms is None:
+        return None
+    normalized_surface = _normalize(surface)
+    return any(
+        normalized_surface == _normalize(term)
+        for term in terms
+    )
+
+
+def _vnext_role_has_explicit_evidence(
+    goal: str,
+    slot: DynamicGoalMentionSlot | DynamicGoalScalarMentionSlot,
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    public_catalog: dict[str, object] | None = None,
+) -> bool:
+    """Determine whether a role was actually expressed by the player.
+
+    In the production path (where a public catalog is present), provider
+    provenance is untrusted input.  Only backend-provable deterministic
+    identity, a canonical public term actually present in the Goal, or the
+    raw Goal surface itself can establish explicit evidence.  The
+    ``public_catalog is None`` branch is retained solely for old compatibility
+    providers and unit fixtures.
+    """
+
+    provenance = getattr(slot, "provenance", None)
+    strict_catalog_path = public_catalog is not None
+    if not strict_catalog_path:
+        if provenance in _EXPLICIT_ROLE_PROVENANCE:
+            return True
+        if provenance in _NON_EXPLICIT_ROLE_PROVENANCE:
+            return False
+    if _vnext_surface_is_in_goal(goal, getattr(slot, "surface", None)):
+        return True
+    key = getattr(slot, "key", None)
+    ref_type = getattr(slot, "ref_type", None)
+    if isinstance(key, str) and isinstance(ref_type, str):
+        terms = _vnext_public_reference_terms(
+            public_catalog,
+            ref_type=ref_type,
+            key=key,
+        )
+        if terms:
+            normalized_goal = _normalize(goal)
+            if any(
+                _contains_public_term(normalized_goal, _normalize(term)) for term in terms
+            ):
+                return True
+        if any(
+            item.ref_type == ref_type
+            and item.key == key
+            and item.provenance == "EXACT_USER_MENTION"
+            for item in deterministic_refs
+        ):
+            return True
+    # Keep old unit/test providers usable when no public catalog is available.
+    return slot.status == "GROUNDED" and not strict_catalog_path
+
+
+def _vnext_semantic_grounding_recheck_feedback(
+    goal: str,
+    intent: DynamicGoalIntentDraft | None,
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    public_catalog: dict[str, object] | None,
+) -> tuple[dict[str, object], ...]:
+    """Build one bounded semantic recheck for an explicit entity role.
+
+    Stage 1 remains the semantic owner. This feedback only asks it to revisit
+    a role whose typed claim is internally inconsistent (an invalid exact
+    claim) or whose explicit surface was left unresolved. It deliberately
+    carries no replacement identity, so a related public candidate cannot be
+    promoted by the backend.
+    """
+
+    if intent is None:
+        return ()
+    slots: tuple[tuple[str, DynamicGoalMentionSlot], ...] = (
+        ("actor", intent.actor),
+        ("source", intent.source),
+        ("target", intent.target),
+        ("resource", intent.resource),
+    )
+    invalid_exact: list[dict[str, object]] = []
+    unresolved_surface: list[dict[str, object]] = []
+    disputed_roles: set[str] = set()
+    for role, slot in slots:
+        if not _vnext_surface_is_in_goal(goal, slot.surface):
+            continue
+        if (
+            slot.status == "GROUNDED"
+            and slot.match_semantics == "EXACT_OR_AUTHORED"
+            and _vnext_surface_matches_public_identity(
+                slot.surface,
+                ref_type=slot.ref_type,
+                key=slot.key,
+                public_catalog=public_catalog,
+            )
+            is False
+        ):
+            invalid_exact.append(
+                {
+                    "role": role,
+                    "surface": slot.surface,
+                    "candidate_ref_type": slot.ref_type,
+                    "candidate_key": slot.key,
+                    "claimed_match_semantics": slot.match_semantics,
+                }
+            )
+            disputed_roles.add(role)
+        elif slot.status == "UNRESOLVED":
+            unresolved_surface.append(
+                {
+                    "role": role,
+                    "surface": slot.surface,
+                    "ref_type": slot.ref_type,
+                }
+            )
+            disputed_roles.add(role)
+
+    if not disputed_roles:
+        return ()
+
+    preserve: list[dict[str, object]] = []
+    for role, slot in slots:
+        if role in disputed_roles:
+            if isinstance(slot.surface, str) and slot.surface.strip():
+                preserve.append(
+                    {
+                        "path": f"intent.{role}.surface",
+                        "surface": slot.surface[:400],
+                    }
+                )
+            continue
+        if slot.status != "GROUNDED" or slot.ref_type is None or slot.key is None:
+            continue
+        preserved: dict[str, object] = {
+            "path": f"intent.{role}",
+            "ref_type": slot.ref_type,
+            "key": slot.key,
+        }
+        if slot.match_semantics is not None:
+            preserved["match_semantics"] = slot.match_semantics
+        if isinstance(slot.surface, str) and slot.surface.strip():
+            preserved["surface"] = slot.surface[:400]
+        preserve.append(preserved)
+    disputed_identities = {
+        (item.get("candidate_ref_type"), item.get("candidate_key"))
+        for item in invalid_exact
+    }
+    for index, reference in enumerate(deterministic_refs):
+        if reference.ref_type == "ACTION" or (
+            reference.ref_type,
+            reference.key,
+        ) in disputed_identities:
+            continue
+        preserve.append(
+            {
+                "path": f"deterministic_candidate_refs[{index}]",
+                "ref_type": reference.ref_type,
+                "key": reference.key,
+                "match_semantics": reference.match_semantics,
+            }
+        )
+
+    code = (
+        "ROLE_MATCH_SEMANTICS_RECHECK"
+        if invalid_exact
+        else "ROLE_SEMANTIC_GROUNDING_RECHECK"
+    )
+    return (
+        {
+            "code": code,
+            "expected": (
+                "Re-evaluate the named explicit role against the complete public catalog "
+                "and raw player Goal; do not force the disputed canonical key."
+            ),
+            "disputed_roles": [*invalid_exact, *unresolved_surface],
+            "preserve": preserve,
+            "fix_only": [f"intent.{role}" for role in sorted(disputed_roles)],
+        },
+    )
+
+
+def _vnext_trusted_role_provenance(
+    goal: str,
+    slot: DynamicGoalMentionSlot,
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    public_catalog: dict[str, object] | None,
+) -> str | None:
+    """Assign backend-owned provenance after role evidence has been checked."""
+
+    if slot.status == "NOT_SPECIFIED":
+        return "NOT_SPECIFIED"
+    explicit_surface = _vnext_surface_is_in_goal(goal, slot.surface)
+    deterministic_exact = any(
+        item.ref_type == slot.ref_type
+        and item.key == slot.key
+        and item.provenance == "EXACT_USER_MENTION"
+        for item in deterministic_refs
+    )
+    named_public_identity = bool(
+        isinstance(slot.ref_type, str)
+        and isinstance(slot.key, str)
+        and _vnext_reference_is_named_in_goal(
+            goal,
+            DynamicGoalCandidateReference(ref_type=slot.ref_type, key=slot.key),
+            public_catalog,
+        )
+    )
+    if deterministic_exact or named_public_identity:
+        return "DETERMINISTIC_EXACT"
+    if slot.match_semantics == "SEMANTIC_EQUIVALENT" and explicit_surface:
+        return "SEMANTIC_ROLE_EVIDENCE"
+    if explicit_surface:
+        return "EXPLICIT_USER_MENTION"
+    if public_catalog is None and slot.provenance in {
+        "EXPLICIT_USER_MENTION",
+        "DETERMINISTIC_EXACT",
+        "SEMANTIC_ROLE_EVIDENCE",
+        "INFERRED",
+        "NOT_SPECIFIED",
+    }:
+        return slot.provenance
+    if slot.status == "UNRESOLVED":
+        return "EXPLICIT_USER_MENTION"
+    return None
+
+
+def _vnext_normalize_role_slot(
+    goal: str,
+    slot: DynamicGoalMentionSlot,
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    public_catalog: dict[str, object] | None,
+    *,
+    check_surface_identity: bool = True,
+) -> DynamicGoalMentionSlot:
+    strict_catalog_path = public_catalog is not None
+    explicit = _vnext_role_has_explicit_evidence(
+        goal,
+        slot,
+        deterministic_refs,
+        public_catalog,
+    )
+    semantics = slot.match_semantics
+    # Action is a semantic operation hint, not a player-frozen HOW choice.
+    # Keep a valid public Action hint even when the model did not copy its
+    # literal name into ``surface``; all other roles require trusted evidence.
+    action_hint = bool(
+        slot.ref_type == "ACTION"
+        and slot.status == "GROUNDED"
+        and isinstance(slot.key, str)
+        and semantics != "RELATED_ONLY"
+        and _vnext_public_reference_terms(
+            public_catalog,
+            ref_type="ACTION",
+            key=slot.key,
+        )
+    )
+    if slot.status == "UNRESOLVED" and not explicit:
+        return DynamicGoalMentionSlot(status="NOT_SPECIFIED", provenance="NOT_SPECIFIED")
+    if slot.status == "GROUNDED":
+        if semantics == "RELATED_ONLY":
+            return (
+                slot.model_copy(update={"status": "UNRESOLVED", "key": None})
+                if explicit
+                else DynamicGoalMentionSlot(status="NOT_SPECIFIED", provenance="NOT_SPECIFIED")
+            )
+        if semantics == "SEMANTIC_EQUIVALENT" and not explicit and not action_hint:
+            return DynamicGoalMentionSlot(status="NOT_SPECIFIED", provenance="NOT_SPECIFIED")
+        if strict_catalog_path and not explicit and not action_hint:
+            return DynamicGoalMentionSlot(status="NOT_SPECIFIED", provenance="NOT_SPECIFIED")
+        if (
+            not action_hint
+            and not strict_catalog_path
+            and slot.provenance in _NON_EXPLICIT_ROLE_PROVENANCE
+        ):
+            return DynamicGoalMentionSlot(status="NOT_SPECIFIED", provenance="NOT_SPECIFIED")
+        if (
+            check_surface_identity
+            # An explicit EXACT_OR_AUTHORED claim is safe to compare against
+            # the public catalog.  Older VNext providers omitted the typed
+            # match marker while still returning a semantically grounded
+            # role (for example, "north depot" -> a public region).  Treating
+            # an unmarked surface as an exact catalog name would demote those
+            # valid semantic bindings and make downstream freeze recovery
+            # spuriously re-run.  The typed RELATED_ONLY/SEMANTIC_EQUIVALENT
+            # paths are handled above; an unmarked role remains on the
+            # compatibility semantic-grounding path.
+            and semantics == "EXACT_OR_AUTHORED"
+            and _vnext_surface_is_in_goal(goal, slot.surface)
+        ):
+            deterministic_exact_identity = any(
+                item.ref_type == slot.ref_type
+                and item.key == slot.key
+                and item.provenance == "EXACT_USER_MENTION"
+                for item in deterministic_refs
+            )
+            identity_match = (
+                True
+                if deterministic_exact_identity
+                else _vnext_surface_matches_public_identity(
+                    slot.surface,
+                    ref_type=slot.ref_type,
+                    key=slot.key,
+                    public_catalog=public_catalog,
+                )
+            )
+            if identity_match is False:
+                # The player named a real surface, but it does not name the
+                # returned canonical object.  Keep the explicit mention for a
+                # clarification instead of accepting a nearest substitute.
+                return slot.model_copy(update={"status": "UNRESOLVED", "key": None})
+    trusted_provenance = _vnext_trusted_role_provenance(
+        goal,
+        slot,
+        deterministic_refs,
+        public_catalog,
+    )
+    if trusted_provenance is not None:
+        return slot.model_copy(update={"provenance": trusted_provenance})
+    return slot.model_copy(update={"provenance": None})
+
+
+def _vnext_unresolved_roles_without_evidence(
+    goal: str,
+    intent: DynamicGoalIntentDraft | None,
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    public_catalog: dict[str, object] | None,
+) -> tuple[str, ...]:
+    """Find explicit ``UNRESOLVED`` slots that still lack an identity.
+
+    ``UNRESOLVED`` is a player-facing semantic distinction only when the
+    provider carries an explicit surface/provenance signal.  A bare unresolved
+    slot has no evidence that the player supplied that role and is normalized
+    to ``NOT_SPECIFIED`` so the generic Goal-required gate can decide whether
+    clarification is needed.  Explicit unresolved evidence still receives one
+    bounded provider recovery before the normal provider-failure fallback.
+    """
+
+    if intent is None:
+        return ()
+    slots: tuple[
+        tuple[str, DynamicGoalMentionSlot | DynamicGoalScalarMentionSlot], ...
+    ] = (
+        ("action", intent.action),
+        ("actor", intent.actor),
+        ("source", intent.source),
+        ("target", intent.target),
+        ("resource", intent.resource),
+        ("amount", intent.amount),
+    )
+    return tuple(
+        role
+        for role, slot in slots
+        if (
+            (
+                slot.status == "UNRESOLVED"
+                or (
+                    slot.status == "GROUNDED"
+                    and getattr(slot, "match_semantics", None) == "SEMANTIC_EQUIVALENT"
+                )
+            )
+            and not _vnext_role_has_explicit_evidence(
+                goal,
+                slot,
+                deterministic_refs,
+                public_catalog,
+            )
+            and (
+                _vnext_surface_is_in_goal(goal, getattr(slot, "surface", None))
+                or getattr(slot, "provenance", None) in _EXPLICIT_ROLE_PROVENANCE
+            )
+            and role != "action"
+        )
+    )
+
+
+def _vnext_normalize_scalar_slot(
     goal: str,
     slot: DynamicGoalScalarMentionSlot,
-) -> bool:
-    """Accept a scalar without a copied surface only when its literal is in the Goal."""
+    *,
+    strict_catalog_path: bool = False,
+) -> DynamicGoalScalarMentionSlot:
+    provenance = slot.provenance
+    explicit = (
+        (not strict_catalog_path and provenance in _EXPLICIT_ROLE_PROVENANCE)
+        or _vnext_surface_is_in_goal(goal, slot.surface)
+    )
+    if not explicit and slot.status == "GROUNDED":
+        explicit = _vnext_scalar_value_is_explicit(goal, slot.value)
+    if not strict_catalog_path and provenance in _NON_EXPLICIT_ROLE_PROVENANCE:
+        explicit = False
+    if slot.status == "UNRESOLVED" and not explicit:
+        return DynamicGoalScalarMentionSlot(status="NOT_SPECIFIED", provenance="NOT_SPECIFIED")
+    if slot.status == "GROUNDED" and not explicit:
+        return DynamicGoalScalarMentionSlot(status="NOT_SPECIFIED", provenance="NOT_SPECIFIED")
+    trusted = (
+        "EXPLICIT_USER_MENTION"
+        if _vnext_surface_is_in_goal(goal, slot.surface)
+        or _vnext_scalar_value_is_explicit(goal, slot.value)
+        else slot.provenance
+        if not strict_catalog_path and slot.provenance in _EXPLICIT_ROLE_PROVENANCE
+        else None
+    )
+    return slot.model_copy(update={"provenance": trusted})
 
-    if _vnext_surface_is_explicit(slot.surface):
-        return True
-    if slot.status != "GROUNDED" or slot.value is None:
-        return False
-    # Amounts are commonly returned with ``surface=null`` by otherwise valid
-    # providers.  A native scalar is still explicit when its literal occurs as
-    # a token in the raw Goal; this deliberately does not infer arbitrary
-    # reference roles from a semantic suggestion.
-    literal = str(slot.value)
-    if isinstance(slot.value, bool):
-        return _contains_public_term(_normalize(goal), _normalize(literal))
-    if isinstance(slot.value, int):
-        return re.search(rf"(?<![0-9]){re.escape(literal)}(?![0-9])", goal) is not None
-    return _contains_public_term(_normalize(goal), _normalize(literal))
+
+def _vnext_rejected_role_identities(
+    original: DynamicGoalIntentDraft | None,
+    normalized: DynamicGoalIntentDraft | None,
+) -> frozenset[tuple[str, str]]:
+    """Return identities invalidated by role-evidence normalization."""
+
+    if original is None or normalized is None:
+        return frozenset()
+    pairs: list[tuple[DynamicGoalMentionSlot, DynamicGoalMentionSlot]] = [
+        (original.action, normalized.action),
+        (original.actor, normalized.actor),
+        (original.source, normalized.source),
+        (original.target, normalized.target),
+        (original.resource, normalized.resource),
+    ]
+    rejected = {
+        (before.ref_type, before.key)
+        for before, after in pairs
+        if before.status == "GROUNDED"
+        and before.ref_type is not None
+        and before.key is not None
+        and (
+            after.status != "GROUNDED"
+            or after.ref_type != before.ref_type
+            or after.key != before.key
+        )
+    }
+    return frozenset(rejected)
+
+
+def _vnext_operation_terminal_facts(
+    definition: ScenarioDefinitionV2,
+    intent: DynamicGoalIntentDraft | None,
+) -> tuple[tuple[str, str, StrictScalar | None], ...]:
+    """Return authored terminal Fact effects for an explicit operation.
+
+    This is deliberately a metadata check, not an inference engine.  It lets
+    frozen STATE interpretation accept one direct operation-equivalent Fact
+    while rejecting added consequences or an unrelated sibling state.
+    """
+
+    if intent is None or intent.intent_kind != "OPERATION":
+        return ()
+    if intent.action.status != "GROUNDED" or intent.action.key is None:
+        return ()
+    action = next((item for item in definition.actions if item.key == intent.action.key), None)
+    if action is None:
+        return ()
+    target_key = intent.target.key if intent.target.status == "GROUNDED" else None
+    return action_goal_terminal_effects(definition, action, target_key)
+
+
+def _vnext_semantic_family_evidence(
+    evidence: _FrozenDynamicGoalEvidence,
+    definition: ScenarioDefinitionV2,
+) -> DynamicGoalSemanticFamilyEvidence:
+    """Build advisory operation/state-equivalence evidence for Family routing."""
+
+    intent = evidence.frozen_intent
+    if (
+        intent is None
+        or intent.intent_kind != "OPERATION"
+        or intent.action.status != "GROUNDED"
+        or intent.action.key is None
+        or intent.action.match_semantics == "RELATED_ONLY"
+    ):
+        return DynamicGoalSemanticFamilyEvidence(
+            operation_expressed=False,
+            state_equivalent_available=None,
+        )
+    action = next((item for item in definition.actions if item.key == intent.action.key), None)
+    if action is None:
+        return DynamicGoalSemanticFamilyEvidence(
+            operation_expressed=False,
+            state_equivalent_available=None,
+        )
+    target_key = intent.target.key if intent.target.status == "GROUNDED" else None
+    terminal_effects = action_goal_terminal_effects(definition, action, target_key)
+    return DynamicGoalSemanticFamilyEvidence(
+        operation_expressed=True,
+        state_equivalent_available=bool(terminal_effects),
+    )
+
+
+def _vnext_semantic_action_evidence(
+    goal: str,
+    evidence: _FrozenDynamicGoalEvidence,
+    public_action_keys: set[str],
+    public_catalog: dict[str, object] | None = None,
+) -> DynamicGoalSemanticActionEvidence | None:
+    """Project one public Stage-1 Action hint for the Action Router.
+
+    The hint is intentionally narrower than the frozen role evidence.  A
+    provider's compatibility Action guess with no player surface or exact
+    public mention is not treated as semantic evidence, while a typed
+    non-contextual Action surface is retained as advisory input.
+    """
+
+    intent = evidence.frozen_intent
+    if intent is None or intent.intent_kind != "OPERATION":
+        return None
+    action = intent.action
+    if (
+        action.status != "GROUNDED"
+        or action.ref_type != "ACTION"
+        or action.key is None
+        or action.key not in public_action_keys
+        or action.match_semantics == "RELATED_ONLY"
+    ):
+        return None
+    surface_in_goal = _vnext_surface_is_in_goal(goal, action.surface)
+    exact_mention = any(
+        item.ref_type == "ACTION"
+        and item.key == action.key
+        and item.provenance == "EXACT_USER_MENTION"
+        for item in evidence.deterministic_exact_refs
+    )
+    named_public_action = _vnext_reference_is_named_in_goal(
+        goal,
+        DynamicGoalCandidateReference(ref_type="ACTION", key=action.key),
+        public_catalog,
+    )
+    # A semantic-equivalent match must carry a real player surface.  For an
+    # unmarked compatibility response, require an independently observable
+    # player mention so an arbitrary Stage-1 Action guess remains advisory-
+    # absent rather than becoming accidental authority.
+    if action.match_semantics == "SEMANTIC_EQUIVALENT" and not surface_in_goal:
+        return None
+    if action.match_semantics is None and not (
+        surface_in_goal or exact_mention or named_public_action
+    ):
+        return None
+    return DynamicGoalSemanticActionEvidence(
+        action_key=action.key,
+        surface=action.surface,
+        match_semantics=action.match_semantics,
+    )
+
+
+def _validate_vnext_state_minimality(
+    definition: ScenarioDefinitionV2,
+    evidence: _FrozenDynamicGoalEvidence,
+    candidates: AdHocGoalCandidateSetV2,
+) -> None:
+    """Enforce minimal terminal-WHAT semantics for an operation-as-STATE.
+
+    Ordinary STATE Goals may contain multiple explicitly requested
+    requirements.  The stricter rule applies only when Stage 1 supplied one
+    explicit operation intent and the family router selected STATE: at most
+    one requirement may represent that operation, and it must match one of the
+    authored terminal Fact effects.
+    """
+
+    intent = evidence.frozen_intent
+    if intent is None or intent.intent_kind != "OPERATION":
+        return
+    if intent.action.status != "GROUNDED" or intent.action.key is None:
+        return
+    effects = _vnext_operation_terminal_facts(definition, intent)
+    if len(candidates.requirements) != 1:
+        raise FormalGoalError(
+            "STATE_REQUIREMENT_NOT_MINIMAL",
+            "An operation-equivalent STATE Goal must contain one terminal requirement",
+            details={"requirement_count": len(candidates.requirements)},
+        )
+    requirement = candidates.requirements[0]
+    if not isinstance(requirement, AdHocFactRequirementCandidateV1):
+        raise FormalGoalError(
+            "STATE_OPERATION_EQUIVALENCE_CONFLICT",
+            "An operation-equivalent STATE Goal must use a terminal Fact",
+            details={"kind": getattr(requirement, "kind", None)},
+        )
+    matching = [
+        (node_key, fact_key, value)
+        for node_key, fact_key, value in effects
+        if requirement.node_key == node_key and requirement.fact_key == fact_key
+    ]
+    if not matching:
+        raise FormalGoalError(
+            "STATE_OPERATION_EQUIVALENCE_CONFLICT",
+            "The STATE requirement is not a terminal effect of the explicit operation",
+            details={
+                "node_key": requirement.node_key,
+                "fact_key": requirement.fact_key,
+            },
+        )
+    declared_values = tuple(requirement.accepted_values)
+    concrete_values = tuple(value for _, _, value in matching if value is not None)
+    if concrete_values and set(declared_values) != set(concrete_values):
+        raise FormalGoalError(
+            "STATE_OPERATION_EQUIVALENCE_CONFLICT",
+            "The STATE value does not match the explicit operation terminal effect",
+            details={
+                "node_key": requirement.node_key,
+                "fact_key": requirement.fact_key,
+            },
+        )
 
 
 def _vnext_scalar_value_is_explicit(goal: str, value: object | None) -> bool:
@@ -10420,57 +11224,124 @@ def _vnext_normalize_frozen_intent(
     goal: str,
     intent: DynamicGoalIntentDraft | None,
     deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+    public_catalog: dict[str, object] | None = None,
 ) -> DynamicGoalIntentDraft | None:
-    """Normalize Stage-1 roles to explicit player provenance.
+    """Normalize semantic role provenance before the immutable evidence freeze.
 
-    A semantic provider may identify a useful Actor/Source/etc. for planning,
-    but a role becomes frozen resolver evidence only when the raw Goal (or a
-    deterministic exact public identity) proves that the player expressed it.
-    This keeps speculative references available through the semantic-reference
-    channel without promoting them to Formal Goal constraints.
+    Semantic Grounding owns identity and role binding. Public-catalog validation
+    rejects invented keys before this freeze; deterministic lookup and optional
+    copied surfaces have no authority to add, remove, or replace a role.  The
+    only normalization is semantic evidence hygiene: an omitted role cannot be
+    represented as ``UNRESOLVED``/``GROUNDED`` merely because Runtime needs a
+    value, while a real explicit but unresolved mention remains unresolved.
     """
 
     if intent is None:
         return None
-    exact = {
-        (item.ref_type, item.key)
-        for item in deterministic_refs
-        if item.provenance == "EXACT_USER_MENTION"
+    normalized_actor = _vnext_normalize_role_slot(
+        goal,
+        intent.actor,
+        deterministic_refs,
+        public_catalog,
+    )
+    normalized_source = _vnext_normalize_role_slot(
+        goal,
+        intent.source,
+        deterministic_refs,
+        public_catalog,
+    )
+    normalized_target = _vnext_normalize_role_slot(
+        goal,
+        intent.target,
+        deterministic_refs,
+        public_catalog,
+    )
+    normalized_resource = _vnext_normalize_role_slot(
+        goal,
+        intent.resource,
+        deterministic_refs,
+        public_catalog,
+    )
+    # A provider sometimes copies a substring of its own Action description
+    # into a target role (for example, treating the words that describe
+    # generation as the facility being generated).  A role surface that is
+    # only contained in the Action surface is not independent player evidence
+    # unless deterministic lookup also found that exact public identity.  Keep
+    # this generic: role ownership is established from typed surfaces and
+    # deterministic refs, never from a Scenario/action-name special case.
+    normalized_roles = {
+        "actor": normalized_actor,
+        "source": normalized_source,
+        "target": normalized_target,
+        "resource": normalized_resource,
     }
-
-    def normalize_reference(slot: DynamicGoalMentionSlot) -> DynamicGoalMentionSlot:
-        if slot.status == "GROUNDED":
-            explicit = _vnext_surface_is_explicit(slot.surface, goal) or (
-                slot.ref_type is not None
-                and slot.key is not None
-                and (slot.ref_type, slot.key) in exact
+    for role, normalized in tuple(normalized_roles.items()):
+        if _vnext_role_surface_is_action_only(
+            goal,
+            intent.action,
+            normalized,
+            deterministic_refs,
+        ):
+            normalized_roles[role] = DynamicGoalMentionSlot(
+                status="NOT_SPECIFIED",
+                provenance="NOT_SPECIFIED",
             )
-            if explicit:
-                return slot
-            return DynamicGoalMentionSlot(status="NOT_SPECIFIED")
-        if slot.status == "UNRESOLVED" and _vnext_surface_is_explicit(slot.surface, goal):
-            return slot
-        if slot.status == "NOT_SPECIFIED":
-            return slot
-        return DynamicGoalMentionSlot(status="NOT_SPECIFIED")
+    return intent.model_copy(
+        update={
+            "action": _vnext_normalize_role_slot(
+                goal,
+                intent.action,
+                deterministic_refs,
+                public_catalog,
+                check_surface_identity=False,
+            ),
+            **normalized_roles,
+            "amount": _vnext_normalize_scalar_slot(
+                goal,
+                intent.amount,
+                strict_catalog_path=public_catalog is not None,
+            ),
+        }
+    )
 
-    def normalize_scalar(slot: DynamicGoalScalarMentionSlot) -> DynamicGoalScalarMentionSlot:
-        if slot.status == "GROUNDED" and _vnext_scalar_surface_is_explicit(goal, slot):
-            return slot
-        if slot.status == "UNRESOLVED" and _vnext_surface_is_explicit(slot.surface):
-            return slot
-        if slot.status == "NOT_SPECIFIED":
-            return slot
-        return DynamicGoalScalarMentionSlot(status="NOT_SPECIFIED")
 
-    return DynamicGoalIntentDraft(
-        intent_kind=intent.intent_kind,
-        action=intent.action,
-        actor=normalize_reference(intent.actor),
-        source=normalize_reference(intent.source),
-        target=normalize_reference(intent.target),
-        resource=normalize_reference(intent.resource),
-        amount=normalize_scalar(intent.amount),
+def _vnext_role_surface_is_action_only(
+    goal: str,
+    action: DynamicGoalMentionSlot,
+    role: DynamicGoalMentionSlot,
+    deterministic_refs: tuple[DynamicGoalCandidateReference, ...],
+) -> bool:
+    """Return whether a role surface is merely copied from the Action phrase.
+
+    Stage-1 semantic evidence is authoritative for explicit role binding, but
+    a model can still label an Action's descriptive substring as another role.
+    When no deterministic exact public reference supports that role, keeping
+    it would turn Action wording into a player constraint.  The conservative
+    result is ``NOT_SPECIFIED`` so a data-driven ``goal_required`` gate can ask
+    for the missing slot.
+    """
+
+    if (
+        action.status != "GROUNDED"
+        or role.status != "GROUNDED"
+        or action.match_semantics == "RELATED_ONLY"
+        or not _vnext_surface_is_in_goal(goal, action.surface)
+        or not _vnext_surface_is_in_goal(goal, role.surface)
+        or not isinstance(action.surface, str)
+        or not isinstance(role.surface, str)
+    ):
+        return False
+    action_surface = _normalize(action.surface)
+    role_surface = _normalize(role.surface)
+    if not action_surface or not role_surface or role_surface not in action_surface:
+        return False
+    if role.ref_type is None or role.key is None:
+        return False
+    return not any(
+        item.ref_type == role.ref_type
+        and item.key == role.key
+        and item.provenance == "EXACT_USER_MENTION"
+        for item in deterministic_refs
     )
 
 
@@ -10481,12 +11352,18 @@ def _vnext_role_candidate_refs(
         return ()
     refs = []
     for slot in (intent.actor, intent.source, intent.target, intent.resource):
-        if slot.status == "GROUNDED" and slot.ref_type is not None and slot.key is not None:
+        if (
+            slot.status == "GROUNDED"
+            and slot.match_semantics != "RELATED_ONLY"
+            and slot.ref_type is not None
+            and slot.key is not None
+        ):
             refs.append(
                 DynamicGoalCandidateReference(
                     ref_type=slot.ref_type,
                     key=slot.key,
                     provenance="LLM_SUPPLEMENTED",
+                    match_semantics=slot.match_semantics,
                 )
             )
     unique = {(item.ref_type, item.key): item for item in refs}
@@ -10509,11 +11386,9 @@ def _vnext_frozen_dynamic_goal_evidence(
     )
     grounder = getattr(provider, "ground_dynamic_goal_entities", None)
     if not callable(grounder):
-        merged = _merge_dynamic_goal_candidate_refs(exact_refs, ambiguous_refs)
         return _FrozenDynamicGoalEvidence(
             deterministic_exact_refs=exact_refs,
             deterministic_ambiguous_refs=ambiguous_refs,
-            merged_refs=merged,
         )
 
     public_catalog = _dynamic_goal_entity_catalog(db, scope, definition)
@@ -10537,26 +11412,57 @@ def _vnext_frozen_dynamic_goal_evidence(
             role_evidence: dict[str, object] | None = None
             frozen_intent: DynamicGoalIntentDraft | None = None
             if grounded.status == "RESOLVED":
+                stage1_intent = grounded.intent
+                if recovery_attempt == 0:
+                    semantic_recheck = _vnext_semantic_grounding_recheck_feedback(
+                        goal,
+                        stage1_intent,
+                        exact_refs,
+                        public_catalog,
+                    )
+                    if semantic_recheck:
+                        recovery_feedback = semantic_recheck
+                        continue
+                invalid_unresolved_roles = _vnext_unresolved_roles_without_evidence(
+                    goal,
+                    stage1_intent,
+                    exact_refs,
+                    public_catalog,
+                )
+                if invalid_unresolved_roles:
+                    raise FormalGoalError(
+                        "ROLE_EVIDENCE_INVALID",
+                        "An UNRESOLVED semantic role has no explicit player evidence",
+                        details={"roles": list(invalid_unresolved_roles)},
+                    )
                 frozen_intent = _vnext_normalize_frozen_intent(
                     goal,
-                    grounded.intent,
+                    stage1_intent,
                     exact_refs,
+                    public_catalog,
                 )
-                deterministic_identities = {
-                    (item.ref_type, item.key) for item in (*exact_refs, *ambiguous_refs)
-                }
+                rejected_role_identities = _vnext_rejected_role_identities(
+                    stage1_intent,
+                    frozen_intent,
+                )
                 raw_semantic_refs = (
-                    *(item for item in grounded.candidate_refs if item.ref_type != "ACTION"),
+                    *(
+                        item
+                        for item in grounded.candidate_refs
+                        if item.ref_type != "ACTION"
+                        and item.match_semantics != "RELATED_ONLY"
+                        and (item.ref_type, item.key) not in rejected_role_identities
+                    ),
                     *_vnext_role_candidate_refs(frozen_intent),
                 )
                 semantic_refs = tuple(
                     DynamicGoalCandidateReference(
                         ref_type=item.ref_type,
                         key=item.key,
-                        provenance="LLM_SUPPLEMENTED",
+                        provenance=item.provenance,
+                        match_semantics=item.match_semantics,
                     )
                     for item in raw_semantic_refs
-                    if (item.ref_type, item.key) not in deterministic_identities
                 )
                 semantic_refs = _merge_dynamic_goal_candidate_refs((), semantic_refs)
                 if semantic_refs:
@@ -10600,11 +11506,8 @@ def _vnext_frozen_dynamic_goal_evidence(
                 continue
             raise last_error from exc
 
-        merged = _merge_dynamic_goal_candidate_refs(
-            _merge_dynamic_goal_candidate_refs(exact_refs, ambiguous_refs),
-            semantic_refs,
-        )
-        return _FrozenDynamicGoalEvidence(
+        merged = semantic_refs
+        frozen = _FrozenDynamicGoalEvidence(
             deterministic_exact_refs=exact_refs,
             deterministic_ambiguous_refs=ambiguous_refs,
             semantic_refs=semantic_refs,
@@ -10612,6 +11515,15 @@ def _vnext_frozen_dynamic_goal_evidence(
             frozen_intent=frozen_intent,
             explicit_role_evidence=role_evidence,
             semantic_status=grounded.status,
+        )
+        return replace(
+            frozen,
+            semantic_action_evidence=_vnext_semantic_action_evidence(
+                goal,
+                frozen,
+                _dynamic_goal_public_action_keys(db, scope, definition),
+                public_catalog,
+            ),
         )
     assert last_error is not None
     raise last_error

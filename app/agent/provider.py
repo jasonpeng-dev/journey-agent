@@ -52,13 +52,71 @@ class GoalSelection(ProviderModel):
     clarification_prompt: str | None = None
 
 
+GoalMatchSemantics = Literal[
+    "EXACT_OR_AUTHORED",
+    "SEMANTIC_EQUIVALENT",
+    "RELATED_ONLY",
+]
+
+GoalRoleProvenance = Literal[
+    "EXPLICIT_USER_MENTION",
+    "DETERMINISTIC_EXACT",
+    "SEMANTIC_ROLE_EVIDENCE",
+    "INFERRED",
+    "NOT_SPECIFIED",
+]
+
+
 class DynamicGoalCandidateReference(ProviderModel):
-    """One public Scenario definition that Stage 1 may ground."""
+    """One public Scenario definition that Stage 1 may ground.
+
+    ``match_semantics`` is transient evidence about whether this is the same
+    referent as the player's wording.  It is intentionally separate from
+    ``provenance`` (which describes how the candidate entered the pipeline).
+    """
 
     ref_type: Literal["NODE", "REGION", "RESOURCE", "DERIVED_STATE", "ACTION", "ACTOR"]
     key: StrictStr = Field(min_length=1, max_length=160)
     provenance: Literal["EXACT_USER_MENTION", "TOPOLOGY_ENRICHED", "LLM_SUPPLEMENTED", "OTHER"] = (
         "LLM_SUPPLEMENTED"
+    )
+    # Optional during the compatibility rollout.  When present it says
+    # whether this identity is the same referent as the player's mention;
+    # RELATED_ONLY references are contextual hints and must never be bound as
+    # a Goal role.
+    match_semantics: GoalMatchSemantics | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+
+class DynamicGoalSemanticFamilyEvidence(ProviderModel):
+    """Backend-computed advisory evidence for the Family routing call.
+
+    The provider may use this evidence to resolve a semantic disagreement, but
+    it never owns the family decision.  Keeping the field typed and explicit
+    also makes the operation/state equivalence check auditable without leaking
+    runtime state into the provider contract.
+    """
+
+    operation_expressed: StrictBool = False
+    state_equivalent_available: StrictBool | None = None
+
+
+class DynamicGoalSemanticActionEvidence(ProviderModel):
+    """Backend-computed advisory Action evidence from Semantic Grounding.
+
+    This transient hint keeps the Stage 1 semantic Action visible to the
+    Action Router without transferring Action-selection authority out of that
+    stage.  The resolver only constructs it for a public, non-contextual
+    Action identity.
+    """
+
+    action_key: StrictStr = Field(min_length=1, max_length=100)
+    surface: StrictStr | None = Field(default=None, max_length=400)
+    match_semantics: GoalMatchSemantics | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
     )
 
 
@@ -70,6 +128,9 @@ class DynamicGoalFamilyRoutingRequest(ProviderModel):
     deterministic_ambiguous_refs: tuple[DynamicGoalCandidateReference, ...] = ()
     semantic_candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
     explicit_role_evidence: dict[str, object] = Field(default_factory=dict)
+    semantic_family_evidence: DynamicGoalSemanticFamilyEvidence = Field(
+        default_factory=DynamicGoalSemanticFamilyEvidence
+    )
     recovery_attempt: StrictInt = Field(default=0, ge=0, le=1)
     recovery_feedback: tuple[dict[str, object], ...] = ()
 
@@ -101,6 +162,10 @@ class DynamicGoalActionRoutingRequest(ProviderModel):
     deterministic_ambiguous_refs: tuple[DynamicGoalCandidateReference, ...] = ()
     semantic_candidate_refs: tuple[DynamicGoalCandidateReference, ...] = ()
     explicit_role_evidence: dict[str, object] = Field(default_factory=dict)
+    semantic_action_evidence: DynamicGoalSemanticActionEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     recovery_attempt: StrictInt = Field(default=0, ge=0, le=1)
     recovery_feedback: tuple[dict[str, object], ...] = ()
 
@@ -286,7 +351,9 @@ class DynamicGoalMentionSlot(ProviderModel):
     This is a resolver/provider DTO only.  It is never persisted as part of a
     Formal Goal or Scenario definition.  ``NOT_SPECIFIED`` means the player
     did not express the slot; it is intentionally different from an explicit
-    value that still needs semantic grounding.
+    value that still needs semantic grounding.  ``match_semantics`` and
+    ``provenance`` make that distinction auditable without freezing Planner
+    choices into the Goal.
     """
 
     status: Literal["GROUNDED", "UNRESOLVED", "NOT_SPECIFIED"]
@@ -294,6 +361,17 @@ class DynamicGoalMentionSlot(ProviderModel):
     key: StrictStr | None = Field(default=None, max_length=160)
     value: None = None
     surface: StrictStr | None = Field(default=None, max_length=400)
+    # These fields are transient grounding provenance only.  They are omitted
+    # from legacy wire payloads when unset and are never persisted in a
+    # FormalGoal.
+    match_semantics: GoalMatchSemantics | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    provenance: GoalRoleProvenance | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_mention_shape(self) -> DynamicGoalMentionSlot:
@@ -318,6 +396,10 @@ class DynamicGoalScalarMentionSlot(ProviderModel):
     key: None = None
     value: StrictScalar | None = None
     surface: StrictStr | None = Field(default=None, max_length=400)
+    provenance: GoalRoleProvenance | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_scalar_shape(self) -> DynamicGoalScalarMentionSlot:
@@ -1277,6 +1359,51 @@ def provider_validation_diagnostics(
     return tuple(diagnostics)
 
 
+def _normalize_dynamic_goal_grounding_wire(raw: object) -> object:
+    """Normalize the provider-only grounding wire contract.
+
+    Candidate/role provenance is assigned by the backend after validation.  A
+    few older provider templates also repeated reference metadata on scalar
+    amount slots.  Those exact redundant fields are removed before strict
+    DTO validation; every other unknown field is deliberately retained so the
+    closed Pydantic models continue to reject it.
+    """
+
+    if isinstance(raw, BaseModel):
+        raw = raw.model_dump(mode="json")
+    if not isinstance(raw, dict):
+        return raw
+
+    normalized = dict(raw)
+    candidate_refs = normalized.get("candidate_refs")
+    if isinstance(candidate_refs, (list, tuple)):
+        normalized["candidate_refs"] = [
+            ({key: value for key, value in reference.items() if key != "provenance"}
+             if isinstance(reference, dict) else reference)
+            for reference in candidate_refs
+        ]
+
+    intent = normalized.get("intent")
+    if not isinstance(intent, dict):
+        return normalized
+    normalized_intent = dict(intent)
+    for role in ("action", "actor", "source", "target", "resource"):
+        slot = normalized_intent.get(role)
+        if isinstance(slot, dict):
+            normalized_intent[role] = {
+                key: value for key, value in slot.items() if key != "provenance"
+            }
+    amount = normalized_intent.get("amount")
+    if isinstance(amount, dict):
+        normalized_intent["amount"] = {
+            key: value
+            for key, value in amount.items()
+            if key not in {"provenance", "match_semantics", "ref_type", "key"}
+        }
+    normalized["intent"] = normalized_intent
+    return normalized
+
+
 def _normalize_dynamic_goal_semantic_routing(raw: object) -> object:
     """Normalize only the redundant singleton form of a matched Action."""
 
@@ -1744,13 +1871,19 @@ def dynamic_goal_grounding_recovery_feedback(
                     and isinstance(key, str)
                     and (ref_type, key) in allowed_identities
                 ):
-                    preserve.append(
-                        {
-                            "path": f"candidate_refs[{index}]",
-                            "ref_type": ref_type,
-                            "key": key,
-                        }
-                    )
+                    preserved_ref: dict[str, object] = {
+                        "path": f"candidate_refs[{index}]",
+                        "ref_type": ref_type,
+                        "key": key,
+                    }
+                    match_semantics = reference.get("match_semantics")
+                    if match_semantics in {
+                        "EXACT_OR_AUTHORED",
+                        "SEMANTIC_EQUIVALENT",
+                        "RELATED_ONLY",
+                    }:
+                        preserved_ref["match_semantics"] = match_semantics
+                    preserve.append(preserved_ref)
 
         intent = raw.get("intent")
         if isinstance(intent, dict):
@@ -1765,13 +1898,22 @@ def dynamic_goal_grounding_recovery_feedback(
                     and isinstance(key, str)
                     and (ref_type, key) in allowed_identities
                 ):
-                    preserve.append(
-                        {
-                            "path": f"intent.{slot_key}",
-                            "ref_type": ref_type,
-                            "key": key,
-                        }
-                    )
+                    preserved_slot: dict[str, object] = {
+                        "path": f"intent.{slot_key}",
+                        "ref_type": ref_type,
+                        "key": key,
+                    }
+                    match_semantics = slot.get("match_semantics")
+                    if match_semantics in {
+                        "EXACT_OR_AUTHORED",
+                        "SEMANTIC_EQUIVALENT",
+                        "RELATED_ONLY",
+                    }:
+                        preserved_slot["match_semantics"] = match_semantics
+                    surface = slot.get("surface")
+                    if isinstance(surface, str) and surface.strip():
+                        preserved_slot["surface"] = surface[:400]
+                    preserve.append(preserved_slot)
 
     issue = "INVALID_JSON"
     fix_only: list[str] = []
@@ -1831,8 +1973,6 @@ def dynamic_goal_grounding_recovery_feedback(
             "path": "intent.amount",
             "example": {
                 "status": "GROUNDED",
-                "ref_type": None,
-                "key": None,
                 "value": 30,
                 "surface": None,
             },
@@ -2076,12 +2216,12 @@ _GOAL_PROVIDER_PURPOSES = frozenset(
     }
 )
 _GOAL_PROMPT_TEMPLATE_VERSIONS = {
-    "dynamic_goal_grounding": "dynamic-goal-grounding-v5",
-    "dynamic_goal": "dynamic-goal-interpretation-v1",
-    "dynamic_goal_interpretation": "dynamic-goal-interpretation-v1",
-    "dynamic_goal_family_routing": "dynamic-goal-family-routing-v1",
-    "dynamic_goal_action_routing": "dynamic-goal-action-routing-v2",
-    "dynamic_goal_routing": "dynamic-goal-routing-v2",
+    "dynamic_goal_grounding": "dynamic-goal-grounding-v8",
+    "dynamic_goal": "dynamic-goal-interpretation-v2",
+    "dynamic_goal_interpretation": "dynamic-goal-interpretation-v2",
+    "dynamic_goal_family_routing": "dynamic-goal-family-routing-v2",
+    "dynamic_goal_action_routing": "dynamic-goal-action-routing-v4",
+    "dynamic_goal_routing": "dynamic-goal-routing-v3",
     "dynamic_goal_operation": "dynamic-goal-operation-v2",
 }
 _GOAL_SNAPSHOT_MAX_DEPTH = 8
@@ -2153,7 +2293,7 @@ def goal_provider_response_snapshot(
     if purpose == "dynamic_goal_grounding":
         raw = _redact_goal_grounding_identities(raw, public_catalog)
         allowed = {"status", "candidate_refs", "candidate_keys", "intent", "clarification_prompt"}
-        nested_allowed = {"ref_type", "key", "provenance"}
+        nested_allowed = {"ref_type", "key", "match_semantics", "surface", "status", "value"}
     else:
         raw = _redact_goal_interpretation_identities(raw, public_ontology)
         allowed = {"status", "requirements", "clarification_prompt"}
@@ -2217,7 +2357,7 @@ def _redact_goal_intent(
     value: object,
     allowed_references: set[tuple[str, str]],
 ) -> object:
-    """Keep Stage 1 role provenance while omitting ungrounded identities."""
+    """Keep Stage 1 role evidence while omitting ungrounded identities."""
 
     if not isinstance(value, dict):
         return {"json_type": _safe_json_type(value) or "unknown", "value_omitted": True}
@@ -2261,6 +2401,16 @@ def _redact_goal_intent(
                     safe_slot["ref_type"] = _redacted_goal_identity(ref_type)
                 if "key" in slot:
                     safe_slot["key"] = _redacted_goal_identity(key)
+        match_semantics = slot.get("match_semantics")
+        if match_semantics in {
+            "EXACT_OR_AUTHORED",
+            "SEMANTIC_EQUIVALENT",
+            "RELATED_ONLY",
+        }:
+            safe_slot["match_semantics"] = match_semantics
+        surface = slot.get("surface")
+        if isinstance(surface, str) and surface.strip():
+            safe_slot["surface"] = surface[:400]
         if slot_key == "amount" and "value" in slot:
             amount = slot.get("value")
             if type(amount) in {str, int, bool}:
@@ -2281,14 +2431,13 @@ def _redact_goal_reference(
     key = value.get("key")
     if isinstance(ref_type, str) and isinstance(key, str) and (ref_type, key) in allowed:
         result = {"ref_type": ref_type, "key": key}
-        provenance = value.get("provenance")
-        if provenance in {
-            "EXACT_USER_MENTION",
-            "TOPOLOGY_ENRICHED",
-            "LLM_SUPPLEMENTED",
-            "OTHER",
+        match_semantics = value.get("match_semantics")
+        if match_semantics in {
+            "EXACT_OR_AUTHORED",
+            "SEMANTIC_EQUIVALENT",
+            "RELATED_ONLY",
         }:
-            result["provenance"] = provenance
+            result["match_semantics"] = match_semantics
         return result
     return {
         "ref_type": {"json_type": _safe_json_type(ref_type) or "unknown", "value_omitted": True},
@@ -3039,12 +3188,14 @@ class OpenAICompatibleGenericProvider:
         self, request: DynamicGoalEntityGroundingRequest
     ) -> DynamicGoalEntityGrounding:
         raw: object | None = None
+        normalized: object | None = None
         try:
             raw = self._invoke(
                 "dynamic_goal_grounding",
                 request.model_dump(mode="json"),
             )
-            result = DynamicGoalEntityGrounding.model_validate(raw)
+            normalized = _normalize_dynamic_goal_grounding_wire(raw)
+            result = DynamicGoalEntityGrounding.model_validate(normalized)
         except GenericProviderError:
             raise
         except (ValidationError, TypeError, ValueError) as exc:
@@ -3052,7 +3203,7 @@ class OpenAICompatibleGenericProvider:
                 provider_validation_diagnostics(exc) if isinstance(exc, ValidationError) else ()
             )
             recovery_feedback = dynamic_goal_grounding_recovery_feedback(
-                raw,
+                normalized if normalized is not None else raw,
                 validation_diagnostics=diagnostics,
                 public_catalog=request.public_catalog,
             )
@@ -3063,7 +3214,7 @@ class OpenAICompatibleGenericProvider:
                 self._record_goal_response_snapshot(
                     goal_provider_response_snapshot(
                         "dynamic_goal_grounding",
-                        raw,
+                        normalized if normalized is not None else raw,
                         public_catalog=request.public_catalog,
                     ),
                     validation="REJECTED",
@@ -3229,26 +3380,31 @@ class OpenAICompatibleGenericProvider:
             response_contract = (
                 '{"status":"RESOLVED|NEEDS_CLARIFICATION|UNSUPPORTED",'
                 '"candidate_refs":[{"ref_type":"NODE|REGION|RESOURCE|DERIVED_STATE|ACTION|ACTOR",'
-                '"key":"public_scenario_reference_key"}],'
+                '"key":"public_scenario_reference_key",'
+                '"match_semantics":"EXACT_OR_AUTHORED|SEMANTIC_EQUIVALENT|RELATED_ONLY|null"}],'
                 '"intent":{"intent_kind":"STATE|OPERATION",'
                 '"action":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
                 '"ref_type":"ACTION|null","key":"public_action_key|null",'
-                '"value":null,"surface":null},'
+                '"value":null,"surface":null,"match_semantics":"EXACT_OR_AUTHORED|'
+                'SEMANTIC_EQUIVALENT|RELATED_ONLY|null"},'
                 '"actor":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
                 '"ref_type":"ACTOR|null","key":"public_actor_key|null",'
-                '"value":null,"surface":null},'
+                '"value":null,"surface":null,"match_semantics":"EXACT_OR_AUTHORED|'
+                'SEMANTIC_EQUIVALENT|RELATED_ONLY|null"},'
                 '"source":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
                 '"ref_type":"NODE|REGION|ACTOR|null",'
-                '"key":"public_source_key|null","value":null,"surface":null},'
+                '"key":"public_source_key|null","value":null,"surface":null,"match_semantics":"'
+                'EXACT_OR_AUTHORED|SEMANTIC_EQUIVALENT|RELATED_ONLY|null"},'
                 '"target":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
                 '"ref_type":"NODE|REGION|ACTOR|null",'
-                '"key":"public_target_key|null","value":null,"surface":null},'
+                '"key":"public_target_key|null","value":null,"surface":null,"match_semantics":"'
+                'EXACT_OR_AUTHORED|SEMANTIC_EQUIVALENT|RELATED_ONLY|null"},'
                 '"resource":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
                 '"ref_type":"RESOURCE|null","key":"public_resource_key|null",'
-                '"value":null,"surface":null},'
+                '"value":null,"surface":null,"match_semantics":"EXACT_OR_AUTHORED|'
+                'SEMANTIC_EQUIVALENT|RELATED_ONLY|null"},'
                 '"amount":{"status":"GROUNDED|UNRESOLVED|NOT_SPECIFIED",'
-                '"ref_type":null,"key":null,"value":30,'
-                '"surface":null}},'
+                '"value":30,"surface":null}},'
                 '"clarification_prompt":null}. '
                 "The top level has no goal field and no unknown fields. A RESOLVED response "
                 "must contain catalog-backed candidate_refs and a valid intent. A "
@@ -3258,7 +3414,16 @@ class OpenAICompatibleGenericProvider:
                 "an UNRESOLVED or NOT_SPECIFIED slot carries no key or value. The amount "
                 "example uses native JSON integer 30; use the player's actual native JSON "
                 "scalar value. A scalar value is a string, integer, or boolean, never an "
-                "object or array. Do not place reference identity inside a value object."
+                "object or array. Do not place reference identity inside a value object. "
+                "For every entity role, surface is the exact player substring that expressed "
+                "that role or null; do not synthesize a surface. "
+                "match_semantics EXACT_OR_AUTHORED means the same public referent is directly "
+                "named or uses an authored alias; SEMANTIC_EQUIVALENT means the same referent "
+                "is expressed differently and requires a real player surface; "
+                "RELATED_ONLY means merely related, similar, same-category, same-purpose, or "
+                "plausible-substitute context and must never be bound to a role or returned as "
+                "the player's canonical identity. Provenance is backend-owned and must not be "
+                "returned."
             )
         elif purpose == "dynamic_goal":
             response_contract = (
@@ -3328,16 +3493,26 @@ class OpenAICompatibleGenericProvider:
                 "families; otherwise return STATE or OPERATION and freeze that choice. Do not "
                 "select, match, rank, or infer any "
                 "Action or State requirement. No Action catalog or State candidate catalog is "
-                "available at this stage. deterministic_candidate_refs are authoritative exact "
-                "identities; deterministic_ambiguous_refs are unresolved exact surfaces; and "
-                "semantic_candidate_refs plus explicit_role_evidence are evidence only. They do "
+                "available at this stage. deterministic_candidate_refs and "
+                "deterministic_ambiguous_refs are advisory retrieval hints only; "
+                "semantic_candidate_refs plus explicit_role_evidence are the canonical semantic "
+                "evidence. They do "
                 "not contain an upstream Family or Action decision. Candidate availability must "
                 "not decide the family. When a "
                 "natural expression permits both a reasonable STATE and OPERATION reading, choose "
                 "one reasonable reading rather than requesting clarification merely because both "
                 "exist. Judge semantic intent, never keywords, substrings, or language-specific "
-                "verb rules. On recovery fix only the supplied structural validation error and do "
-                "not add fields outside the response contract."
+                "verb rules. An explicit request to perform behavior remains OPERATION even when "
+                "the behavior may produce a terminal State; target, Actor, or a plausible side "
+                "effect cannot turn an operation into STATE. Conversely, a sentence that only "
+                "states an end condition remains STATE and leaves HOW to later planning. On "
+                "the request, semantic_family_evidence is backend-computed advisory evidence: "
+                "operation_expressed signals that the frozen semantic intent is an operation, "
+                "and state_equivalent_available says whether the selected public Action has a "
+                "canonical terminal Fact for its grounded target. Use it to resolve a conflict, "
+                "but do not treat it as authority or invent an Action or Fact from it. On "
+                "recovery fix only the supplied structural validation error and do not add fields "
+                "outside the response contract."
             )
         elif purpose == "dynamic_goal_action_routing":
             planning_prompt = (
@@ -3364,8 +3539,8 @@ class OpenAICompatibleGenericProvider:
                 "Operation Grounding, or an execution precondition is not yet established. Those "
                 "conditions alone are not reasons for NO_MATCH. Judge "
                 "the raw Goal together with authored Action semantics and typed/topology evidence. "
-                "deterministic_candidate_refs are authoritative exact identities; semantic refs "
-                "and explicit role evidence may add context but must never replace an exact key; "
+                "deterministic_candidate_refs are advisory retrieval hints; semantic refs and "
+                "explicit role evidence own canonical identities and role binding; "
                 "never use keywords, substrings, regexes, or language-specific verb rules. "
                 "Positive semantic evidence is sufficient for MATCHED when the raw Goal, public "
                 "entity name/type/description, authored Action name/description, and typed "
@@ -3379,9 +3554,26 @@ class OpenAICompatibleGenericProvider:
                 "contract conflict with the candidates, using SEMANTIC_CONFLICT. If multiple "
                 "candidates remain genuinely plausible, return AMBIGUOUS. Never use NO_MATCH for "
                 "uncertainty, missing preconditions, incomplete slots, or weak wording alone. "
-                "On recovery preserve every recovery_feedback.preserve field exactly and change "
-                "only recovery_feedback.fix_only fields."
+                "Interpret the requested behavior first: Actor and target mentions only constrain "
+                "which invocation is legal after the Action meaning is understood; they cannot "
+                "substitute a different Action that merely accepts the same entities. Preserve "
+                "an explicit operation such as repair, restore, inspect, transport, or supply as "
+                "that operation, and do not select travel/survey/inspect solely because its target "
+                "shape happens to fit. On recovery preserve every "
+                "recovery_feedback.preserve field exactly and change only "
+                "recovery_feedback.fix_only fields."
             )
+            if isinstance(payload.get("semantic_action_evidence"), dict):
+                planning_prompt += (
+                    " semantic_action_evidence is backend-computed advisory evidence from the "
+                    "earlier Semantic Grounding stage. It identifies the Action expressed by "
+                    "the player's surface when that evidence is public and non-contextual. "
+                    "It does not select the Action for you: compare the raw Goal with every "
+                    "candidate's complete authored name, description, and contract semantics. "
+                    "If recovery_feedback reports ACTION_SEMANTIC_EVIDENCE_CONFLICT, re-check "
+                    "the upstream Action and the returned candidate independently; do not use "
+                    "target or slot compatibility as a substitute for the requested behavior."
+                )
         elif purpose == "dynamic_goal_routing":
             planning_prompt = (
                 "Compare the finite action_catalog and state_catalog, then perform only two "
@@ -3416,6 +3608,9 @@ class OpenAICompatibleGenericProvider:
                 "intent examples (not lexical rules): 把30个燃料运到南部 => OPERATION; "
                 "南部至少有30个燃料 => STATE; "
                 "修复中央河底隧道 => OPERATION; 让中央河底隧道处于可通行状态 => STATE. "
+                "The requested behavior is the primary Action signal. Actor, target, and possible "
+                "downstream effects only constrain candidate legality; they must never rewrite a "
+                "clear operation as another Action or as STATE. "
                 "On recovery correct only the supplied structural validation errors. Preserve "
                 "every field named by recovery_feedback.preserve exactly, and change only fields "
                 "named by recovery_feedback.fix_only."
@@ -3459,9 +3654,9 @@ class OpenAICompatibleGenericProvider:
                 "only recovery_feedback.fix_only paths; never reselect a correct target, binding, "
                 "parameter, frozen_family, or action_key. Use explicit_role_evidence as the "
                 "preserved record of which WHAT slots the player expressed; NOT_SPECIFIED stays "
-                "unconstrained even when Runtime requires the slot. References with provenance "
-                "EXACT_USER_MENTION are backend-owned identities: assign their semantic role "
-                "without replacing their key. TOPOLOGY_ENRICHED references are contextual "
+                "unconstrained even when Runtime requires the slot. References from "
+                "deterministic_candidate_refs are advisory retrieval hints and must not override "
+                "semantic role evidence. TOPOLOGY_ENRICHED references are contextual "
                 "evidence, not player constraints and need not occupy a slot. public_references "
                 "has already been filtered to the selected contract; do not search beyond it."
             )
@@ -3477,10 +3672,12 @@ class OpenAICompatibleGenericProvider:
                 "and public_references are semantic evidence, not a closed vocabulary or backend "
                 "parser rule. Ground every explicit public mention in the whole Goal in this one "
                 "pass; do not stop after an easy exact match or omit a remaining semantic mention. "
-                "Exact identities in deterministic_candidate_refs are authoritative and must be "
-                "preserved. Never first-pick deterministic_ambiguous_refs. The compatibility "
-                "fields intent_kind and action are not authoritative: downstream Family and "
-                "Action routers ignore them. Classify actor, source, target, resource, and amount "
+                "deterministic_candidate_refs and deterministic_ambiguous_refs are advisory "
+                "retrieval candidates: keep, replace, or discard them according to whole-Goal "
+                "semantics, and never first-pick an ambiguous hint. The compatibility "
+                "field intent_kind is not authoritative. A grounded Action slot is only typed "
+                "advisory evidence for the downstream Action Router; that router retains final "
+                "Action-selection authority. Classify actor, source, target, resource, and amount "
                 "as "
                 "GROUNDED, UNRESOLVED, or NOT_SPECIFIED. GROUNDED entity slots must use the "
                 "typed public key and GROUNDED amount must use the typed value. UNRESOLVED means "
@@ -3488,11 +3685,21 @@ class OpenAICompatibleGenericProvider:
                 "NOT_SPECIFIED means the player did not constrain it. A source or target role "
                 "may be a binding declared by the Action contract rather than a literal Action "
                 "parameter. Keep every slot role-compatible; topology is context, not a "
-                "substitute for a typed role. Preserve every deterministic_candidate_ref and add "
-                "public references needed by role evidence. If multiple compatible candidates "
+                "substitute for a typed role. Return all public references selected by semantic "
+                "role evidence. If multiple compatible candidates "
                 "remain equally plausible, mark the affected slot UNRESOLVED instead of guessing. "
                 "NEEDS_CLARIFICATION and UNSUPPORTED are evidence-completeness statuses here, not "
-                "product verdicts. Never invent a key. Stage 1 must not emit "
+                "product verdicts. A candidate or role marked RELATED_ONLY is context only "
+                "(related, similar, same category/purpose, or a plausible substitute) and cannot "
+                "become a canonical identity. EXACT_OR_AUTHORED and SEMANTIC_EQUIVALENT both "
+                "require the same referent as the player's wording; SEMANTIC_EQUIVALENT also "
+                "requires a real player surface. Provider provenance is backend-owned and must "
+                "not be returned. If a role was omitted, return NOT_SPECIFIED; "
+                "runtime-required is not Goal-required and must never create UNRESOLVED. If an "
+                "unknown airport, resource, location, Actor, or source is merely close to a public "
+                "object, keep it unresolved (or UNSUPPORTED when it is explicitly non-public) "
+                "instead of substituting the nearest candidate. Never invent a key. Stage 1 must "
+                "not emit "
                 "a Goal requirement, authored Objective, plan, hidden Truth, or chain-of-thought."
             )
             if payload.get("recovery_attempt"):
@@ -3506,14 +3713,49 @@ class OpenAICompatibleGenericProvider:
                     "for UNRESOLVED or NOT_SPECIFIED slots do not return a key or scalar value. "
                     "If recovery_feedback identifies intent.amount as an object or array, change "
                     "only that slot so value is a native JSON scalar; for example, an explicit "
-                    'amount of 30 is {"status":"GROUNDED","ref_type":null,'
-                    '"key":null,"value":30,"surface":null}. The example shows wire '
+                    'amount of 30 is {"status":"GROUNDED","value":30,"surface":null}. '
+                    'The example shows wire '
                     "shape only: use the player's actual scalar and never interpret fields from "
                     "the rejected object as a canonical identity. "
                     "A non-RESOLVED response must not carry candidate_refs; use a clarification "
                     "prompt for unresolved or ambiguous semantics. Do not return markdown, prose, "
-                    "a code fence, a top-level goal, or any unknown field."
+                    "a code fence, a top-level goal, or any unknown field. Preserve canonical "
+                    "ref_type/key, valid match_semantics, and valid player surface when already "
+                    "present; provenance is backend-owned and must not be returned. RELATED_ONLY "
+                    "must stay contextual and cannot be repaired into a grounded identity. For "
+                    "an omitted "
+                    "role use NOT_SPECIFIED, never UNRESOLVED merely because Runtime requires it. "
+                    "If recovery_feedback reports ROLE_EVIDENCE_INVALID, set the named role to "
+                    "NOT_SPECIFIED unless the player surface proves that the player named it; "
+                    "do not silently guess a canonical value."
                 )
+                feedback = payload.get("recovery_feedback")
+                feedback_codes = (
+                    {
+                        item.get("code")
+                        for item in feedback
+                        if isinstance(item, dict)
+                    }
+                    if isinstance(feedback, (list, tuple))
+                    else set()
+                )
+                if feedback_codes & {
+                    "ROLE_MATCH_SEMANTICS_RECHECK",
+                    "ROLE_SEMANTIC_GROUNDING_RECHECK",
+                }:
+                    planning_prompt += (
+                        " This recovery is a bounded semantic grounding recheck, not a schema "
+                        "repair. Re-evaluate only the roles named by the feedback against the "
+                        "complete public_catalog and the raw player Goal. For each named role, "
+                        "return GROUNDED + SEMANTIC_EQUIVALENT only when it is the same unique "
+                        "public referent expressed with different wording and retain the real "
+                        "player surface; use RELATED_ONLY or UNRESOLVED for a merely related, "
+                        "similar, same-purpose, same-category, substitute, or non-unique "
+                        "candidate. Do not force the disputed canonical key. Reliable exact "
+                        "roles and their surfaces listed in preserve must remain unchanged. A "
+                        "valid SEMANTIC_EQUIVALENT result is accepted by the normal pipeline "
+                        "without another confirmation call."
+                    )
         elif purpose == "dynamic_goal":
             planning_prompt = (
                 "Interpret the player's Goal only into the closed V2 typed requirement "
@@ -3577,7 +3819,13 @@ class OpenAICompatibleGenericProvider:
                     " The Goal family is already frozen as STATE. Return only FACT, "
                     "RESOURCE_AT_LEAST, or DERIVED_STATE requirements allowed by the focused "
                     "ontology. Do not reclassify the family and never return ACTION_COMPLETED, "
-                    "an action_key, operation slots, or an operation intent."
+                    "an action_key, operation slots, or an operation intent. Requirements must "
+                    "be the minimal terminal WHAT directly requested by the player: do not add "
+                    "prerequisites, likely consequences, restored capabilities, downstream "
+                    "benefits, side effects, or merely related sibling Facts. If one requirement "
+                    "already expresses the requested WHAT, return only that requirement. A clear "
+                    "operation may use one direct terminal-state equivalent, but never expand it "
+                    "into several post-operation states or substitute a related state."
                 )
             if payload.get("recovery_attempt"):
                 planning_prompt += (
@@ -3586,7 +3834,10 @@ class OpenAICompatibleGenericProvider:
                     "the indicated requirement shape without changing grounded references "
                     "or broadening the ontology. For DERIVED_STATE, accepted_values is "
                     "required and non-empty; use the focused target value, and do not emit "
-                    "target_value. Do not fall back to an authored Objective."
+                    "target_value. Do not fall back to an authored Objective. For frozen STATE, "
+                    "preserve minimal-WHAT semantics: remove added prerequisites, consequences, "
+                    "restored capabilities, downstream benefits, side effects, and sibling "
+                    "requirements rather than inventing new requirements."
                 )
         elif purpose == "repair":
             planning_prompt = (
@@ -4456,6 +4707,8 @@ __all__ = [
     "DynamicGoalOperationGrounding",
     "DynamicGoalOperationGroundingRequest",
     "DynamicGoalRecoveryFeedback",
+    "DynamicGoalSemanticActionEvidence",
+    "DynamicGoalSemanticFamilyEvidence",
     "DynamicGoalSemanticRouting",
     "DynamicGoalSemanticRoutingRequest",
     "GenericModelProvider",
@@ -4463,6 +4716,8 @@ __all__ = [
     "GoalDependencyProjection",
     "GoalFamilyMatch",
     "GoalFamilyMatchRequest",
+    "GoalMatchSemantics",
+    "GoalRoleProvenance",
     "GoalSelection",
     "GoalSelectionRequest",
     "OpenAICompatibleGenericProvider",

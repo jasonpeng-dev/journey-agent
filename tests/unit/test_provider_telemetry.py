@@ -117,7 +117,7 @@ def test_semantic_routing_request_is_small_closed_and_observable() -> None:
     assert metadata.response_validation == "ACCEPTED"
     assert metadata.debug_snapshot is not None
     assert metadata.debug_snapshot["output"]["action_key"] == "move_cargo"
-    assert metadata.prompt_template_version == "dynamic-goal-routing-v2"
+    assert metadata.prompt_template_version == "dynamic-goal-routing-v3"
     system_prompt = captured[0]["messages"][0]["content"]
     assert '"action_match":"MATCHED"' in system_prompt
     assert '"action_key":"exact_public_action_key","candidate_keys":[]' in system_prompt
@@ -183,6 +183,7 @@ def test_family_routing_request_excludes_action_and_state_catalogs() -> None:
         "deterministic_ambiguous_refs",
         "semantic_candidate_refs",
         "explicit_role_evidence",
+        "semantic_family_evidence",
         "recovery_attempt",
         "recovery_feedback",
     }
@@ -1132,7 +1133,7 @@ def test_dynamic_goal_prompt_explains_action_defined_derived_bindings() -> None:
         assert term in prompt
 
 
-def test_dynamic_grounding_prompt_exposes_typed_roles_and_preserves_exact_refs() -> None:
+def test_dynamic_grounding_prompt_exposes_typed_roles_and_advisory_refs() -> None:
     deterministic_refs = (
         DynamicGoalCandidateReference(ref_type="REGION", key="region_a"),
         DynamicGoalCandidateReference(ref_type="REGION", key="region_b"),
@@ -1200,7 +1201,7 @@ def test_dynamic_grounding_prompt_exposes_typed_roles_and_preserves_exact_refs()
         "evidence-only Semantic Grounding",
         "public Action name, description, target_kind",
         "do not rely on a fixed",
-        "Exact identities in deterministic_candidate_refs are authoritative",
+            "advisory retrieval candidates",
         "GROUNDED, UNRESOLVED, or NOT_SPECIFIED",
         "source or target role may be a binding declared by the Action contract",
         "multiple compatible candidates remain equally plausible",
@@ -1241,7 +1242,7 @@ def test_dynamic_goal_prompt_exposes_explicit_slot_provenance() -> None:
         "evidence-only Semantic Grounding",
         "GROUNDED, UNRESOLVED, or NOT_SPECIFIED",
         "NOT_SPECIFIED means the player did not constrain it",
-        "preserve",
+        "selected by semantic role evidence",
         "binding declared by the Action contract",
         "topology is context, not a substitute",
     ):
@@ -1320,6 +1321,118 @@ def test_dynamic_goal_grounding_request_uses_json_object_with_explicit_scalar_co
     assert "native JSON scalar" in prompt
     assert "never an object or array" in prompt
     assert '"typed_value|null"' not in prompt
+
+
+def test_dynamic_grounding_wire_normalization_strips_only_provider_owned_fields() -> None:
+    def complete(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "status": "RESOLVED",
+                                    "candidate_refs": [
+                                        {
+                                            "ref_type": "NODE",
+                                            "key": "central_hospital",
+                                            "provenance": "EXACT_USER_MENTION",
+                                            "match_semantics": "EXACT_OR_AUTHORED",
+                                        }
+                                    ],
+                                    "intent": {
+                                        "intent_kind": "OPERATION",
+                                        "target": {
+                                            "status": "GROUNDED",
+                                            "ref_type": "NODE",
+                                            "key": "central_hospital",
+                                            "value": None,
+                                            "surface": "central hospital",
+                                            "provenance": "SEMANTIC_ROLE_EVIDENCE",
+                                        },
+                                        "amount": {
+                                            "status": "GROUNDED",
+                                            "value": 30,
+                                            "surface": "30",
+                                            "provenance": "EXPLICIT_USER_MENTION",
+                                            "match_semantics": "EXACT_OR_AUTHORED",
+                                            "ref_type": None,
+                                            "key": None,
+                                        },
+                                    },
+                                }
+                            )
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(complete)
+    )
+    result = provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="move 30 to central hospital",
+            public_catalog={"references": [{"ref_type": "NODE", "key": "central_hospital"}]},
+        )
+    )
+
+    assert result.candidate_refs[0].provenance == "LLM_SUPPLEMENTED"
+    assert result.intent is not None
+    assert result.intent.target.provenance is None
+    assert result.intent.amount.provenance is None
+    assert result.intent.amount.value == 30
+
+
+def test_dynamic_grounding_wire_unknown_extra_still_fails_closed() -> None:
+    def complete(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"status":"RESOLVED","candidate_refs":['
+                            '{"ref_type":"NODE","key":"central_hospital",'
+                            '"unexpected_guess":"central_hospital"}]}'
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(), transport=httpx.MockTransport(complete)
+    )
+    with pytest.raises(GenericProviderError) as caught:
+        provider.ground_dynamic_goal_entities(
+            DynamicGoalEntityGroundingRequest(
+                goal="central hospital",
+                public_catalog={"references": [{"ref_type": "NODE", "key": "central_hospital"}]},
+            )
+        )
+    assert caught.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
+    assert any(
+        item.get("field_path") == "candidate_refs[0].unexpected_guess"
+        for item in caught.value.validation_diagnostics
+    )
+
+
+def test_dynamic_grounding_prompt_does_not_publish_provenance_wire_fields() -> None:
+    provider = OpenAICompatibleGenericProvider(_settings())
+    body, _size = provider._build_request_body("dynamic_goal_grounding", {})
+    prompt = body["messages"][0]["content"]
+    assert '"candidate_refs":[{"ref_type"' in prompt
+    assert '"provenance":' not in prompt
+    assert '"value":30,"surface":null' in prompt
+    assert "provenance is backend-owned" in prompt.casefold()
 
 
 def test_historical_grounding_snapshot_keeps_invalid_amount_shape_redacted() -> None:
@@ -1485,8 +1598,8 @@ def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
         "DYNAMIC_GOAL",
     ]
     assert [item.prompt_template_version for item in history] == [
-        "dynamic-goal-grounding-v5",
-        "dynamic-goal-interpretation-v1",
+        "dynamic-goal-grounding-v8",
+        "dynamic-goal-interpretation-v2",
     ]
     assert [item.prompt_tokens for item in history] == [11, 13]
     assert [item.prompt_cache_hit_tokens for item in history] == [3, 4]
