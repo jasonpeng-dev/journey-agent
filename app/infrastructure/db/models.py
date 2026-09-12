@@ -247,6 +247,14 @@ class GoalResolutionAttempt(UUIDPrimaryKey, TimestampMixin, Base):
             "goal_hash",
             "created_at",
         ),
+        Index(
+            "uq_goal_resolution_attempts_instance_submission_key",
+            "game_instance_id",
+            "submission_idempotency_key",
+            unique=True,
+            sqlite_where=text("submission_idempotency_key IS NOT NULL"),
+            postgresql_where=text("submission_idempotency_key IS NOT NULL"),
+        ),
     )
 
     game_instance_id: Mapped[UUID] = mapped_column(
@@ -256,6 +264,7 @@ class GoalResolutionAttempt(UUIDPrimaryKey, TimestampMixin, Base):
     scenario_version_id: Mapped[UUID] = mapped_column(
         ForeignKey("scenario_versions.id", ondelete="RESTRICT")
     )
+    submission_idempotency_key: Mapped[str | None] = mapped_column(String(160))
     original_goal_text: Mapped[str | None] = mapped_column(String(4000))
     normalized_goal_text: Mapped[str | None] = mapped_column(String(4000))
     goal_hash: Mapped[str] = mapped_column(String(64))
@@ -288,6 +297,7 @@ class GoalResolutionAttempt(UUIDPrimaryKey, TimestampMixin, Base):
     provider_model: Mapped[str | None] = mapped_column(String(100))
     provider_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     resolution_duration_ms: Mapped[int] = mapped_column(Integer)
+    presentation_text: Mapped[str | None] = mapped_column(Text)
 
 
 class ResolvedGoalDraft(UUIDPrimaryKey, TimestampMixin, Base):

@@ -38,6 +38,7 @@ from app.api.schemas.phase_d import (
     PublicPlanResponse,
     PublicPlanStepResponse,
     PublicRelationResponse,
+    PublicResolvedGoalDraftResponse,
     PublicResourceResponse,
     PublicResourceUsageKind,
     PublicResourceUsageResponse,
@@ -54,6 +55,7 @@ from app.domain.enums import (
     AgentStepStatus,
     AgentTaskStatus,
     DecisionStatus,
+    ResolvedGoalDraftStatus,
     ResourcePoolAvailability,
     StepExecutionType,
     WorldOperationStatus,
@@ -76,15 +78,21 @@ from app.infrastructure.db.models import (
     PlanningAttempt,
     PlanningCycle,
     PlayerExecutionCheckpoint,
+    ResolvedGoalDraft,
     Scenario,
     ScenarioVersion,
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.derived_state import evaluate_derived_states
-from app.services.formal_goal import FormalGoalCompletionEvaluator, load_formal_goal_for_task
+from app.services.formal_goal import (
+    FormalGoalCompletionEvaluator,
+    load_formal_goal_for_draft,
+    load_formal_goal_for_task,
+)
 from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
+from app.services.goal_presentation import present_resolved_goal
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.mission_roadmap import MissionRoadmap, MissionRoadmapProjector
 from app.services.player_action_report import format_player_knowledge_changes
@@ -168,6 +176,14 @@ class PlayerProjectionService:
         active_task = next(
             (item for item in reversed(task_rows) if item.status in _PUBLIC_ACTIVE_TASKS),
             None,
+        )
+        ready_draft = self.db.scalar(
+            select(ResolvedGoalDraft)
+            .where(
+                ResolvedGoalDraft.game_instance_id == game.id,
+                ResolvedGoalDraft.status == ResolvedGoalDraftStatus.READY,
+            )
+            .order_by(ResolvedGoalDraft.created_at.desc(), ResolvedGoalDraft.id.desc())
         )
         if selected_task_id is None:
             # The active Task is the player-facing default.  A terminal Task
@@ -349,6 +365,19 @@ class PlayerProjectionService:
                     known_resources=knowledge_projection.planner_resources()["resources"],
                 )
                 if task is not None
+                else None
+            ),
+            current_goal_draft=(
+                PublicResolvedGoalDraftResponse(
+                    draft_id=ready_draft.id,
+                    submitted_goal=ready_draft.original_goal_text,
+                    presentation_text=present_resolved_goal(
+                        load_formal_goal_for_draft(self.db, scope, ready_draft),
+                        definition,
+                    ),
+                    created_at=ready_draft.created_at,
+                )
+                if ready_draft is not None
                 else None
             ),
             task_history=[

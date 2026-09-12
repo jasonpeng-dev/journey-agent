@@ -7,11 +7,97 @@ import re
 from collections.abc import Callable, Sequence
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericGoalResolution
 from app.agent.provider import GenericModelProvider, provider_call_metadata
-from app.infrastructure.db.models import GoalResolutionAttempt
+from app.domain.enums import AgentTaskStatus, GameInstanceStatus, ResolvedGoalDraftStatus
+from app.infrastructure.db.models import (
+    AgentTask,
+    GameInstance,
+    GoalResolutionAttempt,
+    ResolvedGoalDraft,
+)
+
+
+class GoalResolutionAttemptConflict(ValueError):
+    pass
+
+
+def reserve_goal_resolution_attempt(
+    session_factory: Callable[[], Session],
+    *,
+    game_instance_id: UUID,
+    scenario_version_id: UUID,
+    goal: str,
+    idempotency_key: str,
+) -> tuple[GoalResolutionAttempt, bool]:
+    """Reserve one Parse identity and durably supersede the prior READY Draft."""
+
+    with session_factory() as audit_db:
+        game = audit_db.scalar(
+            select(GameInstance)
+            .where(GameInstance.id == game_instance_id)
+            .with_for_update()
+        )
+        if game is None:
+            raise GoalResolutionAttemptConflict("GAME_INSTANCE_NOT_FOUND")
+        if game.status != GameInstanceStatus.ACTIVE:
+            raise GoalResolutionAttemptConflict("GAME_INSTANCE_READ_ONLY")
+        existing = audit_db.scalar(
+            select(GoalResolutionAttempt).where(
+                GoalResolutionAttempt.game_instance_id == game_instance_id,
+                GoalResolutionAttempt.submission_idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            if existing.original_goal_text != goal:
+                raise GoalResolutionAttemptConflict("GOAL_IDEMPOTENCY_CONFLICT")
+            return existing, True
+        active_task = audit_db.scalar(
+            select(AgentTask.id).where(
+                AgentTask.game_instance_id == game_instance_id,
+                AgentTask.status.in_(
+                    (
+                        AgentTaskStatus.ACTIVE,
+                        AgentTaskStatus.REQUIRES_PLAYER_DECISION,
+                        AgentTaskStatus.WAITING_FOR_PLAYER_ACTION,
+                        AgentTaskStatus.WAITING_FOR_WORLD_EVENT,
+                    )
+                ),
+            )
+        )
+        if active_task is not None:
+            raise GoalResolutionAttemptConflict("AGENT_TASK_ALREADY_ACTIVE")
+        for draft in audit_db.scalars(
+            select(ResolvedGoalDraft).where(
+                ResolvedGoalDraft.game_instance_id == game_instance_id,
+                ResolvedGoalDraft.status == ResolvedGoalDraftStatus.READY,
+            )
+        ):
+            draft.status = ResolvedGoalDraftStatus.SUPERSEDED
+        row = GoalResolutionAttempt(
+            game_instance_id=game_instance_id,
+            scenario_version_id=scenario_version_id,
+            submission_idempotency_key=idempotency_key,
+            original_goal_text=goal,
+            normalized_goal_text=_normalize_goal(goal),
+            goal_hash=_goal_hash(goal),
+            resolution_status="IN_PROGRESS",
+            resolver_source="PENDING",
+            grounded_public_entity_keys=[],
+            resolution_candidate_keys=[],
+            interpretation_attempts=[],
+            recovery_used=False,
+            value_type_diagnostics=[],
+            provider_metadata={},
+            resolution_duration_ms=0,
+        )
+        audit_db.add(row)
+        audit_db.flush()
+        audit_db.commit()
+        return row, False
 
 _SAFE_PROVIDER_METADATA_KEYS = frozenset(
     {
@@ -113,6 +199,9 @@ def persist_goal_resolution_attempt(
     provider_calls: Sequence[dict[str, object]] | None = None,
     validation_diagnostics: Sequence[dict[str, object]] | None = None,
     resolution_observation: dict[str, object] | None = None,
+    attempt_id: UUID | None = None,
+    submission_idempotency_key: str | None = None,
+    presentation_text: str | None = None,
 ) -> GoalResolutionAttempt:
     """Commit a redacted Goal resolution result in an independent transaction.
 
@@ -176,9 +265,10 @@ def persist_goal_resolution_attempt(
     rejection_code = error_code or _safe_text(observation.get("rejection_code"))
     value_type_diagnostics = _safe_value_type_diagnostics(observation.get("value_type_diagnostics"))
     with session_factory() as audit_db:
-        row = GoalResolutionAttempt(
+        values: dict[str, object] = dict(
             game_instance_id=game_instance_id,
             scenario_version_id=scenario_version_id,
+            submission_idempotency_key=submission_idempotency_key,
             original_goal_text=goal,
             normalized_goal_text=_normalize_goal(goal),
             goal_hash=_goal_hash(goal),
@@ -209,8 +299,15 @@ def persist_goal_resolution_attempt(
             provider_model=provider_model,
             provider_metadata=provider_metadata,
             resolution_duration_ms=max(0, resolution_duration_ms),
+            presentation_text=presentation_text,
         )
-        audit_db.add(row)
+        row = audit_db.get(GoalResolutionAttempt, attempt_id) if attempt_id is not None else None
+        if row is None:
+            row = GoalResolutionAttempt(**values)
+            audit_db.add(row)
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
         audit_db.flush()
         audit_db.commit()
     return row

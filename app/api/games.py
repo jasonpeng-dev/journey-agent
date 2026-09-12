@@ -116,22 +116,18 @@ def submit_goal(
         submission = configured_play_orchestrator(
             db, GameInstanceId(game_instance_id), settings
         ).submit_goal(request.goal, idempotency_key=request.idempotency_key)
-        if submission.task is None:
-            db.rollback()
-            status_value = GoalSubmissionStatus(submission.resolution.status)
-            return GoalSubmissionResponse(
-                status=status_value,
-                clarification_prompt=submission.resolution.clarification_prompt,
-                candidate_objective_names=list(submission.resolution.candidate_keys),
-                explanation=(
-                    "Goal must be expressible in the exact ScenarioVersion's "
-                    "supported Goal vocabulary"
-                ),
-            )
         db.commit()
-        state = PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
-        assert state.current_task is not None
-        return GoalSubmissionResponse(status=GoalSubmissionStatus.ACCEPTED, task=state.current_task)
+        return GoalSubmissionResponse(
+            resolution_id=submission.resolution_id,
+            submitted_goal=request.goal,
+            status=(
+                GoalSubmissionStatus.READY_FOR_CONFIRMATION
+                if submission.draft is not None
+                else GoalSubmissionStatus(submission.resolution.status)
+            ),
+            presentation_text=submission.presentation_text,
+            draft_id=submission.draft.id if submission.draft is not None else None,
+        )
     except (
         GameInstanceError,
         GameLifecycleError,

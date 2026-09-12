@@ -24,7 +24,7 @@ from app.domain.formal_goal import (
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import ObjectiveRequirementV2, ScenarioDefinitionV2
-from app.infrastructure.db.models import AgentTask
+from app.infrastructure.db.models import AgentTask, ResolvedGoalDraft
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.completion_kernel import (
     evaluate_operation_requirement,
@@ -221,6 +221,31 @@ def load_formal_goal_for_task(
     return _compile_legacy_predefined_task(task, snapshot)
 
 
+def load_formal_goal_for_draft(
+    db: Session,
+    scope: RuntimeScope,
+    draft: ResolvedGoalDraft,
+) -> FormalGoalContract:
+    """Load and prove a Draft contract without reinterpreting its original text."""
+
+    if draft.game_instance_id != scope.game_instance_id:
+        raise FormalGoalPersistenceError(
+            "FORMAL_GOAL_DRAFT_SCOPE_INVALID",
+            "Formal Goal Draft does not belong to the requested runtime scope",
+        )
+    snapshot = ScenarioVersionRepository(db).load(scope.scenario_version_id)
+    return load_and_validate_formal_goal_contract(
+        payload=draft.formal_goal_contract_json,
+        contract_hash=draft.formal_goal_contract_hash,
+        schema_version=draft.formal_goal_contract_schema_version,
+        source_kind=draft.formal_goal_source_kind,
+        scenario_version_id=draft.scenario_version_id,
+        scenario_content_hash=draft.scenario_content_hash,
+        compiler_version=draft.formal_goal_compiler_version,
+        snapshot=snapshot,
+    )
+
+
 def _load_persisted_formal_goal(
     task: AgentTask,
     snapshot: ScenarioVersionSnapshot,
@@ -346,5 +371,6 @@ __all__ = [
     "FormalGoalPersistenceError",
     "FormalGoalRequirementEvaluation",
     "load_and_validate_formal_goal_contract",
+    "load_formal_goal_for_draft",
     "load_formal_goal_for_task",
 ]

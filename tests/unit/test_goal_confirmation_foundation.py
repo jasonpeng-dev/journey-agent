@@ -2,12 +2,14 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.domain.enums import ResolvedGoalDraftStatus
 from app.domain.runtime_scope import GameInstanceId
 from app.infrastructure.db.models import (
+    ConversationSession,
     GoalResolutionAttempt,
     ResolvedGoalDraft,
     ResolvedGoalDraftImmutableError,
@@ -32,33 +34,42 @@ def _foundation(session: Session):  # type: ignore[no-untyped-def]
         idempotency_key=str(uuid4()),
     )
     session.flush()
-    submission = PlayOrchestrator(session, GameInstanceId(runtime.instance.id)).submit_goal(
+    orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
+    submission = orchestrator.submit_goal(
         "stabilize the patient", idempotency_key=str(uuid4())
     )
-    assert submission.task is not None
+    assert submission.draft is not None
     attempt = (
         session.query(GoalResolutionAttempt)
         .order_by(GoalResolutionAttempt.created_at.desc())
         .first()
     )
     assert attempt is not None
-    task = submission.task
-    draft = ResolvedGoalDraft(
-        game_instance_id=runtime.instance.id,
-        resolution_attempt_id=attempt.id,
-        original_goal_text=task.goal_description,
-        scenario_version_id=version.id,
-        scenario_content_hash=version.content_hash,
-        formal_goal_contract_schema_version=task.formal_goal_contract_schema_version,
-        formal_goal_source_kind=task.formal_goal_source_kind,
-        formal_goal_contract_json=task.formal_goal_contract_json,
-        formal_goal_contract_hash=task.formal_goal_contract_hash,
-        formal_goal_compiler_version=task.formal_goal_compiler_version,
-        resolver_source=task.objective_resolver_source or "UNKNOWN",
-        status=ResolvedGoalDraftStatus.READY,
+    draft = submission.draft
+    contract = load_and_validate_formal_goal_contract(
+        payload=draft.formal_goal_contract_json,
+        contract_hash=draft.formal_goal_contract_hash,
+        schema_version=draft.formal_goal_contract_schema_version,
+        source_kind=draft.formal_goal_source_kind,
+        scenario_version_id=draft.scenario_version_id,
+        scenario_content_hash=draft.scenario_content_hash,
+        compiler_version=draft.formal_goal_compiler_version,
+        snapshot=ScenarioVersionRepository(session).load(version.id),
     )
-    session.add(draft)
-    session.flush()
+    conversation = session.scalar(
+        select(ConversationSession).where(
+            ConversationSession.game_instance_id == runtime.instance.id,
+            ConversationSession.actor_key.is_not(None),
+        )
+    )
+    assert conversation is not None
+    task = orchestrator.agent.create_task_from_formal_goal(
+        conversation,
+        draft.original_goal_text,
+        formal_goal=contract,
+        resolver_source=draft.resolver_source,
+        initialize_plan=False,
+    )
     return runtime, version, task, draft
 
 
