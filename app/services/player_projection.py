@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -60,6 +60,7 @@ from app.domain.enums import (
     StepExecutionType,
     WorldOperationStatus,
 )
+from app.domain.formal_goal import FormalGoalContract
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import (
     ActionBehavior,
@@ -75,6 +76,7 @@ from app.infrastructure.db.models import (
     GameInstance,
     GameInstanceActor,
     GameInstanceResourceState,
+    GoalResolutionAttempt,
     PlanningAttempt,
     PlanningCycle,
     PlayerExecutionCheckpoint,
@@ -185,6 +187,18 @@ class PlayerProjectionService:
             )
             .order_by(ResolvedGoalDraft.created_at.desc(), ResolvedGoalDraft.id.desc())
         )
+        ready_attempt = (
+            self.db.get(GoalResolutionAttempt, ready_draft.resolution_attempt_id)
+            if ready_draft is not None
+            else None
+        )
+        ready_formal_goal = (
+            load_formal_goal_for_draft(self.db, scope, ready_draft)
+            if ready_draft is not None
+            else None
+        )
+        if ready_draft is not None:
+            assert ready_formal_goal is not None
         if selected_task_id is None:
             # The active Task is the player-facing default.  A terminal Task
             # can only be the fallback when the Instance has no active work.
@@ -371,9 +385,13 @@ class PlayerProjectionService:
                 PublicResolvedGoalDraftResponse(
                     draft_id=ready_draft.id,
                     submitted_goal=ready_draft.original_goal_text,
-                    presentation_text=present_resolved_goal(
-                        load_formal_goal_for_draft(self.db, scope, ready_draft),
-                        definition,
+                    presentation_text=(
+                        ready_attempt.presentation_text
+                        if ready_attempt is not None and ready_attempt.presentation_text
+                        else present_resolved_goal(
+                            cast(FormalGoalContract, ready_formal_goal),
+                            definition,
+                        )
                     ),
                     created_at=ready_draft.created_at,
                 )

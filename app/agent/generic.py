@@ -952,6 +952,18 @@ class GenericGoalResolver:
             return self._resolve_dynamic_goal(goal, definition, frozen_family="STATE")
         interpreter = getattr(provider, "interpret_dynamic_goal", None)
         if not callable(interpreter):
+            if frozen_family == "STATE":
+                raise GenericProviderError(
+                    "MODEL_PROVIDER_FAILURE",
+                    "The configured Goal provider cannot interpret STATE Goals",
+                    resolution_observation={
+                        "stage": "STATE_INTERPRETATION",
+                        "status": "ERROR",
+                        "result": "NO_STATE_INTERPRETER",
+                        "rejection_code": "NO_STATE_INTERPRETER",
+                        "frozen_family": "STATE",
+                    },
+                )
             return None
         provider_history_start = (
             _provider_history_start
@@ -1222,12 +1234,24 @@ class GenericGoalResolver:
         grounder = getattr(provider, "ground_dynamic_goal_entities", None)
         needs_provider_grounding = frozen_family is None and callable(grounder)
         if not needs_provider_grounding and frozen_family is None:
+            status = "NEEDS_CLARIFICATION" if grounding.status == "NONE" else "UNSUPPORTED"
             return GenericGoalResolution(
-                "UNSUPPORTED",
+                status,
+                clarification_prompt=(
+                    definition.goal_resolution.clarification_prompt
+                    if status == "NEEDS_CLARIFICATION"
+                    else None
+                ),
                 source="NO_PUBLIC_GROUNDING",
                 provider_observation=build_observation(
                     stage="DYNAMIC_GOAL_ENTITY_GROUNDING",
-                    result="NO_GROUNDING_PROVIDER",
+                    status=status,
+                    result=(
+                        "NO_PUBLIC_IDENTITY"
+                        if status == "NEEDS_CLARIFICATION"
+                        else "NO_GROUNDING_PROVIDER"
+                    ),
+                    rejection_code="NO_PUBLIC_GROUNDING",
                     validation="ACCEPTED",
                 ),
             )
@@ -1587,12 +1611,11 @@ class GenericGoalResolver:
                 )
             if operation_intent_complete and grounded_operation is None:
                 return GenericGoalResolution(
-                    "NEEDS_CLARIFICATION",
-                    clarification_prompt=definition.goal_resolution.clarification_prompt,
+                    "UNSUPPORTED",
                     source="PUBLIC_OPERATION_LOCK_UNREPRESENTABLE",
                     provider_observation=build_observation(
                         stage="DYNAMIC_GOAL_INTERPRETATION",
-                        status="NEEDS_CLARIFICATION",
+                        status="UNSUPPORTED",
                         result="EXPLICIT_OPERATION_LOCK_UNREPRESENTABLE",
                         validation="REJECTED",
                         rejection_code="OPERATION_LOCK_UNREPRESENTABLE",
@@ -1615,13 +1638,23 @@ class GenericGoalResolver:
                         projection=projection,
                     )
                 except FormalGoalError as exc:
+                    if _operation_lock_failure_is_system(exc.code):
+                        raise GenericProviderError(
+                            "MODEL_PROVIDER_FAILURE",
+                            "The frozen public operation could not be validated",
+                            resolution_observation={
+                                "stage": "DYNAMIC_GOAL_INTERPRETATION",
+                                "status": "ERROR",
+                                "result": "EXPLICIT_OPERATION_LOCK_INVALID",
+                                "rejection_code": exc.code,
+                            },
+                        ) from exc
                     return GenericGoalResolution(
-                        "NEEDS_CLARIFICATION",
-                        clarification_prompt=definition.goal_resolution.clarification_prompt,
+                        "UNSUPPORTED",
                         source="PUBLIC_OPERATION_LOCK_INVALID",
                         provider_observation=build_observation(
                             stage="DYNAMIC_GOAL_INTERPRETATION",
-                            status="NEEDS_CLARIFICATION",
+                            status="UNSUPPORTED",
                             result="EXPLICIT_OPERATION_LOCK_INVALID",
                             validation="REJECTED",
                             rejection_code=exc.code,
@@ -2090,6 +2123,33 @@ class GenericGoalResolver:
                 provider_observation=final_observation,
             )
 
+        if frozen_family == "STATE":
+            status = (
+                "NEEDS_CLARIFICATION"
+                if grounding.status in {"NONE", "NEEDS_CLARIFICATION"}
+                else "UNSUPPORTED"
+            )
+            return GenericGoalResolution(
+                status,
+                clarification_prompt=(
+                    grounding.clarification_prompt
+                    or definition.goal_resolution.clarification_prompt
+                    if status == "NEEDS_CLARIFICATION"
+                    else None
+                ),
+                source="NO_PUBLIC_GROUNDING",
+                provider_observation={
+                    "stage": "STATE_INTERPRETATION",
+                    "status": status,
+                    "result": (
+                        "NO_PUBLIC_STATE_IDENTITY"
+                        if status == "NEEDS_CLARIFICATION"
+                        else "NO_PUBLIC_STATE_EVIDENCE"
+                    ),
+                    "rejection_code": "NO_PUBLIC_GROUNDING",
+                    "frozen_family": "STATE",
+                },
+            )
         return GenericGoalResolution("UNSUPPORTED", source="NO_PUBLIC_GROUNDING")
 
     def _resolve_vnext_state_goal(
@@ -2104,26 +2164,44 @@ class GenericGoalResolver:
         """Resolve a frozen STATE without entering the legacy grounding-round loop."""
 
         if not callable(interpreter):
-            return GenericGoalResolution(
-                "UNSUPPORTED",
-                source="NO_STATE_INTERPRETER",
-                provider_observation=_vnext_goal_observation(
+            raise GenericProviderError(
+                "MODEL_PROVIDER_FAILURE",
+                "The configured Goal provider cannot interpret STATE Goals",
+                resolution_observation=_vnext_goal_observation(
                     frozen_evidence,
                     frozen_family="STATE",
                     terminal_stage="STATE_INTERPRETATION",
                     result="NO_STATE_INTERPRETER",
+                    rejection_code="NO_STATE_INTERPRETER",
                 ),
             )
         if not frozen_evidence.merged_refs:
-            return GenericGoalResolution(
-                "UNSUPPORTED",
-                source="NO_PUBLIC_GROUNDING",
-                provider_observation=_vnext_goal_observation(
-                    frozen_evidence,
-                    frozen_family="STATE",
-                    terminal_stage="STATE_INTERPRETATION",
-                    result="NO_PUBLIC_STATE_EVIDENCE",
+            status = (
+                "UNSUPPORTED"
+                if frozen_evidence.semantic_status == "UNSUPPORTED"
+                else "NEEDS_CLARIFICATION"
+            )
+            observation = _vnext_goal_observation(
+                frozen_evidence,
+                frozen_family="STATE",
+                terminal_stage="STATE_INTERPRETATION",
+                result=(
+                    "NO_PUBLIC_STATE_IDENTITY"
+                    if status == "NEEDS_CLARIFICATION"
+                    else "NO_PUBLIC_STATE_EVIDENCE"
                 ),
+                rejection_code="NO_PUBLIC_GROUNDING",
+            )
+            observation["status"] = status
+            return GenericGoalResolution(
+                status,
+                clarification_prompt=(
+                    definition.goal_resolution.clarification_prompt
+                    if status == "NEEDS_CLARIFICATION"
+                    else None
+                ),
+                source="NO_PUBLIC_GROUNDING",
+                provider_observation=observation,
             )
 
         grounding = _dynamic_goal_grounding_from_refs(
@@ -2142,15 +2220,32 @@ class GenericGoalResolver:
             include_authored_matches=False,
         )
         if grounding.status != "RESOLVED":
-            return GenericGoalResolution(
-                "UNSUPPORTED",
-                source="NO_PUBLIC_GROUNDING",
-                provider_observation=_vnext_goal_observation(
-                    frozen_evidence,
-                    frozen_family="STATE",
-                    terminal_stage="STATE_INTERPRETATION",
-                    result="NO_PUBLIC_STATE_EVIDENCE",
+            status = (
+                "UNSUPPORTED"
+                if frozen_evidence.semantic_status == "UNSUPPORTED"
+                else "NEEDS_CLARIFICATION"
+            )
+            observation = _vnext_goal_observation(
+                frozen_evidence,
+                frozen_family="STATE",
+                terminal_stage="STATE_INTERPRETATION",
+                result=(
+                    "NO_PUBLIC_STATE_IDENTITY"
+                    if status == "NEEDS_CLARIFICATION"
+                    else "NO_PUBLIC_STATE_EVIDENCE"
                 ),
+                rejection_code="NO_PUBLIC_GROUNDING",
+            )
+            observation["status"] = status
+            return GenericGoalResolution(
+                status,
+                clarification_prompt=(
+                    definition.goal_resolution.clarification_prompt
+                    if status == "NEEDS_CLARIFICATION"
+                    else None
+                ),
+                source="NO_PUBLIC_GROUNDING",
+                provider_observation=observation,
             )
 
         projection = _dynamic_goal_projection(
@@ -8813,6 +8908,26 @@ def _dynamic_goal_action_contract(action: ActionDefinitionV2) -> dict[str, objec
     """Return the single canonical invocation contract consumed by Resolver stages."""
 
     return canonical_action_invocation_contract(action)
+
+
+def _operation_lock_failure_is_system(code: str) -> bool:
+    """Classify lock validation failures that indicate infrastructure drift.
+
+    Contract/publicity failures are player Goal semantics and remain typed
+    ``UNSUPPORTED``.  Provider/schema and exact-version/invariant failures
+    must use the existing system-error path instead of looking like a rejected
+    Goal.
+    """
+
+    if code in {
+        "FROZEN_EVIDENCE_CONFLICT",
+        "OPERATION_LOCK_MISMATCH",
+        "MODEL_PROVIDER_RESPONSE_INVALID",
+        "PROVIDER_SCHEMA_INVALID",
+        "MODEL_PROVIDER_FAILURE",
+    }:
+        return True
+    return code.startswith(("MODEL_PROVIDER_", "PROVIDER_", "INTERNAL_", "RUNTIME_"))
 
 
 def _contract_driven_operation_context(

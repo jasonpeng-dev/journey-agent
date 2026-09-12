@@ -23,6 +23,7 @@ import {
   syncPlayStateCaches,
 } from "./playPresentation";
 import {
+  confirmGoalErrorText,
   goalSubmissionErrorText,
   taskExplanationLabel,
   uiLabel,
@@ -1304,6 +1305,18 @@ describe("Formal Play player projections", () => {
     expect(message).toBe("目标解析暂时失败，请重新解析。");
     expect(message).not.toContain("MODEL_PROVIDER_RESPONSE_INVALID");
     expect(goalSubmissionErrorText({ code: "MODEL_PROVIDER_TIMEOUT" })).toBe(message);
+  });
+
+  it("maps confirm lifecycle and integrity errors without exposing internal codes", () => {
+    expect(confirmGoalErrorText({ code: "GOAL_DRAFT_SUPERSEDED" })).toBe(
+      "这个目标确认已失效，请重新解析目标。",
+    );
+    expect(confirmGoalErrorText({ code: "AGENT_TASK_ALREADY_ACTIVE" })).toBe(
+      "当前已有进行中的任务，暂时无法确认新的目标。",
+    );
+    const safe = confirmGoalErrorText({ code: "FORMAL_GOAL_CONTRACT_HASH_MISMATCH" });
+    expect(safe).toBe("目标确认暂时失败，请重新尝试。");
+    expect(safe).not.toContain("FORMAL_GOAL_CONTRACT_HASH_MISMATCH");
   });
 
   it("renders Knowledge sections with dynamic counts and controlled defaults", () => {

@@ -39,6 +39,7 @@ import type {
   ScenarioVersionDetail,
 } from "../types";
 import {
+  confirmGoalErrorText,
   errorText,
   goalSubmissionErrorText,
   resultLabel,
@@ -2688,7 +2689,7 @@ export function GamePage() {
       {mutationError && (
         <div className="console-error">
           <strong>命令无法继续</strong>
-          <span>{errorText(mutationError)}</span>
+          <span>{confirmGoal.error ? confirmGoalErrorText(confirmGoal.error) : errorText(mutationError)}</span>
         </div>
       )}
       <section className="scenario-strip">

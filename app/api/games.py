@@ -168,7 +168,7 @@ def confirm_goal_draft(
         PlayError,
     ) as exc:
         db.rollback()
-        _raise_http(exc)
+        _raise_http(exc, goal_confirmation=True)
 
 
 @router.post(
@@ -544,16 +544,37 @@ def _raise_http(
         | PlayError
         | RuntimeInitializationError
     ),
+    *,
+    goal_confirmation: bool = False,
 ) -> Never:
-    if exc.code == "MODEL_PROVIDER_TIMEOUT":
+    if goal_confirmation and _is_goal_integrity_failure(exc.code):
+        status_code = 500
+        message = "目标确认暂时失败，请重新尝试。"  # noqa: RUF001
+    elif exc.code == "MODEL_PROVIDER_TIMEOUT":
         status_code = 504
+        message = exc.message
     elif exc.code.startswith("MODEL_PROVIDER_"):
         status_code = 502
+        message = exc.message
     elif exc.code == "RUNTIME_CONTRACT_ERROR" or exc.code.startswith("RULE_"):
         status_code = 500
+        message = exc.message
     else:
         status_code = 404 if exc.code.endswith("NOT_FOUND") else 409
-    raise AppError(exc.code, exc.message, status_code=status_code) from exc
+        message = exc.message
+    raise AppError(exc.code, message, status_code=status_code) from exc
+
+
+def _is_goal_integrity_failure(code: str) -> bool:
+    """Keep persisted Goal/confirmation integrity failures system-classified."""
+
+    if code.startswith("FORMAL_GOAL_"):
+        return True
+    return code in {
+        "GENERIC_SESSION_SCOPE_INVALID",
+        "GOAL_DRAFT_CONFIRMATION_INCOMPLETE",
+        "PLAY_SESSION_NOT_FOUND",
+    }
 
 
 __all__ = ["game_summary", "router"]

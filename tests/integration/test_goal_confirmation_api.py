@@ -325,6 +325,7 @@ def test_confirm_rejects_tampered_draft_integrity(
         f"/api/v1/games/{game_id}/goal-drafts/{draft_id}/confirm"
     )
 
-    assert response.status_code == 409
+    assert response.status_code == 500
     assert response.json()["error"]["code"] == code
+    assert response.json()["error"]["message"] == "目标确认暂时失败，请重新尝试。"
     assert session.scalar(select(func.count()).select_from(AgentTask)) == 0

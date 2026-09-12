@@ -273,7 +273,11 @@ class PlayOrchestrator:
                 None,
             )
         formal_goal = self.agent.compile_formal_goal_for_resolution(resolution)
-        presentation_text = present_resolved_goal(formal_goal, definition)
+        presentation_text = present_resolved_goal(
+            formal_goal,
+            definition,
+            provider_observation=resolution.provider_observation,
+        )
         persist_goal_resolution_attempt(
             self.audit_session_factory,
             game_instance_id=self.scope.game_instance_id,

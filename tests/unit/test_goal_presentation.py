@@ -95,6 +95,65 @@ def test_success_presenter_covers_resource_and_derived_state(session) -> None:  
     assert "general_engineering_parts" not in text
 
 
+def test_success_presenter_shows_only_frozen_operation_constraints(session) -> None:  # type: ignore[no-untyped-def]
+    version = require_builtin_v2_version(session, LINJIANG_V2_TEST)
+    snapshot = ScenarioVersionRepository(session).load(version.id)
+    definition = snapshot.definition
+
+    omitted_source = compile_ad_hoc_dynamic_goal_v2(
+        snapshot,
+        (
+            AdHocActionCompletedRequirementCandidateV1(
+                kind="ACTION_COMPLETED",
+                action_key="supply_power",
+                target_key="east_community_hospital",
+            ),
+        ),
+    )
+    omitted_text = present_resolved_goal(omitted_source, definition)
+    assert "东区社区医院" in omitted_text
+    assert "东部配电站" not in omitted_text
+
+    explicit_source = compile_ad_hoc_dynamic_goal_v2(
+        snapshot,
+        (
+            AdHocActionCompletedRequirementCandidateV1(
+                kind="ACTION_COMPLETED",
+                action_key="supply_power",
+                target_key="east_community_hospital",
+                parameter_constraints={"source_key": "east_distribution_station"},
+            ),
+        ),
+    )
+    explicit_text = present_resolved_goal(explicit_source, definition)
+    assert "东区社区医院" in explicit_text
+    assert "东部配电站" in explicit_text
+
+    transport = compile_ad_hoc_dynamic_goal_v2(
+        snapshot,
+        (
+            AdHocActionCompletedRequirementCandidateV1(
+                kind="ACTION_COMPLETED",
+                action_key="transport_resource",
+                target_key="south_waterfront_district",
+                binding_constraints=(
+                    {"role": "source_region", "value": "north_industrial_district"},
+                ),
+                parameter_constraints={
+                    "resources": [
+                        {"resource_key": "emergency_fuel", "amount": 30},
+                    ],
+                },
+            ),
+        ),
+    )
+    transport_text = present_resolved_goal(transport, definition)
+    assert "北部工业区" in transport_text
+    assert "南部滨水区" in transport_text
+    assert "应急燃料" in transport_text
+    assert "30个" in transport_text
+
+
 def test_failure_presenter_uses_typed_family_and_not_provider_prompt() -> None:
     resolution = GenericGoalResolution(
         "NEEDS_CLARIFICATION",
@@ -133,6 +192,28 @@ def test_failure_presenter_quotes_only_trusted_raw_surface() -> None:
     )
     assert "「部件」" in trusted
     assert "「部件」" not in untrusted
+
+
+def test_failure_presenter_separates_ambiguity_from_unsupported() -> None:
+    ambiguous = present_failed_goal(
+        GenericGoalResolution(
+            "NEEDS_CLARIFICATION",
+            source="ACTION_AMBIGUOUS",
+            provider_observation={"rejection_code": "ACTION_AMBIGUOUS"},
+        ),
+        "检查一下",
+    )
+    no_match = present_failed_goal(
+        GenericGoalResolution(
+            "UNSUPPORTED",
+            source="ACTION_NO_MATCH",
+            provider_observation={"rejection_code": "ACTION_NO_MATCH"},
+        ),
+        "执行未知操作",
+    )
+    assert "多个可执行操作" in ambiguous
+    assert "没有找到" in no_match
+    assert ambiguous != no_match
 
 
 def test_optional_not_specified_actor_is_never_requested() -> None:
