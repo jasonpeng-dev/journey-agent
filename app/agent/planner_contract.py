@@ -631,6 +631,88 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
     return _deduplicate(effects)
 
 
+def action_goal_terminal_effects(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    target_key: str | None,
+) -> tuple[tuple[str, str, StrictScalar | None], ...]:
+    """Project only canonical terminal Fact mutations for one Action target.
+
+    This is a Goal-facing projection, not a runtime simulator.  It combines
+    authored static/target planning effects, generic behavior-level planner
+    effects, and direct current-target ``SET_FACT`` resolve rules.  Knowledge,
+    resource, location, and other supporting effects are intentionally ignored
+    so an operation can be treated as a STATE only when one explicit terminal
+    Fact is actually authored.
+    """
+
+    effects: list[tuple[str, str, StrictScalar | None]] = []
+    effects.extend(
+        (item.node_key, item.fact_key, None)
+        for item in action.planning.terminal_effects
+    )
+    if target_key is not None:
+        effects.extend(
+            (target_key, item.fact_key, item.value)
+            for item in action.planning.target_terminal_effects
+        )
+
+    # Behavior-owned effects (for example SUPPLY_POWER's power_supply=AVAILABLE)
+    # are already expressed through the generic planner projection.  Do not
+    # special-case any Action key here.
+    if target_key is not None:
+        for effect in action_planner_effects(action):
+            if (
+                effect.get("type") == "FACT_MUTATION"
+                and effect.get("target") == "target_key"
+                and isinstance(effect.get("fact_key"), str)
+                and type(effect.get("value")) in {str, int, bool}
+            ):
+                effects.append(
+                    (
+                        target_key,
+                        cast(str, effect["fact_key"]),
+                        cast(StrictScalar, effect["value"]),
+                    )
+                )
+
+        # Resolve rules may encode an operation's terminal state directly on
+        # CURRENT_TARGET (CLEAR_TRANSPORT is one example).  Only literal
+        # SET_FACT effects qualify; parameter-derived values are not
+        # deterministic Goal terminal values.
+        for rule in definition.rules:
+            if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
+                continue
+            for item in rule.effects:
+                if (
+                    item.kind != EffectKind.SET_FACT
+                    or item.node is None
+                    or item.node.kind != NodeSelectorKind.CURRENT_TARGET
+                ):
+                    continue
+                projection = declarative_effect(item)
+                if projection is None or not isinstance(projection.get("fact_key"), str):
+                    continue
+                value = projection.get("value")
+                if type(value) in {str, int, bool}:
+                    effects.append(
+                        (
+                            target_key,
+                            cast(str, projection["fact_key"]),
+                            cast(StrictScalar, value),
+                        )
+                    )
+
+    unique: list[tuple[str, str, StrictScalar | None]] = []
+    seen: set[tuple[str, str, StrictScalar | None]] = set()
+    for terminal in effects:
+        if terminal in seen:
+            continue
+        seen.add(terminal)
+        unique.append(terminal)
+    return tuple(unique)
+
+
 def planner_target_contracts(
     definition: ScenarioDefinitionV2,
     action: ActionDefinitionV2,

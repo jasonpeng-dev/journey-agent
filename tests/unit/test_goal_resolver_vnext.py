@@ -444,7 +444,7 @@ def test_exact_aliases_are_forwarded_as_advisory_grounding_hints() -> None:
         assert expected in exact
 
 
-def test_travel_preserves_explicit_target_and_leaves_actor_unspecified() -> None:
+def test_travel_requires_an_explicit_actor() -> None:
     target = DynamicGoalMentionSlot(
         status="GROUNDED", ref_type="REGION", key="east_residential_district"
     )
@@ -477,10 +477,11 @@ def test_travel_preserves_explicit_target_and_leaves_actor_unspecified() -> None
 
     resolution = GenericGoalResolver(provider=provider).resolve("前往东部居住区", LINJIANG_V2_TEST)
 
-    requirement = resolution.dynamic_requirements[0]
-    assert resolution.status == "RESOLVED"
-    assert requirement.target_key == "east_residential_district"
-    assert requirement.actor_key is None
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
+    assert resolution.provider_observation is not None
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == ["actor"]
 
 
 def test_resource_state_uses_frozen_region_resource_and_amount() -> None:
@@ -702,18 +703,520 @@ def test_generic_relation_contract_rejects_explicit_source_target_conflict() -> 
     assert resolution.dynamic_requirements == ()
 
 
+def test_supply_power_omitted_source_is_a_legal_unconstrained_operation() -> None:
+    provider = _VNextProvider(
+        grounding=[
+            _role_grounding(
+                (DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),),
+                target=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                    surface="hospital",
+                ),
+            )
+        ],
+        family="OPERATION",
+        action_key="supply_power",
+        operation=[
+            _operation(
+                "supply_power",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+                parameters=[_slot("source_key", "NODE", "NOT_SPECIFIED")],
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "supply power to the hospital", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "RESOLVED"
+    requirement = resolution.dynamic_requirements[0]
+    assert requirement.action_key == "supply_power"
+    assert requirement.target_key == "central_hospital"
+    assert requirement.parameter_constraints is None
+    assert provider.operation_requests[0].explicit_role_evidence["source"]["status"] == (
+        "NOT_SPECIFIED"
+    )
 
 
+def test_supply_power_explicit_valid_source_is_frozen_and_relation_passes() -> None:
+    provider = _VNextProvider(
+        grounding=[
+            _role_grounding(
+                (
+                    DynamicGoalCandidateReference(
+                        ref_type="NODE", key="east_distribution_station"
+                    ),
+                    DynamicGoalCandidateReference(
+                        ref_type="NODE", key="east_community_hospital"
+                    ),
+                ),
+                source=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="NODE",
+                    key="east_distribution_station",
+                    surface="distribution station",
+                ),
+                target=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="NODE",
+                    key="east_community_hospital",
+                    surface="community hospital",
+                ),
+            )
+        ],
+        family="OPERATION",
+        action_key="supply_power",
+        operation=[
+            _operation(
+                "supply_power",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="east_community_hospital",
+                ),
+                parameters=[
+                    _slot(
+                        "source_key",
+                        "NODE",
+                        "GROUNDED",
+                        ref_type="NODE",
+                        key="east_distribution_station",
+                    )
+                ],
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "supply power from the distribution station to the community hospital",
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "RESOLVED"
+    assert resolution.dynamic_requirements[0].parameter_constraints == {
+        "source_key": "east_distribution_station"
+    }
 
 
+def test_supply_power_explicit_wrong_source_is_a_relation_conflict() -> None:
+    provider = _VNextProvider(
+        grounding=[
+            _role_grounding(
+                (
+                    DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),
+                    DynamicGoalCandidateReference(
+                        ref_type="NODE", key="east_community_hospital"
+                    ),
+                ),
+                source=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                    surface="central hospital",
+                ),
+                target=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="NODE",
+                    key="east_community_hospital",
+                    surface="community hospital",
+                ),
+            )
+        ],
+        family="OPERATION",
+        action_key="supply_power",
+        operation=[
+            _operation(
+                "supply_power",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="east_community_hospital",
+                ),
+                parameters=[
+                    _slot(
+                        "source_key",
+                        "NODE",
+                        "GROUNDED",
+                        ref_type="NODE",
+                        key="central_hospital",
+                    )
+                ],
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "supply power from central hospital to the community hospital",
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.source == "SOURCE_TARGET_RELATION_CONFLICT"
+    assert provider.operation_requests[0].action_key == "supply_power"
 
 
+@pytest.mark.parametrize(
+    ("action_key", "operation", "expected_missing"),
+    [
+        (
+            "generate_power",
+            _operation("generate_power", target=_slot("target", "NODE", "NOT_SPECIFIED")),
+            ("target",),
+        ),
+        (
+            "travel",
+            _operation(
+                "travel",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="central_hospital",
+                ),
+            ),
+            ("actor",),
+        ),
+        (
+            "transport_resource",
+            _operation(
+                "transport_resource",
+                target=_slot(
+                    "target",
+                    "REGION",
+                    "GROUNDED",
+                    ref_type="REGION",
+                    key="central_district",
+                ),
+                bindings=[_slot("source_region", "REGION", "NOT_SPECIFIED")],
+                parameters=[
+                    _slot("amount", "INTEGER", "GROUNDED", value=30),
+                    _slot(
+                        "resource_key",
+                        "RESOURCE",
+                        "GROUNDED",
+                        ref_type="RESOURCE",
+                        key="emergency_fuel",
+                    ),
+                ],
+            ),
+            ("source_region",),
+        ),
+        (
+            "transport_resource",
+            _operation(
+                "transport_resource",
+                target=_slot(
+                    "target",
+                    "REGION",
+                    "GROUNDED",
+                    ref_type="REGION",
+                    key="central_district",
+                ),
+                bindings=[
+                    _slot(
+                        "source_region",
+                        "REGION",
+                        "GROUNDED",
+                        ref_type="REGION",
+                        key="west_logistics_district",
+                    )
+                ],
+                parameters=[
+                    _slot("amount", "INTEGER", "NOT_SPECIFIED"),
+                    _slot(
+                        "resource_key",
+                        "RESOURCE",
+                        "GROUNDED",
+                        ref_type="RESOURCE",
+                        key="emergency_fuel",
+                    ),
+                ],
+            ),
+            ("amount",),
+        ),
+        (
+            "transport_resource",
+            _operation(
+                "transport_resource",
+                target=_slot(
+                    "target",
+                    "REGION",
+                    "GROUNDED",
+                    ref_type="REGION",
+                    key="central_district",
+                ),
+                bindings=[
+                    _slot(
+                        "source_region",
+                        "REGION",
+                        "GROUNDED",
+                        ref_type="REGION",
+                        key="west_logistics_district",
+                    )
+                ],
+                parameters=[
+                    _slot("amount", "INTEGER", "GROUNDED", value=30),
+                    _slot("resource_key", "RESOURCE", "NOT_SPECIFIED"),
+                ],
+            ),
+            ("resource_key",),
+        ),
+        (
+            "transport_resource",
+            _operation(
+                "transport_resource",
+                target=_slot("target", "REGION", "NOT_SPECIFIED"),
+                bindings=[
+                    _slot(
+                        "source_region",
+                        "REGION",
+                        "GROUNDED",
+                        ref_type="REGION",
+                        key="west_logistics_district",
+                    )
+                ],
+                parameters=[
+                    _slot("amount", "INTEGER", "GROUNDED", value=30),
+                    _slot(
+                        "resource_key",
+                        "RESOURCE",
+                        "GROUNDED",
+                        ref_type="RESOURCE",
+                        key="emergency_fuel",
+                    ),
+                ],
+            ),
+            ("target",),
+        ),
+    ],
+)
+def test_goal_required_missing_slot_returns_clarification_without_formal_goal(
+    action_key: str,
+    operation: dict[str, object],
+    expected_missing: tuple[str, ...],
+) -> None:
+    provider = _VNextProvider(
+        grounding=[DynamicGoalEntityGrounding(status="UNSUPPORTED")],
+        family="OPERATION",
+        action_key=action_key,
+        operation=[operation],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        f"exercise {action_key}", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == list(
+        expected_missing
+    )
 
 
+def test_action_surface_fragment_does_not_ground_required_target() -> None:
+    """Action wording must not become a target constraint by substring reuse."""
+
+    provider = _VNextProvider(
+        grounding=[
+            DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(
+                        ref_type="ACTION", key="generate_power"
+                    ),
+                ),
+                intent=DynamicGoalIntentDraft(
+                    intent_kind="OPERATION",
+                    action=DynamicGoalMentionSlot(
+                        status="GROUNDED",
+                        ref_type="ACTION",
+                        key="generate_power",
+                        surface="启动燃料应急发电",
+                        match_semantics="EXACT_OR_AUTHORED",
+                    ),
+                    target=DynamicGoalMentionSlot(
+                        status="GROUNDED",
+                        ref_type="NODE",
+                        key="southeast_fuel_emergency_power_plant",
+                        surface="燃料应急发电",
+                        match_semantics="SEMANTIC_EQUIVALENT",
+                    ),
+                    resource=DynamicGoalMentionSlot(
+                        status="GROUNDED",
+                        ref_type="RESOURCE",
+                        key="emergency_fuel",
+                        surface="燃料",
+                        match_semantics="SEMANTIC_EQUIVALENT",
+                    ),
+                ),
+            )
+        ],
+        family="OPERATION",
+        action_key="generate_power",
+        operation=[
+            _operation(
+                "generate_power",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="southeast_fuel_emergency_power_plant",
+                ),
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "启动燃料应急发电", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == [
+        "target"
+    ]
 
 
+def test_bare_unresolved_required_role_normalizes_to_missing_slot() -> None:
+    provider = _VNextProvider(
+        grounding=[
+            DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(
+                        ref_type="ACTION", key="generate_power"
+                    ),
+                ),
+                intent=DynamicGoalIntentDraft(
+                    intent_kind="OPERATION",
+                    action=DynamicGoalMentionSlot(
+                        status="GROUNDED",
+                        ref_type="ACTION",
+                        key="generate_power",
+                    ),
+                    target=DynamicGoalMentionSlot(status="UNRESOLVED"),
+                ),
+            )
+        ],
+        family="OPERATION",
+        action_key="generate_power",
+        operation=[
+            _operation(
+                "generate_power",
+                target=_slot(
+                    "target",
+                    "NODE",
+                    "GROUNDED",
+                    ref_type="NODE",
+                    key="southeast_fuel_emergency_power_plant",
+                ),
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "启动燃料应急发电", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
 
 
+def test_omitted_target_is_not_promoted_from_explicit_source_identity() -> None:
+    """An explicit source cannot silently fill an omitted required target."""
+
+    provider = _VNextProvider(
+        grounding=[
+            _role_grounding(
+                (
+                    DynamicGoalCandidateReference(
+                        ref_type="REGION", key="west_logistics_district"
+                    ),
+                    DynamicGoalCandidateReference(
+                        ref_type="RESOURCE", key="emergency_fuel"
+                    ),
+                ),
+                source=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="REGION",
+                    key="west_logistics_district",
+                    surface="west depot",
+                    match_semantics="SEMANTIC_EQUIVALENT",
+                ),
+                target=DynamicGoalMentionSlot(status="NOT_SPECIFIED"),
+                resource=DynamicGoalMentionSlot(
+                    status="GROUNDED",
+                    ref_type="RESOURCE",
+                    key="emergency_fuel",
+                    surface="emergency fuel",
+                    match_semantics="SEMANTIC_EQUIVALENT",
+                ),
+                amount=DynamicGoalScalarMentionSlot(
+                    status="GROUNDED", value=30, surface="30"
+                ),
+            )
+        ],
+        family="OPERATION",
+        action_key="transport_resource",
+        operation=[
+            _operation(
+                "transport_resource",
+                target=_slot(
+                    "target",
+                    "REGION",
+                    "GROUNDED",
+                    ref_type="REGION",
+                    key="west_logistics_district",
+                ),
+                bindings=[
+                    _slot(
+                        "source_region",
+                        "REGION",
+                        "GROUNDED",
+                        ref_type="REGION",
+                        key="west_logistics_district",
+                    )
+                ],
+                parameters=[
+                    _slot("amount", "INTEGER", "GROUNDED", value=30),
+                    _slot(
+                        "resource_key",
+                        "RESOURCE",
+                        "GROUNDED",
+                        ref_type="RESOURCE",
+                        key="emergency_fuel",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    resolution = GenericGoalResolver(provider=provider).resolve(
+        "transport 30 emergency fuel from west depot", LINJIANG_V2_TEST
+    )
+
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == [
+        "target"
+    ]
 
 
 def test_nonlocal_transport_is_frozen_without_route_legality_validation() -> None:

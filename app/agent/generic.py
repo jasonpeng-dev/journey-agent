@@ -1623,6 +1623,33 @@ class GenericGoalResolver:
                 )
             locked_candidate_set = None
             if grounded_operation is not None:
+                action = next(
+                    (
+                        item
+                        for item in definition.actions
+                        if item.key == grounded_operation.action_key
+                    ),
+                    None,
+                )
+                if action is not None:
+                    try:
+                        _validate_goal_required_operation_slots(action, grounded_operation)
+                    except FormalGoalError as exc:
+                        return GenericGoalResolution(
+                            "NEEDS_CLARIFICATION",
+                            clarification_prompt=definition.goal_resolution.clarification_prompt,
+                            source=exc.code,
+                            provider_observation=build_observation(
+                                stage="CONTRACT_VALIDATION",
+                                status="NEEDS_CLARIFICATION",
+                                result="GOAL_REQUIRED_SLOT_MISSING",
+                                validation="REJECTED",
+                                rejection_code=exc.code,
+                                validation_diagnostics=(
+                                    {"code": exc.code, **dict(exc.details)},
+                                ),
+                            ),
+                        )
                 candidate = _dynamic_goal_grounded_operation_candidate(grounded_operation)
                 candidate_set = AdHocGoalCandidateSetV2(requirements=(candidate,))
                 try:
@@ -2798,6 +2825,7 @@ class GenericGoalResolver:
                     deterministic_refs,
                     operation_topology,
                 )
+                _validate_goal_required_operation_slots(action, operation)
                 _validate_explicit_actor_action_compatibility(
                     definition,
                     action,
@@ -2885,6 +2913,7 @@ class GenericGoalResolver:
                         "TARGET_UNRESOLVED",
                         "TARGET_AMBIGUOUS",
                         "EXPLICIT_CONSTRAINT_UNRESOLVED",
+                        "GOAL_REQUIRED_SLOT_MISSING",
                     }
                     else "UNSUPPORTED"
                 )
@@ -8436,6 +8465,10 @@ def _dynamic_goal_routing_action_catalog(
                         "slot_key": item["slot_key"],
                         "expected_type": item["expected_type"],
                         "description": item["description"],
+                        "logical_role": item["logical_role"],
+                        "semantic_reference_type": item["semantic_reference_type"],
+                        "goal_required": item["goal_required"],
+                        "runtime_required": item["runtime_required"],
                     }
                     for item in cast(list[dict[str, object]], contract["bindings"])
                 ],
@@ -8444,6 +8477,10 @@ def _dynamic_goal_routing_action_catalog(
                         "slot_key": item["slot_key"],
                         "name": item["name"],
                         "expected_type": item["expected_type"],
+                        "logical_role": item["logical_role"],
+                        "semantic_reference_type": item["semantic_reference_type"],
+                        "goal_required": item["goal_required"],
+                        "runtime_required": item["runtime_required"],
                     }
                     for item in cast(list[dict[str, object]], contract["parameters"])
                 ],
@@ -9968,6 +10005,54 @@ def _compose_contract_driven_operation(
         binding_constraints=binding_constraints,
         parameter_constraints=parameter_constraints or None,
     )
+
+
+def _validate_goal_required_operation_slots(
+    action: ActionDefinitionV2,
+    operation: DynamicGoalGroundedOperation,
+) -> None:
+    """Require every authored Goal slot before compiling a FormalGoal.
+
+    This gate intentionally consumes the final canonical operation rather than
+    provider mentions or deterministic lookup hints. Optional invocation slots
+    remain unconstrained, while a required slot must be represented by a
+    grounded actor, target, binding, or parameter value.
+    """
+
+    contract = _dynamic_goal_action_contract(action)
+    raw_slots = contract.get("slots")
+    slots = raw_slots if isinstance(raw_slots, (list, tuple)) else ()
+    binding_values = {item.role: item.value for item in operation.binding_constraints}
+    parameter_values = operation.parameter_constraints or {}
+    missing: list[str] = []
+    for raw_slot in slots:
+        if not isinstance(raw_slot, Mapping) or raw_slot.get("goal_required") is not True:
+            continue
+        slot_key = raw_slot.get("slot_key")
+        if not isinstance(slot_key, str) or not slot_key:
+            continue
+        channel = raw_slot.get("storage_channel")
+        if channel == "actor":
+            present = operation.actor_key is not None and bool(operation.actor_key.strip())
+        elif channel == "target":
+            present = operation.target_key is not None and bool(operation.target_key.strip())
+        elif channel == "binding":
+            present = slot_key in binding_values and binding_values[slot_key] is not None
+        elif channel == "parameter":
+            present = slot_key in parameter_values and parameter_values[slot_key] is not None
+        else:
+            present = False
+        if not present:
+            missing.append(slot_key)
+    if missing:
+        raise FormalGoalError(
+            "GOAL_REQUIRED_SLOT_MISSING",
+            "The selected Action Goal is missing required invocation slots",
+            details={
+                "action_key": action.key,
+                "missing_slot_keys": sorted(set(missing)),
+            },
+        )
 
 
 def _validate_explicit_actor_action_compatibility(

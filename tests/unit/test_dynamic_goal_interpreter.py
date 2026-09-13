@@ -390,7 +390,7 @@ def test_explicit_transport_goal_preserves_action_defined_source_binding() -> No
     }
 
 
-def test_explicit_operation_without_source_keeps_source_and_actor_not_specified() -> None:
+def test_explicit_operation_without_required_source_clarifies() -> None:
     candidate = AdHocActionCompletedRequirementCandidateV1(
         kind="ACTION_COMPLETED",
         action_key="transport_resource",
@@ -415,18 +415,20 @@ def test_explicit_operation_without_source_keeps_source_and_actor_not_specified(
         LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
     )
 
-    assert resolution.status == "RESOLVED"
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
     assert len(provider.grounding_requests) == 1
     assert provider.requests == []
     assert resolution.provider_observation is not None
-    intent = resolution.provider_observation["intent"]
-    assert isinstance(intent, dict)
-    assert intent["intent_kind"] == "OPERATION"
-    assert intent["source"]["status"] == "NOT_SPECIFIED"
-    assert intent["actor"]["status"] == "NOT_SPECIFIED"
-    assert intent["target"]["key"] == "south_waterfront_district"
-    assert intent["resource"]["key"] == "emergency_fuel"
-    assert intent["amount"]["value"] == 30
+    diagnostics = resolution.provider_observation["validation_diagnostics"]
+    assert diagnostics == [
+        {
+            "code": "GOAL_REQUIRED_SLOT_MISSING",
+            "action_key": "transport_resource",
+            "missing_slot_keys": ["source_region"],
+        }
+    ]
 
 
 @pytest.mark.parametrize(

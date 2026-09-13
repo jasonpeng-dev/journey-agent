@@ -2058,6 +2058,8 @@ actions:
   required_interaction_key: clearable
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   required_actor_role_key: municipal_repair_team
@@ -2086,6 +2088,8 @@ actions:
   required_interaction_key: heavy_support_target
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   required_actor_role_key: industrial_repair_team
@@ -2115,6 +2119,8 @@ actions:
   required_interaction_key: inspectable
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   - INSPECT_STATE
@@ -2140,6 +2146,8 @@ actions:
   required_interaction_key: relayable
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   authority_policy:
@@ -2165,6 +2173,8 @@ actions:
   required_interaction_key: repairable
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   authority_policy:
@@ -2265,6 +2275,8 @@ actions:
     allowed_values: []
     default: null
     semantic_reference_type: NODE
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   required_actor_role_key: electrical_response_team
@@ -2303,6 +2315,8 @@ actions:
   required_interaction_key: surveyable
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   - INSPECT_STATE
@@ -2345,6 +2359,11 @@ actions:
     allowed_values: []
     default: null
     semantic_reference_type: RESOURCE
+  goal_required_slots:
+  - target
+  - source_region
+  - amount
+  - resource_key
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   - LOGISTICS
@@ -2379,6 +2398,9 @@ actions:
   required_interaction_key: travel_destination
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - actor
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   authority_policy:
@@ -2403,6 +2425,8 @@ actions:
   required_interaction_key: external_relief_intake
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   required_actor_role_key: emergency_logistics_team
@@ -2427,6 +2451,8 @@ actions:
   required_interaction_key: generation_control
   execution_mode: IMMEDIATE
   parameters: []
+  goal_required_slots:
+  - target
   allowed_actor_capabilities:
   - EXECUTE_ACTION
   required_actor_role_key: electrical_response_team

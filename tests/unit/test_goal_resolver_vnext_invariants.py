@@ -207,8 +207,14 @@ def test_deterministic_exact_target_does_not_create_a_semantic_role() -> None:
         "east_residential_district", LINJIANG_V2_TEST
     )
 
-    assert resolution.status == "RESOLVED"
-    assert resolution.dynamic_requirements[0].target_key is None
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
+    assert resolution.provider_observation is not None
+    assert set(resolution.provider_observation["diagnostics"]["missing_slot_keys"]) == {
+        "actor",
+        "target",
+    }
 
 
 def test_semantic_frozen_source_survives_operation_grounding() -> None:
@@ -566,6 +572,19 @@ def test_explicit_semantic_surface_is_backend_marked_and_omitted_source_stays_un
     assert normalized_omitted.source.status == "NOT_SPECIFIED"
 
 
+def test_operation_terminal_projection_is_generic_and_excludes_travel() -> None:
+    supply = next(item for item in LINJIANG_V2_TEST.actions if item.key == "supply_power")
+    repair = next(item for item in LINJIANG_V2_TEST.actions if item.key == "repair_facility")
+    clear = next(item for item in LINJIANG_V2_TEST.actions if item.key == "clear_transport")
+    travel = next(item for item in LINJIANG_V2_TEST.actions if item.key == "travel")
+
+    supply_effects = action_goal_terminal_effects(LINJIANG_V2_TEST, supply, "central_hospital")
+    repair_effects = action_goal_terminal_effects(LINJIANG_V2_TEST, repair, "central_hospital")
+    clear_effects = action_goal_terminal_effects(LINJIANG_V2_TEST, clear, "central_hospital")
+    assert ("central_hospital", "power_supply", "AVAILABLE") in supply_effects
+    assert ("central_hospital", "operational", True) in repair_effects
+    assert ("central_hospital", "passable", True) in clear_effects
+    assert action_goal_terminal_effects(LINJIANG_V2_TEST, travel, "central_hospital") == ()
 
 
 def test_family_advisory_evidence_distinguishes_operation_equivalence() -> None:
@@ -703,7 +722,7 @@ def test_clarification_allows_only_explicit_unresolved_contract_fields() -> None
         contract,
         _transport_evidence_with_unresolved_resource(),
     )
-    assert allowed == ("resource_key",)
+    assert allowed == ("resource_key", "source_region")
 
 
 def test_bare_parts_clarification_asks_for_resource_only() -> None:
@@ -744,10 +763,12 @@ def test_runtime_required_does_not_become_goal_required() -> None:
         if item["slot_key"] == "amount":
             item["runtime_required"] = True
             item["goal_required"] = False
-    assert _vnext_allowed_clarification_fields(
+    allowed = _vnext_allowed_clarification_fields(
         contract,
         _FrozenDynamicGoalEvidence(),
-    ) == ()
+    )
+    assert "amount" not in allowed
+    assert {"resource_key", "source_region", "target"}.issubset(allowed)
 
 
 def test_no_allowed_clarification_fields_cannot_fall_back_to_provider_prompt() -> None:

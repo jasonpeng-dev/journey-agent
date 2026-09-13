@@ -3423,7 +3423,11 @@ class OpenAICompatibleGenericProvider:
                 "RELATED_ONLY means merely related, similar, same-category, same-purpose, or "
                 "plausible-substitute context and must never be bound to a role or returned as "
                 "the player's canonical identity. Provenance is backend-owned and must not be "
-                "returned."
+                "returned. Runtime-required is not Goal-required: an "
+                "omitted Actor, source, or other Planner-owned role is NOT_SPECIFIED, never "
+                "UNRESOLVED or GROUNDED. A grounded role must preserve the same referent as its "
+                "surface; never replace an unknown object/resource/location with the nearest "
+                "public candidate."
             )
         elif purpose == "dynamic_goal":
             response_contract = (

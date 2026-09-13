@@ -887,6 +887,10 @@ class ActionDefinitionV2(FrozenDefinitionModel):
     target_node_type_keys: tuple[StableKey, ...] = ()
     target_actor_roles: tuple[ActionTargetActorRoleV2, ...] = ()
     operation_bindings: tuple[ActionOperationBindingV2, ...] = ()
+    goal_required_slots: tuple[StableKey, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
 
     def required_actor_role_for_target(self, target_key: str | None) -> StableKey | None:
         """Resolve the exact executor Role, preserving the Action-level fallback."""
@@ -938,6 +942,19 @@ class ActionDefinitionV2(FrozenDefinitionModel):
             "Action target-specific Actor Roles",
         )
         _require_unique((item.role for item in self.operation_bindings), "Action binding roles")
+        _require_unique(self.goal_required_slots, "Action Goal required slots")
+        invocation_slot_keys = {
+            "actor",
+            "target",
+            *(item.role for item in self.operation_bindings),
+            *(item.key for item in self.parameters),
+        }
+        unknown_goal_required_slots = set(self.goal_required_slots).difference(invocation_slot_keys)
+        if unknown_goal_required_slots:
+            unknown = ", ".join(sorted(unknown_goal_required_slots))
+            raise ValueError(
+                f"Action Goal required slots must reference invocation slots: {unknown}"
+            )
         if self.target_kind != ActionTargetKind.NODE and self.target_node_type_keys:
             raise ValueError("Only NODE-target Actions may constrain target Node types")
         if self.target_kind != ActionTargetKind.NODE and self.target_actor_roles:

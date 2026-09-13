@@ -95,6 +95,7 @@ def canonical_action_invocation_contract(action: ActionDefinitionV2) -> dict[str
     types, and relation-source semantics stay attached to their backing slot.
     """
 
+    goal_required_slots = frozenset(action.goal_required_slots)
     if action.target_semantic_reference_type is not None:
         target_semantic_type = action.target_semantic_reference_type.value
     elif action.target_kind.value == "NODE" and len(action.target_node_type_keys) == 1:
@@ -112,7 +113,7 @@ def canonical_action_invocation_contract(action: ActionDefinitionV2) -> dict[str
         "scalar_value_type": None,
         "semantic_reference_type": "ACTOR",
         "expected_type": "ACTOR",
-        "goal_required": False,
+        "goal_required": "actor" in goal_required_slots,
         "runtime_required": True,
         "cardinality": "ONE",
         **(
@@ -134,7 +135,7 @@ def canonical_action_invocation_contract(action: ActionDefinitionV2) -> dict[str
         "scalar_value_type": None,
         "semantic_reference_type": target_semantic_type,
         "expected_type": target_semantic_type,
-        "goal_required": False,
+        "goal_required": "target" in goal_required_slots,
         "runtime_required": True,
         "cardinality": "ONE",
         "node_type_keys": list(action.target_node_type_keys),
@@ -163,7 +164,7 @@ def canonical_action_invocation_contract(action: ActionDefinitionV2) -> dict[str
                 "scalar_value_type": None,
                 "semantic_reference_type": binding.value_type.value,
                 "expected_type": binding.value_type.value,
-                "goal_required": False,
+                "goal_required": binding.role in goal_required_slots,
                 "runtime_required": False,
                 "cardinality": "ONE",
             }
@@ -185,7 +186,7 @@ def canonical_action_invocation_contract(action: ActionDefinitionV2) -> dict[str
                 "scalar_value_type": parameter.value_type.value,
                 "semantic_reference_type": semantic_type,
                 "expected_type": semantic_type or parameter.value_type.value,
-                "goal_required": False,
+                "goal_required": parameter.key in goal_required_slots,
                 "runtime_required": parameter.required,
                 "cardinality": "ONE",
                 "minimum": parameter.minimum,

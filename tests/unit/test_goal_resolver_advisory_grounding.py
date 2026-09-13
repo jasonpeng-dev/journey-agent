@@ -364,7 +364,7 @@ def test_supply_power_preserves_explicit_valid_source() -> None:
     assert provider.operation_requests[0].explicit_role_evidence["source"]["key"] == source_key
 
 
-def test_other_source_optional_action_keeps_unspecified_source_unconstrained() -> None:
+def test_transport_required_source_cannot_remain_unspecified() -> None:
     provider = _VNextProvider(
         grounding=[
             _role_grounding(
@@ -431,11 +431,13 @@ def test_other_source_optional_action_keeps_unspecified_source_unconstrained() -
         "把30个应急燃料运到南部", LINJIANG_V2_TEST
     )
 
-    requirement = resolution.dynamic_requirements[0]
-    assert resolution.status == "RESOLVED"
-    assert requirement.action_key == "transport_resource"
-    assert requirement.binding_constraints == ()
-    assert requirement.target_key == "south_waterfront_district"
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
+    assert resolution.provider_observation is not None
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == [
+        "source_region"
+    ]
 
 
 def test_semantic_grounding_cannot_invent_identity_outside_public_catalog() -> None:

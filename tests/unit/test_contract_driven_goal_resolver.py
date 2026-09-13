@@ -72,6 +72,7 @@ def _operation(
     action_key: str,
     *,
     target: dict[str, object],
+    actor: dict[str, object] | None = None,
     bindings: Iterable[dict[str, object]] = (),
     parameters: Iterable[dict[str, object]] = (),
     references: Iterable[dict[str, str]] = (),
@@ -80,7 +81,7 @@ def _operation(
         "status": "RESOLVED",
         "intent": {
             "action_key": action_key,
-            "actor": _slot("actor", "ACTOR", "NOT_SPECIFIED"),
+            "actor": actor or _slot("actor", "ACTOR", "NOT_SPECIFIED"),
             "target": target,
             "bindings": list(bindings),
             "parameters": list(parameters),
@@ -430,10 +431,53 @@ def test_routing_action_projection_assigns_supply_source_and_target_roles() -> N
     assert "supply_power" in action_keys
 
 
+def test_linjiang_goal_required_slot_sets_are_exact_and_data_driven() -> None:
+    expected = {
+        "clear_transport": {"target"},
+        "deploy_heavy_engineering_support": {"target"},
+        "inspect": {"target"},
+        "relay_message": {"target"},
+        "repair_facility": {"target"},
+        "supply_power": {"target"},
+        "survey_resources": {"target"},
+        "transport_resource": {"target", "source_region", "amount", "resource_key"},
+        "travel": {"actor", "target"},
+        "receive_external_relief_supplies": {"target"},
+        "generate_power": {"target"},
+    }
+
+    assert {
+        item.key: set(item.goal_required_slots)
+        for item in LINJIANG_V2_TEST.actions
+    } == expected
 
 
+def test_canonical_invocation_contract_reflects_goal_required_slot_metadata() -> None:
+    for action in LINJIANG_V2_TEST.actions:
+        contract = _dynamic_goal_action_contract(action)
+        expected = set(action.goal_required_slots)
+        slots = contract["slots"]
+        assert isinstance(slots, list)
+        assert {
+            str(item["slot_key"])
+            for item in slots
+            if item["goal_required"] is True
+        } == expected
+        assert all(
+            item["goal_required"] is (item["slot_key"] in expected)
+            for item in slots
+        )
 
 
+def test_invalid_goal_required_slot_fails_scenario_validation() -> None:
+    payload = LINJIANG_V2_TEST.model_dump(mode="json")
+    action = next(item for item in payload["actions"] if item["key"] == "inspect")
+    action["goal_required_slots"] = ["does_not_exist"]
+
+    result = ScenarioDefinitionValidator().validate(payload)
+
+    assert not result.passed
+    assert any("Goal required slots" in item.message for item in result.issues)
 
 
 def test_routing_action_projection_rejects_impossible_role_assignment() -> None:
@@ -729,7 +773,15 @@ def _transport_operation(*, amount: object = 12) -> dict[str, object]:
     return _operation(
         "transport_resource",
         target=_slot("target", "REGION", "GROUNDED", ref_type="REGION", key="central_district"),
-        bindings=[_slot("source_region", "REGION", "NOT_SPECIFIED")],
+        bindings=[
+            _slot(
+                "source_region",
+                "REGION",
+                "GROUNDED",
+                ref_type="REGION",
+                key="west_logistics_district",
+            )
+        ],
         parameters=[
             _slot("amount", "INTEGER", "GROUNDED", value=amount),
             _slot(
@@ -875,7 +927,9 @@ def test_operation_family_resolves_from_selected_action_contract() -> None:
     assert requirement.kind == "ACTION_COMPLETED"
     assert requirement.action_key == "transport_resource"
     assert requirement.target_key == "central_district"
-    assert requirement.binding_constraints == ()
+    assert [(item.role, item.value) for item in requirement.binding_constraints] == [
+        ("source_region", "west_logistics_district")
+    ]
     assert requirement.parameter_constraints == {
         "resources": [{"amount": 12, "resource_key": "emergency_fuel"}]
     }
@@ -1343,7 +1397,7 @@ def test_semantic_routing_recovery_cannot_change_preserved_match() -> None:
     assert len(provider.routing_requests) == 2
 
 
-def test_routed_transport_without_source_keeps_source_unspecified() -> None:
+def test_routed_transport_without_required_source_clarifies() -> None:
     operation = _operation(
         "transport_resource",
         target=_slot(
@@ -1378,10 +1432,13 @@ def test_routed_transport_without_source_keeps_source_unspecified() -> None:
         "把30个应急燃料运到南部滨水区", LINJIANG_V2_TEST
     )
 
-    assert resolution.status == "RESOLVED"
-    requirement = resolution.dynamic_requirements[0]
-    assert requirement.binding_constraints == ()
-    assert requirement.target_key == "south_waterfront_district"
+    assert resolution.status == "NEEDS_CLARIFICATION"
+    assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
+    assert resolution.dynamic_requirements == ()
+    assert resolution.provider_observation is not None
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == [
+        "source_region"
+    ]
 
 
 def test_advisory_region_pair_does_not_create_authoritative_topology_target() -> None:
