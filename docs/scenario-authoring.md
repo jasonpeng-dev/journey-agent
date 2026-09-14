@@ -1,6 +1,9 @@
 # Scenario authoring and publishing
 
 This is the maintained guide to the Scenario Editor and its persistence contract.
+The player-facing natural-language Goal contract is described in
+[Custom Goals and Task Compilation](custom-goals.md); this document focuses on
+authoring the declarative data that the Goal and planning layers consume.
 
 ## Lifecycle
 
@@ -29,8 +32,8 @@ another edit.
   Resources.
 - **Actors:** Roles, capabilities, actor profiles, persona/doctrine, initial location, allowed
   Actions, and authority policy.
-- **Actions:** parameters, required Interaction, execution mode, actor capability/authority
-  policy, expected outcomes, planning projections, and hints.
+- **Actions:** parameters, Goal Required slots, required Interaction, execution mode, actor
+  capability/authority policy, expected outcomes, planning projections, and hints.
 - **Rules:** action-bound preflight/resolve behavior expressed as structured Conditions and
   Effects.
 - **Objectives:** completion `ObjectiveRequirementV2` values, public prerequisites, aliases,
@@ -41,6 +44,46 @@ another edit.
 Authors can define content and vocabulary, but cannot add executable code, edit the generic Rule
 interpreter, bypass Action validation, change Version immutability, or bind a scenario to a
 specific model provider.
+
+## Goal Required slots and Action contracts
+
+`ActionDefinitionV2.goal_required_slots` declares which Action slots must be
+identified by the player before the Goal can be resolved. It is a Goal
+contract, not a duplicate of the Action's execution parameter schema:
+
+| Declaration | Question it answers |
+| --- | --- |
+| Goal Required slot | Does the player's WHAT remain ambiguous without this value? |
+| Execution-required parameter | Must the eventual Action invocation contain a legal value? |
+| Optional slot | Can the player leave the choice to Planner while the contract remains valid? |
+
+Missing Goal Required information produces clarification before planning. The
+Resolver must not infer it from topology or select a value on the player's
+behalf. An omitted optional slot is `NOT_SPECIFIED` (or absent in the
+canonical contract) and remains Planner-owned. If the player supplies a value,
+that explicit constraint is frozen in `FormalGoalContractV1` and is preserved
+through INITIAL, REPAIR, and REPLAN.
+
+An authored Action contract may combine `goal_required_slots`,
+`required_actor_role_key`, `target_actor_roles`, planning terminal effects,
+target-specific terminal effects, supporting effects, Resource requirements,
+`locality`, required `interactions`, and structured `PREFLIGHT`/`RESOLVE`
+Rules. These declarations describe legal WHAT/HOW boundaries and public
+planning evidence; they do not select an Actor or fixed sequence for the
+Planner.
+
+This distinction lets an Action require a concrete execution value without
+requiring the player to decide HOW. An Action can require a Target while
+leaving its source, Actor, route, or other execution choices Planner-owned;
+authored relations and target contracts constrain those choices. An explicit
+value is frozen and an invalid relation is rejected. Target-only Actions can
+leave Actor selection to Planner unless the player explicitly names one.
+
+Target-specific actor roles, resource requirements, planning effects, and
+PREFLIGHT/RESOLVE Rules are authored in the same declarative Scenario. Generic
+Closure and PlannerTargetBinding preserve those contracts without adding
+Scenario-specific Python branches. See [Agent Planning V2](agent-planning-v2.md)
+for the runtime projection and validation boundary.
 
 ## Knowledge, Resource Pools, and Objective Requirements
 
@@ -67,9 +110,8 @@ should keep `goal_addressable=false`.
 For a goal-addressable Fact, `goal_aliases`, `goal_examples`, and optional
 `goal_target_values` are public semantic metadata. They describe how a player
 may name the schema and which lossless typed target values may be matched;
-they never publish the Fact's current value. The current Linjiang
-`central_telecom_hub.operational` Fact uses this boundary for its public
-"restore communications" Goal text while its initial Truth remains hidden.
+they never publish the Fact's current value. A Scenario may therefore expose
+an addressable semantic while its initial Truth remains hidden.
 
 `initialization.region_resource_knowledge` is the authority for initial Region inventory
 visibility and survey completion. Neither choosing a starting Region nor placing an Actor there
@@ -79,16 +121,15 @@ automatically makes that Region's Resource inventory Known.
 
 The generic Knowledge channels have separate authoring meanings:
 
-- `survey_resources` updates Region Resource Knowledge and may reveal authored, discoverable
-  Resource Pools. It does not reveal hidden Facility Truth.
-- `inspect` reveals the selected Facility or Transport target's non-Resource facts. It does not
-  survey the Region inventory.
+- A resource-survey Action updates Region Resource Knowledge and may reveal authored,
+  discoverable Resource Pools. It does not reveal hidden Facility Truth.
+- An inspection Action reveals the selected Facility or Transport target's non-Resource facts.
+  It does not survey the Region inventory.
 - public Rule Effects can reveal Node, Fact, Relation, Region Resource, or Pool visibility when
   the corresponding supported Effect is explicitly authored.
-- successful communication recovery uses generic locality and `located_in` relations to reveal
-  eligible Facility Facts and their current Runtime values in the target Region. It does not
-  reveal Facility identity (Node visibility is authored separately) or that Region's Resource
-  inventory.
+- A communication-recovery Action can use generic locality and `located_in` relations to reveal
+  eligible Facility Facts and their current Runtime values in a target Region. It does not reveal
+  Facility identity (Node visibility is authored separately) or that Region's Resource inventory.
 
 One channel must not be treated as implicit permission to disclose another Knowledge domain.
 Reveal operations publish current Runtime state, not a cached copy of the Scenario's initial
@@ -107,12 +148,12 @@ rule. Making its Fact true does not automatically change the Pool's Runtime avai
 repair or unlock Action should make the Pool `AVAILABLE`, a selected Rule must explicitly emit
 `SET_RESOURCE_POOL_AVAILABILITY` or an implemented equivalent Effect.
 
-The current validator checks the requirement's references and supported Effect vocabulary. It
+The validator checks the requirement's references and supported Effect vocabulary. It
 does not prove that every unavailable Pool has a reachable unlock producer.
 
 ### Objective requirements
 
-Current objective completion requirements support:
+Objective completion requirements support:
 
 - `FACT`: `node_key`, `fact_key`, and non-empty `accepted_values`;
 - `RESOURCE_AT_LEAST`: `region_key`, `resource_key`, and non-negative `minimum`;
@@ -121,7 +162,8 @@ Current objective completion requirements support:
 A requirement can also declare `knowledge_gate` with `node_key`, `fact_key`, and
 `accepted_values`. The requirement formally belongs to the Objective before it becomes public.
 Until the gate is Known and satisfied it must not enter Agent/Player Knowledge. After a legal
-reveal it remains part of the same frozen ObjectiveScope; no new Objective is created, and
+reveal it remains part of the same frozen Formal Goal contract (and the
+ObjectiveScope compatibility projection for predefined Tasks); no new Objective is created, and
 completion remains deterministic.
 
 All cross-entity references use stable machine keys. Display and localized names are presentation,
@@ -162,41 +204,16 @@ The World Goal State vocabulary is intentionally explicit:
   dependencies and its own stable semantic identity.
 
 Do not wrap a single real Fact in a Derived State merely to give an Objective a
-marker. The current canonical Linjiang authoring is:
+marker. Derived values are computed on read from the immutable ScenarioVersion
+and Runtime Truth or public Knowledge. They are not persisted runtime rows, do
+not create an extra `runtime_revision`, and cannot be directly written by an
+Action or Rule. Checkpoint/Fork copies Base Runtime and Knowledge state, then
+recomputes Derived values in the target.
 
-| Objective | Completion form |
-| --- | --- |
-| Task1 `restore_central_communication_capability` | `FACT`: `central_telecom_hub.operational == true` |
-| Task2 `restore_north_basic_engineering_support` | `DERIVED_STATE`: `north_basic_engineering_support` |
-| Task3 `restore_east_emergency_power_network` | `DERIVED_STATE`: `east_emergency_power_network` |
-| Task4 `restore_east_emergency_water_supply` | `DERIVED_STATE`: `east_emergency_water_supply` |
-| Task5 `establish_citywide_sustained_emergency_support` | `DERIVED_STATE`: `citywide_sustained_emergency_support` |
-| Task6 `establish_sustained_emergency_generation` | `DERIVED_STATE`: `southeast_sustained_emergency_generation` |
-
-Thus the current Version has five goal-addressable Derived States. Derived
-values are computed on read from the immutable ScenarioVersion and Runtime
-Truth or public Knowledge. They are not persisted runtime rows, do not create
-an extra `runtime_revision`, and cannot be directly written by an Action or
-Rule. Checkpoint/Fork copies Base Runtime and Knowledge state, then recomputes
-Derived values in the target.
-
-Task5's `citywide_sustained_emergency_support` is an implicit-AND capability
-over the real base contracts: `rail_freight_yard.rail_freight_capability`,
-`emergency_supply_warehouse.operational`, `vehicle_depot.emergency_delivery_support`,
-`city_distribution_center.operational`, six transport `passable` Facts, and
-three typed `RESOURCE_AT_LEAST` requirements for 30 emergency-relief supplies
-in Central, East, and Southeast. The rail-freight and emergency-delivery
-Facts remain Base Facts because Actions consume them as independent downstream
-preconditions, even though the current repair Action sets each alongside its
-facility's `operational` Fact. No final activate/establish marker Action is
-used, and resource inventory is not converted into a persistent marker Fact.
-
-Task6 keeps `generate_power` as the real discovery Action. Its successful
-reveal of `sustained_requirements_discovered` exposes the gated sustained
-generation dependencies to public planning and causes REPLAN. The frozen Goal
-contract is unchanged; Knowledge gates control exposure, not Truth
-satisfaction. `commission_sustained_generation` is not part of the current
-canonical Scenario.
+When a meaningful capability depends on several Facts, resource thresholds,
+or other Derived States, an author may expose that capability as one
+`DERIVED_STATE` Goal semantic. The dependency graph remains Scenario data and
+the deterministic evaluator remains the completion authority.
 
 ## Formal Goals and Dynamic Goals
 
@@ -209,9 +226,9 @@ exact immutable ScenarioVersion; later Draft edits or publication do not alter
 an existing Task. A Version may set
 `goal_resolution.world_goal_state_catalog=true`; in that mode its authored
 Objective rows can remain for compatibility and preset text, but do not
-shortcut current player Goal routing.
+bypass the Goal contract.
 
-The current runtime also accepts an `AD_HOC_DYNAMIC` Goal. The Dynamic Goal
+The runtime also accepts an `AD_HOC_DYNAMIC` Goal. The Dynamic Goal
 interpreter receives a Knowledge-safe public ontology and may return one or
 more `FACT`, `RESOURCE_AT_LEAST`, or public `DERIVED_STATE` candidates with
 implicit `AND` semantics.
@@ -296,8 +313,8 @@ It creates a new immutable Version; publishing an unchanged semantic document is
 Version History supports reading a snapshot, restoring its content into the Current Draft, and
 starting a new Game from that exact Version. Restore changes only the Draft. The New Game flow
 accepts a `scenario_version_id`, never a Draft or a mutable Scenario pointer. Built-in examples
-are exposed by `GET /api/v1/scenario-examples` and currently include the Linjiang Infrastructure
-Recovery v2.0 definition seeded by `uv run python -m app.seed`.
+are exposed by `GET /api/v1/scenario-examples` and are seeded through the normal scenario
+bootstrap. They are onboarding content, not a special runtime path.
 
 ## Authoring API map
 

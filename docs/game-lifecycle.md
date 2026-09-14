@@ -1,9 +1,13 @@
 # GameInstance lifecycle
 
 This document is the canonical detailed contract for GameInstance lifecycle
-behavior. It describes the current Archive, Checkpoint, and Fork services,
+behavior. It describes the Archive, Checkpoint, and Fork services,
 their stable-point requirements, materialized state, provenance, and player
 presentation.
+Natural-language Goal resolution and the WHAT/HOW task-compilation boundary
+are defined in [Custom Goals and Task Compilation](custom-goals.md); this
+document owns the GameInstance and Formal PLAY lifecycle after a Goal is
+accepted.
 
 ## 1. Identity and exact ScenarioVersion binding
 
@@ -29,15 +33,13 @@ exact ScenarioVersion/content-hash proof inside the AgentTask. Preset Goal
 entries in the UI only fill the same editable text input and do not submit an
 Objective or Task identity.
 
-The V1 contract is a flat implicit `AND` of `FACT`, `RESOURCE_AT_LEAST`, and
-public `DERIVED_STATE` requirements. Its deterministic Truth evaluator owns
-completion. Derived State values are recomputed from the exact ScenarioVersion
-and instance Runtime/Knowledge state; they are not directly writable runtime
-rows. A predefined requirement may be hidden behind an authored
-`knowledge_gate`; the requirement is already in the frozen contract, while the
-GameInstance Knowledge projection controls when it is visible to the Agent and
-Player. A Dynamic Goal cannot add a gate or hidden completion semantic, and it
-does not create a Scenario ObjectiveDefinition.
+The frozen contract is evaluated deterministically against the exact
+ScenarioVersion and instance Runtime/Knowledge state. Computed capabilities
+are derived on read rather than written as runtime rows. A predefined
+requirement may be hidden behind an authored Knowledge gate; it is already in
+the frozen contract while the GameInstance Knowledge projection controls when
+it becomes visible to the Agent and Player. A Dynamic Goal cannot add hidden
+completion semantics or alter the Scenario definition.
 
 Authoritative Truth satisfaction is not the same as player-visible completion.
 The completion evaluator keeps both results. If a Dynamic Goal requirement is
@@ -59,7 +61,15 @@ Tasks do not have an authored ObjectiveScope. Neither planning, REPAIR, nor
 REPLAN may expand the frozen Formal Goal; REPAIR is pre-execution proposal
 correction, while REPLAN is post-execution planning from the new public
 Runtime/Knowledge projection. There is no persisted WorkingGoal or Milestone
-lifecycle in the current product.
+lifecycle in the product.
+
+The player-facing sequence is therefore: enter a Goal, clarify missing or
+ambiguous WHAT when requested, review the Agent's accepted plan, confirm
+Actions, and receive safe execution/Knowledge feedback. The Agent may replan
+after execution, but lifecycle operations never turn an intermediate plan step
+into a new Goal or alter the frozen contract. See [Custom Goals and Task
+Compilation](custom-goals.md) for the Goal-level contract and [Agent Planning
+V2](agent-planning-v2.md) for planning details.
 
 ## 2. States and the stable gate
 

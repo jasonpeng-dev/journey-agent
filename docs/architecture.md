@@ -1,12 +1,14 @@
 # Journey Agent Architecture
 
-This document is the canonical high-level architecture for the current
-Journey Agent runtime. Detailed planning and validation semantics live in
+This document is the canonical high-level architecture for Journey Agent.
+Detailed planning and validation semantics live in
 [Agent Planning V2](agent-planning-v2.md). Scenario authoring semantics live
 in [Scenario authoring](scenario-authoring.md). Historical design and
 migration notes live under [docs/archive](archive/) and are not current
 implementation authority.
 GameInstance lifecycle details live in [GameInstance lifecycle](game-lifecycle.md).
+The player-facing natural-language Goal and task-compilation contract is in
+[Custom Goals and Task Compilation](custom-goals.md).
 
 ## 1. Product and system goal
 
@@ -24,6 +26,14 @@ Scenario content is supplied by an immutable published ScenarioVersion.
 The runtime interprets that content through generic source code. A Scenario
 must not require a scenario-key branch in Planner, Validator, Runtime, or
 persistence code.
+
+From the product perspective, a player enters a Goal, receives clarification
+when the requested WHAT is incomplete, reviews the Agent's proposed HOW one
+Action at a time, and sees the world/Knowledge update after execution. The
+Goal contract is frozen before planning; supporting work and replanning remain
+data-driven runtime behavior. The detailed player contract is maintained in
+[Custom Goals and Task Compilation](custom-goals.md), rather than duplicated
+here.
 
 ## 2. Runtime identity hierarchy
 
@@ -69,9 +79,9 @@ interpreter, a model-specific provider, or a scenario-specific runtime branch.
 
 The runtime has one frozen Goal authority: `FormalGoalContractV1`. Product
 sources are `PREDEFINED` (the compatibility path for catalog-disabled and old
-immutable Versions) and `AD_HOC_DYNAMIC` (the current World Goal State path,
-compiled from catalog semantics or a provider candidate set validated against
-the current public ontology). `PARAMETERIZED` is reserved in the domain enum
+immutable Versions) and `AD_HOC_DYNAMIC` (the World Goal State path, compiled
+from catalog semantics or a provider candidate set validated against the
+public ontology). `PARAMETERIZED` is reserved in the domain enum
 but has no V1 resolver or template implementation.
 
 The contract contains a flat, canonically ordered tuple of typed completion
@@ -124,15 +134,8 @@ The typed World Goal State vocabulary is deliberately small:
 
 `DERIVED_STATE` is not a default wrapper around a single Fact. A single real
 world condition remains a `FACT`; a capability with multiple authored
-dependencies may be a `DERIVED_STATE`. The canonical Linjiang authoring has
-five goal-addressable Derived States:
-
-    Task1 -> FACT: central_telecom_hub.operational == true
-    Task2 -> DERIVED_STATE: north_basic_engineering_support
-    Task3 -> DERIVED_STATE: east_emergency_power_network
-    Task4 -> DERIVED_STATE: east_emergency_water_supply
-    Task5 -> DERIVED_STATE: citywide_sustained_emergency_support
-    Task6 -> DERIVED_STATE: southeast_sustained_emergency_generation
+dependencies may be a `DERIVED_STATE`. Authors choose the smallest semantic
+kind that losslessly describes the intended completion condition.
 
 `FactDefinitionV2.goal_addressable` is false by default and is independent of
 Fact Truth and current Knowledge. Public `goal_aliases`, `goal_examples`, and
@@ -166,39 +169,22 @@ resolution.
 The request path is:
 
     Goal text
-      -> World Goal State catalog deterministic routing (current canonical)
-      -> legacy authored Objective routing (catalog-disabled/old Version)
-      -> Dynamic public Entity Grounding when needed
-      -> focused public ontology
-      -> Dynamic Goal Interpretation when needed
-      -> deterministic exact-Version candidate validation
-      -> frozen FormalGoalContractV1
-      -> Dependency Closure
-      -> canonical PlannerInput V2
-      -> Provider PlanSegment
-      -> deterministic Validator
-      -> bounded internal REPAIR if needed
+      -> Goal Resolution and clarification when needed
+      -> frozen FormalGoalContractV1 bound to one ScenarioVersion
+      -> Dependency Closure and PlannerInput V2
+      -> Planner proposal
+      -> deterministic Validation and bounded REPAIR
       -> accepted AgentPlan
-      -> Runtime Action execution
+      -> Runtime execution
       -> Truth and public Knowledge update
-      -> remaining-plan validation
-      -> Player pacing / acknowledgement
-      -> REPLAN or objective completion
+      -> remaining-plan validation and Player acknowledgement
+      -> REPLAN or deterministic completion
 
-The Dynamic path is conditional: an exact public catalog match can resolve a
-typed `AD_HOC_DYNAMIC` requirement without a provider; otherwise the text
-enters public grounding and interpretation. Only catalog-disabled/legacy
-authored Objective matching stops at the `PREDEFINED` source. Grounding answers
-which public entity the player named. Interpretation answers which supported
-terminal Goal state is requested. Neither stage plans Actions.
-
-For the current Linjiang catalog, all six player-facing preset texts use the
-public World Goal State path. Task1 resolves to an `AD_HOC_DYNAMIC` Fact
-requirement for `central_telecom_hub.operational == true`; Task2-Task6 resolve
-to their `AD_HOC_DYNAMIC` Derived requirements. The six authored Objective rows
-remain as compatibility/authoring data and do not control current canonical
-player routing. Legacy ScenarioVersions without that catalog continue to use
-their immutable authored Objective contracts.
+Goal Resolution may use public catalog semantics, authored compatibility
+semantics, or bounded semantic grounding according to the ScenarioVersion
+contract. It validates the resolved Goal against that exact Version before
+planning. Grounding identifies public entities; interpretation identifies the
+supported requested outcome; neither stage plans Actions.
 
 The application composes the configured provider once and injects it into
 the generic resolver and Agent service. API routes and React components are
@@ -231,12 +217,11 @@ provider assertion becomes a new source of Truth. A public Derived State may
 therefore remain Knowledge `UNKNOWN` while its authored schema is a legal Goal
 target.
 
-In Task6, `generate_power` remains the gameplay discovery Action. Its explicit
-reveal changes public Knowledge for the gated sustained-generation dependencies,
-which then changes Closure and Planner projection and triggers REPLAN. It does
-not change the frozen Goal contract or ObjectiveScope. Checkpoint and Fork copy
-the Base Runtime state and Knowledge; Derived values are recomputed in each
-instance.
+An authored Knowledge-producing Action may reveal previously gated
+dependencies. Newly public dependencies can change the Closure and Planner
+projection and trigger REPLAN without changing the frozen Formal Goal contract.
+Checkpoint and Fork copy Base Runtime and Knowledge state; Derived values are
+recomputed in each instance.
 
 Player projections expose known Nodes/Facts/Relations/Resources, accepted
 formal Plan History, safe action results, and pacing state. Developer
@@ -263,7 +248,13 @@ Planner.
 Goal planning relevance is another projection boundary. Closure and
 PlannerInput expose only the currently public obligations and their public
 producers. Revealing a requirement or Action relevance changes the public
-planning projection, never the frozen Formal Goal scope.
+planning projection, never the frozen Formal Goal contract.
+
+Scenario-authored Action and target contracts provide the generic roles,
+resources, locality, interactions, prerequisites, and deterministic effects
+that Closure and PlannerInput project. Target-specific contracts remain data,
+not Scenario-specific Python; authored identities may stay visible to planning
+while hidden current Truth stays `UNKNOWN`.
 
 See Agent Planning V2 for the detailed contract and invariants.
 
@@ -359,8 +350,11 @@ Repository map:
 | migrations | Alembic schema history |
 | docs | Current architecture, planning, authoring, and historical notes |
 
-## 10. Current canonical documents
+## 10. Canonical documents
 
+* [Custom Goals and Task Compilation](custom-goals.md): natural-language
+  Goal resolution, clarification, explicit constraints, task compilation,
+  supporting dependencies, and the WHAT/HOW boundary.
 * [Agent Planning V2](agent-planning-v2.md): detailed Planner, Validator,
   Runtime, Knowledge, REPAIR, REPLAN, and continuity contract.
 * [Scenario authoring](scenario-authoring.md): Draft, Editor, validation,

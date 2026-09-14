@@ -8,60 +8,69 @@ Formal PLAY 执行。运行时由发布后的 ScenarioVersion 驱动：不可变
 Version 提供世界内容和声明式语义，可复用的源代码负责 Goal resolution、
 planning、validation、Action execution、persistence 和浏览器产品。
 
+它不同于普通 chatbot：Agent 在有版本约束的世界中行动，并经过确定性验证和
+执行；它也不同于 scripted game：结果来自 Scenario 的声明式 contract 和不断
+变化的公开世界状态，而不是固定的对话树。
+
 ## 包含内容
 
-* ScenarioDefinitionV2 Draft、validation、publication、不可变 Version，以及
-  精确绑定 Version 的 GameInstance。
-* Scenario Library 和结构化 Editor，覆盖 world、Actors、Actions、Rules、
-  Objectives、planning metadata、initialization、references 和 Version history。
-* Generic Goal Resolver、冻结的 `FormalGoalContractV1`、canonical
-  PlannerInput V2、deterministic Validator、bounded 内部 REPAIR，以及
-  Knowledge-aware REPLAN。
-* World Goal State V2 typed requirement：`FACT`、`RESOURCE_AT_LEAST` 和作者声明的
-  `DERIVED_STATE`。当前 canonical Linjiang 的六条玩家目标文案都通过公开
-  catalog 解析：Task1 是 typed Fact，Task2–Task6 对应 5 个可作为 Goal 的
-  Derived capability。保留的 authored Objective 行只用于兼容/authoring，不再
-  作为当前 canonical 玩家目标的快捷路由。
-* Declarative Action/Rule execution、Truth mutation、public Knowledge projection、
-  Player-safe Formal PLAY、审批、不可变 archived runtime source、Fork 和 plan
-  history。
-* Generic built-in Scenario 通过同一套 runtime 和浏览器产品运行；engine 不包含
-  scenario-specific gameplay 分支。
+* Web-based Scenario authoring：作者通过 Web Editor 设计 world、actors/roles、
+  actions、rules、resources、goal semantics 和 initial state，并经过 validation
+  发布 immutable ScenarioVersions。
+* Versioned gameplay：每个 Game 精确绑定一个发布后的 ScenarioVersion，保证
+  世界内容、规则和运行历史基于确定版本。
+* Natural-language Custom Goals：玩家可以自由输入自然语言 Goal；作者可提供
+  optional preset/suggested Goals 作为 onboarding/example，意图不完整或有歧义时
+  系统会请求 clarification。
+* Agent planning and deterministic execution：Agent 根据当前公开世界状态自主规划
+  HOW，系统确定性验证 proposal，通过后由 Runtime 执行 Action。
+* Truth/Knowledge separation and replanning：Truth 与 Player/Agent 可见 Knowledge
+  分离；执行可能揭示新 Knowledge，并在需要时驱动 REPLAN。
+* Auditable game lifecycle：支持 Formal PLAY、执行历史、Archive、Checkpoint、
+  Fork 和可审计 runtime 记录。
+
+## 如何游玩
+
+1. 在 Web Editor 中设计 Scenario：World、Actors、Actions、Rules、Resources、
+   goal semantics 和初始状态。
+2. 验证 Draft，并发布不可变的 ScenarioVersion。
+3. 从某一个精确的已发布 Version 创建 Game。
+4. 选择作者提供的 suggested Goal，或输入自然语言 Custom Goal。运行时会解析
+   你想达成的结果；如果意图不完整或有歧义，会先请求 clarification。
+5. Agent 根据当前已知世界规划，玩家逐步查看并确认 Action。
+6. Runtime 执行 Action，改变世界并可能揭示新的 Knowledge；当可用信息改变时，
+   Agent 可以重新规划。
+7. 当 Goal 的确定性世界条件满足后，目标完成。
+
+Scenario 作者可以提供 optional preset/suggested Goal，作为帮助玩家开始的
+onboarding/example surface，但它们不是固定任务集合；玩家仍然可以直接输入自然语言
+Custom Goal。详见 [Custom Goals and Task Compilation](docs/custom-goals.md)，了解产品
+contract 和 WHAT/HOW 边界。
 
 ## 架构概览
 
 ~~~text
 ScenarioVersion
   -> GameInstance
-       -> Goal 文本
-            -> public World Goal State catalog / legacy compatibility routing
-                 -> 需要时进行 Dynamic public entity grounding
-                      -> focused ontology -> typed Goal interpretation
-                           -> exact-Version validation
-                                -> frozen FormalGoalContractV1
-                                -> Closure -> PlannerInput V2
-                                     -> Provider PlanSegment -> Validator
-                                          -> AgentPlan -> Runtime -> Truth / Knowledge
-                                               -> REPLAN or Complete
+       -> Natural-language Goal
+            -> Goal Resolution
+                 -> Frozen Goal Contract
+                      -> Planning
+                           -> Validation
+                                -> Execution
+                                     -> Truth / Knowledge update
+                                          -> Replan or Completion
 ~~~
 
-Formal PLAY 用一次 planning HTTP request 完成一个 planning cycle。Backend
-在内部执行 bounded REPAIR，并返回最终状态。被拒绝的 proposal 只保存在
-PlanningAttempt audit rows 中，不会成为 Player 可见的 plan，也不会创建
-runtime operation。
+Formal PLAY 协调每个 planning cycle，只把通过验证的 Action 呈现给玩家。
+被拒绝的 proposal 只保留在内部，不会改变世界，也不会成为 Player 可见的 plan。
 
-详见 [docs/architecture.md](docs/architecture.md) 了解 high-level runtime
+详见 [docs/custom-goals.md](docs/custom-goals.md)，了解玩家 Goal 如何变成任务以及
+WHAT/HOW 的职责边界；详见 [docs/architecture.md](docs/architecture.md) 了解 high-level runtime
 boundaries，[docs/agent-planning-v2.md](docs/agent-planning-v2.md) 了解详细
 planning contract，[docs/scenario-authoring.md](docs/scenario-authoring.md)
 了解 Scenario publishing，以及 [docs/game-lifecycle.md](docs/game-lifecycle.md)
 了解详细的 GameInstance lifecycle。
-
-ACTIVE GameInstance 只有在没有 non-terminal Task、pending WorldOperation、
-pending ActionDecisionRequest 或 reserved resource value 时才能 Archive。
-ARCHIVED instance 是不可变的只读 runtime source。Checkpoint 在 source 保持
-不变的情况下创建独立的 ARCHIVED snapshot；Fork 从 ARCHIVED source 创建新的
-独立 ACTIVE instance，保留相同的 exact ScenarioVersion、runtime state 和
-inherited formal history。详见 [GameInstance lifecycle](docs/game-lifecycle.md)。
 
 ## Provider 配置
 
@@ -78,28 +87,10 @@ Journey Agent 支持 OpenAI-compatible endpoint，包括 OpenAI 以及 DeepSeek
 
 完整配置项和示例请参见 [`.env.example`](.env.example)。
 
-Dynamic Goal Entity Grounding 和 Goal Interpretation 使用 `FAST_SEMANTIC`
-profile。它使用 `SEMANTIC_MODEL`（未设置时回退到 `MODEL_NAME`）、bounded
-semantic output budget，并由代码强制 `thinking=disabled`。
-`MODEL_THINKING_MODE` 和 `MODEL_REASONING_EFFORT` 不会影响这个 profile。
-
-`INITIAL`、`REPAIR` 和 `REPLAN` 使用 `PLANNING_REASONING` profile。它使用
-`MODEL_NAME`、`MODEL_THINKING_MODE`、`MODEL_REASONING_EFFORT` 和
-`MODEL_MAX_OUTPUT_TOKENS`。semantic 和 planning 可以使用不同模型；修改模型
-只需要改配置，不需要修改 Goal Resolver 或 Planner 业务逻辑。
-
-Dynamic Goal 会先 grounding public entity，再构造 focused ontology，最后解释
-terminal `FACT`、`RESOURCE_AT_LEAST` 或公开 `DERIVED_STATE` requirement。Derived
-依赖仍是 backend authored semantics，不会作为 provider planning instructions
-暴露。transient/provider-format
-failure 使用 bounded retry；`NEEDS_CLARIFICATION` 不会被随机 retry 成某个结果。
-provider 或 validation 内部错误码只保留给 developer diagnostics；Goal submission
-feedback 显示在 Goal input 下方，不作为页面级错误。
-
-当前 Linjiang Version 开启 World Goal State catalog。快捷目标只是把建议文案
-填入同一个可编辑 Goal 输入框，不是 Objective/Task selector，也不会提交额外
-identity。Dynamic submission 直接针对 exact Version 编译，不会创建新的 authored
-Objective；旧的 immutable Version 继续保留原有 predefined Objective 行为。
+Goal 理解和 planning 使用分离的 Provider 配置 profile；运行时不会把 provider
+payload 或内部诊断暴露给玩家。详细的 semantic/planning 边界和 retry 行为请见
+[docs/architecture.md](docs/architecture.md) 与
+[docs/agent-planning-v2.md](docs/agent-planning-v2.md)。
 
 不要提交 API key。
 
@@ -204,27 +195,25 @@ Browser E2E 包含三个 deterministic smoke：Basic Product、PLAY Presentation
 
 | Path | Responsibility |
 | --- | --- |
-| app/domain | ScenarioDefinitionV2、ObjectiveScope、world/runtime values |
-| app/agent | Goal resolver、PlannerInput、provider、Validator、Agent loop |
+| app/domain | ScenarioDefinitionV2、world/runtime values 和 domain contracts |
+| app/agent | Goal resolution、planning、provider、validation 和 Agent loop |
 | app/services | Scenario/Game lifecycle、Formal PLAY、actions、projections |
 | app/scenarios | V2 parsing、validation、persistence、built-in definitions |
 | app/api | FastAPI adapters 和 Player/Developer DTOs |
 | frontend/src | React/Vite browser product 和 Editor |
 | tests | Unit、contract、integration、lifecycle、provider 和 E2E support |
 | migrations | Alembic schema history |
-| docs | 当前 architecture、planning、authoring、lifecycle 和 archive |
+| docs | 当前 custom-goals、architecture、planning、authoring、lifecycle 和 archive |
 
 ## 文档
 
-Current authority：
+当前权威文档：
 
-* [docs/architecture.md](docs/architecture.md)：high-level system architecture。
-* [docs/agent-planning-v2.md](docs/agent-planning-v2.md)：Agent Harness 和
-  planning contract。
-* [docs/scenario-authoring.md](docs/scenario-authoring.md)：Scenario authoring
-  和 publishing contract。
-* [docs/game-lifecycle.md](docs/game-lifecycle.md)：GameInstance Archive、
-  Checkpoint 和 Fork lifecycle。
+* [docs/custom-goals.md](docs/custom-goals.md)：自然语言 Goal 如何变成可执行任务、何时需要澄清，以及玩家 WHAT 与 Planner HOW 如何分工。
+* [docs/architecture.md](docs/architecture.md)：ScenarioVersion、GameInstance、Goal、Planning、Validation、Runtime、Truth/Knowledge 和 Formal PLAY 如何组合。
+* [docs/agent-planning-v2.md](docs/agent-planning-v2.md)：Agent 如何获得受限的公开上下文、组合支援 Action、验证规划，并在新 Knowledge 出现后重新规划。
+* [docs/scenario-authoring.md](docs/scenario-authoring.md)：作者可以在 Web Editor 中声明什么，以及 Draft → Validate → Publish 如何工作。
+* [docs/game-lifecycle.md](docs/game-lifecycle.md)：Game 如何绑定一个精确 Version，以及 Archive、Checkpoint、Fork 和 history 如何工作。
 
 [docs/archive](docs/archive/) 仅保存 historical material，不是 current
 implementation authority。

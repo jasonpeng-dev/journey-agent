@@ -11,64 +11,75 @@ world content and declarative semantics, while reusable source code supplies
 Goal resolution, planning, validation, Action execution, persistence, and
 the browser product.
 
+Unlike a chatbot, the Agent acts inside a versioned world with deterministic
+validation and execution. Unlike a scripted game, outcomes emerge from the
+Scenario's declarative contracts and the world's changing public state rather
+than from a fixed dialogue tree.
+
 ## What is included
 
-* ScenarioDefinitionV2 Draft, validation, publication, immutable Versions, and
-  exact-Version GameInstances.
-* Scenario Library and structured Editor for world, Actors, Actions, Rules,
-  Objectives, planning metadata, initialization, references, and Version
-  history.
-* Generic Goal Resolver, frozen `FormalGoalContractV1`, canonical PlannerInput
-  V2, deterministic Validator, bounded internal REPAIR, and Knowledge-aware
-  REPLAN.
-* Authored Derived World State / capability evaluation with separate
-  authoritative Truth and public Knowledge projections.
-* World Goal State V2 typed requirements: `FACT`, `RESOURCE_AT_LEAST`, and
-  authored `DERIVED_STATE`. The current canonical Linjiang Scenario routes all
-  six player-facing goal texts through this public catalog: Task1 is a typed
-  Fact target and Task2-Task6 are five goal-addressable Derived capabilities.
-  The retained authored Objective rows are compatibility/authoring data, not
-  the current canonical player-goal routing shortcut.
-* Declarative Action/Rule execution, Truth mutation, public Knowledge
-  projection, Player-safe Formal PLAY, approvals, immutable archived runtime
-  sources, Fork, and plan history.
-* Generic built-in scenarios running through the same runtime and browser
-  product. Scenario-specific gameplay branches are not part of the engine.
+* Web-based Scenario authoring: authors design worlds, actors and roles,
+  actions, rules, resources, goal semantics, and initial state in the Web
+  Editor, then validate and publish immutable ScenarioVersions.
+* Versioned gameplay: each Game binds to one exact published ScenarioVersion,
+  so its world content, rules, and runtime history remain deterministic.
+* Natural-language Custom Goals: players describe desired outcomes in their own
+  words; authors may provide optional preset or suggested Goals as onboarding
+  examples, and incomplete or ambiguous intent can be clarified.
+* Agent planning and deterministic execution: the Agent plans HOW from the
+  public world state, proposals are checked deterministically, and Runtime
+  executes accepted Actions.
+* Truth/Knowledge separation and replanning: authoritative Truth is distinct
+  from Player/Agent-visible Knowledge; execution may reveal Knowledge and
+  trigger replanning.
+* Auditable game lifecycle: Formal PLAY, execution history, Archive,
+  Checkpoint, Fork, and auditable runtime records.
+
+## How it plays
+
+1. Design a Scenario in the Web Editor: its World, Actors, Actions, Rules,
+   Resources, goal semantics, and initial state.
+2. Validate the Draft and publish an immutable ScenarioVersion.
+3. Create a Game from one exact published Version.
+4. Choose an author-provided suggested Goal or enter a natural-language Custom
+   Goal. The runtime resolves the requested outcome and asks for clarification
+   when the player's intent is incomplete or ambiguous.
+5. The Agent plans from the currently known world. The player reviews and
+   confirms Actions one step at a time.
+6. Runtime execution changes the world and may reveal new Knowledge. When that
+   changes what is legally known or planned, the Agent can replan.
+7. The Goal completes when its deterministic world requirements are satisfied.
+
+Scenario authors may provide optional preset or suggested Goals to help a
+player start quickly, but those entries are an onboarding/example surface
+rather than a fixed task set. Players can always enter a natural-language
+Custom Goal. See [Custom Goals and Task Compilation](docs/custom-goals.md) for
+the product contract and the WHAT-versus-HOW boundary.
 
 ## Architecture at a glance
 
     ScenarioVersion
       -> GameInstance
-           -> Goal text
-                -> public World Goal State catalog / legacy compatibility routing
-                     -> Dynamic public entity grounding when needed
-                          -> focused ontology -> typed Goal interpretation
-                               -> exact-Version validation
-                                    -> frozen FormalGoalContractV1
-                                    -> Closure -> PlannerInput V2
-                                         -> Provider PlanSegment -> Validator
-                                              -> AgentPlan -> Runtime -> Truth / Knowledge
-                                                   -> REPLAN or Complete
+           -> Natural-language Goal
+                -> Goal Resolution
+                     -> Frozen Goal Contract
+                          -> Planning
+                               -> Validation
+                                    -> Execution
+                                         -> Truth / Knowledge update
+                                              -> Replan or Completion
 
-Formal PLAY sends one planning HTTP request. The backend performs any bounded
-REPAIR attempts internally and returns one final state. Rejected proposals
-remain internal PlanningAttempt audit rows; they are not player-visible plans
-and do not create runtime operations.
+Formal PLAY coordinates each planning cycle and presents only validated
+Actions to the player. Rejected proposals stay internal and do not mutate the
+world or become player-facing plans.
 
+See [docs/custom-goals.md](docs/custom-goals.md) for how a player's Goal
+becomes a task and how WHAT/HOW responsibilities are divided.
 See [docs/architecture.md](docs/architecture.md) for high-level runtime
 boundaries, [docs/agent-planning-v2.md](docs/agent-planning-v2.md) for the
 detailed planning contract, [docs/scenario-authoring.md](docs/scenario-authoring.md)
 for Scenario publishing, and [docs/game-lifecycle.md](docs/game-lifecycle.md)
 for the detailed GameInstance lifecycle.
-
-An ACTIVE GameInstance can be archived only when it has no non-terminal Task,
-pending WorldOperation, pending ActionDecisionRequest, or reserved resource
-value. ARCHIVED instances are immutable, read-only runtime sources. A
-Checkpoint creates an independent ARCHIVED snapshot while its ACTIVE source
-remains unchanged. Fork materializes a new independent ACTIVE instance from an
-ARCHIVED source with the same exact ScenarioVersion, runtime state, inherited
-formal history, and an auditable source link. See
-[GameInstance lifecycle](docs/game-lifecycle.md) for the complete contract.
 
 ## Provider configuration
 
@@ -86,33 +97,11 @@ compatible providers such as DeepSeek.
 See [`.env.example`](.env.example) for the available settings and example
 configuration.
 
-Dynamic Goal Entity Grounding and Goal Interpretation use the
-`FAST_SEMANTIC` profile. It uses `SEMANTIC_MODEL` (falling back to
-`MODEL_NAME` when unset), a bounded semantic output budget, and
-`thinking=disabled` enforced by code. `MODEL_THINKING_MODE` and
-`MODEL_REASONING_EFFORT` do not affect this profile.
-
-`INITIAL`, `REPAIR`, and `REPLAN` use `PLANNING_REASONING`. This profile uses
-`MODEL_NAME`, `MODEL_THINKING_MODE`, `MODEL_REASONING_EFFORT`, and
-`MODEL_MAX_OUTPUT_TOKENS`. Semantic and planning calls may use different
-models; changing either model is a configuration change and does not require
-changing Goal Resolver or Planner business logic.
-
-Dynamic Goal resolution grounds public entities before building a focused
-ontology and interpreting terminal `FACT`, `RESOURCE_AT_LEAST`, or public
-`DERIVED_STATE` requirements. Derived State dependencies remain authored
-backend semantics and are not exposed as provider planning instructions.
-Transient/provider-format failures use bounded retry, while
-`NEEDS_CLARIFICATION` is not retried into a random resolution. Internal
-provider or validation codes remain developer diagnostics; Goal submission
-feedback is shown below the Goal input rather than as a page-level error.
-
-The current Linjiang Version enables the World Goal State catalog. Its preset
-entries are suggested text that fills the same editable Goal input; they are
-not Objective or Task selectors and submit no separate identity. A dynamic
-submission compiles against the exact Version without creating a new authored
-Objective. Older immutable Versions retain their original predefined
-Objective behavior.
+Goal understanding and planning use separate provider configuration profiles;
+the runtime keeps provider payloads and internal diagnostics out of the player
+surface. See [docs/architecture.md](docs/architecture.md) and
+[docs/agent-planning-v2.md](docs/agent-planning-v2.md) for the detailed
+semantic/planning boundary and retry behavior.
 
 Never commit API keys.
 
@@ -207,24 +196,33 @@ provider and do not call a real Provider.
 
 | Path | Responsibility |
 | --- | --- |
-| app/domain | ScenarioDefinitionV2, ObjectiveScope, world/runtime values |
-| app/agent | Goal resolver, PlannerInput, provider, Validator, Agent loop |
+| app/domain | ScenarioDefinitionV2, world/runtime values, and domain contracts |
+| app/agent | Goal resolution, planning, provider, validation, and Agent loop |
 | app/services | Scenario/Game lifecycle, Formal PLAY, actions, projections |
 | app/scenarios | V2 parsing, validation, persistence, built-in definitions |
 | app/api | FastAPI adapters and Player/Developer DTOs |
 | frontend/src | React/Vite browser product and Editor |
 | tests | Unit, contract, integration, lifecycle, provider, and E2E support |
 | migrations | Alembic schema history |
-| docs | Current architecture, planning, authoring, lifecycle, and archive |
+| docs | Current custom-goals, architecture, planning, authoring, lifecycle, and archive |
 
 ## Documentation
 
 Current authority:
 
-* [docs/architecture.md](docs/architecture.md)
-* [docs/agent-planning-v2.md](docs/agent-planning-v2.md)
-* [docs/scenario-authoring.md](docs/scenario-authoring.md)
-* [docs/game-lifecycle.md](docs/game-lifecycle.md)
+* [docs/custom-goals.md](docs/custom-goals.md) — how a natural-language Goal
+  becomes an executable task, when clarification is needed, and how the
+  player's WHAT is separated from the Planner's HOW.
+* [docs/architecture.md](docs/architecture.md) — how ScenarioVersion,
+  GameInstance, Goal, Planning, Validation, Runtime, Truth/Knowledge, and
+  Formal PLAY fit together.
+* [docs/agent-planning-v2.md](docs/agent-planning-v2.md) — how the Agent gets
+  bounded public context, composes supporting Actions, validates proposals,
+  and replans when new Knowledge appears.
+* [docs/scenario-authoring.md](docs/scenario-authoring.md) — what authors can
+  declare in the Web Editor and how Draft → Validate → Publish works.
+* [docs/game-lifecycle.md](docs/game-lifecycle.md) — how a Game stays bound to
+  one exact Version and how Archive, Checkpoint, Fork, and history work.
 
 Historical notes:
 
