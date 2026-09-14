@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -25,6 +26,10 @@ class GoalResolutionAttemptConflict(ValueError):
     pass
 
 
+_STALE_GOAL_RESOLUTION_GRACE_SECONDS = 5
+_GOAL_RESOLUTION_TIMEOUT_TEXT = "目标解析暂时失败，请重新解析。"  # noqa: RUF001
+
+
 def reserve_goal_resolution_attempt(
     session_factory: Callable[[], Session],
     *,
@@ -32,6 +37,7 @@ def reserve_goal_resolution_attempt(
     scenario_version_id: UUID,
     goal: str,
     idempotency_key: str,
+    stale_after_seconds: float = 20,
 ) -> tuple[GoalResolutionAttempt, bool]:
     """Reserve one Parse identity and durably supersede the prior READY Draft."""
 
@@ -43,6 +49,11 @@ def reserve_goal_resolution_attempt(
             raise GoalResolutionAttemptConflict("GAME_INSTANCE_NOT_FOUND")
         if game.status != GameInstanceStatus.ACTIVE:
             raise GoalResolutionAttemptConflict("GAME_INSTANCE_READ_ONLY")
+        _reconcile_stale_goal_resolution_attempts_in_session(
+            audit_db,
+            game_instance_id=game_instance_id,
+            stale_after_seconds=stale_after_seconds,
+        )
         existing = audit_db.scalar(
             select(GoalResolutionAttempt).where(
                 GoalResolutionAttempt.game_instance_id == game_instance_id,
@@ -98,6 +109,82 @@ def reserve_goal_resolution_attempt(
         return row, False
 
 
+def reconcile_stale_goal_resolution_attempts(
+    session_factory: Callable[[], Session],
+    *,
+    stale_after_seconds: float = 20,
+    game_instance_id: UUID | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Terminalize audit rows that outlived the Goal operation budget.
+
+    This is deliberately an audit reconciliation path.  It never creates a
+    Draft or Task and it does not participate in gameplay state transitions.
+    """
+
+    with session_factory() as audit_db:
+        reconciled = _reconcile_stale_goal_resolution_attempts_in_session(
+            audit_db,
+            game_instance_id=game_instance_id,
+            stale_after_seconds=stale_after_seconds,
+            now=now,
+        )
+        if reconciled:
+            audit_db.commit()
+        return reconciled
+
+
+def _reconcile_stale_goal_resolution_attempts_in_session(
+    audit_db: Session,
+    *,
+    stale_after_seconds: float,
+    game_instance_id: UUID | None = None,
+    now: datetime | None = None,
+) -> int:
+    if stale_after_seconds <= 0:
+        raise ValueError("Goal resolution stale threshold must be positive")
+    current_time = now or datetime.now(UTC)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=UTC)
+    cutoff = current_time - timedelta(
+        seconds=stale_after_seconds + _STALE_GOAL_RESOLUTION_GRACE_SECONDS
+    )
+    statement = select(GoalResolutionAttempt).where(
+        GoalResolutionAttempt.resolution_status.in_(
+            ("IN_PROGRESS", "PENDING")
+        )
+    )
+    if game_instance_id is not None:
+        statement = statement.where(GoalResolutionAttempt.game_instance_id == game_instance_id)
+    rows = tuple(audit_db.scalars(statement))
+    reconciled = 0
+    for row in rows:
+        updated_at = row.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=UTC)
+        if updated_at >= cutoff:
+            continue
+        age_ms = max(0, round((current_time - updated_at).total_seconds() * 1000))
+        metadata = dict(row.provider_metadata or {})
+        metadata.update(
+            {
+                "outcome": "TIMEOUT",
+                "error_category": "GOAL_RESOLUTION_STALE",
+                "timeout_subtype": "GOAL_RESOLUTION_DEADLINE",
+                "goal_resolution_deadline_seconds": stale_after_seconds,
+                "stale_reconciled": True,
+            }
+        )
+        row.resolution_status = "ERROR"
+        row.resolver_source = "STALE_TIMEOUT"
+        row.rejection_code = "MODEL_PROVIDER_TIMEOUT"
+        row.provider_metadata = metadata
+        row.resolution_duration_ms = max(row.resolution_duration_ms or 0, age_ms)
+        row.presentation_text = _GOAL_RESOLUTION_TIMEOUT_TEXT
+        reconciled += 1
+    return reconciled
+
+
 _SAFE_PROVIDER_METADATA_KEYS = frozenset(
     {
         "provider",
@@ -131,7 +218,9 @@ _SAFE_PROVIDER_METADATA_KEYS = frozenset(
         "configured_output_token_limit",
         "profile",
         "http_timeout_seconds",
-        "total_deadline_seconds",
+        "plan_timeout_seconds",
+        "plan_total_timeout_seconds",
+        "goal_resolution_deadline_seconds",
         "prompt_template_version",
         "request_hash",
         "public_catalog_hash",
@@ -657,4 +746,7 @@ def _is_safe_metadata_value(value: object) -> bool:
     return isinstance(value, (str, int, float, bool)) or value is None
 
 
-__all__ = ["persist_goal_resolution_attempt"]
+__all__ = [
+    "persist_goal_resolution_attempt",
+    "reconcile_stale_goal_resolution_attempts",
+]

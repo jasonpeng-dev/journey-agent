@@ -998,9 +998,9 @@ def test_grounding_recovery_feedback_preserves_only_public_canonical_identity() 
     assert "candidate_refs[1]" not in feedback["preserve"]
 
 
-def test_provider_total_deadline_bounds_a_slow_sync_provider_call() -> None:
+def test_plan_timeout_bounds_a_slow_sync_provider_call() -> None:
     settings = _settings("openai_compatible").model_copy(
-        update={"model_timeout_seconds": 5, "model_total_timeout_seconds": 0.02}
+        update={"plan_timeout_seconds": 0.02, "plan_total_timeout_seconds": None}
     )
     request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
 
@@ -1019,7 +1019,7 @@ def test_provider_total_deadline_bounds_a_slow_sync_provider_call() -> None:
     assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
     assert provider.last_call_metadata is not None
     assert provider.last_call_metadata.outcome == "TIMEOUT"
-    assert provider.last_call_metadata.total_deadline_seconds == 0.02
+    assert provider.last_call_metadata.plan_timeout_seconds == 0.02
     assert provider.last_call_metadata.wall_clock_latency_ms is not None
     assert provider.last_call_metadata.wall_clock_latency_ms < 120
 

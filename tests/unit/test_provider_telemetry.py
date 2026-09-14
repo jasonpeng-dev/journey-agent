@@ -35,12 +35,13 @@ from app.agent.provider import (
     dynamic_goal_recovery_feedback,
     goal_provider_request_snapshot,
     goal_provider_response_snapshot,
+    goal_resolution_operation,
     provider_call_history_metadata,
 )
 from app.core.config import Settings
 
 
-def _settings(*, total_timeout: float = 1.0, observability: str = "NORMAL") -> Settings:
+def _settings(*, plan_timeout: float = 1.0, observability: str = "NORMAL") -> Settings:
     return Settings(
         _env_file=None,
         app_env="test",
@@ -48,8 +49,8 @@ def _settings(*, total_timeout: float = 1.0, observability: str = "NORMAL") -> S
         model_provider="openai_compatible",
         model_name="fake-model",
         model_api_key=SecretStr("not-a-real-key"),
-        model_timeout_seconds=1.0,
-        model_total_timeout_seconds=total_timeout,
+        plan_timeout_seconds=plan_timeout,
+        plan_total_timeout_seconds=None,
         goal_resolution_observability=observability,
     )
 
@@ -1935,7 +1936,7 @@ def test_completed_response_or_invalid_response_is_never_retried() -> None:
     assert metadata.network_calls[0]["outcome"] == "SUCCESS"
 
 
-def test_transport_retry_obeys_one_logical_total_deadline() -> None:
+def test_transport_retry_obeys_one_logical_plan_timeout() -> None:
     calls = 0
 
     def slow_second_attempt(request: httpx.Request) -> httpx.Response:
@@ -1947,7 +1948,7 @@ def test_transport_retry_obeys_one_logical_total_deadline() -> None:
         return _goal_response(request)
 
     provider = OpenAICompatibleGenericProvider(
-        _settings(total_timeout=0.02),
+        _settings(plan_timeout=0.02),
         transport=httpx.MockTransport(slow_second_attempt),
     )
 
@@ -1961,16 +1962,44 @@ def test_transport_retry_obeys_one_logical_total_deadline() -> None:
     metadata = provider.last_call_metadata
     assert metadata is not None
     assert metadata.outcome == "TIMEOUT"
-    assert metadata.error_category == "PROVIDER_TOTAL_DEADLINE"
+    assert metadata.error_category == "PLAN_INVOCATION_DEADLINE"
     assert len(metadata.network_calls) == 2
     assert metadata.network_calls[0]["outcome"] == "ERROR"
     assert metadata.network_calls[1]["outcome"] == "TIMEOUT"
-    assert metadata.network_calls[1]["timeout_category"] == "PROVIDER_TOTAL_DEADLINE"
+    assert metadata.network_calls[1]["timeout_category"] == "PLAN_INVOCATION_DEADLINE"
+
+
+def test_goal_resolution_calls_share_one_operation_deadline() -> None:
+    calls = 0
+
+    def slow_second_call(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            sleep(0.15)
+        return _goal_response(request)
+
+    provider = OpenAICompatibleGenericProvider(
+        _settings(plan_timeout=300),
+        transport=httpx.MockTransport(slow_second_call),
+    )
+    request = GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+
+    with goal_resolution_operation(0.05):
+        provider.select_objectives(request)
+        with pytest.raises(GenericProviderError) as error:
+            provider.select_objectives(request)
+
+    assert error.value.code == "MODEL_PROVIDER_TIMEOUT"
+    assert calls == 2
+    metadata = provider.last_call_metadata
+    assert metadata is not None
+    assert metadata.error_category == "GOAL_RESOLUTION_DEADLINE"
+    assert metadata.goal_resolution_deadline_seconds == 0.05
 
 
 @pytest.mark.parametrize("call_type", ["INITIAL_PLAN", "REPLAN", "REPAIR"])
-def test_enabled_uncapped_provider_uses_nullable_production_settings(
-    monkeypatch: pytest.MonkeyPatch,
+def test_plan_provider_uses_finite_invocation_and_unlimited_http_settings(
     call_type: Literal["INITIAL_PLAN", "REPLAN", "REPAIR"],
 ) -> None:
     captured: dict[str, object] = {}
@@ -1979,18 +2008,14 @@ def test_enabled_uncapped_provider_uses_nullable_production_settings(
         captured.update(json.loads(request.content))
         return _plan_response(request)
 
-    def unexpected_executor(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("No total deadline must not create a deadline executor")
-
-    monkeypatch.setattr("app.agent.provider.ThreadPoolExecutor", unexpected_executor)
     provider = OpenAICompatibleGenericProvider(
         _settings().model_copy(
             update={
                 "model_name": "deepseek-v4-flash",
                 "model_thinking_mode": "enabled",
                 "model_reasoning_effort": "low",
-                "model_timeout_seconds": None,
-                "model_total_timeout_seconds": None,
+                "plan_timeout_seconds": 300,
+                "plan_total_timeout_seconds": None,
                 "model_max_output_tokens": None,
             }
         ),
@@ -2016,7 +2041,8 @@ def test_enabled_uncapped_provider_uses_nullable_production_settings(
     assert metadata.reasoning_effort == "low"
     assert metadata.configured_output_token_limit is None
     assert metadata.http_timeout_seconds is None
-    assert metadata.total_deadline_seconds is None
+    assert metadata.plan_timeout_seconds == 300
+    assert metadata.plan_total_timeout_seconds is None
 
 
 def test_provider_settings_defaults_remain_bounded_and_disabled(
@@ -2025,8 +2051,8 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
     for key in (
         "MODEL_THINKING_MODE",
         "MODEL_REASONING_EFFORT",
-        "MODEL_TIMEOUT_SECONDS",
-        "MODEL_TOTAL_TIMEOUT_SECONDS",
+        "PLAN_TIMEOUT_SECONDS",
+        "PLAN_TOTAL_TIMEOUT_SECONDS",
         "MODEL_MAX_OUTPUT_TOKENS",
         "SEMANTIC_MODEL",
         "GOAL_RESOLUTION_OBSERVABILITY",
@@ -2039,8 +2065,9 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
     assert settings.model_reasoning_effort == "low"
     assert settings.semantic_model is None
     assert settings.goal_resolution_observability == "NORMAL"
-    assert settings.model_timeout_seconds == 20
-    assert settings.model_total_timeout_seconds == 60
+    assert settings.plan_timeout_seconds == 300
+    assert settings.plan_total_timeout_seconds is None
+    assert settings.goal_resolution_timeout_seconds == 20
     assert settings.model_max_output_tokens == 8192
 
 
@@ -2067,20 +2094,46 @@ def test_provider_settings_parse_goal_resolution_debug_observability(
 def test_provider_settings_parse_explicit_null_as_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("MODEL_TIMEOUT_SECONDS", "null")
-    monkeypatch.setenv("MODEL_TOTAL_TIMEOUT_SECONDS", "null")
+    monkeypatch.setenv("PLAN_TIMEOUT_SECONDS", "null")
+    monkeypatch.setenv("PLAN_TOTAL_TIMEOUT_SECONDS", "unlimited")
     monkeypatch.setenv("MODEL_MAX_OUTPUT_TOKENS", "null")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_provider_settings_parse_unlimited_plan_total_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PLAN_TOTAL_TIMEOUT_SECONDS", "unlimited")
 
     settings = Settings(_env_file=None)
 
-    assert settings.model_timeout_seconds is None
-    assert settings.model_total_timeout_seconds is None
-    assert settings.model_max_output_tokens is None
+    assert settings.plan_total_timeout_seconds is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("plan_timeout_seconds", 0),
+        ("plan_timeout_seconds", -1),
+        ("plan_total_timeout_seconds", 0),
+        ("plan_total_timeout_seconds", -1),
+        ("goal_resolution_timeout_seconds", 0),
+        ("goal_resolution_timeout_seconds", -1),
+    ],
+)
+def test_provider_deadline_settings_reject_non_positive_values(
+    field: str,
+    value: int,
+) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})
 
 
 def test_headers_received_but_slow_body_is_distinguished_from_no_response() -> None:
     provider = OpenAICompatibleGenericProvider(
-        _settings(total_timeout=0.02),
+        _settings(plan_timeout=0.02),
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
                 200,
@@ -2101,17 +2154,17 @@ def test_headers_received_but_slow_body_is_distinguished_from_no_response() -> N
     assert metadata.response_headers_received_at is not None
     assert metadata.first_response_byte_at is None
     assert metadata.response_bytes_received == 0
-    assert metadata.timeout_subtype == "PROVIDER_TOTAL_DEADLINE"
+    assert metadata.timeout_subtype == "PLAN_INVOCATION_DEADLINE"
     assert metadata.request_cancelled_at is not None
 
 
-def test_total_deadline_without_response_keeps_response_phase_fields_null() -> None:
+def test_plan_timeout_without_response_keeps_response_phase_fields_null() -> None:
     def no_response(request: httpx.Request) -> httpx.Response:
         sleep(0.15)
         return _goal_response(request)
 
     provider = OpenAICompatibleGenericProvider(
-        _settings(total_timeout=0.02), transport=httpx.MockTransport(no_response)
+        _settings(plan_timeout=0.02), transport=httpx.MockTransport(no_response)
     )
 
     with pytest.raises(GenericProviderError):
@@ -2124,14 +2177,14 @@ def test_total_deadline_without_response_keeps_response_phase_fields_null() -> N
     assert metadata.response_headers_received_at is None
     assert metadata.first_response_byte_at is None
     assert metadata.response_bytes_received is None
-    assert metadata.timeout_subtype == "PROVIDER_TOTAL_DEADLINE"
+    assert metadata.timeout_subtype == "PLAN_INVOCATION_DEADLINE"
     assert metadata.request_cancelled_at is not None
 
 
-def test_partial_body_before_total_deadline_preserves_received_bytes() -> None:
+def test_partial_body_before_plan_timeout_preserves_received_bytes() -> None:
     first_chunk_sent = Event()
     provider = OpenAICompatibleGenericProvider(
-        _settings(total_timeout=0.02),
+        _settings(plan_timeout=0.02),
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
                 200,
@@ -2152,7 +2205,7 @@ def test_partial_body_before_total_deadline_preserves_received_bytes() -> None:
     assert metadata.response_headers_received_at is not None
     assert metadata.first_response_byte_at is not None
     assert metadata.response_bytes_received == len(b"partial")
-    assert metadata.timeout_subtype == "PROVIDER_TOTAL_DEADLINE"
+    assert metadata.timeout_subtype == "PLAN_INVOCATION_DEADLINE"
 
 
 def test_phase_telemetry_does_not_change_plan_parsing() -> None:

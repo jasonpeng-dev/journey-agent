@@ -8,6 +8,8 @@ import re
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
@@ -1188,7 +1190,9 @@ class ProviderCallMetadata(ProviderModel):
     reasoning_effort: str | None = None
     configured_output_token_limit: int | None = None
     http_timeout_seconds: float | None = None
-    total_deadline_seconds: float | None = None
+    plan_timeout_seconds: float | None = None
+    plan_total_timeout_seconds: float | None = None
+    goal_resolution_deadline_seconds: float | None = None
     started_at: str | None = None
     finished_at: str | None = None
     request_started_at: str | None = None
@@ -1296,6 +1300,101 @@ class GenericProviderError(ValueError):
         self.grounding_recovery_feedback = grounding_recovery_feedback
         self.resolution_observation = (
             dict(resolution_observation) if resolution_observation is not None else None
+        )
+
+
+_goal_resolution_budget: ContextVar[tuple[float, float] | None] = ContextVar(
+    "journey_goal_resolution_budget",
+    default=None,
+)
+
+
+@contextmanager
+def goal_resolution_operation(timeout_seconds: float) -> Iterator[None]:
+    """Install one shared deadline for the synchronous Goal resolver operation."""
+
+    if timeout_seconds <= 0:
+        raise ValueError("Goal resolution timeout must be positive")
+    token = _goal_resolution_budget.set(
+        (perf_counter() + timeout_seconds, float(timeout_seconds))
+    )
+    try:
+        yield
+    finally:
+        _goal_resolution_budget.reset(token)
+
+
+def goal_resolution_remaining_seconds() -> float | None:
+    budget = _goal_resolution_budget.get()
+    if budget is None:
+        return None
+    return budget[0] - perf_counter()
+
+
+def goal_resolution_budget_seconds() -> float | None:
+    budget = _goal_resolution_budget.get()
+    return budget[1] if budget is not None else None
+
+
+_plan_operation_budget: ContextVar[tuple[float, float] | None] = ContextVar(
+    "journey_plan_operation_budget",
+    default=None,
+)
+
+
+@contextmanager
+def plan_operation(timeout_seconds: float | None) -> Iterator[None]:
+    """Install an optional shared deadline for one planning operation."""
+
+    if timeout_seconds is None:
+        yield
+        return
+    if timeout_seconds <= 0:
+        raise ValueError("Plan total timeout must be positive")
+    token = _plan_operation_budget.set(
+        (perf_counter() + timeout_seconds, float(timeout_seconds))
+    )
+    try:
+        yield
+    finally:
+        _plan_operation_budget.reset(token)
+
+
+def plan_operation_remaining_seconds() -> float | None:
+    budget = _plan_operation_budget.get()
+    return budget[0] - perf_counter() if budget is not None else None
+
+
+def plan_operation_budget_seconds() -> float | None:
+    budget = _plan_operation_budget.get()
+    return budget[1] if budget is not None else None
+
+
+def _provider_deadline_timeout_category() -> str:
+    goal_remaining = goal_resolution_remaining_seconds()
+    if goal_remaining is not None and goal_remaining <= 0:
+        return "GOAL_RESOLUTION_DEADLINE"
+    plan_operation_remaining = plan_operation_remaining_seconds()
+    if plan_operation_remaining is not None and plan_operation_remaining <= 0:
+        return "PLAN_TOTAL_DEADLINE"
+    return "PLAN_INVOCATION_DEADLINE"
+
+
+def ensure_goal_resolution_budget() -> None:
+    """Raise the canonical provider timeout once the shared Goal budget expires."""
+
+    remaining = goal_resolution_remaining_seconds()
+    if remaining is not None and remaining <= 0:
+        raise GenericProviderError(
+            "MODEL_PROVIDER_TIMEOUT",
+            "The Goal resolution operation timed out",
+            resolution_observation={
+                "stage": "GOAL_RESOLUTION",
+                "status": "ERROR",
+                "result": "GOAL_RESOLUTION_DEADLINE",
+                "rejection_code": "MODEL_PROVIDER_TIMEOUT",
+                "timeout_category": "GOAL_RESOLUTION_DEADLINE",
+            },
         )
 
 
@@ -2768,7 +2867,11 @@ def _goal_provider_metadata(
 
 
 class ProviderTotalTimeout(TimeoutError):
-    """The provider call exceeded the configured end-to-end deadline."""
+    """The provider call exceeded an active plan or Goal deadline."""
+
+    def __init__(self, timeout_category: str = "PLAN_INVOCATION_DEADLINE") -> None:
+        super().__init__(timeout_category)
+        self.timeout_category = timeout_category
 
 
 class _ProviderPhaseTelemetry:
@@ -2877,8 +2980,8 @@ class OpenAICompatibleGenericProvider:
         self._model_name = settings.model_name
         self._semantic_model_name = settings.semantic_model or self._model_name
         self._goal_resolution_observability = settings.goal_resolution_observability
-        self._timeout = settings.model_timeout_seconds
-        self._total_timeout = settings.model_total_timeout_seconds
+        self._plan_timeout = settings.plan_timeout_seconds
+        self._plan_total_timeout = settings.plan_total_timeout_seconds
         self._max_output_tokens = settings.model_max_output_tokens
         self._thinking_mode = settings.model_thinking_mode
         self._reasoning_effort = settings.model_reasoning_effort
@@ -2940,11 +3043,15 @@ class OpenAICompatibleGenericProvider:
 
     @property
     def http_timeout_seconds(self) -> float | None:
-        return self._timeout
+        return None
 
     @property
-    def total_deadline_seconds(self) -> float | None:
-        return self._total_timeout
+    def plan_timeout_seconds(self) -> float:
+        return self._plan_timeout
+
+    @property
+    def plan_total_timeout_seconds(self) -> float | None:
+        return self._plan_total_timeout
 
     @property
     def model_name(self) -> str:
@@ -4096,7 +4203,7 @@ class OpenAICompatibleGenericProvider:
         _request_body, request_size_bytes = self._build_request_body(purpose, payload)
         return request_size_bytes
 
-    def _post_with_total_deadline(
+    def _post_with_plan_deadline(
         self,
         *,
         url: str,
@@ -4115,8 +4222,9 @@ class OpenAICompatibleGenericProvider:
                 telemetry=telemetry,
             )
         if timeout_seconds <= 0:
-            telemetry.mark_timeout("PROVIDER_TOTAL_DEADLINE")
-            raise ProviderTotalTimeout
+            timeout_category = _provider_deadline_timeout_category()
+            telemetry.mark_timeout(timeout_category)
+            raise ProviderTotalTimeout(timeout_category)
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="journey-provider")
         future = executor.submit(
             self._post,
@@ -4129,14 +4237,26 @@ class OpenAICompatibleGenericProvider:
             return future.result(timeout=timeout_seconds)
         except FutureTimeout as exc:
             future.cancel()
-            telemetry.mark_timeout("PROVIDER_TOTAL_DEADLINE")
-            raise ProviderTotalTimeout from exc
+            timeout_category = _provider_deadline_timeout_category()
+            telemetry.mark_timeout(timeout_category)
+            raise ProviderTotalTimeout(timeout_category) from exc
         finally:
             # A late upstream result must never keep the planning lifecycle
             # waiting or get a chance to mutate persistence.  The worker is
             # deliberately detached after the caller has crossed the total
             # deadline; its result is ignored.
             executor.shutdown(wait=False, cancel_futures=True)
+
+    def _remaining_timeout(self, started: float) -> float | None:
+        """Return the tightest active per-call or Goal-operation budget."""
+
+        deadlines = [
+            self._plan_timeout - (perf_counter() - started),
+            plan_operation_remaining_seconds(),
+            goal_resolution_remaining_seconds(),
+        ]
+        finite = [value for value in deadlines if value is not None]
+        return min(finite) if finite else None
 
     def _post(
         self,
@@ -4158,7 +4278,7 @@ class OpenAICompatibleGenericProvider:
 
         try:
             with httpx.Client(
-                timeout=httpx.Timeout(self._timeout),
+                timeout=None,
                 transport=self._transport,
                 event_hooks={"response": [response_hook]},
             ) as client:
@@ -4191,26 +4311,31 @@ class OpenAICompatibleGenericProvider:
             call_started = perf_counter()
             telemetry = _ProviderPhaseTelemetry(request_started_at=call_started_at.isoformat())
             response = None
-            remaining_timeout = (
-                None
-                if self._total_timeout is None
-                else self._total_timeout - (perf_counter() - started)
-            )
+            remaining_timeout = self._remaining_timeout(started)
             try:
-                response = self._post_with_total_deadline(
+                if remaining_timeout is not None and remaining_timeout <= 0:
+                    timeout_category = _provider_deadline_timeout_category()
+                    telemetry.mark_timeout(timeout_category)
+                    raise ProviderTotalTimeout(timeout_category)
+                response = self._post_with_plan_deadline(
                     url=f"{self._base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {self._api_key}"},
                     request_body=request_body,
                     telemetry=telemetry,
                     timeout_seconds=remaining_timeout,
                 )
+                remaining_after_request = self._remaining_timeout(started)
+                if remaining_after_request is not None and remaining_after_request <= 0:
+                    timeout_category = _provider_deadline_timeout_category()
+                    telemetry.mark_timeout(timeout_category)
+                    raise ProviderTotalTimeout(timeout_category)
                 response.raise_for_status()
             except ProviderTotalTimeout as exc:
                 final_error = exc
                 final_response = None
                 final_outcome = "TIMEOUT"
                 final_error_code = "MODEL_PROVIDER_TIMEOUT"
-                final_error_category = "PROVIDER_TOTAL_DEADLINE"
+                final_error_category = exc.timeout_category
                 network_calls.append(
                     self._network_call_metadata(
                         call_index=call_index,
@@ -4270,17 +4395,13 @@ class OpenAICompatibleGenericProvider:
                     )
                 )
                 if retryable and call_index <= _MAX_TRANSPORT_RETRIES:
-                    remaining_after_failure = (
-                        None
-                        if self._total_timeout is None
-                        else self._total_timeout - (perf_counter() - started)
-                    )
+                    remaining_after_failure = self._remaining_timeout(started)
                     if remaining_after_failure is None or remaining_after_failure > 0:
                         continue
                     final_error = ProviderTotalTimeout()
                     final_outcome = "TIMEOUT"
                     final_error_code = "MODEL_PROVIDER_TIMEOUT"
-                    final_error_category = "PROVIDER_TOTAL_DEADLINE"
+                    final_error_category = _provider_deadline_timeout_category()
                     break
                 final_error = exc
                 final_response = getattr(exc, "response", None)
@@ -4323,8 +4444,8 @@ class OpenAICompatibleGenericProvider:
                 error=final_error,
                 response=final_response,
                 latency_ms=latency_ms,
-                http_timeout_seconds=self._timeout,
-                total_deadline_seconds=self._total_timeout,
+                http_timeout_seconds=None,
+                plan_timeout_seconds=self._plan_timeout,
             )
             raise GenericProviderError(
                 final_error_code,
@@ -4377,8 +4498,10 @@ class OpenAICompatibleGenericProvider:
             thinking_mode=profile.thinking_mode,
             reasoning_effort=profile.reasoning_effort,
             configured_output_token_limit=profile.output_token_limit,
-            http_timeout_seconds=self._timeout,
-            total_deadline_seconds=self._total_timeout,
+            http_timeout_seconds=None,
+            plan_timeout_seconds=self._plan_timeout,
+            plan_total_timeout_seconds=self._plan_total_timeout,
+            goal_resolution_deadline_seconds=goal_resolution_budget_seconds(),
             started_at=started_at.isoformat(),
             finished_at=datetime.now(UTC).isoformat(),
             **telemetry.snapshot(),
@@ -4473,8 +4596,10 @@ class OpenAICompatibleGenericProvider:
             thinking_mode=self._profile_for_purpose(purpose).thinking_mode,
             reasoning_effort=self._profile_for_purpose(purpose).reasoning_effort,
             configured_output_token_limit=self._profile_for_purpose(purpose).output_token_limit,
-            http_timeout_seconds=self._timeout,
-            total_deadline_seconds=self._total_timeout,
+            http_timeout_seconds=None,
+            plan_timeout_seconds=self._plan_timeout,
+            plan_total_timeout_seconds=self._plan_total_timeout,
+            goal_resolution_deadline_seconds=goal_resolution_budget_seconds(),
             started_at=started_at.isoformat(),
             finished_at=datetime.now(UTC).isoformat(),
             **telemetry.snapshot(),
@@ -4562,7 +4687,8 @@ def provider_call_start_metadata(
         "reasoning_effort": getattr(provider, "reasoning_effort", None),
         "configured_output_token_limit": getattr(provider, "configured_output_token_limit", None),
         "http_timeout_seconds": getattr(provider, "http_timeout_seconds", None),
-        "total_deadline_seconds": getattr(provider, "total_deadline_seconds", None),
+        "plan_timeout_seconds": getattr(provider, "plan_timeout_seconds", None),
+        "plan_total_timeout_seconds": getattr(provider, "plan_total_timeout_seconds", None),
     }
 
 
@@ -4599,7 +4725,7 @@ def _log_provider_failure(
     response: httpx.Response | None,
     latency_ms: int,
     http_timeout_seconds: float | None,
-    total_deadline_seconds: float | None,
+    plan_timeout_seconds: float | None,
 ) -> None:
     """Record bounded, credential-safe upstream diagnostics for Developer logs."""
 
@@ -4612,7 +4738,7 @@ def _log_provider_failure(
         request_size_bytes=request_size_bytes,
         latency_ms=latency_ms,
         http_timeout_seconds=http_timeout_seconds,
-        total_deadline_seconds=total_deadline_seconds,
+        plan_timeout_seconds=plan_timeout_seconds,
         provider_request_id=_provider_request_id(response),
         response_body_summary=_response_body_summary(response),
     )
@@ -4752,8 +4878,15 @@ __all__ = [
     "build_generic_provider",
     "dynamic_goal_grounding_recovery_feedback",
     "dynamic_goal_recovery_feedback",
+    "ensure_goal_resolution_budget",
     "goal_provider_request_snapshot",
     "goal_provider_response_snapshot",
+    "goal_resolution_budget_seconds",
+    "goal_resolution_operation",
+    "goal_resolution_remaining_seconds",
+    "plan_operation",
+    "plan_operation_budget_seconds",
+    "plan_operation_remaining_seconds",
     "provider_call_history_metadata",
     "provider_call_metadata",
     "provider_call_start_metadata",

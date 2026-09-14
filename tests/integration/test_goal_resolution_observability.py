@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import timedelta
+from time import sleep
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -21,13 +25,24 @@ from app.agent.provider import (
     DynamicGoalSemanticRouting,
     DynamicGoalSemanticRoutingRequest,
     GenericProviderError,
+    OpenAICompatibleGenericProvider,
     ProviderCallMetadata,
 )
+from app.core.config import Settings
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
-from app.infrastructure.db.models import GoalResolutionAttempt, Player
+from app.infrastructure.db.models import (
+    AgentTask,
+    GoalResolutionAttempt,
+    Player,
+    ResolvedGoalDraft,
+)
 from app.scenarios.builtin import require_builtin_v2_version
-from app.services.goal_resolution_observability import persist_goal_resolution_attempt
+from app.services.goal_resolution_observability import (
+    persist_goal_resolution_attempt,
+    reconcile_stale_goal_resolution_attempts,
+    reserve_goal_resolution_attempt,
+)
 from app.services.play import PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
 from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
@@ -608,6 +623,101 @@ def test_provider_error_attempt_persists_goal_text(
     assert attempt.public_catalog_hash and len(attempt.public_catalog_hash) == 64
     assert attempt.focused_ontology_hash and len(attempt.focused_ontology_hash) == 64
     assert attempt.interpretation_attempts
+
+
+def test_goal_operation_timeout_terminalizes_attempt_without_draft_or_task(
+    client: TestClient,
+    session: Session,
+) -> None:
+    game_id, _version_id = _new_game(client, session)
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        database_url="sqlite+pysqlite:///:memory:",
+        model_provider="openai_compatible",
+        model_base_url="https://api.deepseek.com",
+        model_name="test-model",
+        model_api_key=SecretStr("not-a-real-key"),
+        plan_timeout_seconds=300,
+        plan_total_timeout_seconds=None,
+        goal_resolution_timeout_seconds=20,
+    )
+
+    def slow_response(request: httpx.Request) -> httpx.Response:
+        sleep(0.15)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{}"}}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(
+        settings,
+        transport=httpx.MockTransport(slow_response),
+    )
+    orchestrator = PlayOrchestrator(
+        session,
+        GameInstanceId(UUID(game_id)),
+        provider=provider,
+        goal_resolution_timeout_seconds=0.02,
+    )
+
+    with pytest.raises(GenericProviderError) as timed_out:
+        orchestrator.submit_goal("invent warp travel", idempotency_key=str(uuid4()))
+
+    assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
+    attempt = _attempt(session, game_id)
+    assert attempt.resolution_status == "ERROR"
+    assert attempt.rejection_code == "MODEL_PROVIDER_TIMEOUT"
+    assert attempt.resolution_duration_ms > 0
+    assert attempt.provider_metadata["error_category"] == "GOAL_RESOLUTION_DEADLINE"
+    assert session.scalar(
+        select(ResolvedGoalDraft).where(
+            ResolvedGoalDraft.game_instance_id == UUID(game_id)
+        )
+    ) is None
+    assert session.scalar(
+        select(AgentTask).where(AgentTask.game_instance_id == UUID(game_id))
+    ) is None
+
+
+def test_stale_goal_resolution_attempt_reconciliation_is_bounded(
+    client: TestClient,
+    session: Session,
+) -> None:
+    game_id, version_id = _new_game(client, session)
+    audit_factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False)
+    attempt, replayed = reserve_goal_resolution_attempt(
+        audit_factory,
+        game_instance_id=UUID(game_id),
+        scenario_version_id=version_id,
+        goal="an old goal",
+        idempotency_key=str(uuid4()),
+    )
+    assert replayed is False
+
+    reconciled = reconcile_stale_goal_resolution_attempts(
+        audit_factory,
+        game_instance_id=UUID(game_id),
+        stale_after_seconds=20,
+        now=attempt.updated_at.replace(tzinfo=None),
+    )
+    assert reconciled == 0
+
+    stale_now = attempt.updated_at.replace(tzinfo=None)
+    reconciled = reconcile_stale_goal_resolution_attempts(
+        audit_factory,
+        game_instance_id=UUID(game_id),
+        stale_after_seconds=20,
+        now=stale_now + timedelta(seconds=26),
+    )
+    assert reconciled == 1
+    session.expire_all()
+    row = _attempt(session, game_id)
+    assert row.resolution_status == "ERROR"
+    assert row.resolver_source == "STALE_TIMEOUT"
+    assert row.rejection_code == "MODEL_PROVIDER_TIMEOUT"
+    assert row.provider_metadata["stale_reconciled"] is True
 
 
 def test_authored_resolution_attempt_is_recorded_without_provider_call(

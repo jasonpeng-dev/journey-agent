@@ -26,6 +26,9 @@ from app.agent.provider import (
     GenericModelProvider,
     GenericProviderError,
     PlanRequest,
+    ensure_goal_resolution_budget,
+    goal_resolution_operation,
+    plan_operation,
     provider_call_history_metadata,
 )
 from app.domain.enums import (
@@ -97,6 +100,8 @@ class PlayOrchestrator:
         provider: GenericModelProvider | None = None,
         audit_session_factory: Callable[[], Session] | None = None,
         model_max_repair_attempts_per_cycle: int = 2,
+        goal_resolution_timeout_seconds: float = 20,
+        plan_total_timeout_seconds: float | None = None,
     ) -> None:
         self.db = db
         audit_bind = db.get_bind()
@@ -107,6 +112,8 @@ class PlayOrchestrator:
             expire_on_commit=False,
         )
         self.scope = GameInstanceService(db).load(game_instance_id)
+        self.goal_resolution_timeout_seconds = goal_resolution_timeout_seconds
+        self.plan_total_timeout_seconds = plan_total_timeout_seconds
         self.goal_resolver = GenericGoalResolver(
             provider=provider,
             db=db,
@@ -190,6 +197,7 @@ class PlayOrchestrator:
                 scenario_version_id=self.scope.scenario_version_id,
                 goal=goal,
                 idempotency_key=idempotency_key,
+                stale_after_seconds=self.goal_resolution_timeout_seconds,
             )
         except GoalResolutionAttemptConflict as exc:
             code = str(exc)
@@ -227,7 +235,12 @@ class PlayOrchestrator:
         provider_history_start = len(provider_call_history_metadata(self.goal_resolver.provider))
         resolution_started = perf_counter()
         try:
-            resolution = self.goal_resolver.resolve(goal, definition)
+            with goal_resolution_operation(self.goal_resolution_timeout_seconds):
+                resolution = self.goal_resolver.resolve(goal, definition)
+                # A provider implementation may return a value after its
+                # transport boundary has crossed the shared operation budget.
+                # Do not allow that late value to become a READY draft.
+                ensure_goal_resolution_budget()
         except GenericProviderError as exc:
             persist_goal_resolution_attempt(
                 self.audit_session_factory,
@@ -331,7 +344,8 @@ class PlayOrchestrator:
             )
         planning_started = perf_counter()
         try:
-            plan = self.agent.plan(task)
+            with plan_operation(self.plan_total_timeout_seconds):
+                plan = self.agent.plan(task)
         except GenericProviderError as exc:
             self._persist_provider_failure(
                 task,
@@ -682,11 +696,12 @@ class PlayOrchestrator:
                     replan_reason=replan_reason,
                     trigger_step_id=failed_step.id,
                 )
-                plan = self.agent.plan(
-                    task,
-                    reason=replan_reason,
-                    planning_continuity=planning_continuity,
-                )
+                with plan_operation(self.plan_total_timeout_seconds):
+                    plan = self.agent.plan(
+                        task,
+                        reason=replan_reason,
+                        planning_continuity=planning_continuity,
+                    )
             except GenericProviderError as exc:
                 self._persist_provider_failure(
                     task,
@@ -803,7 +818,8 @@ class PlayOrchestrator:
             self.agent.retire_failed_plan_suffix(task, step)
         replan_started = perf_counter()
         try:
-            plan = self.agent.plan(task, reason="PLAYER_REJECTED")
+            with plan_operation(self.plan_total_timeout_seconds):
+                plan = self.agent.plan(task, reason="PLAYER_REJECTED")
         except GenericProviderError as exc:
             self._persist_provider_failure(
                 task,
@@ -907,7 +923,8 @@ class PlayOrchestrator:
         if self.agent.evaluate(task).completed:
             self.agent.execute_next(task)
             return
-        self.agent.plan(task, reason="PLAN_EXHAUSTED")
+        with plan_operation(self.plan_total_timeout_seconds):
+            self.agent.plan(task, reason="PLAN_EXHAUSTED")
 
     def _next_action_step(self, task: AgentTask) -> AgentStep | None:
         plan = self._active_plan_for_task(task)
