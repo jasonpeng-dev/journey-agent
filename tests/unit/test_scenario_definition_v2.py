@@ -18,7 +18,7 @@ from app.scenarios.serialization import (
     scenario_content_hash,
 )
 from app.scenarios.validation import ScenarioDefinitionValidator
-from app.scenarios.versions import ScenarioVersionRepository
+from app.scenarios.versions import ScenarioVersionError, ScenarioVersionRepository
 from app.services.scenarios import ScenarioService
 
 
@@ -265,17 +265,15 @@ def test_v2_validation_fails_closed_for_references_and_engine_contract(
     assert code in {issue.code for issue in result.issues}
 
 
-def test_legacy_v2_snapshot_loads_without_rewriting_optional_action_fields(
+def _persist_scenario_version(
     session: Session,
-) -> None:
-    payload = canonical_document_payload(_contract_scenario_document())
-    assert all(
-        "target_node_type_keys" not in action and "operation_bindings" not in action
-        for action in payload["actions"]
-    )
-
+    payload: dict[str, Any],
+    *,
+    key: str = "legacy_contract",
+    content_hash: str | None = None,
+) -> ScenarioVersion:
     scenario = Scenario(
-        key="legacy_contract",
+        key=key,
         name="Legacy Contract",
         status="PUBLISHED",
     )
@@ -286,13 +284,37 @@ def test_legacy_v2_snapshot_loads_without_rewriting_optional_action_fields(
         version_number=1,
         schema_version=2,
         snapshot_document=payload,
-        content_hash=canonical_payload_hash(payload),
+        content_hash=content_hash or canonical_payload_hash(payload),
         engine_contract_key="declarative-rule-engine",
         engine_contract_version="1",
         published_at=datetime.now(UTC),
     )
     session.add(version)
     session.flush()
+    return version
+
+
+def test_legacy_v2_snapshot_loads_without_rewriting_optional_action_fields(
+    session: Session,
+) -> None:
+    payload = canonical_document_payload(_contract_scenario_document())
+    assert all(
+        "target_node_type_keys" not in action
+        and "target_actor_roles" not in action
+        and "operation_bindings" not in action
+        and "target_terminal_effects" not in action["planning"]
+        and "goal_required_slots" not in action
+        and "behavior" not in action
+        and "locality" not in action
+        for action in payload["actions"]
+    )
+    assert "resource_initial_states" not in payload["initialization"]
+    assert "locality" not in payload["metadata"]
+    assert all(
+        "resource_scope" not in effect for rule in payload["rules"] for effect in rule["effects"]
+    )
+
+    version = _persist_scenario_version(session, payload)
 
     loaded = ScenarioVersionRepository(session).load(version.id)
 
@@ -300,7 +322,11 @@ def test_legacy_v2_snapshot_loads_without_rewriting_optional_action_fields(
     assert loaded.definition.metadata.key == "generic_contract"
     assert version.content_hash in loaded.verified_content_hashes
     assert all(
-        action.operation_bindings == () and action.target_node_type_keys == ()
+        action.operation_bindings == ()
+        and action.target_node_type_keys == ()
+        and action.target_actor_roles == ()
+        and action.planning.target_terminal_effects == ()
+        and action.goal_required_slots == ()
         for action in loaded.definition.actions
     )
     contract = compile_predefined_formal_goal(loaded, (loaded.definition.objectives[0],))
@@ -312,11 +338,126 @@ def test_explicit_empty_action_fields_remain_a_valid_current_snapshot_shape() ->
     payload = canonical_document_payload(_contract_scenario_document())
     for action in payload["actions"]:
         action["target_node_type_keys"] = []
+        action["target_actor_roles"] = []
         action["operation_bindings"] = []
+        action["planning"]["target_terminal_effects"] = []
 
     canonical_payload = canonical_document_payload(payload)
 
     assert canonical_payload == payload
+
+
+def test_known_legacy_default_omissions_preserve_explicit_defaults() -> None:
+    source = _contract_scenario_document()
+    action = source["actions"][0]
+    action["behavior"] = "RULE"
+    action["locality"] = "NONE"
+    action["planning"]["target_terminal_effects"] = []
+    source["initialization"]["resource_initial_states"] = []
+    source["metadata"]["locality"] = {}
+    source["rules"][0]["effects"][0]["resource_scope"] = None
+
+    payload = canonical_document_payload(source)
+    payload_action = payload["actions"][0]
+
+    assert payload_action["behavior"] == "RULE"
+    assert payload_action["locality"] == "NONE"
+    assert payload_action["planning"]["target_terminal_effects"] == []
+    assert payload["initialization"]["resource_initial_states"] == []
+    assert payload["metadata"]["locality"] == {
+        "enabled": False,
+        "scoped_resources": False,
+        "region_node_type_key": None,
+        "facility_node_type_key": None,
+        "transport_node_type_key": None,
+        "located_in_relation_type_key": None,
+        "transport_endpoint_relation_type_key": None,
+        "passability_fact_key": None,
+    }
+    assert payload["rules"][0]["effects"][0]["resource_scope"] is None
+
+
+def test_new_optional_action_omissions_preserve_explicit_empty_distinction() -> None:
+    omitted = canonical_document_payload(_contract_scenario_document())
+    explicit_source = _contract_scenario_document()
+    for action in explicit_source["actions"]:
+        action["target_actor_roles"] = []
+        action["planning"]["target_terminal_effects"] = []
+    explicit = canonical_document_payload(explicit_source)
+
+    for omitted_action, explicit_action in zip(
+        omitted["actions"], explicit["actions"], strict=True
+    ):
+        assert "target_actor_roles" not in omitted_action
+        assert omitted_action["planning"].get("target_terminal_effects") is None
+        assert explicit_action["target_actor_roles"] == []
+        assert explicit_action["planning"]["target_terminal_effects"] == []
+    assert omitted != explicit
+
+
+def test_new_optional_action_fields_preserve_non_empty_content() -> None:
+    source = _contract_scenario_document()
+    source["actions"][0]["target_actor_roles"] = [
+        {
+            "target_key": "patient_one",
+            "required_actor_role_key": "clinician",
+        }
+    ]
+    source["actions"][0]["planning"]["target_terminal_effects"] = [
+        {"fact_key": "stable", "value": True}
+    ]
+
+    payload = canonical_document_payload(source)
+    action = payload["actions"][0]
+
+    assert action["target_actor_roles"] == [
+        {
+            "target_key": "patient_one",
+            "required_actor_role_key": "clinician",
+        }
+    ]
+    assert action["planning"]["target_terminal_effects"] == [{"fact_key": "stable", "value": True}]
+
+
+@pytest.mark.parametrize("present_field", ["target_actor_roles", "target_terminal_effects"])
+def test_historical_v2_snapshot_missing_each_new_optional_field_loads(
+    session: Session,
+    present_field: str,
+) -> None:
+    source = _contract_scenario_document()
+    if present_field == "target_actor_roles":
+        source["actions"][0]["target_actor_roles"] = []
+    else:
+        source["actions"][0]["planning"]["target_terminal_effects"] = []
+    payload = canonical_document_payload(source)
+    action = payload["actions"][0]
+    assert ("target_actor_roles" in action) is (present_field == "target_actor_roles")
+    assert ("target_terminal_effects" in action["planning"]) is (
+        present_field == "target_terminal_effects"
+    )
+
+    version = _persist_scenario_version(session, payload, key=f"legacy_{present_field}")
+    loaded = ScenarioVersionRepository(session).load(version.id)
+
+    assert loaded.id == version.id
+    assert loaded.definition.actions[0].target_actor_roles == ()
+    assert loaded.definition.actions[0].planning.target_terminal_effects == ()
+    assert version.snapshot_document == payload
+
+
+def test_historical_snapshot_still_requires_a_verified_hash(session: Session) -> None:
+    payload = canonical_document_payload(_contract_scenario_document())
+    version = _persist_scenario_version(
+        session,
+        payload,
+        key="legacy_hash_required",
+        content_hash="0" * 64,
+    )
+
+    with pytest.raises(ScenarioVersionError) as caught:
+        ScenarioVersionRepository(session).load(version.id)
+
+    assert caught.value.code == "SCENARIO_VERSION_HASH_MISMATCH"
 
 
 def test_v2_draft_publishes_and_loads_exact_snapshot(session: Session) -> None:

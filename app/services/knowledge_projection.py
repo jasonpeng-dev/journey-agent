@@ -467,8 +467,7 @@ class SharedKnowledgeProjection:
         result: list[dict[str, Any]] = []
         for target_key in sorted(target_keys):
             requirements_for_target = {
-                str(item["action_key"]): item
-                for item in requirements_by_key.get(target_key, [])
+                str(item["action_key"]): item for item in requirements_by_key.get(target_key, [])
             }
             action_keys = set(requirements_for_target)
             action_keys.update(

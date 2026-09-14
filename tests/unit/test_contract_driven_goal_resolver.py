@@ -447,8 +447,7 @@ def test_linjiang_goal_required_slot_sets_are_exact_and_data_driven() -> None:
     }
 
     assert {
-        item.key: set(item.goal_required_slots)
-        for item in LINJIANG_V2_TEST.actions
+        item.key: set(item.goal_required_slots) for item in LINJIANG_V2_TEST.actions
     } == expected
 
 
@@ -459,14 +458,9 @@ def test_canonical_invocation_contract_reflects_goal_required_slot_metadata() ->
         slots = contract["slots"]
         assert isinstance(slots, list)
         assert {
-            str(item["slot_key"])
-            for item in slots
-            if item["goal_required"] is True
+            str(item["slot_key"]) for item in slots if item["goal_required"] is True
         } == expected
-        assert all(
-            item["goal_required"] is (item["slot_key"] in expected)
-            for item in slots
-        )
+        assert all(item["goal_required"] is (item["slot_key"] in expected) for item in slots)
 
 
 def test_invalid_goal_required_slot_fails_scenario_validation() -> None:
@@ -1436,9 +1430,7 @@ def test_routed_transport_without_required_source_clarifies() -> None:
     assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
     assert resolution.dynamic_requirements == ()
     assert resolution.provider_observation is not None
-    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == [
-        "source_region"
-    ]
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == ["source_region"]
 
 
 def test_advisory_region_pair_does_not_create_authoritative_topology_target() -> None:

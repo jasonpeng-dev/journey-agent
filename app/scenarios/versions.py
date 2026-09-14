@@ -63,9 +63,10 @@ class ScenarioVersionRepository:
                 "SCENARIO_VERSION_SNAPSHOT_NOT_CANONICAL",
                 "The persisted ScenarioVersion snapshot is not canonical",
             )
-        # Pre-0f49 snapshots were hashed before the two empty Action fields
-        # existed. Accept that exact historical payload hash only after the
-        # payload-shape equality check above; never normalize or rewrite it.
+        # Historical snapshots may have been hashed before one or more of the
+        # optional empty Action fields existed. Accept that exact historical
+        # payload hash only after the payload-shape equality check above; never
+        # normalize or rewrite it.
         semantic_hash = scenario_content_hash(record.snapshot_document)
         historical_payload_hash = canonical_payload_hash(canonical_payload)
         if semantic_hash != record.content_hash and historical_payload_hash != record.content_hash:

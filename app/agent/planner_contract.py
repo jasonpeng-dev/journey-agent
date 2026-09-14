@@ -648,8 +648,7 @@ def action_goal_terminal_effects(
 
     effects: list[tuple[str, str, StrictScalar | None]] = []
     effects.extend(
-        (item.node_key, item.fact_key, None)
-        for item in action.planning.terminal_effects
+        (item.node_key, item.fact_key, None) for item in action.planning.terminal_effects
     )
     if target_key is not None:
         effects.extend(
@@ -732,10 +731,7 @@ def planner_target_contracts(
         for node in definition.world.nodes
         if node.key in known_node_keys
         and action.required_interaction_key in node.interaction_keys
-        and (
-            not action.target_node_type_keys
-            or node.node_type_key in action.target_node_type_keys
-        )
+        and (not action.target_node_type_keys or node.node_type_key in action.target_node_type_keys)
     }
     for target_key in eligible_targets:
         effects_by_target[target_key] = [

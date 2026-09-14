@@ -932,11 +932,15 @@ def _canonical_action_parameters_for_goal(
         definitions = {item.key: item for item in action.parameters}
         invocation_contract = canonical_action_invocation_contract(action)
         raw_parameter_specs = invocation_contract.get("parameters")
-        parameter_specs = {
-            str(item["slot_key"]): item
-            for item in raw_parameter_specs
-            if isinstance(item, Mapping) and isinstance(item.get("slot_key"), str)
-        } if isinstance(raw_parameter_specs, (list, tuple)) else {}
+        parameter_specs = (
+            {
+                str(item["slot_key"]): item
+                for item in raw_parameter_specs
+                if isinstance(item, Mapping) and isinstance(item.get("slot_key"), str)
+            }
+            if isinstance(raw_parameter_specs, (list, tuple))
+            else {}
+        )
         if action.behavior == ActionBehavior.TRANSPORT_RESOURCE:
             normalized = cast(
                 dict[str, JsonValue],
@@ -974,13 +978,9 @@ def _canonical_action_parameters_for_goal(
                     and isinstance(value, int)
                     and not isinstance(value, bool)
                 )
+                or (parameter.value_type == ActionParameterType.BOOLEAN and isinstance(value, bool))
                 or (
-                    parameter.value_type == ActionParameterType.BOOLEAN
-                    and isinstance(value, bool)
-                )
-                or (
-                    parameter.value_type
-                    in {ActionParameterType.STRING, ActionParameterType.ENUM}
+                    parameter.value_type in {ActionParameterType.STRING, ActionParameterType.ENUM}
                     and isinstance(value, str)
                 )
             )

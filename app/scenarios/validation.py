@@ -142,10 +142,7 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
         if action.key in resolve_action_keys
         for node in definition.world.nodes
         if action.required_interaction_key in node.interaction_keys
-        and (
-            not action.target_node_type_keys
-            or node.node_type_key in action.target_node_type_keys
-        )
+        and (not action.target_node_type_keys or node.node_type_key in action.target_node_type_keys)
         for effect in action.planning.target_terminal_effects
     )
     projected_resource_effects: set[tuple[str, str]] = set()

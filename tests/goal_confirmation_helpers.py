@@ -25,9 +25,7 @@ def parse_and_confirm_api(
     payload = parsed.json()
     assert payload["status"] == "READY_FOR_CONFIRMATION"
     assert "task" not in payload
-    confirmed = client.post(
-        f"/api/v1/games/{game_id}/goal-drafts/{payload['draft_id']}/confirm"
-    )
+    confirmed = client.post(f"/api/v1/games/{game_id}/goal-drafts/{payload['draft_id']}/confirm")
     assert confirmed.status_code == 200, confirmed.text
     return confirmed.json()
 

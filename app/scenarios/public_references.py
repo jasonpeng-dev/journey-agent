@@ -134,9 +134,7 @@ class PublicReferenceIndex:
             hit
             for hit in hits
             if not any(
-                other[1][0] <= hit[1][0]
-                and other[1][1] >= hit[1][1]
-                and other[1] != hit[1]
+                other[1][0] <= hit[1][0] and other[1][1] >= hit[1][1] and other[1] != hit[1]
                 for other in hits
             )
         ]

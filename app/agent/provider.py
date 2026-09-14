@@ -1378,8 +1378,11 @@ def _normalize_dynamic_goal_grounding_wire(raw: object) -> object:
     candidate_refs = normalized.get("candidate_refs")
     if isinstance(candidate_refs, (list, tuple)):
         normalized["candidate_refs"] = [
-            ({key: value for key, value in reference.items() if key != "provenance"}
-             if isinstance(reference, dict) else reference)
+            (
+                {key: value for key, value in reference.items() if key != "provenance"}
+                if isinstance(reference, dict)
+                else reference
+            )
             for reference in candidate_refs
         ]
 
@@ -3718,7 +3721,7 @@ class OpenAICompatibleGenericProvider:
                     "If recovery_feedback identifies intent.amount as an object or array, change "
                     "only that slot so value is a native JSON scalar; for example, an explicit "
                     'amount of 30 is {"status":"GROUNDED","value":30,"surface":null}. '
-                    'The example shows wire '
+                    "The example shows wire "
                     "shape only: use the player's actual scalar and never interpret fields from "
                     "the rejected object as a canonical identity. "
                     "A non-RESOLVED response must not carry candidate_refs; use a clarification "
@@ -3735,11 +3738,7 @@ class OpenAICompatibleGenericProvider:
                 )
                 feedback = payload.get("recovery_feedback")
                 feedback_codes = (
-                    {
-                        item.get("code")
-                        for item in feedback
-                        if isinstance(item, dict)
-                    }
+                    {item.get("code") for item in feedback if isinstance(item, dict)}
                     if isinstance(feedback, (list, tuple))
                     else set()
                 )

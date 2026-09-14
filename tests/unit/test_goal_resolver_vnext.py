@@ -189,18 +189,14 @@ def _transport_role_grounding(
             ref_type="REGION",
             key=source_key if source_status == "GROUNDED" else None,
             surface=source_surface,
-            match_semantics=(
-                "SEMANTIC_EQUIVALENT" if source_status == "GROUNDED" else None
-            ),
+            match_semantics=("SEMANTIC_EQUIVALENT" if source_status == "GROUNDED" else None),
         )
     )
     refs = [
         DynamicGoalCandidateReference(ref_type="REGION", key=target_key),
     ]
     if resource_status == "GROUNDED":
-        refs.append(
-            DynamicGoalCandidateReference(ref_type="RESOURCE", key=resource_key)
-        )
+        refs.append(DynamicGoalCandidateReference(ref_type="RESOURCE", key=resource_key))
     if source_status == "GROUNDED" and source_key is not None:
         refs.append(DynamicGoalCandidateReference(ref_type="REGION", key=source_key))
     return _role_grounding(
@@ -379,9 +375,7 @@ def test_repair_facility_semantics_discard_contaminating_region_hint() -> None:
         ],
     )
 
-    resolution = GenericGoalResolver(provider=provider).resolve(
-        "修复中央通信塔", LINJIANG_V2_TEST
-    )
+    resolution = GenericGoalResolver(provider=provider).resolve("修复中央通信塔", LINJIANG_V2_TEST)
 
     assert resolution.status == "RESOLVED"
     assert resolution.dynamic_requirements[0].target_key == "central_telecom_hub"
@@ -390,13 +384,10 @@ def test_repair_facility_semantics_discard_contaminating_region_hint() -> None:
         for item in provider.grounding_requests[0].deterministic_candidate_refs
     } == {("REGION", "central_district")}
     assert {
-        (item.ref_type, item.key)
-        for item in provider.operation_requests[0].semantic_candidate_refs
+        (item.ref_type, item.key) for item in provider.operation_requests[0].semantic_candidate_refs
     } == {("NODE", "central_telecom_hub")}
     frozen = resolution.provider_observation["stages"][2]["merged_refs"]
-    assert {(item["ref_type"], item["key"]) for item in frozen} == {
-        ("NODE", "central_telecom_hub")
-    }
+    assert {(item["ref_type"], item["key"]) for item in frozen} == {("NODE", "central_telecom_hub")}
 
 
 def test_genuine_family_ambiguity_returns_focused_clarification_without_action_routing() -> None:
@@ -752,12 +743,8 @@ def test_supply_power_explicit_valid_source_is_frozen_and_relation_passes() -> N
         grounding=[
             _role_grounding(
                 (
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="east_distribution_station"
-                    ),
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="east_community_hospital"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="east_distribution_station"),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="east_community_hospital"),
                 ),
                 source=DynamicGoalMentionSlot(
                     status="GROUNDED",
@@ -815,9 +802,7 @@ def test_supply_power_explicit_wrong_source_is_a_relation_conflict() -> None:
             _role_grounding(
                 (
                     DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="east_community_hospital"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="east_community_hospital"),
                 ),
                 source=DynamicGoalMentionSlot(
                     status="GROUNDED",
@@ -1035,9 +1020,7 @@ def test_action_surface_fragment_does_not_ground_required_target() -> None:
         grounding=[
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="ACTION", key="generate_power"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="ACTION", key="generate_power"),
                 ),
                 intent=DynamicGoalIntentDraft(
                     intent_kind="OPERATION",
@@ -1088,9 +1071,7 @@ def test_action_surface_fragment_does_not_ground_required_target() -> None:
     assert resolution.status == "NEEDS_CLARIFICATION"
     assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
     assert resolution.dynamic_requirements == ()
-    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == [
-        "target"
-    ]
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == ["target"]
 
 
 def test_bare_unresolved_required_role_normalizes_to_missing_slot() -> None:
@@ -1098,9 +1079,7 @@ def test_bare_unresolved_required_role_normalizes_to_missing_slot() -> None:
         grounding=[
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="ACTION", key="generate_power"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="ACTION", key="generate_power"),
                 ),
                 intent=DynamicGoalIntentDraft(
                     intent_kind="OPERATION",
@@ -1145,12 +1124,8 @@ def test_omitted_target_is_not_promoted_from_explicit_source_identity() -> None:
         grounding=[
             _role_grounding(
                 (
-                    DynamicGoalCandidateReference(
-                        ref_type="REGION", key="west_logistics_district"
-                    ),
-                    DynamicGoalCandidateReference(
-                        ref_type="RESOURCE", key="emergency_fuel"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="REGION", key="west_logistics_district"),
+                    DynamicGoalCandidateReference(ref_type="RESOURCE", key="emergency_fuel"),
                 ),
                 source=DynamicGoalMentionSlot(
                     status="GROUNDED",
@@ -1167,9 +1142,7 @@ def test_omitted_target_is_not_promoted_from_explicit_source_identity() -> None:
                     surface="emergency fuel",
                     match_semantics="SEMANTIC_EQUIVALENT",
                 ),
-                amount=DynamicGoalScalarMentionSlot(
-                    status="GROUNDED", value=30, surface="30"
-                ),
+                amount=DynamicGoalScalarMentionSlot(status="GROUNDED", value=30, surface="30"),
             )
         ],
         family="OPERATION",
@@ -1214,9 +1187,7 @@ def test_omitted_target_is_not_promoted_from_explicit_source_identity() -> None:
     assert resolution.status == "NEEDS_CLARIFICATION"
     assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
     assert resolution.dynamic_requirements == ()
-    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == [
-        "target"
-    ]
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == ["target"]
 
 
 def test_nonlocal_transport_is_frozen_without_route_legality_validation() -> None:
@@ -1645,14 +1616,10 @@ def test_action_semantic_evidence_conflict_fails_closed_after_bounded_retry() ->
     )
 
     with pytest.raises(GenericProviderError) as caught:
-        GenericGoalResolver(provider=provider).resolve(
-            "前往东部居住区", LINJIANG_V2_TEST
-        )
+        GenericGoalResolver(provider=provider).resolve("前往东部居住区", LINJIANG_V2_TEST)
 
     assert caught.value.code == "PROVIDER_SCHEMA_INVALID"
-    assert caught.value.validation_diagnostics[0]["code"] == (
-        "ACTION_SEMANTIC_EVIDENCE_CONFLICT"
-    )
+    assert caught.value.validation_diagnostics[0]["code"] == ("ACTION_SEMANTIC_EVIDENCE_CONFLICT")
     assert provider.operation_requests == []
 
 

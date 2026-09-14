@@ -184,9 +184,10 @@ def test_linjiang_action_descriptions_are_semantic_only_authoring_text() -> None
         item.description.strip() and len(item.description) <= 40 for item in actions.values()
     )
     assert all(isinstance(item.planning.hints, tuple) for item in actions.values())
-    assert ScenarioDefinitionV2.model_validate(
-        LINJIANG_V2_TEST.model_dump(mode="json")
-    ) == LINJIANG_V2_TEST
+    assert (
+        ScenarioDefinitionV2.model_validate(LINJIANG_V2_TEST.model_dump(mode="json"))
+        == LINJIANG_V2_TEST
+    )
 
 
 def test_builtin_action_authoring_change_publishes_without_mutating_predecessor(
@@ -641,9 +642,7 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     assert communications["command_reachability"] == "DISCONNECTED"
     assert communications["execution_state"]["status"] == "KNOWN_BLOCKED"
     repair_contract = next(
-        item
-        for item in payload["action_contracts"]
-        if item["action_key"] == "repair_facility"
+        item for item in payload["action_contracts"] if item["action_key"] == "repair_facility"
     )
     assert set(repair_contract["executor_requirements"]["required_capabilities"]).issubset(
         communications["capabilities"]
@@ -2441,9 +2440,7 @@ def test_linjiang_v2_power_and_support_rules() -> None:
     assert action.required_actor_role_for_target("east_community_hospital") == (
         "industrial_repair_team"
     )
-    assert action.required_actor_role_for_target("riverside_shelter") == (
-        "industrial_repair_team"
-    )
+    assert action.required_actor_role_for_target("riverside_shelter") == ("industrial_repair_team")
     assert [(item.fact_key, item.value) for item in action.planning.target_terminal_effects] == [
         ("operational", True)
     ]

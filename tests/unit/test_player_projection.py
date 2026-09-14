@@ -929,8 +929,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     hidden_contract = next(
         item
         for item in hidden_state.known_target_action_contracts
-        if item.target_key == "utility_service_depot"
-        and item.action_key == "repair_facility"
+        if item.target_key == "utility_service_depot" and item.action_key == "repair_facility"
     )
     assert hidden_contract.required_actor_role_key == "industrial_repair_team"
     assert hidden_contract.cost == {}

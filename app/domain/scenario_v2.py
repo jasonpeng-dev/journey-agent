@@ -972,8 +972,7 @@ class ActionDefinitionV2(FrozenDefinitionModel):
             raise ValueError("NODE-target Actions require a Node semantic target type")
         if (
             self.target_kind == ActionTargetKind.ACTOR
-            and self.target_semantic_reference_type
-            not in {None, ActionSemanticReferenceType.ACTOR}
+            and self.target_semantic_reference_type not in {None, ActionSemanticReferenceType.ACTOR}
         ):
             raise ValueError("ACTOR-target Actions require an ACTOR semantic target type")
         if not self.allowed_actor_capabilities:

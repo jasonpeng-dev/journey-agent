@@ -191,9 +191,7 @@ def test_planner_and_validator_select_only_target_role_actor(session) -> None:  
     specialist = session.get(GameInstanceActor, (runtime.instance.id, "specialist_one"))
     assert doctor is not None and specialist is not None
     action = next(item for item in definition.actions if item.key == "treat_patient")
-    assert not agent._validate_planning_action(
-        definition, action, doctor, "patient_one"
-    )
+    assert not agent._validate_planning_action(definition, action, doctor, "patient_one")
     assert agent._validate_planning_action(definition, action, specialist, "patient_one")
 
     with pytest.raises(GenericActionError) as caught:

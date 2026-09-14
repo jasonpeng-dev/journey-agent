@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 
@@ -307,9 +307,7 @@ def test_operation_cannot_erase_or_replace_frozen_target(
 
     if name == "replaced_canonical_key":
         with pytest.raises(Exception) as caught:
-            GenericGoalResolver(provider=provider).resolve(
-                "custom hospital goal", LINJIANG_V2_TEST
-            )
+            GenericGoalResolver(provider=provider).resolve("custom hospital goal", LINJIANG_V2_TEST)
         assert getattr(caught.value, "code", None) == "PROVIDER_SCHEMA_INVALID"
         assert len(provider.operation_requests) == 2
     else:
@@ -329,11 +327,7 @@ def test_contextual_actor_candidate_does_not_override_not_specified_role() -> No
     provider = _VNextProvider(
         grounding=[
             _transport_grounding(
-                refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="ACTOR", key="logistics_team_alpha"
-                    ),
-                ),
+                refs=(DynamicGoalCandidateReference(ref_type="ACTOR", key="logistics_team_alpha"),),
                 actor=actor,
                 target=target,
             )
@@ -343,9 +337,7 @@ def test_contextual_actor_candidate_does_not_override_not_specified_role() -> No
         operation=[
             _operation(
                 "inspect",
-                target=_slot(
-                    "target", "NODE", "GROUNDED", ref_type="NODE", key="central_hospital"
-                ),
+                target=_slot("target", "NODE", "GROUNDED", ref_type="NODE", key="central_hospital"),
             )
         ],
     )
@@ -379,9 +371,7 @@ def test_semantic_source_role_is_frozen_without_optional_surface() -> None:
 def test_grounded_semantic_role_without_surface_is_frozen() -> None:
     intent = _transport_grounding(
         refs=(DynamicGoalCandidateReference(ref_type="NODE", key="central_hospital"),),
-        target=DynamicGoalMentionSlot(
-            status="GROUNDED", ref_type="NODE", key="central_hospital"
-        ),
+        target=DynamicGoalMentionSlot(status="GROUNDED", ref_type="NODE", key="central_hospital"),
     ).intent
     assert intent is not None
     normalized = _vnext_normalize_frozen_intent("inspect something", intent, ())
@@ -644,9 +634,7 @@ def test_semantic_role_binding_is_authoritative_even_with_deterministic_hint() -
         ],
     )
 
-    resolution = GenericGoalResolver(provider=provider).resolve(
-        "go east", LINJIANG_V2_TEST
-    )
+    resolution = GenericGoalResolver(provider=provider).resolve("go east", LINJIANG_V2_TEST)
 
     assert resolution.status == "RESOLVED"
     assert resolution.dynamic_requirements[0].target_key == "east_residential_district"
@@ -654,9 +642,7 @@ def test_semantic_role_binding_is_authoritative_even_with_deterministic_hint() -
 
 def test_explicit_ambiguous_role_remains_unresolved() -> None:
     intent = _transport_grounding(
-        resource=DynamicGoalMentionSlot(
-            status="UNRESOLVED", ref_type="RESOURCE", surface="parts"
-        )
+        resource=DynamicGoalMentionSlot(status="UNRESOLVED", ref_type="RESOURCE", surface="parts")
     ).intent
     assert intent is not None
     normalized = _vnext_normalize_frozen_intent("transport parts", intent, ())
@@ -706,9 +692,7 @@ def test_survey_resources_generic_noun_does_not_require_resource_identity() -> N
 def _transport_evidence_with_unresolved_resource() -> _FrozenDynamicGoalEvidence:
     intent = _transport_grounding(
         target=_slot_surface("GROUNDED", "REGION", "south_waterfront_district", "south"),
-        resource=DynamicGoalMentionSlot(
-            status="UNRESOLVED", ref_type="RESOURCE", surface="parts"
-        ),
+        resource=DynamicGoalMentionSlot(status="UNRESOLVED", ref_type="RESOURCE", surface="parts"),
         amount=DynamicGoalScalarMentionSlot(status="GROUNDED", value=30, surface="30"),
     ).intent
     assert intent is not None
@@ -881,4 +865,3 @@ def test_operation_contract_slot_dto_rejects_unknown_status_shape() -> None:
             expected_type="NODE",
             status="GROUNDED",
         )
-

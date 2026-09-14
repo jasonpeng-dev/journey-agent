@@ -563,9 +563,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert provider.plan_requests[2].rejected_segment is not None
     assert (
         session.scalar(
-            select(func.count())
-            .select_from(AgentPlan)
-            .where(AgentPlan.task_id == task.id)
+            select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == task.id)
         )
         == 1
     )

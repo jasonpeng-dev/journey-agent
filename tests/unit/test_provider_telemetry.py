@@ -1201,7 +1201,7 @@ def test_dynamic_grounding_prompt_exposes_typed_roles_and_advisory_refs() -> Non
         "evidence-only Semantic Grounding",
         "public Action name, description, target_kind",
         "do not rely on a fixed",
-            "advisory retrieval candidates",
+        "advisory retrieval candidates",
         "GROUNDED, UNRESOLVED, or NOT_SPECIFIED",
         "source or target role may be a binding declared by the Action contract",
         "multiple compatible candidates remain equally plausible",
@@ -1372,9 +1372,7 @@ def test_dynamic_grounding_wire_normalization_strips_only_provider_owned_fields(
             },
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
     result = provider.ground_dynamic_goal_entities(
         DynamicGoalEntityGroundingRequest(
             goal="move 30 to central hospital",
@@ -1408,9 +1406,7 @@ def test_dynamic_grounding_wire_unknown_extra_still_fails_closed() -> None:
             },
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(complete)
-    )
+    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
     with pytest.raises(GenericProviderError) as caught:
         provider.ground_dynamic_goal_entities(
             DynamicGoalEntityGroundingRequest(

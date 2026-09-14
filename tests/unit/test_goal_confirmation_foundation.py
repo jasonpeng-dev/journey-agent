@@ -35,9 +35,7 @@ def _foundation(session: Session):  # type: ignore[no-untyped-def]
     )
     session.flush()
     orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
-    submission = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key=str(uuid4())
-    )
+    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
     assert submission.draft is not None
     attempt = (
         session.query(GoalResolutionAttempt)

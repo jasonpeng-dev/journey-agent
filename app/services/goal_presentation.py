@@ -555,11 +555,7 @@ def _explicit_roles(observation: object) -> dict[str, dict[str, object]]:
     if isinstance(observation, dict):
         direct = observation.get("explicit_role_evidence")
         if isinstance(direct, dict):
-            return {
-                str(key): value
-                for key, value in direct.items()
-                if isinstance(value, dict)
-            }
+            return {str(key): value for key, value in direct.items() if isinstance(value, dict)}
         for value in observation.values():
             nested = _explicit_roles(value)
             if nested:

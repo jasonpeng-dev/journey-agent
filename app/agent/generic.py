@@ -771,9 +771,7 @@ class GenericGoalResolver:
                                 explicit_role_evidence=(
                                     frozen_evidence.explicit_role_evidence or {}
                                 ),
-                                semantic_action_evidence=(
-                                    frozen_evidence.semantic_action_evidence
-                                ),
+                                semantic_action_evidence=(frozen_evidence.semantic_action_evidence),
                                 recovery_attempt=recovery_attempt,
                                 recovery_feedback=action_recovery,
                             )
@@ -1645,9 +1643,7 @@ class GenericGoalResolver:
                                 result="GOAL_REQUIRED_SLOT_MISSING",
                                 validation="REJECTED",
                                 rejection_code=exc.code,
-                                validation_diagnostics=(
-                                    {"code": exc.code, **dict(exc.details)},
-                                ),
+                                validation_diagnostics=({"code": exc.code, **dict(exc.details)},),
                             ),
                         )
                 candidate = _dynamic_goal_grounded_operation_candidate(grounded_operation)
@@ -2502,9 +2498,7 @@ class GenericGoalResolver:
             else deterministic_refs
         )
         authoritative_refs = (
-            frozen_evidence.semantic_refs
-            if frozen_evidence is not None
-            else deterministic_refs
+            frozen_evidence.semantic_refs if frozen_evidence is not None else deterministic_refs
         )
         public_catalog = _dynamic_goal_entity_catalog(self.db, self.scope, definition)
         raw_references = public_catalog.get("references", ())
@@ -2891,9 +2885,7 @@ class GenericGoalResolver:
                     raise GenericProviderError(
                         "PROVIDER_SCHEMA_INVALID",
                         "The Operation provider violated frozen explicit evidence",
-                        validation_diagnostics=(
-                            {"code": exc.code, **dict(exc.details)},
-                        ),
+                        validation_diagnostics=({"code": exc.code, **dict(exc.details)},),
                     ) from exc
                 if (
                     exc.code
@@ -3213,9 +3205,7 @@ class GenericAgentService:
             objective_resolution_metadata={
                 "exact_version": str(self.scope.scenario_version_id),
                 "provider_calls": (
-                    [provider_observation]
-                    if provider_observation is not None
-                    else []
+                    [provider_observation] if provider_observation is not None else []
                 ),
             },
             objective_resolved_at=now,
@@ -4845,8 +4835,7 @@ class GenericAgentService:
                     {
                         "kind": (
                             "TERMINAL"
-                            if item
-                            in action.planning.terminal_effects_for_target(target_key)
+                            if item in action.planning.terminal_effects_for_target(target_key)
                             else "SUPPORTING"
                         ),
                         "node_key": item.node_key,
@@ -9234,15 +9223,11 @@ def _vnext_role_contract_specs(
     )
     if role == "source":
         return tuple(
-            item
-            for item in (*bindings, *parameters)
-            if item.get("logical_role") == "source"
+            item for item in (*bindings, *parameters) if item.get("logical_role") == "source"
         )
     if role == "resource":
         return tuple(
-            item
-            for item in parameters
-            if item.get("semantic_reference_type") == "RESOURCE"
+            item for item in parameters if item.get("semantic_reference_type") == "RESOURCE"
         )
     return tuple(
         item
@@ -9331,8 +9316,10 @@ def _vnext_operation_slot_from_frozen_role(
                 },
             )
         expected_ref = _slot_expected_reference_type(expected_type)
-        if expected_ref is not None and frozen.ref_type != expected_ref and not (
-            expected_type in {"NODE", "FACILITY"} and frozen.ref_type == "REGION"
+        if (
+            expected_ref is not None
+            and frozen.ref_type != expected_ref
+            and not (expected_type in {"NODE", "FACILITY"} and frozen.ref_type == "REGION")
         ):
             raise FormalGoalError(
                 "FROZEN_EVIDENCE_CONFLICT",
@@ -9693,9 +9680,7 @@ def _vnext_allowed_clarification_fields(
         frozen = _vnext_frozen_role(evidence, cast(Any, role))
         if frozen is None or frozen.status != "UNRESOLVED":
             continue
-        specs = _vnext_role_contract_specs(
-            action_contract, cast(Any, role)
-        )
+        specs = _vnext_role_contract_specs(action_contract, cast(Any, role))
         if len(specs) == 1:
             key = specs[0].get("slot_key")
             allowed.add(str(key) if isinstance(key, str) else field)
@@ -10676,11 +10661,7 @@ def _llm_all_dynamic_goal_grounding(
     candidate_refs = _merge_dynamic_goal_candidate_refs(
         (),
         (
-            *(
-                item
-                for item in grounded.candidate_refs
-                if item.match_semantics != "RELATED_ONLY"
-            ),
+            *(item for item in grounded.candidate_refs if item.match_semantics != "RELATED_ONLY"),
             *_dynamic_goal_intent_candidate_refs(grounded.intent),
         ),
     )
@@ -10778,9 +10759,13 @@ def _vnext_reference_is_named_in_goal(
 
 
 def _vnext_surface_is_in_goal(goal: str, surface: object) -> bool:
-    return isinstance(surface, str) and bool(surface.strip()) and _contains_public_term(
-        _normalize(goal),
-        _normalize(surface),
+    return (
+        isinstance(surface, str)
+        and bool(surface.strip())
+        and _contains_public_term(
+            _normalize(goal),
+            _normalize(surface),
+        )
     )
 
 
@@ -10807,10 +10792,7 @@ def _vnext_surface_matches_public_identity(
     if terms is None:
         return None
     normalized_surface = _normalize(surface)
-    return any(
-        normalized_surface == _normalize(term)
-        for term in terms
-    )
+    return any(normalized_surface == _normalize(term) for term in terms)
 
 
 def _vnext_role_has_explicit_evidence(
@@ -10848,9 +10830,7 @@ def _vnext_role_has_explicit_evidence(
         )
         if terms:
             normalized_goal = _normalize(goal)
-            if any(
-                _contains_public_term(normalized_goal, _normalize(term)) for term in terms
-            ):
+            if any(_contains_public_term(normalized_goal, _normalize(term)) for term in terms):
                 return True
         if any(
             item.ref_type == ref_type
@@ -10950,14 +10930,17 @@ def _vnext_semantic_grounding_recheck_feedback(
             preserved["surface"] = slot.surface[:400]
         preserve.append(preserved)
     disputed_identities = {
-        (item.get("candidate_ref_type"), item.get("candidate_key"))
-        for item in invalid_exact
+        (item.get("candidate_ref_type"), item.get("candidate_key")) for item in invalid_exact
     }
     for index, reference in enumerate(deterministic_refs):
-        if reference.ref_type == "ACTION" or (
-            reference.ref_type,
-            reference.key,
-        ) in disputed_identities:
+        if (
+            reference.ref_type == "ACTION"
+            or (
+                reference.ref_type,
+                reference.key,
+            )
+            in disputed_identities
+        ):
             continue
         preserve.append(
             {
@@ -10968,11 +10951,7 @@ def _vnext_semantic_grounding_recheck_feedback(
             }
         )
 
-    code = (
-        "ROLE_MATCH_SEMANTICS_RECHECK"
-        if invalid_exact
-        else "ROLE_SEMANTIC_GROUNDING_RECHECK"
-    )
+    code = "ROLE_MATCH_SEMANTICS_RECHECK" if invalid_exact else "ROLE_SEMANTIC_GROUNDING_RECHECK"
     return (
         {
             "code": code,
@@ -11145,9 +11124,7 @@ def _vnext_unresolved_roles_without_evidence(
 
     if intent is None:
         return ()
-    slots: tuple[
-        tuple[str, DynamicGoalMentionSlot | DynamicGoalScalarMentionSlot], ...
-    ] = (
+    slots: tuple[tuple[str, DynamicGoalMentionSlot | DynamicGoalScalarMentionSlot], ...] = (
         ("action", intent.action),
         ("actor", intent.actor),
         ("source", intent.source),
@@ -11189,9 +11166,8 @@ def _vnext_normalize_scalar_slot(
 ) -> DynamicGoalScalarMentionSlot:
     provenance = slot.provenance
     explicit = (
-        (not strict_catalog_path and provenance in _EXPLICIT_ROLE_PROVENANCE)
-        or _vnext_surface_is_in_goal(goal, slot.surface)
-    )
+        not strict_catalog_path and provenance in _EXPLICIT_ROLE_PROVENANCE
+    ) or _vnext_surface_is_in_goal(goal, slot.surface)
     if not explicit and slot.status == "GROUNDED":
         explicit = _vnext_scalar_value_is_explicit(goal, slot.value)
     if not strict_catalog_path and provenance in _NON_EXPLICIT_ROLE_PROVENANCE:

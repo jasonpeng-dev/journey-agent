@@ -7,13 +7,25 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import LocalityContractV2, ScenarioDefinitionV2
 from app.scenarios.documents import parse_scenario_document
 
 _OPTIONAL_ACTION_FIELDS_WITH_LEGACY_OMISSION = (
     "target_node_type_keys",
+    "target_actor_roles",
     "operation_bindings",
 )
+
+_OPTIONAL_ACTION_PLANNING_FIELDS_WITH_LEGACY_OMISSION = ("target_terminal_effects",)
+
+_OPTIONAL_ACTION_DEFAULTS_WITH_LEGACY_OMISSION = (
+    ("behavior", "RULE"),
+    ("locality", "NONE"),
+)
+
+_OPTIONAL_INITIALIZATION_FIELDS_WITH_LEGACY_OMISSION = ("resource_initial_states",)
+
+_DEFAULT_LOCALITY_PAYLOAD = LocalityContractV2().model_dump(mode="json")
 
 
 def canonical_document(document: dict[str, Any]) -> ScenarioDefinitionV2:
@@ -25,12 +37,12 @@ def canonical_document(document: dict[str, Any]) -> ScenarioDefinitionV2:
 def canonical_document_payload(document: dict[str, Any]) -> dict[str, Any]:
     """Return canonical JSON while preserving safe legacy omissions.
 
-    ``target_node_type_keys`` and ``operation_bindings`` were added to the v2
-    Action contract with empty defaults. Versions persisted before that change
-    legitimately omit them. Their absence is equivalent to an empty tuple, so
-    the serializer keeps the original presence/absence bit for persisted
-    snapshot equality. The regular semantic hash remains stable across both
-    shapes; the payload hash below is available for historical raw hashes.
+    Several v2 Action fields were added with empty defaults. Versions persisted
+    before those changes legitimately omit them. Their absence is equivalent to
+    an empty tuple, so the serializer keeps the original presence/absence bit
+    for persisted snapshot equality. The regular semantic hash remains stable
+    across both shapes; the payload hash below is available for historical raw
+    hashes.
     """
 
     return _canonical_v2_payload(parse_scenario_document(document), document)
@@ -104,6 +116,46 @@ def _canonical_v2_payload(
             for field in _OPTIONAL_ACTION_FIELDS_WITH_LEGACY_OMISSION:
                 if field not in source_action and not action[field]:
                     action.pop(field)
+            for field, default in _OPTIONAL_ACTION_DEFAULTS_WITH_LEGACY_OMISSION:
+                if field not in source_action and action.get(field) == default:
+                    action.pop(field, None)
+            source_planning = source_action.get("planning")
+            if isinstance(source_planning, Mapping):
+                planning = action["planning"]
+                for field in _OPTIONAL_ACTION_PLANNING_FIELDS_WITH_LEGACY_OMISSION:
+                    if field not in source_planning and not planning[field]:
+                        planning.pop(field)
+
+    source_initialization = source_document.get("initialization")
+    if isinstance(source_initialization, Mapping):
+        initialization = normalized["initialization"]
+        for field in _OPTIONAL_INITIALIZATION_FIELDS_WITH_LEGACY_OMISSION:
+            if field not in source_initialization and not initialization[field]:
+                initialization.pop(field)
+
+    source_metadata = source_document.get("metadata")
+    if isinstance(source_metadata, Mapping):
+        metadata = normalized["metadata"]
+        if (
+            "locality" not in source_metadata
+            and metadata.get("locality") == _DEFAULT_LOCALITY_PAYLOAD
+        ):
+            metadata.pop("locality", None)
+
+    source_rules = source_document.get("rules")
+    if isinstance(source_rules, list):
+        for rule, source_rule in zip(normalized["rules"], source_rules, strict=True):
+            if not isinstance(source_rule, Mapping):
+                continue
+            condition = rule.get("condition")
+            source_condition = source_rule.get("condition")
+            if isinstance(condition, dict) and isinstance(source_condition, Mapping):
+                _preserve_legacy_condition_resource_scopes(condition, source_condition)
+            for effect, source_effect in zip(
+                rule["effects"], source_rule.get("effects", ()), strict=True
+            ):
+                if isinstance(source_effect, Mapping):
+                    _preserve_legacy_resource_scope(effect, source_effect)
 
     normalized["rules"].sort(
         key=lambda item: (
@@ -164,6 +216,32 @@ def _sort_authority(policy: dict[str, Any]) -> None:
     policy["approval_required_values"].sort(key=lambda item: item["parameter_key"])
     for approval in policy["approval_required_values"]:
         approval["values"].sort(key=_scalar_sort_key)
+
+
+def _preserve_legacy_condition_resource_scopes(
+    condition: dict[str, Any],
+    source_condition: Mapping[str, Any],
+) -> None:
+    _preserve_legacy_resource_scope(condition, source_condition)
+    for nested, source_nested in zip(
+        condition.get("conditions", ()),
+        source_condition.get("conditions", ()),
+        strict=True,
+    ):
+        if isinstance(nested, dict) and isinstance(source_nested, Mapping):
+            _preserve_legacy_condition_resource_scopes(nested, source_nested)
+    nested = condition.get("condition")
+    source_nested = source_condition.get("condition")
+    if isinstance(nested, dict) and isinstance(source_nested, Mapping):
+        _preserve_legacy_condition_resource_scopes(nested, source_nested)
+
+
+def _preserve_legacy_resource_scope(
+    node: dict[str, Any],
+    source_node: Mapping[str, Any],
+) -> None:
+    if "resource_scope" not in source_node and node.get("resource_scope") is None:
+        node.pop("resource_scope", None)
 
 
 def _scalar_sort_key(value: object) -> tuple[str, str]:

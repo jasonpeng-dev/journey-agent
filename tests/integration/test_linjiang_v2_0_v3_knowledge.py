@@ -584,12 +584,15 @@ def test_unconstrained_facility_repair_has_no_role_cost_or_extra_effects(
     assert result.outcome.outcome_code == "FACILITY_REPAIRED"
     assert result.outcome.resource_mutations == ()
     assert result.outcome.actor_command_reachability_updates == ()
-    assert _fact(
-        session,
-        runtime.instance.id,
-        "east_telecom_station",
-        "operational",
-    ).truth_value is True
+    assert (
+        _fact(
+            session,
+            runtime.instance.id,
+            "east_telecom_station",
+            "operational",
+        ).truth_value
+        is True
+    )
 
 
 def test_repair_facility_rejects_region_even_if_it_has_repairable_interaction(
@@ -669,12 +672,15 @@ def test_legacy_repair_communications_snapshot_behavior_remains_executable(
 
     assert result.outcome.failure is None
     assert result.outcome.outcome_code == "FACILITY_REPAIRED"
-    assert _fact(
-        session,
-        runtime.instance.id,
-        "central_hospital",
-        "operational",
-    ).truth_value is True
+    assert (
+        _fact(
+            session,
+            runtime.instance.id,
+            "central_hospital",
+            "operational",
+        ).truth_value
+        is True
+    )
     assert any(item.kind == "FACT_REVEALED" for item in result.knowledge_changes)
 
 

@@ -56,8 +56,7 @@ def test_success_presenter_is_deterministic_and_uses_public_names(session) -> No
     assert definition.world.node("patient_one").name in texts[1]
     assert definition.world.node("patient_one").fact("stable").name in texts[1]
     assert (
-        next(item.name for item in definition.actions if item.key == "diagnose_patient")
-        in texts[2]
+        next(item.name for item in definition.actions if item.key == "diagnose_patient") in texts[2]
     )
     assert all("patient_one" not in text for text in texts)
 
@@ -87,9 +86,14 @@ def test_success_presenter_covers_resource_and_derived_state(session) -> None:  
     text = present_resolved_goal(contract, definition)
 
     assert definition.world.node("north_industrial_district").name in text
-    assert next(
-        item.name for item in definition.world.resources if item.key == "general_engineering_parts"
-    ) in text
+    assert (
+        next(
+            item.name
+            for item in definition.world.resources
+            if item.key == "general_engineering_parts"
+        )
+        in text
+    )
     assert derived.name in text
     assert "north_industrial_district" not in text
     assert "general_engineering_parts" not in text

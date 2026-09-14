@@ -435,9 +435,7 @@ def test_transport_required_source_cannot_remain_unspecified() -> None:
     assert resolution.source == "GOAL_REQUIRED_SLOT_MISSING"
     assert resolution.dynamic_requirements == ()
     assert resolution.provider_observation is not None
-    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == [
-        "source_region"
-    ]
+    assert resolution.provider_observation["diagnostics"]["missing_slot_keys"] == ["source_region"]
 
 
 def test_semantic_grounding_cannot_invent_identity_outside_public_catalog() -> None:

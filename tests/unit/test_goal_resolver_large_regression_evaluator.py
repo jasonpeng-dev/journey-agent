@@ -152,12 +152,8 @@ def test_explicit_amount_cannot_be_reasked_in_clarification() -> None:
     assert evaluation["product_semantic_verdict"] == "FAIL"
     assert "CLARIFICATION_DRIFT" in evaluation["corrected_classifications"]
     assert "REDUNDANT_CLARIFICATION_FIELD" in evaluation["corrected_classifications"]
-    assert evaluation["clarification_analysis"]["valid_clarification_fields"] == [
-        "resource"
-    ]
-    assert evaluation["clarification_analysis"][
-        "redundant_clarification_fields"
-    ] == ["amount"]
+    assert evaluation["clarification_analysis"]["valid_clarification_fields"] == ["resource"]
+    assert evaluation["clarification_analysis"]["redundant_clarification_fields"] == ["amount"]
     assert evaluation["explicit_constraints"]["fields"]["amount"] == 30
 
 

@@ -126,11 +126,14 @@ def test_new_parse_supersedes_ready_even_when_provider_fails(
     first_draft = session.get(ResolvedGoalDraft, first_id)
     assert first_draft is not None
     assert first_draft.status == ResolvedGoalDraftStatus.SUPERSEDED
-    assert session.scalar(
-        select(func.count()).select_from(ResolvedGoalDraft).where(
-            ResolvedGoalDraft.status == ResolvedGoalDraftStatus.READY
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ResolvedGoalDraft)
+            .where(ResolvedGoalDraft.status == ResolvedGoalDraftStatus.READY)
         )
-    ) == 0
+        == 0
+    )
     attempts = tuple(session.scalars(select(GoalResolutionAttempt)))
     assert [item.resolution_status for item in attempts] == ["RESOLVED", "ERROR"]
 
@@ -179,9 +182,7 @@ def test_confirm_creates_exact_task_checkpoint_without_resolver_or_planner(
         raise AssertionError("Confirm must not call the Goal Resolver")
 
     monkeypatch.setattr(GenericGoalResolver, "resolve", forbidden)
-    confirmed = client.post(
-        f"/api/v1/games/{game_id}/goal-drafts/{draft.id}/confirm"
-    )
+    confirmed = client.post(f"/api/v1/games/{game_id}/goal-drafts/{draft.id}/confirm")
 
     assert confirmed.status_code == 200, confirmed.text
     task = confirmed.json()
@@ -281,12 +282,8 @@ def test_superseded_and_wrong_game_drafts_cannot_be_confirmed(
     first = _parse(client, first_game, "stabilize the patient").json()
     _parse(client, first_game, "diagnose the patient")
 
-    superseded = client.post(
-        f"/api/v1/games/{first_game}/goal-drafts/{first['draft_id']}/confirm"
-    )
-    wrong_game = client.post(
-        f"/api/v1/games/{second_game}/goal-drafts/{first['draft_id']}/confirm"
-    )
+    superseded = client.post(f"/api/v1/games/{first_game}/goal-drafts/{first['draft_id']}/confirm")
+    wrong_game = client.post(f"/api/v1/games/{second_game}/goal-drafts/{first['draft_id']}/confirm")
 
     assert superseded.status_code == 409
     assert superseded.json()["error"]["code"] == "GOAL_DRAFT_SUPERSEDED"
@@ -315,15 +312,11 @@ def test_confirm_rejects_tampered_draft_integrity(
     parsed = _parse(client, game_id, "stabilize the patient").json()
     draft_id = UUID(parsed["draft_id"])
     session.execute(
-        update(ResolvedGoalDraft)
-        .where(ResolvedGoalDraft.id == draft_id)
-        .values({field: value})
+        update(ResolvedGoalDraft).where(ResolvedGoalDraft.id == draft_id).values({field: value})
     )
     session.commit()
 
-    response = client.post(
-        f"/api/v1/games/{game_id}/goal-drafts/{draft_id}/confirm"
-    )
+    response = client.post(f"/api/v1/games/{game_id}/goal-drafts/{draft_id}/confirm")
 
     assert response.status_code == 500
     assert response.json()["error"]["code"] == code

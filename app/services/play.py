@@ -382,9 +382,7 @@ class PlayOrchestrator:
 
         require_scope_writable(self.db, self.scope.game_instance_id)
         draft = self.db.scalar(
-            select(ResolvedGoalDraft)
-            .where(ResolvedGoalDraft.id == draft_id)
-            .with_for_update()
+            select(ResolvedGoalDraft).where(ResolvedGoalDraft.id == draft_id).with_for_update()
         )
         if draft is None or draft.game_instance_id != self.scope.game_instance_id:
             raise PlayError("GOAL_DRAFT_NOT_FOUND", "The Goal Draft does not belong to this Game")

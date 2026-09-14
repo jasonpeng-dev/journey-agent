@@ -37,9 +37,7 @@ def reserve_goal_resolution_attempt(
 
     with session_factory() as audit_db:
         game = audit_db.scalar(
-            select(GameInstance)
-            .where(GameInstance.id == game_instance_id)
-            .with_for_update()
+            select(GameInstance).where(GameInstance.id == game_instance_id).with_for_update()
         )
         if game is None:
             raise GoalResolutionAttemptConflict("GAME_INSTANCE_NOT_FOUND")
@@ -98,6 +96,7 @@ def reserve_goal_resolution_attempt(
         audit_db.flush()
         audit_db.commit()
         return row, False
+
 
 _SAFE_PROVIDER_METADATA_KEYS = frozenset(
     {

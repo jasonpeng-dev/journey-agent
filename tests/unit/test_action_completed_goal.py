@@ -218,9 +218,7 @@ def _transport_candidate(
         action_key="transport_resource",
         actor_key=actor_key,
         target_key=destination_region,
-        binding_constraints=(
-            ActionInvocationBinding(role="source_region", value=source_region),
-        ),
+        binding_constraints=(ActionInvocationBinding(role="source_region", value=source_region),),
         parameter_constraints=parameters or {"resource_key": "cargo_alpha", "amount": 10},
     )
 
@@ -387,9 +385,7 @@ def test_transport_operation_matches_actor_source_target_resource_and_amount(
         action_key="transport_resource",
         actor_key="carrier",
         target_key="region_b",
-        bindings=(
-            ActionInvocationBinding(role="source_region", value="region_a"),
-        ),
+        bindings=(ActionInvocationBinding(role="source_region", value="region_a"),),
         parameters={"resource_key": "cargo_alpha", "amount": 10},
     )
     assert evaluate(base) is True
@@ -400,9 +396,7 @@ def test_transport_operation_matches_actor_source_target_resource_and_amount(
         evaluate(
             base.model_copy(
                 update={
-                    "bindings": (
-                        ActionInvocationBinding(role="source_region", value="region_c"),
-                    )
+                    "bindings": (ActionInvocationBinding(role="source_region", value="region_c"),)
                 }
             )
         )
