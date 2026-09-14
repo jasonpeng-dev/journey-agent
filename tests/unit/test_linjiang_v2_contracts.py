@@ -22,9 +22,11 @@ from app.agent.generic import (
 from app.agent.planner_contract import (
     action_planner_constraints,
     action_planner_effects,
+    planner_target_contracts,
 )
 from app.agent.planning_context import PlanningContextBuilder, _canonical_planner_input
 from app.agent.provider import (
+    OperationGoalProjection,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
@@ -2575,6 +2577,257 @@ def test_linjiang_v2_power_and_support_rules() -> None:
     assert "activate_emergency_water_transfer" not in action_keys
     assert "activate_water_requirements" not in {item.key for item in definition.rules}
     assert "activate_water_resolution" not in {item.key for item in definition.rules}
+
+
+def test_linjiang_v2_heavy_support_is_target_local_for_all_three_targets() -> None:
+    definition = LINJIANG_V2_TEST
+    engine = DeclarativeRuleEngine(definition)
+    deploy = next(
+        item for item in definition.actions if item.key == "deploy_heavy_engineering_support"
+    )
+    assert {(item.node_key, item.fact_key) for item in deploy.planning.terminal_effects} == {
+        ("south_bridge", "heavy_engineering_support_ready"),
+        ("water_treatment_plant", "heavy_engineering_support_ready"),
+        ("rail_freight_yard", "heavy_engineering_support_ready"),
+    }
+
+    unavailable = engine.evaluate_preflight(
+        _rule_state(
+            definition,
+            resources={},
+            fact_overrides={
+                ("heavy_equipment_yard", "heavy_engineering_support"): "UNAVAILABLE",
+            },
+        ),
+        ActionRuleContext(
+            action_key="deploy_heavy_engineering_support",
+            target_node_key="rail_freight_yard",
+            parameters={},
+            actor_key="industrial_repair_team_alpha",
+            actor_current_node_key="north_industrial_district",
+        ),
+    )
+    assert unavailable is not None and unavailable.failure is not None
+    assert unavailable.failure.code == "HEAVY_SUPPORT_UNAVAILABLE"
+
+    for target_key in ("south_bridge", "water_treatment_plant", "rail_freight_yard"):
+        deployed = engine.evaluate(
+            _rule_state(
+                definition,
+                resources={},
+                fact_overrides={
+                    ("heavy_equipment_yard", "heavy_engineering_support"): "AVAILABLE",
+                },
+            ),
+            ActionRuleContext(
+                action_key="deploy_heavy_engineering_support",
+                target_node_key=target_key,
+                parameters={},
+                actor_key="industrial_repair_team_alpha",
+                actor_current_node_key="north_industrial_district",
+            ),
+        )
+        assert deployed.failure is None
+        assert (target_key, "heavy_engineering_support_ready", True) in {
+            (item.node_key, item.fact_key, item.value) for item in deployed.fact_updates
+        }
+
+    south_context = ActionRuleContext(
+        action_key="clear_transport",
+        target_node_key="south_bridge",
+        parameters={},
+        actor_key="municipal_transport_team",
+        actor_current_node_key="south_waterfront_district",
+    )
+    south_blocked = engine.evaluate_preflight(
+        _rule_state(
+            definition,
+            resources={("municipal_repair_materials", "south_waterfront_district"): 10},
+        ),
+        south_context,
+    )
+    assert south_blocked is not None and south_blocked.failure is not None
+    assert south_blocked.failure.code == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
+    assert south_blocked.failure.message == "清理南港大桥前必须先部署重型工程支援。"
+
+    south_ready = engine.evaluate(
+        _rule_state(
+            definition,
+            resources={("municipal_repair_materials", "south_waterfront_district"): 10},
+            fact_overrides={("south_bridge", "heavy_engineering_support_ready"): True},
+        ),
+        south_context,
+    )
+    assert south_ready.failure is None
+    assert south_ready.outcome_code == "CLEARED"
+
+    rail_context = ActionRuleContext(
+        action_key="repair_facility",
+        target_node_key="rail_freight_yard",
+        parameters={},
+        actor_key="industrial_repair_team_alpha",
+        actor_current_node_key="north_industrial_district",
+    )
+    rail_blocked = engine.evaluate_preflight(
+        _rule_state(
+            definition,
+            resources={
+                ("general_engineering_parts", "north_industrial_district"): 5,
+                ("municipal_repair_materials", "north_industrial_district"): 10,
+            },
+            fact_overrides={
+                ("heavy_equipment_yard", "heavy_engineering_support"): "AVAILABLE",
+            },
+        ),
+        rail_context,
+    )
+    assert rail_blocked is not None and rail_blocked.failure is not None
+    assert rail_blocked.failure.code == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
+
+    rail_ready = engine.evaluate(
+        _rule_state(
+            definition,
+            resources={
+                ("general_engineering_parts", "north_industrial_district"): 5,
+                ("municipal_repair_materials", "north_industrial_district"): 10,
+            },
+            fact_overrides={
+                ("heavy_equipment_yard", "heavy_engineering_support"): "AVAILABLE",
+                ("rail_freight_yard", "heavy_engineering_support_ready"): True,
+            },
+        ),
+        rail_context,
+    )
+    assert rail_ready.failure is None
+    assert rail_ready.outcome_code == "INDUSTRIAL_REPAIRED"
+
+    ordinary_clear = engine.evaluate(
+        _rule_state(
+            definition,
+            resources={("municipal_repair_materials", "central_district"): 10},
+        ),
+        ActionRuleContext(
+            action_key="clear_transport",
+            target_node_key="central_river_tunnel",
+            parameters={},
+            actor_key="municipal_transport_team",
+            actor_current_node_key="central_district",
+        ),
+    )
+    assert ordinary_clear.failure is None
+    assert ordinary_clear.outcome_code == "CLEARED"
+
+
+@pytest.mark.parametrize(
+    ("action_key", "target_key", "required_actor_key"),
+    (
+        ("clear_transport", "south_bridge", "municipal_transport_team"),
+        ("repair_facility", "water_treatment_plant", "water_repair_team_alpha"),
+        ("repair_facility", "rail_freight_yard", "industrial_repair_team_alpha"),
+    ),
+)
+def test_linjiang_v2_dependency_closure_preserves_heavy_support_chain(
+    session: Session,
+    action_key: str,
+    target_key: str,
+    required_actor_key: str,
+) -> None:
+    runtime, scope = _linjiang_v4_runtime(
+        session,
+        f"linjiang-v2-heavy-closure-{action_key}-{target_key}",
+    )
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "恢复重型工程支援链",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
+        initialize_plan=False,
+    )
+    definition = agent._definition()
+    context = PlanningContextBuilder(session, scope).build(
+        definition,
+        tuple(definition.objectives),
+        task=task,
+        replan_reason=None,
+    )
+    planner_input = _canonical_planner_input(context).model_copy(
+        update={
+            "operation_goal": OperationGoalProjection(
+                action_key=action_key,
+                target_key=target_key,
+            )
+        }
+    )
+    deploy = next(
+        item
+        for item in planner_input.action_contracts
+        if item.action_key == "deploy_heavy_engineering_support"
+    )
+    deploy_bindings = {
+        item.target_key: item
+        for item in planner_input.target_bindings
+        if item.action_key == "deploy_heavy_engineering_support"
+    }
+    assert set(deploy_bindings) >= {
+        "south_bridge",
+        "water_treatment_plant",
+        "rail_freight_yard",
+    }
+    assert any(
+        effect.get("fact_key") == "heavy_engineering_support_ready" and effect.get("value") is True
+        for effect in deploy_bindings[target_key].deterministic_effects
+    )
+    assert deploy.target_contract
+
+    closure = build_dependency_closure(definition, (), planner_input).planner_input
+    selected_bindings = {
+        (item.action_key, item.target_key): item for item in closure.target_bindings
+    }
+    assert ("deploy_heavy_engineering_support", target_key) in selected_bindings
+    assert ("repair_facility", "heavy_equipment_yard") in selected_bindings
+    if action_key == "clear_transport":
+        assert ("clear_transport", target_key) in selected_bindings
+    else:
+        assert (action_key, target_key) in selected_bindings
+    assert required_actor_key in {item.actor_key for item in closure.actors}
+    assert f"{target_key}.heavy_engineering_support_ready" not in closure.known_world.facts
+    assert "heavy_equipment_yard.heavy_engineering_support" not in closure.known_world.facts
+    if target_key == "water_treatment_plant":
+        water = selected_bindings[("repair_facility", target_key)]
+        assert any(
+            item.resource_key == "water_system_parts" and item.minimum == 15
+            for item in water.resource_requirements
+        )
+
+
+def test_linjiang_v2_hidden_target_contracts_never_emit_current_truth() -> None:
+    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
+    known_nodes = {node.key for node in definition.world.nodes}
+    contracts = planner_target_contracts(
+        definition,
+        next(item for item in definition.actions if item.key == "deploy_heavy_engineering_support"),
+        known_node_keys=known_nodes,
+        known_facts={},
+        include_authored_hidden_target_effects=True,
+    )
+    assert set(contracts) >= {
+        "south_bridge",
+        "water_treatment_plant",
+        "rail_freight_yard",
+    }
+    for target_key in ("south_bridge", "water_treatment_plant", "rail_freight_yard"):
+        assert contracts[target_key]["effects"] == [
+            {
+                "type": "FACT_MUTATION",
+                "target": "target_key",
+                "fact_key": "heavy_engineering_support_ready",
+                "value": True,
+            }
+        ]
+    assert all(
+        "current_value" not in json.dumps(contract, ensure_ascii=False)
+        for contract in contracts.values()
+    )
 
 
 def test_linjiang_v2_runtime_initializes_knowledge_and_reachability(session: Session) -> None:

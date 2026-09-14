@@ -292,7 +292,11 @@ class SharedKnowledgeProjection:
             result.append(entry)
         return tuple(result)
 
-    def planner_action_requirements(self) -> tuple[dict[str, Any], ...]:
+    def planner_action_requirements(
+        self,
+        *,
+        include_authored_hidden_target_requirements: bool = False,
+    ) -> tuple[dict[str, Any], ...]:
         """Return a sparse, target-oriented Planner requirement projection.
 
         ``known_action_requirements`` is also consumed by the Player API and
@@ -302,10 +306,12 @@ class SharedKnowledgeProjection:
         contracts that can be derived from Knowledge-safe PREFLIGHT rules:
         role, resource costs, and known Fact prerequisites.
 
-        It deliberately skips a rule when its target selector is not itself
-        known.  In particular, hidden target Facts never become a target name
-        or a requirement hint merely because a matching Rule exists in the
-        immutable ScenarioVersion.
+        Hidden current Fact values are never emitted.  The canonical Planner
+        projection may still retain a target's authored prerequisite identity
+        (with ``knowledge_status=UNKNOWN``) when the target can be identified
+        from immutable Scenario metadata.  The player-facing compatibility
+        projection keeps the historical sparse behavior unless the caller opts
+        into this Planner-only authored requirement view.
         """
 
         known_nodes = {row.node_key for row in self.known_node_rows()}
@@ -346,6 +352,7 @@ class SharedKnowledgeProjection:
                             condition,
                             target_key,
                             known_facts,
+                            allow_authored_identity=(include_authored_hidden_target_requirements),
                         )
                         for condition in selector_conditions
                     ):
@@ -397,6 +404,7 @@ class SharedKnowledgeProjection:
                             positive=positive,
                             target_key=target_key,
                             known_facts=known_facts,
+                            include_unknown=(include_authored_hidden_target_requirements),
                         )
                         if special is not None:
                             special_requirements = requirement.setdefault(
@@ -550,10 +558,24 @@ class SharedKnowledgeProjection:
         condition: ConditionV2,
         target_key: str,
         known_facts: dict[tuple[str, str], Any],
+        *,
+        allow_authored_identity: bool = False,
     ) -> bool:
         if condition.fact_key is None:
             return False
         current_value = known_facts.get((target_key, condition.fact_key))
+        if current_value is None and allow_authored_identity:
+            # A target-qualified Rule commonly uses an authored profile/role
+            # value equal to the immutable target key (for example
+            # ``repair_profile == water_treatment_plant``).  This is a
+            # contract identity, not the current runtime Truth.  Keep the
+            # target binding discoverable while never projecting the hidden
+            # current value.
+            if condition.kind == ConditionKind.FACT_EQUALS:
+                return condition.value == target_key
+            if condition.kind == ConditionKind.FACT_IN:
+                return target_key in condition.values
+            return False
         if condition.kind == ConditionKind.FACT_EQUALS:
             return current_value is not None and current_value == condition.value
         if condition.kind == ConditionKind.FACT_IN:
@@ -581,6 +603,7 @@ class SharedKnowledgeProjection:
         positive: bool,
         target_key: str,
         known_facts: dict[tuple[str, str], Any],
+        include_unknown: bool = False,
     ) -> dict[str, Any] | None:
         if condition.node is None or condition.fact_key is None:
             return None
@@ -590,7 +613,10 @@ class SharedKnowledgeProjection:
             node_key = target_key
         else:
             return None
-        if node_key is None or (node_key, condition.fact_key) not in known_facts:
+        if node_key is None:
+            return None
+        fact_is_known = (node_key, condition.fact_key) in known_facts
+        if not fact_is_known and not include_unknown:
             return None
         if condition.kind == ConditionKind.FACT_EQUALS:
             operator = "NE" if positive else "EQ"
@@ -608,12 +634,15 @@ class SharedKnowledgeProjection:
             value = condition.value
         else:
             return None
-        return {
+        projection = {
             "node_key": node_key,
             "fact_key": condition.fact_key,
             "operator": operator,
             "value": value,
         }
+        if not fact_is_known:
+            projection["knowledge_status"] = "UNKNOWN"
+        return projection
 
     @staticmethod
     def _known_condition_nodes(

@@ -298,7 +298,14 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
                 )
 
     current = context.current_knowledge
-    raw_requirements = current.get("known_action_requirements", [])
+    # ``known_action_requirements`` is the public/player compatibility view.
+    # The builder may carry a richer Planner-only authored requirement view in
+    # this private context slot so hidden current Truth never leaks through
+    # ``PlanningContext.compact_dump``.
+    raw_requirements = current.get(
+        "_planner_action_requirements",
+        current.get("known_action_requirements", []),
+    )
     if isinstance(raw_requirements, list):
         for target in raw_requirements:
             if not isinstance(target, dict) or not isinstance(target.get("target_key"), str):
@@ -661,7 +668,10 @@ class PlanningContextBuilder:
         known_refs = legacy.known_fact_refs()
         known_world = legacy.known_world(definition)
         knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
-        planner_action_requirements = knowledge_projection.planner_action_requirements()
+        public_action_requirements = knowledge_projection.planner_action_requirements()
+        planner_action_requirements = knowledge_projection.planner_action_requirements(
+            include_authored_hidden_target_requirements=True
+        )
         known_pool_keys = {item.pool_key for item in knowledge_projection.visible_resource_pools()}
         known_derived = _public_derived_knowledge(
             definition,
@@ -718,7 +728,8 @@ class PlanningContextBuilder:
             current_knowledge={
                 **known_world,
                 "derived_states": known_derived,
-                "known_action_requirements": list(planner_action_requirements),
+                "known_action_requirements": list(public_action_requirements),
+                "_planner_action_requirements": list(planner_action_requirements),
                 "observations": self._observations(task),
             },
             relevant_actions=tuple(relevant_actions),
@@ -1173,6 +1184,7 @@ class PlanningContextBuilder:
                 known_facts=known_fact_values,
                 known_relation_keys=known_relation_keys,
                 known_pool_keys=known_pool_keys,
+                include_authored_hidden_target_effects=True,
             )
             if target_contracts:
                 action_context["target_contracts"] = target_contracts

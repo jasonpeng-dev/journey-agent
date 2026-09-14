@@ -625,6 +625,12 @@ class PlanningContext(ProviderModel):
         """Return the lossless provider projection of this context."""
 
         payload = self.model_dump(mode="json")
+        current_knowledge = payload.get("current_knowledge")
+        if isinstance(current_knowledge, dict):
+            # Builder-internal authored requirement metadata is consumed while
+            # constructing canonical PlannerInput; it is not part of the
+            # player/provider compatibility payload.
+            current_knowledge.pop("_planner_action_requirements", None)
         if not payload.get("previous_execution_context"):
             payload.pop("previous_execution_context", None)
         return payload

@@ -720,8 +720,15 @@ def planner_target_contracts(
     known_facts: dict[tuple[str, str], StrictScalar],
     known_relation_keys: set[str] | None = None,
     known_pool_keys: set[str] | None = None,
+    include_authored_hidden_target_effects: bool = False,
 ) -> dict[str, dict[str, object]]:
-    """Return only known target-specific deterministic effect differences."""
+    """Return target-specific deterministic effects safe for Planner use.
+
+    The default remains the sparse, player-facing compatibility projection.
+    The canonical Planner may opt into authored target identities/effects when
+    the current Truth value is hidden; the emitted effect is still the desired
+    authored mutation, never the hidden current value.
+    """
 
     known_relation_keys = known_relation_keys or set()
     known_pool_keys = known_pool_keys or set()
@@ -744,13 +751,41 @@ def planner_target_contracts(
             for effect in action.planning.target_terminal_effects
             for fact_key in (effect.fact_key,)
         ]
+    if include_authored_hidden_target_effects:
+        # ``terminal_effects`` carries authored target identities for some
+        # actions (notably heavy-support deployment), while the behavior-level
+        # contract carries the generic target-relative effect.  Join those
+        # two declarations without consulting current Truth or naming an
+        # Action/target special case.
+        generic_target_effects = [
+            effect
+            for effect in action_planner_effects(action)
+            if (
+                effect.get("type") == "FACT_MUTATION"
+                and effect.get("target") in {"target_key", "target_node"}
+                and isinstance(effect.get("fact_key"), str)
+            )
+        ]
+        for reference in action.planning.terminal_effects:
+            target_key = reference.node_key
+            if target_key not in eligible_targets:
+                continue
+            for effect in generic_target_effects:
+                if effect.get("fact_key") != reference.fact_key:
+                    continue
+                effects_by_target.setdefault(target_key, []).append(dict(effect))
     for rule in definition.rules:
         if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
             continue
         if not _has_current_target_condition(rule.condition):
             continue
         for target_key in eligible_targets:
-            if not _condition_matches_target(rule.condition, target_key, known_facts):
+            if not _condition_matches_target(
+                rule.condition,
+                target_key,
+                known_facts,
+                allow_authored_identity=include_authored_hidden_target_effects,
+            ):
                 continue
             effects = [
                 projection
@@ -764,6 +799,7 @@ def planner_target_contracts(
                     known_pool_keys=known_pool_keys,
                     known_facts=known_facts,
                     target_key=target_key,
+                    allow_hidden_target_effects=include_authored_hidden_target_effects,
                 )
             ]
             if effects:
@@ -921,6 +957,7 @@ def _effect_is_knowledge_safe(
     known_pool_keys: set[str],
     known_facts: dict[tuple[str, str], StrictScalar],
     target_key: str | None = None,
+    allow_hidden_target_effects: bool = False,
 ) -> bool:
     if effect.kind == EffectKind.REVEAL_TARGET_REGION_FACILITY_FACTS:
         return target_key is not None and target_key in known_node_keys
@@ -947,6 +984,8 @@ def _effect_is_knowledge_safe(
             node_key = effect.node.node_key
             return node_key is not None and (node_key, fact_key) in known_facts
         if target_key is not None:
+            if allow_hidden_target_effects and target_key in known_node_keys:
+                return True
             return (target_key, fact_key) in known_facts
         return any(item_fact_key == fact_key for _, item_fact_key in known_facts)
     return True
@@ -1076,28 +1115,51 @@ def _condition_matches_target(
     condition: Any,
     target_key: str,
     known_facts: dict[tuple[str, str], StrictScalar],
+    *,
+    allow_authored_identity: bool = False,
 ) -> bool:
     if condition is None:
         return True
     if condition.kind == ConditionKind.ALL:
         return all(
-            _condition_matches_target(item, target_key, known_facts)
+            _condition_matches_target(
+                item,
+                target_key,
+                known_facts,
+                allow_authored_identity=allow_authored_identity,
+            )
             for item in condition.conditions
         )
     if condition.kind == ConditionKind.ANY:
         return any(
-            _condition_matches_target(item, target_key, known_facts)
+            _condition_matches_target(
+                item,
+                target_key,
+                known_facts,
+                allow_authored_identity=allow_authored_identity,
+            )
             for item in condition.conditions
         )
     if condition.kind == ConditionKind.NOT:
-        return not _condition_matches_target(condition.condition, target_key, known_facts)
+        return not _condition_matches_target(
+            condition.condition,
+            target_key,
+            known_facts,
+            allow_authored_identity=allow_authored_identity,
+        )
     if condition.node is None or condition.node.kind != NodeSelectorKind.CURRENT_TARGET:
         return True
     if condition.fact_key is None:
         return False
-    current = known_facts.get((target_key, condition.fact_key))
-    if current is None:
+    fact_identity = (target_key, condition.fact_key)
+    if fact_identity not in known_facts:
+        if allow_authored_identity:
+            if condition.kind == ConditionKind.FACT_EQUALS:
+                return bool(condition.value == target_key)
+            if condition.kind == ConditionKind.FACT_IN:
+                return bool(target_key in condition.values)
         return False
+    current = known_facts[fact_identity]
     if condition.kind == ConditionKind.FACT_EQUALS:
         return bool(current == condition.value)
     if condition.kind == ConditionKind.FACT_NOT_EQUALS:

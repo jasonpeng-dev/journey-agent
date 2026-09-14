@@ -493,7 +493,10 @@ def test_debug_resolution_attempt_persists_bounded_call_snapshots(
         for reference in grounding_call["candidate_refs"]
     )
     assert grounding_snapshot["output"]["status"] == "RESOLVED"
-    assert grounding_snapshot["output"]["candidate_refs"] == grounding_call["candidate_refs"]
+    assert grounding_snapshot["output"]["candidate_refs"] == [
+        {key: value for key, value in reference.items() if key != "provenance"}
+        for reference in grounding_call["candidate_refs"]
+    ]
 
     assert grounding_call["validation_result"] == {
         "pydantic": "ACCEPTED",

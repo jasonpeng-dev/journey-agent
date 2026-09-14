@@ -86,6 +86,43 @@ def _scope_actor_actions_to_contracts(
     )
 
 
+def _binding_required_actor_roles(
+    binding: PlannerTargetBinding,
+    contract: PlannerActionContract,
+) -> set[str]:
+    """Return authored executor roles for one target binding.
+
+    Target-specific roles are carried by the binding requirement when the
+    Knowledge projection can expose it.  Fall back to the action contract's
+    target-role declaration and finally its action-level role.  This is only
+    candidate retention; Closure never selects an executor.
+    """
+
+    roles = {
+        role
+        for requirement in binding.requirements
+        for role in (requirement.get("required_actor_role_key"),)
+        if isinstance(role, str)
+    }
+    if roles:
+        return roles
+    target_roles = contract.executor_requirements.get("target_role_requirements")
+    if isinstance(target_roles, (list, tuple)):
+        roles.update(
+            str(item["required_role_key"])
+            for item in target_roles
+            if isinstance(item, dict)
+            and item.get("target_key") == binding.target_key
+            and isinstance(item.get("required_role_key"), str)
+        )
+    if roles:
+        return roles
+    action_role = contract.executor_requirements.get("required_role_key")
+    if isinstance(action_role, str):
+        roles.add(action_role)
+    return roles
+
+
 def _relation_is_public(relation: dict[str, object]) -> bool:
     for key in ("public", "is_public"):
         if key in relation and relation[key] is not True:
@@ -638,6 +675,7 @@ def build_dependency_closure(
     unknowns: dict[str, dict[str, object]] = {}
     audit: dict[str, list[dict[str, object]]] = {}
     selected_actor_targets: set[str] = set()
+    selected_binding_actor_keys: set[str] = set()
     selected_diagnostic_actor_keys: set[str] = set()
     expanded_source_targets: set[tuple[str, str]] = set()
     queued_resource_dependencies: set[TypedDependency] = set()
@@ -855,6 +893,25 @@ def build_dependency_closure(
             }
         )
         relevant_nodes.add(target_key)
+        contract = contracts.get(action_key)
+        if contract is not None:
+            required_roles = _binding_required_actor_roles(binding, contract)
+            for actor in planner_input.actors:
+                if (
+                    actor.availability != "ACTIVE"
+                    or not _actor_matches_executor(actor, contract)
+                    or (
+                        operation_goal is not None
+                        and operation_goal.action_key == action_key
+                        and operation_goal.actor_key is not None
+                        and operation_goal.actor_key != actor.actor_key
+                    )
+                    or (required_roles and actor.role_key not in required_roles)
+                ):
+                    continue
+                selected_binding_actor_keys.add(actor.actor_key)
+                if actor.current_region:
+                    relevant_nodes.add(actor.current_region)
         _queue_binding_resource_dependencies(binding, path, action_key, demand_group)
         expand_source_dependencies(contracts[action_key], target_key, path)
         return True
@@ -1251,6 +1308,24 @@ def build_dependency_closure(
                         demand_group=demand_group,
                     )
             for action_key, contract in contracts.items():
+                binding_key = (action_key, dependency.subject)
+                binding = bindings.get(binding_key)
+                if binding is not None and _binding_declares_fact_effect(binding, dependency):
+                    if _binding_can_produce_fact_for_target(
+                        binding,
+                        contract,
+                        dependency,
+                    ):
+                        select_binding(
+                            binding_key,
+                            path,
+                            repr(dependency),
+                            demand_group=demand_group,
+                        )
+                    # A target binding is the authoritative target-specific
+                    # producer contract.  Do not fall back to the generic
+                    # action effect for this same target.
+                    continue
                 if not _contract_can_produce_fact_for_target(
                     contract,
                     dependency,
@@ -1269,19 +1344,6 @@ def build_dependency_closure(
                         dependency.subject,
                         path,
                     )
-            for binding_key, binding in bindings.items():
-                for effect in binding.deterministic_effects:
-                    if (
-                        effect.get("type") == "FACT_MUTATION"
-                        and effect.get("fact_key") == dependency.key
-                        and binding.target_key == dependency.subject
-                    ):
-                        select_binding(
-                            binding_key,
-                            path,
-                            repr(dependency),
-                            demand_group=demand_group,
-                        )
         elif dependency.dimension in {"ACTOR_COMMAND_REACHABILITY", "ACTOR_LOCATION"}:
             effect_type = dependency.dimension
             if dependency.dimension == "ACTOR_COMMAND_REACHABILITY":
@@ -1561,6 +1623,18 @@ def build_dependency_closure(
             if target_actor.current_region:
                 relevant_nodes.add(target_actor.current_region)
 
+        # A selected target binding may narrow the legal executor Role beyond
+        # the action-level contract (for example water vs. industrial repair).
+        # Keep every public active candidate matching that authored binding
+        # role so Planner can choose; Closure does not choose one.
+        for actor_key in sorted(selected_binding_actor_keys):
+            binding_actor = actor_states.get(actor_key)
+            if binding_actor is None or binding_actor.availability != "ACTIVE":
+                continue
+            selected_actor_keys.add(actor_key)
+            if binding_actor.current_region:
+                relevant_nodes.add(binding_actor.current_region)
+
     state_changed = True
     while state_changed or queue:
         state_changed = False
@@ -1709,6 +1783,67 @@ def build_dependency_closure(
     )
 
 
+def _accepted_dependency_values(dependency: TypedDependency) -> tuple[object, ...]:
+    accepted_values: object = dependency.required
+    if isinstance(dependency.required, str):
+        try:
+            accepted_values = ast.literal_eval(dependency.required)
+        except (SyntaxError, ValueError):
+            accepted_values = dependency.required
+    if isinstance(accepted_values, (tuple, list, set, frozenset)):
+        return tuple(accepted_values)
+    return (accepted_values,)
+
+
+def _binding_declares_fact_effect(
+    binding: PlannerTargetBinding,
+    dependency: TypedDependency,
+) -> bool:
+    """Whether a target binding declares a deterministic mutation for a Fact."""
+
+    return any(
+        effect.get("type") == "FACT_MUTATION"
+        and effect.get("fact_key") == dependency.key
+        and effect.get("target") in {"target_key", "target_node", binding.target_key}
+        for effect in binding.deterministic_effects
+    )
+
+
+def _binding_can_produce_fact_for_target(
+    binding: PlannerTargetBinding,
+    contract: PlannerActionContract,
+    dependency: TypedDependency,
+) -> bool:
+    """Check one target binding against a typed FACT demand."""
+
+    accepted_values = _accepted_dependency_values(dependency)
+    for effect in binding.deterministic_effects:
+        if (
+            effect.get("type") != "FACT_MUTATION"
+            or effect.get("fact_key") != dependency.key
+            or effect.get("target") not in {"target_key", "target_node", binding.target_key}
+        ):
+            continue
+        effect_value = effect.get("value")
+        if effect_value in accepted_values:
+            return True
+        if isinstance(effect_value, dict) and isinstance(effect_value.get("from_parameter"), str):
+            parameter = next(
+                (
+                    item
+                    for item in contract.parameters
+                    if item.get("key") == effect_value.get("from_parameter")
+                ),
+                None,
+            )
+            allowed_values = parameter.get("allowed_values", []) if parameter else []
+            if isinstance(allowed_values, list) and any(
+                value in accepted_values for value in allowed_values
+            ):
+                return True
+    return False
+
+
 def _contract_can_produce_fact_for_target(
     contract: PlannerActionContract,
     dependency: TypedDependency,
@@ -1736,14 +1871,7 @@ def _contract_can_produce_fact_for_target(
         and target.get("type") not in target_node_types
     ):
         return False
-    accepted_values: object = dependency.required
-    if isinstance(dependency.required, str):
-        try:
-            accepted_values = ast.literal_eval(dependency.required)
-        except (SyntaxError, ValueError):
-            accepted_values = dependency.required
-    if not isinstance(accepted_values, (tuple, list, set, frozenset)):
-        accepted_values = (accepted_values,)
+    accepted_values = _accepted_dependency_values(dependency)
     for effect in contract.deterministic_effects:
         effect_value = effect.get("value")
         if isinstance(effect_value, dict) and isinstance(effect_value.get("from_parameter"), str):

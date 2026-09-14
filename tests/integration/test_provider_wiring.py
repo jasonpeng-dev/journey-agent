@@ -948,8 +948,6 @@ def test_grounding_amount_object_returns_native_scalar_recovery_contract() -> No
         "path": "intent.amount",
         "example": {
             "status": "GROUNDED",
-            "ref_type": None,
-            "key": None,
             "value": 30,
             "surface": None,
         },

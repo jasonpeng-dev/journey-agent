@@ -265,6 +265,13 @@ world:
     - clearable
     - inspectable
     facts:
+    - key: heavy_engineering_support_required
+      name: 重型工程支援要求
+      description: 该目标是否需要先部署重型工程支援
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
     - key: passable
       name: 通行状态
       description: 该通道是否可通行。
@@ -856,6 +863,13 @@ world:
     - clearable
     - inspectable
     facts:
+    - key: heavy_engineering_support_required
+      name: 重型工程支援要求
+      description: 该目标是否需要先部署重型工程支援
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
     - key: passable
       name: 通行状态
       description: 该通道是否可通行。
@@ -871,10 +885,18 @@ world:
     initial_access: AVAILABLE
     initial_visibility: KNOWN
     interaction_keys:
+    - heavy_support_target
     - inspectable
     - repairable
     - power_targetable
     facts:
+    - key: heavy_engineering_support_ready
+      name: 重型工程支援就绪
+      description: 重型工程支援就绪
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: HIDDEN
+      allowed_values: []
     - key: operational
       name: 运行状态
       description: 运行状态
@@ -1001,6 +1023,13 @@ world:
     - inspectable
     - clearable
     facts:
+    - key: heavy_engineering_support_required
+      name: 重型工程支援要求
+      description: 该目标是否需要先部署重型工程支援
+      value_type: BOOLEAN
+      initial_value: true
+      initial_visibility: KNOWN
+      allowed_values: []
     - key: heavy_engineering_support_ready
       name: 重型工程支援就绪
       description: 重型工程支援就绪
@@ -1553,6 +1582,13 @@ world:
     - clearable
     - inspectable
     facts:
+    - key: heavy_engineering_support_required
+      name: 重型工程支援要求
+      description: 该目标是否需要先部署重型工程支援
+      value_type: BOOLEAN
+      initial_value: false
+      initial_visibility: KNOWN
+      allowed_values: []
     - key: passable
       name: 通行状态
       description: 通行状态
@@ -2106,6 +2142,8 @@ actions:
       fact_key: heavy_engineering_support_ready
     - node_key: water_treatment_plant
       fact_key: heavy_engineering_support_ready
+    - node_key: rail_freight_yard
+      fact_key: heavy_engineering_support_ready
     supporting_effects: []
     success_outcome_codes:
     - SUPPORT_DEPLOYED
@@ -2474,6 +2512,28 @@ actions:
   behavior: RULE
   locality: FACILITY_REGION
 rules:
+- key: clear_transport_south_bridge_heavy_support_required
+  phase: PREFLIGHT
+  action_key: clear_transport
+  priority: 951
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      node:
+        kind: CURRENT_TARGET
+      fact_key: heavy_engineering_support_required
+      value: true
+    - kind: FACT_NOT_EQUALS
+      node:
+        kind: CURRENT_TARGET
+      fact_key: heavy_engineering_support_ready
+      value: true
+  effects:
+  - kind: EMIT_FAILURE
+    failure_code: HEAVY_ENGINEERING_SUPPORT_REQUIRED
+    message: 清理南港大桥前必须先部署重型工程支援。
+    retryable: true
 - key: clear_transport_municipal_repair_materials_10_required
   phase: PREFLIGHT
   action_key: clear_transport
@@ -6867,13 +6927,13 @@ rules:
     - kind: FACT_NOT_EQUALS
       node:
         kind: EXPLICIT
-        node_key: heavy_equipment_yard
-      fact_key: heavy_engineering_support
-      value: AVAILABLE
+        node_key: rail_freight_yard
+      fact_key: heavy_engineering_support_ready
+      value: true
   effects:
   - kind: EMIT_FAILURE
-    failure_code: ACTION_PRECONDITION
-    message: 重型工程支援尚未就绪。
+    failure_code: HEAVY_ENGINEERING_SUPPORT_REQUIRED
+    message: 维修铁路货运场前必须先部署重型工程支援。
     retryable: true
 - key: repair_facility_industrial_rail_freight_yard_general_engi_03d5bf76
   phase: PREFLIGHT
