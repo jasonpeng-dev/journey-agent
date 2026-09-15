@@ -4,6 +4,19 @@ import { entityRegistry, factInitialValueMetadata, metadataForKind, rootFieldReg
 import type { DraftObject, EntityKind, JsonObject } from "../editor";
 import { sectionObjects } from "../editor";
 import { fieldLabel, uiLabel } from "../ui";
+import {
+  ActionAuthorityPolicyEditor,
+  ActionEditor,
+  AuthoringDocumentProvider,
+  DerivedStateEditor,
+  GoalResolutionEditor,
+  InitializationEditor,
+  ObjectiveEditor,
+  PlanningEditor,
+  PublicKnowledgeEditor,
+  PublicReferenceEditor,
+  RuleEditor,
+} from "./TypedScenarioAuthoring";
 
 type Props = {
   section: string;
@@ -160,6 +173,11 @@ function EntityEditor({ entity, document, onChange, focusPath }: { entity: Draft
     element?.scrollIntoView({ block: "center" });
     if (element instanceof HTMLElement && typeof element.focus === "function") element.focus();
   }, [focusPath]);
+  if (entity.kind === "action") return <><ActionEditor entity={entity} document={document} onChange={onChange} /><ActionAuthorityPolicyEditor value={value.authority_policy ?? {}} path={`${entity.kind}.${entity.key}.authority_policy`} onChange={(next) => onChange({ ...value, authority_policy: next })} /></>;
+  if (entity.kind === "rule") return <RuleEditor entity={entity} document={document} onChange={onChange} />;
+  if (entity.kind === "objective") return <AuthoringDocumentProvider document={document}><ObjectiveEditor entity={entity} document={document} onChange={onChange} /></AuthoringDocumentProvider>;
+  if (entity.kind === "derived_state") return <DerivedStateEditor entity={entity} document={document} onChange={onChange} />;
+  if (entity.kind === "public_reference") return <PublicReferenceEditor entity={entity} document={document} onChange={onChange} />;
   return <div className="typed-entity-editor"><div className="typed-grid">
     {metadata.fields.map((field) => field.type === "text" && Array.isArray(nestedValue(value, field.path))
       ? <StringArrayEditor key={field.path} value={nestedValue(value, field.path)} label={fieldLabel(field.path)} path={`${entity.kind}.${entity.key}.${field.path}`} onChange={(next) => onChange(withNestedValue(value, field.path, next))} />
@@ -180,6 +198,10 @@ function RootEditor({ rootKey, value, document, onChange }: { rootKey: string; v
 export function TypedEditor({ section, value, document, onChange, path = section, focusPath }: Props) {
   if (section === "overview" || section === "initialization" || section === "goal-resolution" || section === "planning" || section === "public-knowledge") {
     const rootKey = section === "overview" ? "metadata" : section === "goal-resolution" ? "goal_resolution" : section === "public-knowledge" ? "public_knowledge" : section;
+    if (rootKey === "initialization" && value && typeof value === "object" && !Array.isArray(value)) return <InitializationEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "planning" && value && typeof value === "object" && !Array.isArray(value)) return <PlanningEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "goal_resolution" && value && typeof value === "object" && !Array.isArray(value)) return <GoalResolutionEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "public_knowledge" && value && typeof value === "object" && !Array.isArray(value)) return <PublicKnowledgeEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
     return <RootEditor rootKey={rootKey} value={value} document={document} onChange={onChange} />;
   }
   if (value && typeof value === "object" && !Array.isArray(value) && "kind" in value && typeof (value as JsonObject).kind === "string") {
