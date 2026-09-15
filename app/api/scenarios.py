@@ -14,6 +14,8 @@ from app.agent.provider import GenericProviderError
 from app.api.schemas.phase_d import (
     DraftDeleteObjectRequest,
     DraftPublishRequest,
+    DraftReferenceAnalysisRequest,
+    DraftReferenceAnalysisResponse,
     DraftRenameKeyRequest,
     DraftReplaceRequest,
     DraftResponse,
@@ -21,6 +23,8 @@ from app.api.schemas.phase_d import (
     DraftRevisionRequest,
     DraftSandboxRequest,
     DraftSandboxResponse,
+    DraftTransformRequest,
+    DraftTransformResponse,
     DraftValidationResponse,
     ReadinessCheckResponse,
     ReadinessLevel,
@@ -43,7 +47,7 @@ from app.core.errors import AppError
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.infrastructure.db.session import get_db
-from app.scenarios.authoring import locator_for_path
+from app.scenarios.authoring import ReferenceEdge, locator_for_path, reference_index
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from app.scenarios.validation import ScenarioValidationIssue
 from app.services.draft_sandbox import DraftSandboxService
@@ -323,6 +327,69 @@ def get_references(scenario_id: UUID, db: Session = Depends(get_db)) -> Referenc
         _raise_http(exc)
 
 
+@router.post(
+    "/scenarios/{scenario_id}/draft/reference-analysis",
+    response_model=DraftReferenceAnalysisResponse,
+)
+def analyze_working_copy_references(
+    scenario_id: UUID,
+    request: DraftReferenceAnalysisRequest,
+    db: Session = Depends(get_db),
+) -> DraftReferenceAnalysisResponse:
+    service = ScenarioService(db)
+    try:
+        references = service.analyze_working_copy_references(
+            scenario_id,
+            expected_revision=request.expected_revision,
+            definition_document=request.definition_document,
+        )
+        draft = service.get_draft(scenario_id)
+        return DraftReferenceAnalysisResponse(
+            scenario_id=scenario_id,
+            base_revision=draft.revision,
+            source="WORKING_COPY",
+            references=_reference_edges(references),
+        )
+    except ScenarioLifecycleError as exc:
+        db.rollback()
+        _raise_http(exc, details=exc.details)
+
+
+@router.post(
+    "/scenarios/{scenario_id}/draft/transform",
+    response_model=DraftTransformResponse,
+)
+def transform_working_copy(
+    scenario_id: UUID,
+    request: DraftTransformRequest,
+    db: Session = Depends(get_db),
+) -> DraftTransformResponse:
+    service = ScenarioService(db)
+    try:
+        operation = request.operation
+        changed = service.transform_working_copy(
+            scenario_id,
+            expected_revision=request.expected_revision,
+            definition_document=request.definition_document,
+            operation_kind=operation.kind,
+            object_kind=operation.object_kind,
+            old_key=operation.old_key,
+            new_key=operation.new_key,
+            object_key=operation.object_key,
+        )
+        draft = service.get_draft(scenario_id)
+        return DraftTransformResponse(
+            scenario_id=scenario_id,
+            base_revision=draft.revision,
+            source="WORKING_COPY",
+            definition_document=changed,
+            references=_reference_edges(reference_index(changed)),
+        )
+    except ScenarioLifecycleError as exc:
+        db.rollback()
+        _raise_http(exc, details=exc.details)
+
+
 @router.post("/scenarios/{scenario_id}/draft/rename-key", response_model=DraftResponse)
 def rename_draft_key(
     scenario_id: UUID,
@@ -422,6 +489,24 @@ def _draft_write(
     except ScenarioLifecycleError as exc:
         db.rollback()
         _raise_http(exc, details=exc.details)
+
+
+def _reference_edges(edges: tuple[ReferenceEdge, ...]) -> list[ReferenceEdgeResponse]:
+    return [
+        ReferenceEdgeResponse(
+            source={
+                "object_kind": edge.source.object_kind,
+                "object_key": edge.source.object_key,
+                "field_path": edge.source.field_path,
+            },
+            target={
+                "object_kind": edge.target.object_kind,
+                "object_key": edge.target.object_key,
+                "field_path": edge.target.field_path,
+            },
+        )
+        for edge in edges
+    ]
 
 
 def _scenario_summary(db: Session, scenario: Scenario) -> ScenarioSummaryResponse:

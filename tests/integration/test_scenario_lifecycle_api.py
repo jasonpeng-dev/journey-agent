@@ -236,6 +236,81 @@ def test_reference_navigation_atomic_rename_and_guarded_delete(client: TestClien
     )
 
 
+def test_working_copy_transform_and_reference_analysis_do_not_persist(client: TestClient) -> None:
+    created = _create_example(client, key="working_copy_case")
+    scenario_id = created["id"]
+    draft_response = client.get(f"/api/v1/scenarios/{scenario_id}/draft")
+    original = draft_response.json()["definition_document"]
+    interaction_key = original["actions"][0]["required_interaction_key"]
+
+    analysis_document = deepcopy(original)
+    analysis_document["actions"][0]["required_interaction_key"] = "working_copy_interaction"
+    analyzed = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/reference-analysis",
+        json={"expected_revision": 1, "definition_document": analysis_document},
+    )
+    assert analyzed.status_code == 200, analyzed.text
+    assert analyzed.json()["source"] == "WORKING_COPY"
+    assert analyzed.json()["base_revision"] == 1
+    assert any(
+        edge["target"]["object_kind"] == "interaction"
+        and edge["target"]["object_key"] == "working_copy_interaction"
+        for edge in analyzed.json()["references"]
+    )
+
+    renamed = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/transform",
+        json={
+            "expected_revision": 1,
+            "definition_document": original,
+            "operation": {
+                "kind": "RENAME_KEY",
+                "object_kind": "interaction",
+                "old_key": interaction_key,
+                "new_key": "working_copy_renamed",
+            },
+        },
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["base_revision"] == 1
+    assert renamed.json()["definition_document"]["actions"][0]["required_interaction_key"] == (
+        "working_copy_renamed"
+    )
+
+    with_unused = deepcopy(original)
+    with_unused["world"]["resources"].append(
+        {"key": "working_copy_unused", "name": "Working copy only", "initial_value": 0}
+    )
+    deleted = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/transform",
+        json={
+            "expected_revision": 1,
+            "definition_document": with_unused,
+            "operation": {
+                "kind": "DELETE_OBJECT",
+                "object_kind": "resource",
+                "object_key": "working_copy_unused",
+            },
+        },
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert all(
+        item["key"] != "working_copy_unused"
+        for item in deleted.json()["definition_document"]["world"]["resources"]
+    )
+
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == 1
+    assert persisted["definition_document"] == original
+
+    stale = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/reference-analysis",
+        json={"expected_revision": 2, "definition_document": original},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "SCENARIO_DRAFT_CONFLICT"
+
+
 @pytest.mark.parametrize("example_key", ["linjiang_infrastructure_recovery_v2_0"])
 def test_generic_editor_round_trip_remains_engine_parseable(
     client: TestClient,

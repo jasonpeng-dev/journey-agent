@@ -25,6 +25,11 @@ export type Draft = {
 export type Locator = { object_kind: string; object_key: string | null; field_path: string | null };
 export type ReferenceEdge = { source: Locator; target: Locator };
 export type ReferenceIndex = { scenario_id: string; revision: number; references: ReferenceEdge[] };
+export type DraftTransformOperation =
+  | { kind: "RENAME_KEY"; object_kind: string; old_key: string; new_key: string }
+  | { kind: "DELETE_OBJECT"; object_kind: string; object_key: string };
+export type WorkingCopyReferenceAnalysis = { scenario_id: string; base_revision: number; source: "WORKING_COPY"; references: ReferenceEdge[] };
+export type WorkingCopyTransformResult = WorkingCopyReferenceAnalysis & { definition_document: Record<string, unknown> };
 
 export type ValidationResult = {
   scenario_id: string; revision: number; content_hash: string | null; publish_ready: boolean;

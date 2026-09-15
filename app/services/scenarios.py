@@ -303,6 +303,76 @@ class ScenarioService:
     def references(self, scenario_id: UUID) -> tuple[ReferenceEdge, ...]:
         return reference_index(self.get_draft(scenario_id).definition_document)
 
+    def analyze_working_copy_references(
+        self,
+        scenario_id: UUID,
+        *,
+        expected_revision: int,
+        definition_document: dict[str, Any],
+    ) -> tuple[ReferenceEdge, ...]:
+        """Analyze a browser working copy without changing the persisted Draft."""
+
+        self._require_working_copy(
+            scenario_id,
+            expected_revision=expected_revision,
+            definition_document=definition_document,
+        )
+        return reference_index(definition_document)
+
+    def transform_working_copy(
+        self,
+        scenario_id: UUID,
+        *,
+        expected_revision: int,
+        definition_document: dict[str, Any],
+        operation_kind: Literal["RENAME_KEY", "DELETE_OBJECT"],
+        object_kind: str,
+        old_key: str | None = None,
+        new_key: str | None = None,
+        object_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one authoring transform to a client working copy only.
+
+        The persisted Draft revision is checked as an optimistic concurrency
+        guard, but this method deliberately does not call ``replace_draft`` or
+        commit anything. The browser must explicitly save the returned document.
+        """
+
+        self._require_working_copy(
+            scenario_id,
+            expected_revision=expected_revision,
+            definition_document=definition_document,
+        )
+        try:
+            if operation_kind == "RENAME_KEY":
+                if old_key is None or new_key is None:
+                    raise DraftAuthoringError(
+                        "SCENARIO_AUTHORING_OPERATION_INVALID",
+                        "RENAME_KEY requires old_key and new_key",
+                    )
+                return rename_key(
+                    definition_document,
+                    object_kind=object_kind,
+                    old_key=old_key,
+                    new_key=new_key,
+                )
+            if object_key is None:
+                raise DraftAuthoringError(
+                    "SCENARIO_AUTHORING_OPERATION_INVALID",
+                    "DELETE_OBJECT requires object_key",
+                )
+            return delete_object(
+                definition_document,
+                object_kind=object_kind,
+                object_key=object_key,
+            )
+        except DraftAuthoringError as exc:
+            raise ScenarioLifecycleError(
+                exc.code,
+                exc.message,
+                details=_authoring_error_details(exc),
+            ) from exc
+
     def rename_draft_key(
         self,
         scenario_id: UUID,
@@ -358,6 +428,24 @@ class ScenarioService:
             expected_revision=expected_revision,
             definition_document=changed,
         )
+
+    def _require_working_copy(
+        self,
+        scenario_id: UUID,
+        *,
+        expected_revision: int,
+        definition_document: dict[str, Any],
+    ) -> ScenarioDraft:
+        scenario = self._scenario(scenario_id, lock=False)
+        self._require_mutable(scenario)
+        draft = self._draft(scenario_id, lock=False)
+        if draft.revision != expected_revision:
+            raise ScenarioLifecycleError(
+                "SCENARIO_DRAFT_CONFLICT",
+                "The Scenario Draft revision changed before working-copy analysis",
+            )
+        _require_scenario_identity(definition_document, scenario.key)
+        return draft
 
     def _create(
         self,

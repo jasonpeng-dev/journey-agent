@@ -228,6 +228,29 @@ class DraftDeleteObjectRequest(DraftRevisionRequest):
     object_key: str = Field(min_length=1, max_length=100)
 
 
+class DraftTransformOperation(ApiModel):
+    kind: Literal["RENAME_KEY", "DELETE_OBJECT"]
+    object_kind: str = Field(min_length=1, max_length=80)
+    old_key: str | None = Field(default=None, min_length=1, max_length=100)
+    new_key: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,79}$")
+    object_key: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_operation_fields(self) -> DraftTransformOperation:
+        if self.kind == "RENAME_KEY":
+            if self.old_key is None or self.new_key is None or self.object_key is not None:
+                raise ValueError("RENAME_KEY requires old_key and new_key only")
+        elif self.object_key is None or self.old_key is not None or self.new_key is not None:
+            raise ValueError("DELETE_OBJECT requires object_key only")
+        return self
+
+
+class DraftTransformRequest(ApiModel):
+    expected_revision: int = Field(ge=1)
+    definition_document: dict[str, Any]
+    operation: DraftTransformOperation
+
+
 class ObjectLocator(ApiModel):
     object_kind: str
     object_key: str | None = None
@@ -294,6 +317,25 @@ class ReferenceEdgeResponse(ApiModel):
 class ReferenceIndexResponse(ApiModel):
     scenario_id: UUID
     revision: int = Field(ge=1)
+    references: list[ReferenceEdgeResponse]
+
+
+class DraftTransformResponse(ApiModel):
+    scenario_id: UUID
+    base_revision: int = Field(ge=1)
+    source: Literal["WORKING_COPY"]
+    definition_document: dict[str, Any]
+    references: list[ReferenceEdgeResponse]
+
+
+class DraftReferenceAnalysisRequest(DraftRevisionRequest):
+    definition_document: dict[str, Any]
+
+
+class DraftReferenceAnalysisResponse(ApiModel):
+    scenario_id: UUID
+    base_revision: int = Field(ge=1)
+    source: Literal["WORKING_COPY"]
     references: list[ReferenceEdgeResponse]
 
 
@@ -729,6 +771,8 @@ __all__ = [
     "DeveloperGameSnapshotResponse",
     "DraftDeleteObjectRequest",
     "DraftPublishRequest",
+    "DraftReferenceAnalysisRequest",
+    "DraftReferenceAnalysisResponse",
     "DraftRenameKeyRequest",
     "DraftReplaceRequest",
     "DraftResponse",
@@ -736,6 +780,9 @@ __all__ = [
     "DraftRevisionRequest",
     "DraftSandboxRequest",
     "DraftSandboxResponse",
+    "DraftTransformOperation",
+    "DraftTransformRequest",
+    "DraftTransformResponse",
     "DraftValidationResponse",
     "GameSummaryResponse",
     "GoalSubmissionRequest",

@@ -1,4 +1,4 @@
-import type { DeveloperSnapshot, Draft, DraftSandboxResult, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult } from "./types";
+import type { DeveloperSnapshot, Draft, DraftSandboxResult, DraftTransformOperation, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult, WorkingCopyReferenceAnalysis, WorkingCopyTransformResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -35,6 +35,16 @@ export const api = {
   scenario: (id: string) => request<ScenarioSummary>(`/api/v1/scenarios/${id}`),
   draft: (id: string) => request<Draft>(`/api/v1/scenarios/${id}/draft`),
   references: (id: string) => request<ReferenceIndex>(`/api/v1/scenarios/${id}/draft/references`),
+  analyzeWorkingCopyReferences: (id: string, revision: number, document: Record<string, unknown>) =>
+    request<WorkingCopyReferenceAnalysis>(`/api/v1/scenarios/${id}/draft/reference-analysis`, {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision, definition_document: document }),
+    }),
+  transformWorkingCopy: (id: string, revision: number, document: Record<string, unknown>, operation: DraftTransformOperation) =>
+    request<WorkingCopyTransformResult>(`/api/v1/scenarios/${id}/draft/transform`, {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision, definition_document: document, operation }),
+    }),
   examples: () => request<ScenarioExample[]>("/api/v1/scenario-examples"),
   createScenario: (payload: Record<string, unknown>) => request<ScenarioSummary>("/api/v1/scenarios", { method: "POST", body: JSON.stringify(payload) }),
   validateDraft: (id: string, revision: number) => request<ValidationResult>(`/api/v1/scenarios/${id}/draft/validate`, { method: "POST", body: JSON.stringify({ expected_revision: revision }) }),
