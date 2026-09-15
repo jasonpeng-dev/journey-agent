@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { referenceOptions } from "./components/TypedEditor";
+import { referenceOptions } from "./components/editor/ReferencePicker";
 import { nodeSemanticView, replaceObject, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
 import { entityRegistry, factInitialValueMetadata } from "./editor-registry";
 import { addObject, defaultArrayItem } from "./templates";

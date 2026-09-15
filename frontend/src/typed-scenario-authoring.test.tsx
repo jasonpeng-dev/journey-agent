@@ -46,12 +46,12 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       effects: [{ kind: "SET_FACT", node: { kind: "CURRENT_TARGET" }, fact_key: "operational", value: { source: "LITERAL", literal: true } }],
     })} />);
 
-    fireEvent.change(screen.getByLabelText("Condition kind"), { target: { value: "RESOURCE_COMPARE" } });
-    expect(screen.getByLabelText("Resource")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Effect kind"), { target: { value: "REVEAL_TARGET_REGION_FACILITY_FACTS" } });
+    fireEvent.change(screen.getByLabelText("条件类型"), { target: { value: "RESOURCE_COMPARE" } });
+    expect(screen.getByLabelText("资源")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("效果类型"), { target: { value: "REVEAL_TARGET_REGION_FACILITY_FACTS" } });
     expect(screen.getByText(/effect has no additional fields/)).toBeInTheDocument();
 
-    const effectKind = screen.getByLabelText("Effect kind") as HTMLSelectElement;
+    const effectKind = screen.getByLabelText("效果类型") as HTMLSelectElement;
     expect(Array.from(effectKind.options).map((option) => option.value)).toContain("SET_RESOURCE_POOL_AVAILABILITY");
   });
 
@@ -79,11 +79,12 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       unknown_extension: { keep: true },
     })} document={document} onChange={onChange} />);
 
-    expect(screen.getByLabelText("Allowed capabilities")).toHaveValue(["EXECUTE_ACTION"]);
+    expect(screen.getByLabelText("允许的能力")).toBeInTheDocument();
     expect(screen.getAllByDisplayValue("SUCCESS")).toHaveLength(2);
-    expect(screen.getAllByLabelText("Node").some((element) => (element as HTMLSelectElement).value === "target")).toBe(true);
-    expect(screen.getByLabelText(/Authority policy/)).toHaveValue(JSON.stringify({ autonomous_limits: [{ parameter_key: "count", maximum: 1 }] }, null, 2));
-    expect(screen.getByText("Knowledge gate")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("节点").some((element) => (element as HTMLSelectElement).value === "target")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /权限策略/ }));
+    expect(screen.getByLabelText(/权限策略 JSON/)).toHaveValue(JSON.stringify({ autonomous_limits: [{ parameter_key: "count", maximum: 1 }] }, null, 2));
+    expect(screen.getByText("知识门槛")).toBeInTheDocument();
 
     fireEvent.change(screen.getByDisplayValue("Repair"), { target: { value: "Repair updated" } });
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Repair updated", unknown_extension: { keep: true } }));
@@ -110,8 +111,8 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       unavailable_value: false,
       dependencies: [{ kind: "FACT", node_key: "target", fact_key: "operational", accepted_values: [true], knowledge_gate: { node_key: "target", fact_key: "operational", accepted_values: [true] } }],
     })} />);
-    expect(screen.getByLabelText("Dependency kind")).toHaveValue("FACT");
-    expect(screen.getByText("Knowledge gate")).toBeInTheDocument();
+    expect(screen.getByLabelText("依赖类型")).toHaveValue("FACT");
+    expect(screen.getByText("知识门槛")).toBeInTheDocument();
   });
 
   it("authors initialization availability requirements and root planning/goal/public sections", () => {
@@ -122,17 +123,17 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       resource_pools: [{ pool_key: "fuel_pool", resource_key: "fuel", region_key: "target", facility_key: null, quantity: 5, reserved_value: 0, visibility: "HIDDEN", availability: "UNAVAILABLE", survey_discoverable: true, availability_requirement: { node_key: "target", fact_key: "operational", value: true } }],
       region_resource_knowledge: [],
     }} document={document} onChange={vi.fn()} />);
-    expect(screen.getByLabelText("Required value")).toBeChecked();
-    expect(screen.queryByText("Accepted values")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("要求值")).toBeChecked();
+    expect(screen.queryByText("可接受值")).not.toBeInTheDocument();
 
     cleanup();
     render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }] }} document={document} onChange={vi.fn()} />);
     expect(screen.getByDisplayValue("Plan safely")).toBeInTheDocument();
     cleanup();
     render(<TypedEditor section="goal-resolution" value={{ allow_llm_fallback: true, clarification_prompt: "Clarify", world_goal_state_catalog: true }} document={document} onChange={vi.fn()} />);
-    expect(screen.getByLabelText("Clarification prompt")).toHaveValue("Clarify");
+    expect(screen.getByLabelText("澄清提示")).toHaveValue("Clarify");
     cleanup();
     render(<TypedEditor section="public-knowledge" value={{ resource_source_hints: [{ resource_key: "fuel", primary_region_key: "target", candidate_region_keys: [] }] }} document={document} onChange={vi.fn()} />);
-    expect(screen.getByLabelText("Resource")).toHaveValue("fuel");
+    expect(screen.getByLabelText("资源")).toHaveValue("fuel");
   });
 });

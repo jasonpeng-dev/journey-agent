@@ -1,9 +1,21 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
-import { entityRegistry, factInitialValueMetadata, metadataForKind, rootFieldRegistry, type FieldMetadata, type ReferenceDomain } from "../editor-registry";
-import type { DraftObject, EntityKind, JsonObject } from "../editor";
-import { sectionObjects } from "../editor";
-import { fieldLabel, uiLabel } from "../ui";
+import { factInitialValueMetadata, metadataForKind, rootFieldRegistry, type FieldMetadata } from "../editor-registry";
+import type { DraftObject, JsonObject } from "../editor";
+import { fieldLabel } from "../ui";
+import {
+  AdvancedSection,
+  BooleanControl,
+  EnumSelect,
+  MultiValuePicker,
+  NumberInput,
+  ReferencePicker,
+  ScalarListEditor,
+  TextArea,
+  TextInput,
+} from "./editor/FormPrimitives";
+import { referenceOptions } from "./editor/ReferencePicker";
+import { fieldId } from "./editor/FormUtils";
 import {
   ActionAuthorityPolicyEditor,
   ActionEditor,
@@ -26,8 +38,6 @@ type Props = {
   path?: string;
   focusPath?: string | null;
 };
-
-type Option = { key: string; name: string };
 
 function cloneObject(value: unknown): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? structuredClone(value) as JsonObject : {};
@@ -54,95 +64,29 @@ function withNestedValue(value: JsonObject, path: string, next: unknown): JsonOb
   return copy;
 }
 
-function keyName(value: JsonObject, key: string, fallback = key): Option {
-  return { key, name: typeof value.name === "string" && value.name.trim() ? value.name : fallback };
-}
-
-// This pure helper is exported for registry/picker tests; it has no React state.
-// eslint-disable-next-line react-refresh/only-export-components
-export function referenceOptions(document: JsonObject, domain: ReferenceDomain): Option[] {
-  const objects = (kind: EntityKind) => sectionObjects(document, entityRegistry[kind].section).filter((item) => item.kind === kind).map((item) => ({ key: item.key, name: item.name }));
-  if (domain === "fact") {
-    const nodes = sectionObjects(document, "world").filter((item) => item.kind === "node");
-    return nodes.flatMap((node) => Array.isArray(node.value.facts)
-      ? (node.value.facts as unknown[]).flatMap((fact) => fact && typeof fact === "object" && !Array.isArray(fact) && typeof (fact as JsonObject).key === "string"
-        ? [keyName(fact as JsonObject, `${node.key}.${String((fact as JsonObject).key)}`, `${node.name} · ${String((fact as JsonObject).name ?? (fact as JsonObject).key)}`)]
-        : [])
-      : []);
-  }
-  if (domain === "resource_pool") {
-    const pools = nestedValue(document, "initialization.resource_pools");
-    return Array.isArray(pools) ? pools.flatMap((pool) => pool && typeof pool === "object" && typeof (pool as JsonObject).pool_key === "string"
-      ? [keyName(pool as JsonObject, String((pool as JsonObject).pool_key))]
-      : []) : [];
-  }
-  const entityKind = domain as EntityKind;
-  if (entityRegistry[entityKind]) return objects(entityKind);
-  return [];
-}
-
-function pathId(path: string): string {
-  return `editor-field-${path.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
-}
-
-function FieldLabel({ metadata }: { metadata: FieldMetadata }) {
-  return <span className="typed-field-label">{metadata.label ?? fieldLabel(metadata.path)}</span>;
-}
-
 function AdvancedJsonField({ value, onChange, path, label }: { value: unknown; onChange: (value: unknown) => void; path: string; label: string }) {
-  const [text, setText] = useState(() => JSON.stringify(value ?? null, null, 2));
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    setText(JSON.stringify(value ?? null, null, 2));
-  }, [value]);
-  return <div className="advanced-json-field">
-    <label htmlFor={pathId(path)}><span>{label} <em>Advanced</em></span></label>
-    <textarea id={pathId(path)} value={text} onChange={(event) => setText(event.target.value)} onBlur={() => {
-      try { const parsed = JSON.parse(text); setError(null); onChange(parsed); }
-      catch { setError("JSON 结构暂时无法解析，当前内容未写回草稿。"); }
-    }} rows={Math.min(12, Math.max(4, text.split("\n").length))} />
-    {error && <small className="field-error">{error}</small>}
-  </div>;
-}
-
-function ScalarControl({ value, onChange, metadata, document, path }: { value: unknown; onChange: (value: unknown) => void; metadata: FieldMetadata; document: JsonObject; path: string }) {
-  if (metadata.type === "json") return <AdvancedJsonField value={value} onChange={onChange} path={path} label={metadata.label ?? fieldLabel(metadata.path)} />;
-  if (metadata.type === "enum") return <select id={pathId(path)} value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value)}><option value="">请选择……</option>{(metadata.enum ?? []).map((item) => <option key={item} value={item}>{uiLabel(item)}</option>)}</select>;
-  if (metadata.type === "multi-enum") {
-    const selected = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-    return <select id={pathId(path)} multiple value={selected} onChange={(event) => onChange(Array.from(event.target.selectedOptions, (option) => option.value))}>{(metadata.enum ?? []).map((item) => <option key={item} value={item}>{uiLabel(item)}</option>)}</select>;
-  }
-  if (metadata.type === "reference") return <ReferenceSelect value={value} onChange={onChange} domain={metadata.referenceDomain!} document={document} path={path} />;
-  if (metadata.type === "multi-reference") return <MultiReferenceSelect value={value} onChange={onChange} domain={metadata.referenceDomain!} document={document} path={path} />;
-  if (metadata.type === "boolean") return <input id={pathId(path)} type="checkbox" checked={value === true} onChange={(event) => onChange(event.target.checked)} />;
-  if (metadata.type === "integer" || metadata.type === "number") return <input id={pathId(path)} type="number" value={typeof value === "number" ? value : ""} onChange={(event) => onChange(event.target.value === "" ? null : Number(event.target.value))} />;
-  if (metadata.type === "textarea" || metadata.multiline) return <textarea id={pathId(path)} value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value)} rows={4} />;
-  return <input id={pathId(path)} value={typeof value === "string" || typeof value === "number" ? String(value) : ""} onChange={(event) => onChange(event.target.value)} />;
-}
-
-function ReferenceSelect({ value, onChange, domain, document, path }: { value: unknown; onChange: (value: unknown) => void; domain: ReferenceDomain; document: JsonObject; path: string }) {
-  const options = referenceOptions(document, domain);
-  const selected = typeof value === "string" ? value : "";
-  return <select id={pathId(path)} value={selected} onChange={(event) => onChange(event.target.value)}><option value="">未选择</option>{options.map((option) => <option key={option.key} value={option.key}>{option.name} · {option.key}</option>)}{selected && !options.some((option) => option.key === selected) && <option value={selected}>{selected}（当前引用无法解析）</option>}</select>;
-}
-
-function MultiReferenceSelect({ value, onChange, domain, document, path }: { value: unknown; onChange: (value: unknown) => void; domain: ReferenceDomain; document: JsonObject; path: string }) {
-  const options = referenceOptions(document, domain);
-  const selected = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-  return <select id={pathId(path)} multiple value={selected} onChange={(event) => onChange(Array.from(event.target.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.key} value={option.key}>{option.name} · {option.key}</option>)}</select>;
+  return <AdvancedSection value={value} onChange={onChange} path={path} label={label} />;
 }
 
 function FieldRow({ metadata, value, document, path, onChange }: { metadata: FieldMetadata; value: JsonObject; document: JsonObject; path: string; onChange: (value: JsonObject) => void }) {
   const current = nestedValue(value, metadata.path);
-  return <div className="typed-field" data-field-path={path}>
-    <FieldLabel metadata={metadata} />
-    <ScalarControl metadata={metadata} value={current} document={document} path={`${path}.${metadata.path}`} onChange={(next) => onChange(withNestedValue(value, metadata.path, next))} />
-  </div>;
+  const next = (updated: unknown) => onChange(withNestedValue(value, metadata.path, updated));
+  const label = metadata.label ?? fieldLabel(metadata.path);
+  const fieldPath = `${path}.${metadata.path}`;
+  if (metadata.type === "json") return <AdvancedJsonField value={current} onChange={next} path={fieldPath} label={label} />;
+  if (metadata.type === "enum") return <EnumSelect value={current} onChange={next as (value: string) => void} path={fieldPath} label={label} choices={metadata.enum ?? []} />;
+  if (metadata.type === "multi-enum") return <MultiValuePicker value={current} onChange={next as (value: string[]) => void} path={fieldPath} label={label} options={(metadata.enum ?? []).map((item) => ({ key: item, name: item }))} />;
+  if (metadata.type === "reference") return <ReferencePicker value={current} onChange={next as (value: string) => void} domain={metadata.referenceDomain!} document={document} path={fieldPath} label={label} />;
+  if (metadata.type === "multi-reference") return <MultiValuePicker value={current} onChange={next as (value: string[]) => void} path={fieldPath} label={label} options={referenceOptions(document, metadata.referenceDomain!)} />;
+  if (metadata.type === "boolean") return <BooleanControl value={current} onChange={next} path={fieldPath} label={label} />;
+  if (metadata.type === "integer" || metadata.type === "number") return <NumberInput value={current} onChange={next} path={fieldPath} label={label} integer={metadata.type === "integer"} />;
+  if (metadata.type === "textarea" || metadata.multiline) return <TextArea value={typeof current === "string" ? current : ""} onChange={next as (value: string) => void} path={fieldPath} label={label} />;
+  return <TextInput value={typeof current === "string" || typeof current === "number" ? String(current) : ""} onChange={next as (value: string) => void} path={fieldPath} label={label} />;
 }
 
 function StringArrayEditor({ value, onChange, label, path }: { value: unknown; onChange: (value: string[]) => void; label: string; path: string }) {
   const items = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-  return <div className="typed-array"><div className="typed-array-heading"><span>{label}</span><button type="button" className="small" onClick={() => onChange([...items, ""])}>＋ 添加</button></div>{items.map((item, index) => <div className="typed-array-row" key={`${path}.${index}`}><input id={pathId(`${path}.${index}`)} value={item} onChange={(event) => onChange(items.map((old, oldIndex) => oldIndex === index ? event.target.value : old))} /><button type="button" className="small danger" onClick={() => onChange(items.filter((_, oldIndex) => oldIndex !== index))}>移除</button></div>)}</div>;
+  return <ScalarListEditor value={items} onChange={(next) => onChange(next.filter((item): item is string => typeof item === "string"))} path={path} label={label} />;
 }
 
 function FactEditor({ value, document, path, onChange }: { value: JsonObject; document: JsonObject; path: string; onChange: (value: JsonObject) => void }) {
@@ -169,7 +113,7 @@ function EntityEditor({ entity, document, onChange, focusPath }: { entity: Draft
   const value = entity.value;
   useEffect(() => {
     if (!focusPath) return;
-    const element = window.document.getElementById(pathId(focusPath));
+    const element = window.document.getElementById(fieldId(focusPath));
     element?.scrollIntoView({ block: "center" });
     if (element instanceof HTMLElement && typeof element.focus === "function") element.focus();
   }, [focusPath]);

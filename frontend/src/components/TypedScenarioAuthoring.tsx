@@ -1,20 +1,24 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 
+import { V2_ENUMS, type ReferenceDomain } from "../editor-registry";
+import { type DraftObject, type JsonObject } from "../editor";
 import {
-  entityRegistry,
-  V2_ENUMS,
-  type ReferenceDomain,
-} from "../editor-registry";
-import {
-  sectionObjects,
-  type DraftObject,
-  type EntityKind,
-  type JsonObject,
-} from "../editor";
+  AdvancedSection,
+  BooleanControl,
+  EnumSelect,
+  MultiValuePicker,
+  NestedCard,
+  NumberInput,
+  OptionSelect,
+  ReferencePicker,
+  ScalarListEditor,
+  TextArea,
+  TextInput,
+} from "./editor/FormPrimitives";
+import { referenceOptions } from "./editor/ReferencePicker";
 import { uiLabel } from "../ui";
 
 type Change = (value: JsonObject) => void;
-type Option = { key: string; name: string };
 const AuthoringDocumentContext = createContext<JsonObject>({});
 
 const EFFECT_KINDS = V2_ENUMS.effectKind;
@@ -40,74 +44,31 @@ function stringsOf(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-function fieldId(path: string): string {
-  return `editor-field-${path.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
-}
-
-function Options({ options, selected }: { options: Option[]; selected: string }) {
-  return <>{options.map((option) => <option key={option.key} value={option.key}>{option.name} · {option.key}</option>)}{selected && !options.some((option) => option.key === selected) && <option value={selected}>{selected} (unresolved)</option>}</>;
-}
-
-function referenceOptions(document: JsonObject, domain: ReferenceDomain): Option[] {
-  if (domain === "fact") {
-    const nodes = sectionObjects(document, "world").filter((item) => item.kind === "node");
-    return nodes.flatMap((node) => arrayOf(node.value.facts).map((fact) => ({
-      key: `${node.key}.${String(fact.key ?? "")}`,
-      name: `${node.name} · ${String(fact.name ?? fact.key ?? "")}`,
-    })));
-  }
-  if (domain === "resource_pool") {
-    const pools = document.initialization && typeof document.initialization === "object" && !Array.isArray(document.initialization)
-      ? (document.initialization as JsonObject).resource_pools
-      : [];
-    return arrayOf(pools).flatMap((pool) => typeof pool.pool_key === "string" ? [{ key: pool.pool_key, name: pool.pool_key }] : []);
-  }
-  const kind = domain as EntityKind;
-  if (!entityRegistry[kind]) return [];
-  return sectionObjects(document, entityRegistry[kind].section)
-    .filter((item) => item.kind === kind)
-    .map((item) => ({ key: item.key, name: item.name }));
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return <label className="typed-field"><span className="typed-field-label">{label}</span>{children}</label>;
-}
-
 function TextField({ value, onChange, path, label, multiline = false }: { value: unknown; onChange: (value: string) => void; path: string; label: string; multiline?: boolean }) {
-  const text = typeof value === "string" ? value : "";
-  return <Field label={label}>{multiline ? <textarea id={fieldId(path)} value={text} rows={4} onChange={(event) => onChange(event.target.value)} /> : <input id={fieldId(path)} value={text} onChange={(event) => onChange(event.target.value)} />}</Field>;
+  return multiline ? <TextArea value={value} onChange={onChange} path={path} label={label} /> : <TextInput value={value} onChange={onChange} path={path} label={label} />;
 }
 
 function NumberField({ value, onChange, path, label, integer = true }: { value: unknown; onChange: (value: number | null) => void; path: string; label: string; integer?: boolean }) {
-  return <Field label={label}><input id={fieldId(path)} type="number" step={integer ? 1 : "any"} value={typeof value === "number" ? value : ""} onChange={(event) => onChange(event.target.value === "" ? null : Number(event.target.value))} /></Field>;
+  return <NumberInput value={value} onChange={onChange} path={path} label={label} integer={integer} />;
 }
 
 function BooleanField({ value, onChange, path, label }: { value: unknown; onChange: (value: boolean) => void; path: string; label: string }) {
-  return <Field label={label}><input id={fieldId(path)} type="checkbox" checked={value === true} onChange={(event) => onChange(event.target.checked)} /></Field>;
+  return <BooleanControl value={value} onChange={onChange} path={path} label={label} />;
 }
 
 function EnumField({ value, onChange, path, label, choices }: { value: unknown; onChange: (value: string) => void; path: string; label: string; choices: readonly string[] }) {
-  const selected = typeof value === "string" ? value : "";
-  return <Field label={label}><select id={fieldId(path)} value={selected} onChange={(event) => onChange(event.target.value)}><option value="">请选择…</option>{choices.map((item) => <option key={item} value={item}>{uiLabel(item)}</option>)}</select></Field>;
+  return <EnumSelect value={value} onChange={onChange} path={path} label={label} choices={choices} />;
 }
 
 function ReferenceField({ value, onChange, path, label, domain, document }: { value: unknown; onChange: (value: string) => void; path: string; label: string; domain: ReferenceDomain; document: JsonObject }) {
-  const selected = typeof value === "string" ? value : "";
-  return <Field label={label}><select id={fieldId(path)} value={selected} onChange={(event) => onChange(event.target.value)}><option value="">未选择</option><Options options={referenceOptions(document, domain)} selected={selected} /></select></Field>;
+  return <ReferencePicker value={value} onChange={onChange} path={path} label={label} domain={domain} document={document} />;
 }
 
 function MultiReferenceField({ value, onChange, path, label, domain, document }: { value: unknown; onChange: (value: string[]) => void; path: string; label: string; domain: ReferenceDomain; document: JsonObject }) {
-  if (path.endsWith("allowed_actor_capabilities")) return <MultiEnumField value={value} onChange={onChange} path={path} label={label} choices={V2_ENUMS.capabilities} />;
-  const selected = stringsOf(value);
   const options = path.endsWith("allowed_actor_capabilities")
     ? V2_ENUMS.capabilities.map((item) => ({ key: item, name: uiLabel(item) }))
     : referenceOptions(document, domain);
-  return <Field label={label}><select id={fieldId(path)} multiple value={selected} onChange={(event) => onChange(Array.from(event.target.selectedOptions, (option) => option.value))}><Options options={options} selected="" /></select></Field>;
-}
-
-function MultiEnumField({ value, onChange, path, label, choices }: { value: unknown; onChange: (value: string[]) => void; path: string; label: string; choices: readonly string[] }) {
-  const selected = stringsOf(value);
-  return <Field label={label}><select id={fieldId(path)} multiple value={selected} onChange={(event) => onChange(Array.from(event.target.selectedOptions, (option) => option.value))}>{choices.map((item) => <option key={item} value={item}>{uiLabel(item)}</option>)}</select></Field>;
+  return <MultiValuePicker value={value} onChange={onChange} path={path} label={label} options={options} />;
 }
 
 function ScalarField({ value, onChange, path, label }: { value: unknown; onChange: (value: string | number | boolean | null) => void; path: string; label: string }) {
@@ -117,8 +78,7 @@ function ScalarField({ value, onChange, path, label }: { value: unknown; onChang
 }
 
 function ScalarListField({ value, onChange, path, label }: { value: unknown; onChange: (value: Array<string | number | boolean>) => void; path: string; label: string }) {
-  const items = Array.isArray(value) ? value.filter((item): item is string | number | boolean => ["string", "number", "boolean"].includes(typeof item)) : [];
-  return <section className="nested-list"><div className="typed-array-heading"><h4>{label}</h4><button type="button" className="small" onClick={() => onChange([...items, typeof items[0] === "number" ? 0 : typeof items[0] === "boolean" ? false : ""])}>＋ 添加</button></div>{items.map((item, index) => <div className="typed-array-row" key={`${path}.${index}`}><ScalarField value={item} onChange={(next) => onChange(items.map((old, oldIndex) => oldIndex === index ? next as string | number | boolean : old))} path={`${path}.${index}`} label={`${label} ${index + 1}`} /><button type="button" className="small danger" onClick={() => onChange(items.filter((_, oldIndex) => oldIndex !== index))}>删除</button></div>)}</section>;
+  return <ScalarListEditor value={value} onChange={onChange} path={path} label={label} />;
 }
 
 function StringListField({ value, onChange, path, label }: { value: unknown; onChange: (value: string[]) => void; path: string; label: string }) {
@@ -126,19 +86,15 @@ function StringListField({ value, onChange, path, label }: { value: unknown; onC
   if (path.includes(".prerequisites.") && path.endsWith(".requirements")) {
     return <RequirementListEditor value={value} document={authoringDocument} path={path} onChange={(next) => (onChange as unknown as (value: JsonObject[]) => void)(next)} />;
   }
-  const items = stringsOf(value);
-  return <section className="nested-list"><div className="typed-array-heading"><h4>{label}</h4><button type="button" className="small" onClick={() => onChange([...items, ""])}>＋ 添加</button></div>{items.map((item, index) => <div className="typed-array-row" key={`${path}.${index}`}><input id={fieldId(`${path}.${index}`)} value={item} onChange={(event) => onChange(items.map((old, oldIndex) => oldIndex === index ? event.target.value : old))} /><button type="button" className="small danger" onClick={() => onChange(items.filter((_, oldIndex) => oldIndex !== index))}>删除</button></div>)}</section>;
+  return <ScalarListEditor value={stringsOf(value)} onChange={(next) => onChange(next.filter((item): item is string => typeof item === "string"))} path={path} label={label} />;
 }
 
 function AdvancedJson({ value, onChange, path, label }: { value: unknown; onChange: (value: unknown) => void; path: string; label: string }) {
-  const [text, setText] = useState(() => JSON.stringify(value ?? null, null, 2));
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => setText(JSON.stringify(value ?? null, null, 2)), [value]);
-  return <div className="advanced-json-field"><label htmlFor={fieldId(path)}><span>{label} <em>Advanced</em></span></label><textarea id={fieldId(path)} rows={Math.min(14, Math.max(4, text.split("\n").length))} value={text} onChange={(event) => setText(event.target.value)} onBlur={() => { try { setError(null); onChange(JSON.parse(text)); } catch { setError("JSON 暂时无法解析；当前内容未写回 Draft。"); } }} />{error && <small className="field-error">{error}</small>}</div>;
+  return <AdvancedSection value={value} onChange={onChange} path={path} label={label} />;
 }
 
-function ListCard({ title, children, onAdd, onRemove }: { title: string; children: React.ReactNode; onAdd?: () => void; onRemove?: () => void }) {
-  return <article className="nested-editor"><header><strong>{title}</strong><span className="button-row">{onAdd && <button type="button" className="small" onClick={onAdd}>＋</button>}{onRemove && <button type="button" className="small danger" onClick={onRemove}>删除</button>}</span></header>{children}</article>;
+function ListCard({ title, children, onAdd, onRemove }: { title: string; children: ReactNode; onAdd?: () => void; onRemove?: () => void }) {
+  return <NestedCard title={title} onAdd={onAdd} onRemove={onRemove} defaultExpanded>{children}</NestedCard>;
 }
 
 function NodeSelectorEditor({ value, document, path, onChange }: { value: JsonObject; document: JsonObject; path: string; onChange: Change }) {
@@ -150,8 +106,7 @@ function NodeSelectorEditor({ value, document, path, onChange }: { value: JsonOb
 function FactKeyField({ value, onChange, path, label, document, nodeKey }: { value: unknown; onChange: (value: string) => void; path: string; label: string; document: JsonObject; nodeKey?: string }) {
   const all = referenceOptions(document, "fact");
   const options = nodeKey ? all.filter((item) => item.key.startsWith(`${nodeKey}.`)).map((item) => ({ ...item, key: item.key.slice(nodeKey.length + 1) })) : all.map((item) => ({ ...item, key: item.key.split(".").slice(-1)[0] }));
-  const selected = typeof value === "string" ? value : "";
-  return <Field label={label}><select id={fieldId(path)} value={selected} onChange={(event) => onChange(event.target.value)}><option value="">未选择</option><Options options={options} selected={selected} /></select></Field>;
+  return <OptionSelect value={value} onChange={onChange} path={path} label={label} options={options} placeholder="未选择" />;
 }
 
 function ValueExpressionEditor({ value, path, onChange }: { value: unknown; document?: JsonObject; path: string; onChange: (value: JsonObject) => void }) {
@@ -241,7 +196,7 @@ function ActionPlanningEditor({ value, document, path, onChange }: { value: Json
   const targetTerminals = arrayOf(current.target_terminal_effects);
   const supporting = arrayOf(current.supporting_effects);
   const update = (key: string, next: unknown) => onChange(setField(current, key, next));
-  const list = (items: JsonObject[], key: string, title: string, create: JsonObject, render: (item: JsonObject, index: number, set: (next: JsonObject) => void, remove: () => void) => React.ReactNode) => <section className="nested-list"><div className="typed-array-heading"><h4>{title}</h4><button type="button" className="small" onClick={() => update(key, [...items, create])}>＋ 添加</button></div>{items.map((item, index) => render(item, index, (next) => update(key, items.map((old, oldIndex) => oldIndex === index ? next : old)), () => update(key, items.filter((_, oldIndex) => oldIndex !== index))))}</section>;
+  const list = (items: JsonObject[], key: string, title: string, create: JsonObject, render: (item: JsonObject, index: number, set: (next: JsonObject) => void, remove: () => void) => ReactNode) => <section className="nested-list"><div className="typed-array-heading"><h4>{title}</h4><button type="button" className="small" onClick={() => update(key, [...items, create])}>＋ 添加</button></div>{items.map((item, index) => render(item, index, (next) => update(key, items.map((old, oldIndex) => oldIndex === index ? next : old)), () => update(key, items.filter((_, oldIndex) => oldIndex !== index))))}</section>;
   return <article className="nested-editor"><header><strong>Action planning projection</strong></header>{list(terminals, "terminal_effects", "Terminal Fact effects", { node_key: "", fact_key: "" }, (item, index, set, remove) => <FactReferenceEditor key={`${path}.terminal_effects.${index}`} value={item} document={document} path={`${path}.terminal_effects.${index}`} onChange={set} onRemove={remove} />)}{list(targetTerminals, "target_terminal_effects", "Target-relative Fact effects", { fact_key: "", value: true }, (item, index, set, remove) => <ListCard key={`${path}.target_terminal_effects.${index}`} title="Target Fact effect" onRemove={remove}><FactKeyField value={item.fact_key} onChange={(next) => set(setField(item, "fact_key", next))} path={`${path}.target_terminal_effects.${index}.fact_key`} label="Fact" document={document} /><ScalarField value={item.value} onChange={(next) => set(setField(item, "value", next))} path={`${path}.target_terminal_effects.${index}.value`} label="Value" /></ListCard>)}{list(supporting, "supporting_effects", "Supporting Fact effects", { node_key: "", fact_key: "" }, (item, index, set, remove) => <FactReferenceEditor key={`${path}.supporting_effects.${index}`} value={item} document={document} path={`${path}.supporting_effects.${index}`} onChange={set} onRemove={remove} />)}<StringListField value={current.success_outcome_codes} onChange={(next) => update("success_outcome_codes", next)} path={`${path}.success_outcome_codes`} label="Success outcomes" /><StringListField value={current.wait_success_outcome_codes} onChange={(next) => update("wait_success_outcome_codes", next)} path={`${path}.wait_success_outcome_codes`} label="Wait success outcomes" /><StringListField value={current.hints} onChange={(next) => update("hints", next)} path={`${path}.hints`} label="Planner hints" />{current.knowledge_gate ? <KnowledgeGateEditor value={clone(current.knowledge_gate)} document={document} path={`${path}.knowledge_gate`} onChange={(next) => update("knowledge_gate", next)} onRemove={() => update("knowledge_gate", null)} /> : <button type="button" className="small" onClick={() => update("knowledge_gate", { node_key: "", fact_key: "", accepted_values: [true] })}>＋ Add knowledge gate</button>}</article>;
 }
 
@@ -343,7 +298,7 @@ function ActionAuthorityPolicyEditor({ value, path, onChange }: { value: unknown
   return <AdvancedJson value={value} onChange={onChange} path={path} label="Authority policy" />;
 }
 
-function AuthoringDocumentProvider({ document, children }: { document: JsonObject; children: React.ReactNode }) {
+function AuthoringDocumentProvider({ document, children }: { document: JsonObject; children: ReactNode }) {
   return <AuthoringDocumentContext.Provider value={document}>{children}</AuthoringDocumentContext.Provider>;
 }
 
