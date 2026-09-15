@@ -6,7 +6,6 @@ import pytest
 
 from app.agent.generic import GenericGoalResolver
 from app.agent.provider import (
-    DynamicGoalActionMatchRequest,
     DynamicGoalActionRouting,
     DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
@@ -22,7 +21,6 @@ from app.agent.provider import (
     DynamicGoalOperationGroundingRequest,
     DynamicGoalScalarMentionSlot,
     GenericProviderError,
-    GoalFamilyMatchRequest,
 )
 from tests.scenario_fixtures import LINJIANG_V2_TEST
 from tests.unit.test_contract_driven_goal_resolver import _operation, _slot
@@ -88,16 +86,6 @@ class _VNextProvider:
     def interpret_dynamic_goal(self, request: DynamicGoalInterpretationRequest) -> object:
         self.interpretation_requests.append(request)
         return self.interpretation_results.pop(0)
-
-    def route_dynamic_goal(self, _request: object) -> object:
-        raise AssertionError("VNext production must not use mixed semantic routing")
-
-    def match_dynamic_goal_family(self, _request: GoalFamilyMatchRequest) -> object:
-        raise AssertionError("VNext production must not use legacy family matching")
-
-    def match_dynamic_goal_action(self, _request: DynamicGoalActionMatchRequest) -> object:
-        raise AssertionError("VNext production must not use legacy Action matching")
-
 
 def _role_grounding(
     refs: Iterable[DynamicGoalCandidateReference],

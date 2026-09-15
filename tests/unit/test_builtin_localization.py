@@ -1,10 +1,16 @@
 from app.agent.generic import GenericGoalResolver
 from app.agent.provider import (
+    DynamicGoalActionRouting,
+    DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRouting,
+    DynamicGoalFamilyRoutingRequest,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
+    DynamicGoalOperationGrounding,
+    DynamicGoalOperationGroundingRequest,
 )
 from app.domain.formal_goal import FormalGoalSourceKind
 from app.domain.scenario_v2 import ObjectiveRequirementKind
@@ -59,6 +65,27 @@ class _BuiltinDynamicProvider:
                 accepted_values=(state.available_value,),
             )
         return DynamicGoalInterpretation(requirements=(candidate,))
+
+    def decide_dynamic_goal_family(
+        self,
+        _request: DynamicGoalFamilyRoutingRequest,
+    ) -> DynamicGoalFamilyRouting:
+        return DynamicGoalFamilyRouting(family="STATE")
+
+    def route_dynamic_goal_action(
+        self,
+        _request: DynamicGoalActionRoutingRequest,
+    ) -> DynamicGoalActionRouting:
+        return DynamicGoalActionRouting(
+            action_match="NO_MATCH",
+            no_match_reason="NO_SEMANTIC_ACTION",
+        )
+
+    def ground_dynamic_goal_operation(
+        self,
+        _request: DynamicGoalOperationGroundingRequest,
+    ) -> DynamicGoalOperationGrounding:
+        return DynamicGoalOperationGrounding(status="UNSUPPORTED")
 
 
 def test_current_builtin_preserves_stable_keys_and_player_names() -> None:
@@ -140,7 +167,7 @@ def test_linjiang_final_goal_vocabulary_has_five_derived_states_and_task1_fact()
         assert resolution.dynamic_requirements[0].fact_key == "operational"
         assert resolution.dynamic_requirements[0].accepted_values == (True,)
         assert resolution.provider_observation is not None
-        assert resolution.provider_observation["stage"] == "DYNAMIC_GOAL_INTERPRETATION"
+        assert resolution.provider_observation["stage"] == "FORMAL_GOAL"
 
     assert GenericGoalResolver().resolve(task1.key, LINJIANG_V2_TEST).status == "UNSUPPORTED"
 
@@ -163,7 +190,7 @@ def test_linjiang_final_goal_vocabulary_has_five_derived_states_and_task1_fact()
             assert resolution.objective_keys == ()
             assert resolution.dynamic_requirements[0].derived_key == state.key
             assert resolution.provider_observation is not None
-            assert resolution.provider_observation["stage"] == "DYNAMIC_GOAL_INTERPRETATION"
+            assert resolution.provider_observation["stage"] == "FORMAL_GOAL"
 
 
 def test_linjiang_unmatched_goal_does_not_use_authored_catalog_fallback() -> None:

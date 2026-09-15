@@ -375,6 +375,7 @@ def persist_goal_resolution_attempt(
             interpretation_status=(
                 _safe_text(observation.get("status"))
                 if observation.get("stage") == "DYNAMIC_GOAL_INTERPRETATION"
+                or observation.get("call_type") == "DYNAMIC_GOAL"
                 else None
             ),
             attempt_count=attempt_count,

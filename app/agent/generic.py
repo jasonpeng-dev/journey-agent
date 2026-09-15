@@ -23,18 +23,14 @@ from app.agent.formal_goal_projection import (
 from app.agent.objective_scope import ObjectiveScope
 from app.agent.planner_contract import action_goal_terminal_effects, action_planner_effects
 from app.agent.planning_context import (
-    PlanningActionCatalogBuilder,
     PlanningContextBuilder,
     PlanningContinuityBuilder,
     _action_planning_is_public,
     _known_world_facts,
     _objective_refs,
-    objective_context,
 )
 from app.agent.provider import (
     AntiRegressionMemoryItem,
-    DynamicGoalActionMatch,
-    DynamicGoalActionMatchRequest,
     DynamicGoalActionRouting,
     DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
@@ -55,8 +51,6 @@ from app.agent.provider import (
     DynamicGoalSemanticFamilyEvidence,
     GenericModelProvider,
     GenericProviderError,
-    GoalFamilyMatch,
-    GoalFamilyMatchRequest,
     OperationContractSlot,
     OperationGoalProjection,
     OperationIntentDraft,
@@ -64,7 +58,6 @@ from app.agent.provider import (
     PlannerActorState,
     PlannerInput,
     PlannerTargetBinding,
-    PlanningActionCandidate,
     PlanningContext,
     PlanningContinuity,
     PlanProposal,
@@ -237,7 +230,6 @@ class _KnownPreflightFailure:
 class _StaticProposalBinding:
     index: int
     raw_step: object
-    candidate: PlanningActionCandidate | None
     action: ActionDefinitionV2
     actor: GameInstanceActor
     target_key: str
@@ -495,7 +487,7 @@ def _validate_action_routing_recovery_preservation(
 
 
 class GenericGoalResolver:
-    """Route public catalog matches and legacy exact matches to Dynamic/Predefined Goals.
+    """Route public catalog matches to Dynamic/Predefined Goals.
 
     The legacy Objective-selection model is intentionally not part of this
     routing path: an unmatched player Goal must never be converted into the
@@ -574,8 +566,6 @@ class GenericGoalResolver:
             return None
         provider = self.provider
         assert provider is not None
-        family_matcher = getattr(provider, "match_dynamic_goal_family", None)
-        action_matcher = getattr(provider, "match_dynamic_goal_action", None)
         operation_grounder = getattr(provider, "ground_dynamic_goal_operation", None)
         family_router = getattr(provider, "decide_dynamic_goal_family", None)
         action_router = getattr(provider, "route_dynamic_goal_action", None)
@@ -910,44 +900,18 @@ class GenericGoalResolver:
                 frozen_action_key=action_routing.action_key,
                 frozen_evidence=frozen_evidence,
             )
-        if frozen_family is None and all(
-            callable(item) for item in (family_matcher, action_matcher, operation_grounder)
+        if frozen_family is None and not all(
+            callable(item) for item in (family_router, action_router, operation_grounder)
         ):
-            assert callable(family_matcher)
-            try:
-                family = GoalFamilyMatch.model_validate(
-                    family_matcher(GoalFamilyMatchRequest(goal=goal))
-                )
-            except (GenericProviderError, ValidationError, TypeError, ValueError) as exc:
-                if isinstance(exc, GenericProviderError):
-                    raise
-                raise GenericProviderError(
-                    "PROVIDER_SCHEMA_INVALID",
-                    "The model provider returned an invalid Goal family match",
-                ) from exc
-            if family.family == "AMBIGUOUS":
-                return GenericGoalResolution(
-                    "NEEDS_CLARIFICATION",
-                    clarification_prompt=(
-                        family.clarification_prompt
-                        or definition.goal_resolution.clarification_prompt
-                    ),
-                    source="FAMILY_AMBIGUOUS",
-                    provider_observation={
-                        "stage": "DYNAMIC_GOAL_FAMILY",
-                        "frozen_family": "AMBIGUOUS",
-                        "rejection_code": "FAMILY_AMBIGUOUS",
-                    },
-                )
-            if family.family == "OPERATION":
-                assert callable(action_matcher) and callable(operation_grounder)
-                return self._resolve_contract_driven_operation(
-                    goal,
-                    definition,
-                    action_matcher=action_matcher,
-                    operation_grounder=operation_grounder,
-                )
-            return self._resolve_dynamic_goal(goal, definition, frozen_family="STATE")
+            raise GenericProviderError(
+                "MODEL_PROVIDER_CAPABILITY_MISSING",
+                "The configured Goal provider does not implement current vNext routing",
+                resolution_observation={
+                    "stage": "DYNAMIC_GOAL_ROUTING",
+                    "status": "ERROR",
+                    "result": "MISSING_CURRENT_ROUTING_CAPABILITY",
+                },
+            )
         interpreter = getattr(provider, "interpret_dynamic_goal", None)
         if not callable(interpreter):
             if frozen_family == "STATE":
@@ -2297,6 +2261,42 @@ class GenericGoalResolver:
                 if item in {"FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"}
             ]
 
+        def decorate_observation(observation: dict[str, object]) -> dict[str, object]:
+            """Attach the current vNext public audit projection to every terminal result."""
+
+            observation["grounding"] = _dynamic_goal_grounding_observation(grounding, projection)
+            observation["catalog_hash"] = _dynamic_goal_payload_hash(
+                _dynamic_goal_entity_catalog(self.db, self.scope, definition)
+            )
+            observation["ontology_hash"] = _dynamic_goal_payload_hash(ontology)
+            provider = self.provider
+            observation["provider_calls"] = list(
+                provider_call_history_metadata(provider)
+            )[provider_history_start:]
+            if "status" not in observation:
+                observation["status"] = {
+                    "ACCEPTED": "RESOLVED",
+                    "NEEDS_CLARIFICATION": "NEEDS_CLARIFICATION",
+                    "UNSUPPORTED": "UNSUPPORTED",
+                }.get(str(observation.get("result")), str(observation.get("result")))
+            if "validation" not in observation and observation.get("result") not in {
+                "MODEL_PROVIDER_RESPONSE_INVALID",
+                "PROVIDER_SCHEMA_INVALID",
+            }:
+                observation["validation"] = "ACCEPTED"
+            attempt = observation.get("attempt")
+            if isinstance(attempt, int):
+                observation["attempt_count"] = attempt + 1
+                observation["attempts"] = [
+                    {
+                        "stage": "DYNAMIC_GOAL_INTERPRETATION",
+                        "attempt": attempt + 1,
+                        "status": observation["status"],
+                        "result": observation.get("result"),
+                    }
+                ]
+            return observation
+
         recovery_feedback: tuple[DynamicGoalRecoveryFeedback, ...] = ()
         for recovery_attempt in range(2):
             request = DynamicGoalInterpretationRequest(
@@ -2319,11 +2319,22 @@ class GenericGoalResolver:
                 }:
                     recovery_feedback = exc.recovery_feedback
                     continue
+                observation = _vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="STATE",
+                    terminal_stage="STATE_INTERPRETATION",
+                    result=exc.code,
+                    attempt=recovery_attempt,
+                    rejection_code=exc.code,
+                )
+                if exc.validation_diagnostics:
+                    observation["validation_diagnostics"] = list(exc.validation_diagnostics)
+                exc.resolution_observation = decorate_observation(observation)
                 raise
             except (ValidationError, TypeError, ValueError) as exc:
                 if recovery_attempt == 0:
                     continue
-                raise GenericProviderError(
+                error = GenericProviderError(
                     "PROVIDER_SCHEMA_INVALID",
                     "The model provider returned invalid frozen STATE interpretation",
                     validation_diagnostics=(
@@ -2331,7 +2342,19 @@ class GenericGoalResolver:
                         if isinstance(exc, ValidationError)
                         else ()
                     ),
-                ) from exc
+                )
+                observation = _vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="STATE",
+                    terminal_stage="STATE_INTERPRETATION",
+                    result=error.code,
+                    attempt=recovery_attempt,
+                    rejection_code=error.code,
+                )
+                if error.validation_diagnostics:
+                    observation["validation_diagnostics"] = list(error.validation_diagnostics)
+                error.resolution_observation = decorate_observation(observation)
+                raise error from exc
 
             if interpretation.status == "NEEDS_CLARIFICATION":
                 return GenericGoalResolution(
@@ -2341,24 +2364,28 @@ class GenericGoalResolver:
                         or definition.goal_resolution.clarification_prompt
                     ),
                     source="STATE_INTERPRETATION_AMBIGUOUS",
-                    provider_observation=_vnext_goal_observation(
-                        frozen_evidence,
-                        frozen_family="STATE",
-                        terminal_stage="STATE_INTERPRETATION",
-                        result="NEEDS_CLARIFICATION",
-                        attempt=recovery_attempt,
+                    provider_observation=decorate_observation(
+                        _vnext_goal_observation(
+                            frozen_evidence,
+                            frozen_family="STATE",
+                            terminal_stage="STATE_INTERPRETATION",
+                            result="NEEDS_CLARIFICATION",
+                            attempt=recovery_attempt,
+                        )
                     ),
                 )
             if interpretation.status == "UNSUPPORTED":
                 return GenericGoalResolution(
                     "UNSUPPORTED",
                     source="STATE_INTERPRETATION_UNSUPPORTED",
-                    provider_observation=_vnext_goal_observation(
-                        frozen_evidence,
-                        frozen_family="STATE",
-                        terminal_stage="STATE_INTERPRETATION",
-                        result="UNSUPPORTED",
-                        attempt=recovery_attempt,
+                    provider_observation=decorate_observation(
+                        _vnext_goal_observation(
+                            frozen_evidence,
+                            frozen_family="STATE",
+                            terminal_stage="STATE_INTERPRETATION",
+                            result="UNSUPPORTED",
+                            attempt=recovery_attempt,
+                        )
                     ),
                 )
 
@@ -2408,34 +2435,35 @@ class GenericGoalResolver:
                             ),
                         )
                     continue
+                observation = _vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="STATE",
+                    terminal_stage="STATE_INTERPRETATION",
+                    result="BACKEND_VALIDATION_REJECTED",
+                    attempt=recovery_attempt,
+                    rejection_code=exc.code,
+                )
+                if exc.details:
+                    observation["value_type_diagnostics"] = [dict(exc.details)]
                 return GenericGoalResolution(
                     "UNSUPPORTED",
                     source=exc.code,
-                    provider_observation=_vnext_goal_observation(
-                        frozen_evidence,
-                        frozen_family="STATE",
-                        terminal_stage="STATE_INTERPRETATION",
-                        result="BACKEND_VALIDATION_REJECTED",
-                        attempt=recovery_attempt,
-                        rejection_code=exc.code,
-                    ),
+                    provider_observation=decorate_observation(observation),
                 )
 
-            observation = _vnext_goal_observation(
-                frozen_evidence,
-                frozen_family="STATE",
-                terminal_stage="FORMAL_GOAL",
-                result="ACCEPTED",
-                attempt=recovery_attempt,
-                intermediate_stages=(
-                    {"stage": "STATE_INTERPRETATION", "result": "RESOLVED"},
-                    {"stage": "CONTRACT_VALIDATION", "result": "ACCEPTED"},
-                ),
+            observation = decorate_observation(
+                _vnext_goal_observation(
+                    frozen_evidence,
+                    frozen_family="STATE",
+                    terminal_stage="FORMAL_GOAL",
+                    result="ACCEPTED",
+                    attempt=recovery_attempt,
+                    intermediate_stages=(
+                        {"stage": "STATE_INTERPRETATION", "result": "RESOLVED"},
+                        {"stage": "CONTRACT_VALIDATION", "result": "ACCEPTED"},
+                    ),
+                )
             )
-            provider = self.provider
-            observation["provider_calls"] = list(provider_call_history_metadata(provider))[
-                provider_history_start:
-            ]
             return GenericGoalResolution(
                 "RESOLVED",
                 dynamic_requirements=canonical.requirements,
@@ -2450,9 +2478,8 @@ class GenericGoalResolver:
         goal: str,
         definition: ScenarioDefinitionV2,
         *,
-        action_matcher: Callable[[DynamicGoalActionMatchRequest], object] | None = None,
         operation_grounder: Callable[[DynamicGoalOperationGroundingRequest], object],
-        frozen_action_key: str | None = None,
+        frozen_action_key: str,
         initial_grounding: _DynamicGoalGrounding | None = None,
         frozen_evidence: _FrozenDynamicGoalEvidence | None = None,
     ) -> GenericGoalResolution:
@@ -2508,45 +2535,6 @@ class GenericGoalResolver:
             else ()
         )
         action_catalog = tuple(item for item in references if item.get("ref_type") == "ACTION")
-        if frozen_action_key is None:
-            assert action_matcher is not None
-            try:
-                action_match = DynamicGoalActionMatch.model_validate(
-                    action_matcher(
-                        DynamicGoalActionMatchRequest(
-                            goal=goal,
-                            action_catalog=action_catalog,
-                            deterministic_candidate_refs=deterministic_hints,
-                        )
-                    )
-                )
-            except GenericProviderError:
-                raise
-            except (ValidationError, TypeError, ValueError) as exc:
-                raise GenericProviderError(
-                    "PROVIDER_SCHEMA_INVALID",
-                    "The model provider returned an invalid Action match",
-                ) from exc
-            if action_match.status != "GROUNDED" or action_match.action_key is None:
-                code = (
-                    "ACTION_UNRESOLVED"
-                    if action_match.status == "UNRESOLVED"
-                    else "GOAL_UNREPRESENTABLE"
-                )
-                return GenericGoalResolution(
-                    "NEEDS_CLARIFICATION" if action_match.status == "UNRESOLVED" else "UNSUPPORTED",
-                    clarification_prompt=(
-                        action_match.clarification_prompt
-                        or definition.goal_resolution.clarification_prompt
-                    ),
-                    source=code,
-                    provider_observation={
-                        "stage": "DYNAMIC_GOAL_ACTION_MATCHING",
-                        "frozen_family": "OPERATION",
-                        "rejection_code": code,
-                    },
-                )
-            frozen_action_key = action_match.action_key
         action = next(
             (item for item in definition.actions if item.key == frozen_action_key),
             None,
@@ -4260,17 +4248,6 @@ class GenericAgentService:
                         }
                     }
                 )
-            # The old catalog is retained only as a compatibility projection for
-            # existing in-process FakeProviders. It is never serialized by the
-            # OpenAI-compatible provider when ``planner_input`` is present.
-            catalog_builder = PlanningActionCatalogBuilder(self.db, self.scope)
-            catalog = catalog_builder.build(
-                definition,
-                objectives,
-                task=task,
-                replan_reason=reason,
-                planner_input=planner_input,
-            )
         except Exception:
             self._finish_planning_cycle(
                 planning_cycle,
@@ -4314,21 +4291,8 @@ class GenericAgentService:
         ):
             request = PlanRequest(
                 call_type=(call_type if repair_attempt == 0 else "REPAIR"),
-                goal=task.goal_description,
-                objective_keys=tuple(item.key for item in objectives),
-                objective_scope=objective_context(
-                    objectives,
-                    known_fact_refs=catalog_builder.known_fact_refs(),
-                    known_facts=_known_world_facts(planning_context.current_knowledge),
-                    definition=definition,
-                ),
-                replan_reason=reason,
-                known_world=planning_context.current_knowledge,
-                actors=planning_context.relevant_actors,
-                planning_metadata=definition.planning.model_dump(mode="json"),
-                planning_action_catalog=catalog,
-                planning_context=planning_context,
                 planner_input=planner_input,
+                replan_reason=reason,
                 planning_continuity=planning_continuity,
                 rejected_segment=rejected_segment,
                 repair_attempt=repair_attempt,
@@ -4435,7 +4399,6 @@ class GenericAgentService:
                     objectives=objectives,
                     reason=reason,
                     plan_version=plan_version,
-                    catalog=catalog,
                     planning_context=planning_context,
                     planner_input=planner_input,
                     request=request,
@@ -4538,7 +4501,6 @@ class GenericAgentService:
         objectives: tuple[ObjectiveDefinitionV2, ...],
         reason: str | None,
         plan_version: int,
-        catalog: tuple[PlanningActionCandidate, ...],
         planning_context: PlanningContext,
         planner_input: PlannerInput,
         request: PlanRequest,
@@ -4552,13 +4514,12 @@ class GenericAgentService:
         if diagnostics:
             steps: list[dict[str, object]] = []
         else:
-            steps, raw_diagnostics = self._validate_provider_proposal_v1(
+            steps, raw_diagnostics = self._validate_provider_proposal(
                 task,
                 definition,
                 objectives,
                 reason,
                 plan_version,
-                catalog,
                 proposal.steps,
                 planning_context,
                 planner_input=planner_input,
@@ -4569,9 +4530,6 @@ class GenericAgentService:
             task,
             request=request,
             proposal_steps=proposal.steps,
-            proposal_candidate_ids=tuple(
-                item.candidate_id or "" for item in proposal.steps if item.candidate_id
-            ),
             diagnostics=diagnostics,
             proposal_stop_reason=proposal.stop_reason,
             accepted=not diagnostics,
@@ -4604,21 +4562,20 @@ class GenericAgentService:
         if self.provider_call_observer is not None:
             self.provider_call_observer(event, task, request, details)
 
-    def _validate_provider_proposal_v1(
+    def _validate_provider_proposal(
         self,
         task: AgentTask,
         definition: ScenarioDefinitionV2,
         objectives: tuple[ObjectiveDefinitionV2, ...],
         reason: str | None,
         plan_version: int,
-        catalog: tuple[PlanningActionCandidate, ...],
         proposed_steps: tuple[object, ...],
         planning_context: PlanningContext,
         *,
         planner_input: PlannerInput | None = None,
         stop_reason: str = "OBJECTIVE_COMPLETION",
     ) -> tuple[list[dict[str, object]], tuple[dict[str, object], ...]]:
-        """Validate direct V1 bindings while accepting legacy candidate IDs.
+        """Validate direct Action/Actor/Target bindings from the PlannerInput.
 
         Only hard constraints are enforced here.  Current access, resources,
         Rule preflight, and dynamic approval remain execution-time concerns in
@@ -4672,7 +4629,6 @@ class GenericAgentService:
             task=task,
             definition=definition,
             objectives=objectives,
-            catalog=catalog,
             proposed_steps=proposed_steps,
             planning_context=planning_context,
             planner_input=planner_input,
@@ -4697,7 +4653,6 @@ class GenericAgentService:
         for static_binding in static_bindings:
             index = static_binding.index
             raw_step = static_binding.raw_step
-            candidate = static_binding.candidate
             action = static_binding.action
             actor = static_binding.actor
             action_key = action.key
@@ -4806,59 +4761,18 @@ class GenericAgentService:
                 parameters,
                 objective_resource_refs,
             )
-            target_definition = definition.world.node(target_key)
-            target_actor = (
-                actors.get(target_key) if action.target_kind == ActionTargetKind.ACTOR else None
-            )
-            target_name = (
-                target_definition.name
-                if target_definition is not None
-                else target_actor.name
-                if target_actor is not None
-                else target_key
-            )
-            binding = PlanningActionCandidate(
-                candidate_id=(
-                    candidate.candidate_id
-                    if candidate is not None
-                    else f"binding:{action_key}:{actor_key}:{target_key}"
-                ),
-                action_key=action_key,
-                action_name=action.name,
-                actor_key=actor_key,
-                actor_name=actor.name,
-                target_key=target_key,
-                target_name=target_name,
-                target_kind=action.target_kind.value,
-                parameter_domain=tuple(item.model_dump(mode="json") for item in action.parameters),
-                public_effects=tuple(
-                    {
-                        "kind": (
-                            "TERMINAL"
-                            if item in action.planning.terminal_effects_for_target(target_key)
-                            else "SUPPORTING"
-                        ),
-                        "node_key": item.node_key,
-                        "fact_key": item.fact_key,
-                    }
-                    for item in (
-                        *action.planning.terminal_effects_for_target(target_key),
-                        *action.planning.supporting_effects,
-                    )
-                    if (item.node_key, item.fact_key) in effect_refs
-                ),
-                currently_executable=True,
-            )
             try:
                 generated = self._validated_proposed_step(
                     definition,
-                    binding,
-                    parameters,
-                    objectives,
-                    plan_version,
-                    index,
-                    reason,
-                    task.id,
+                    action_key=action_key,
+                    actor_key=actor_key,
+                    target_key=target_key,
+                    parameters=parameters,
+                    objectives=objectives,
+                    plan_version=plan_version,
+                    index=index,
+                    reason=reason,
+                    task_id=task.id,
                     allow_epistemic=True,
                     matches_operation_goal=operation_goal_matches,
                 )
@@ -5337,7 +5251,6 @@ class GenericAgentService:
         task: AgentTask,
         definition: ScenarioDefinitionV2,
         objectives: tuple[ObjectiveDefinitionV2, ...],
-        catalog: tuple[PlanningActionCandidate, ...],
         proposed_steps: tuple[object, ...],
         planning_context: PlanningContext,
         planner_input: PlannerInput | None = None,
@@ -5346,7 +5259,6 @@ class GenericAgentService:
     ) -> tuple[list[_StaticProposalBinding], list[dict[str, object]]]:
         """Validate all ordering-independent proposal facts without projecting state."""
 
-        candidates = {item.candidate_id: item for item in catalog}
         actions = {item.key: item for item in definition.actions}
         target_keys = {
             str(item.get("target_key"))
@@ -5391,28 +5303,9 @@ class GenericAgentService:
         bindings: list[_StaticProposalBinding] = []
         diagnostics: list[dict[str, object]] = []
         for index, raw_step in enumerate(proposed_steps, start=1):
-            candidate_id = getattr(raw_step, "candidate_id", None)
             action_key = getattr(raw_step, "action_key", None)
             actor_key = getattr(raw_step, "actor_key", None)
             target_key = getattr(raw_step, "target_key", None)
-            candidate = candidates.get(candidate_id) if isinstance(candidate_id, str) else None
-            if isinstance(candidate_id, str) and candidate is None and not action_key:
-                diagnostics.append(
-                    {
-                        "code": "UNKNOWN_CANDIDATE",
-                        "failure_code": "UNKNOWN_CANDIDATE",
-                        "dimension": "CANDIDATE_BINDING",
-                        "step": index,
-                        "candidate_id": candidate_id,
-                        "required": "KNOWN_CANDIDATE_OR_DIRECT_BINDING",
-                        "actual": candidate_id,
-                    }
-                )
-                break
-            if candidate is not None:
-                action_key = action_key or candidate.action_key
-                actor_key = actor_key or candidate.actor_key
-                target_key = target_key or candidate.target_key
             if not isinstance(action_key, str) or not action_key:
                 diagnostics.append(
                     {
@@ -5605,7 +5498,6 @@ class GenericAgentService:
             binding = _StaticProposalBinding(
                 index=index,
                 raw_step=raw_step,
-                candidate=candidate,
                 action=action,
                 actor=actor,
                 target_key=target_key,
@@ -7439,7 +7331,6 @@ class GenericAgentService:
         *,
         request: PlanRequest,
         proposal_steps: tuple[object, ...],
-        proposal_candidate_ids: tuple[str, ...],
         diagnostics: tuple[PlanViolation, ...],
         proposal_stop_reason: str,
         accepted: bool,
@@ -7456,33 +7347,14 @@ class GenericAgentService:
             "model": self.provider.model_name,
             "repair_attempt": request.repair_attempt,
             "provider_payload": request.provider_payload(),
-            "planning_context": (
-                request.planning_context.compact_dump()
-                if request.planning_context is not None
-                else None
+            "planner_input": request.planner_input.model_dump(mode="json"),
+            "planner_input_bytes": len(
+                json.dumps(
+                    request.planner_input.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
             ),
-            "planning_context_bytes": (
-                len(
-                    json.dumps(
-                        request.planning_context.compact_dump(),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                )
-                if request.planning_context is not None
-                else None
-            ),
-            "candidate_catalog": [
-                {
-                    "candidate_id": item.candidate_id,
-                    "action_key": item.action_key,
-                    "actor_key": item.actor_key,
-                    "target_key": item.target_key,
-                    "currently_executable": item.currently_executable,
-                    "known_blockers": list(item.known_blockers),
-                }
-                for item in request.planning_action_catalog
-            ],
             "proposal_steps": [
                 {
                     "purpose": getattr(item, "purpose", ""),
@@ -7494,7 +7366,6 @@ class GenericAgentService:
                 }
                 for index, item in enumerate(proposal_steps, start=1)
             ],
-            "proposal_candidate_ids": list(proposal_candidate_ids),
             "proposal_stop_reason": proposal_stop_reason,
             "validator_violations": [
                 violation.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
@@ -7557,28 +7428,30 @@ class GenericAgentService:
     def _validated_proposed_step(
         self,
         definition: ScenarioDefinitionV2,
-        candidate: PlanningActionCandidate,
+        *,
+        action_key: str,
+        actor_key: str,
+        target_key: str,
         parameters: ActionParameters,
         objectives: tuple[ObjectiveDefinitionV2, ...],
         plan_version: int,
         index: int,
         reason: str | None,
         task_id: UUID,
-        *,
         allow_epistemic: bool = False,
         matches_operation_goal: bool = False,
     ) -> list[dict[str, object]]:
         action = next(
-            (item for item in definition.actions if item.key == candidate.action_key), None
+            (item for item in definition.actions if item.key == action_key), None
         )
-        actor = self.db.get(GameInstanceActor, (self.scope.game_instance_id, candidate.actor_key))
+        actor = self.db.get(GameInstanceActor, (self.scope.game_instance_id, actor_key))
         if action is None or actor is None:
             raise GenericAgentError("GENERIC_PROVIDER_PLAN_INVALID", "Unknown Action or Actor")
         try:
             invocation = canonical_action_invocation(
                 action,
                 actor_key=actor.actor_key,
-                target_key=candidate.target_key,
+                target_key=target_key,
                 parameters=parameters,
             )
             parameters = cast(ActionParameters, dict(invocation.parameters))
@@ -7596,7 +7469,7 @@ class GenericAgentService:
             definition,
             action,
             actor,
-            candidate.target_key,
+            target_key,
         )
         if planning_failure_code is not None:
             raise GenericAgentError(
@@ -7606,11 +7479,11 @@ class GenericAgentService:
                     definition,
                     action,
                     actor,
-                    candidate.target_key,
+                    target_key,
                     planning_failure_code,
                 ),
             )
-        if not self._validate_planning_action(definition, action, actor, candidate.target_key):
+        if not self._validate_planning_action(definition, action, actor, target_key):
             raise GenericAgentError("GENERIC_PROVIDER_PLAN_INVALID", "Action assignment is invalid")
         public_known_facts = {
             identity: projected.value
@@ -7625,7 +7498,7 @@ class GenericAgentService:
         resource_effects = _action_resource_goal_effects(
             definition,
             action,
-            candidate.target_key,
+            target_key,
             parameters,
             _objective_resource_refs(
                 objectives,
@@ -7636,7 +7509,7 @@ class GenericAgentService:
         projected_refs = {
             (item.node_key, item.fact_key)
             for item in (
-                *action.planning.terminal_effects_for_target(candidate.target_key),
+                *action.planning.terminal_effects_for_target(target_key),
                 *action.planning.supporting_effects,
             )
         }
@@ -7660,13 +7533,13 @@ class GenericAgentService:
             actor,
             action,
             parameters,
-            target_key=candidate.target_key,
+            target_key=target_key,
         )
         if authority.outcome == AuthorityOutcome.DENY:
             raise GenericAgentError(authority.reason_code, "Action authority denied")
         arguments = {
             "action_key": action.key,
-            "target_key": candidate.target_key,
+            "target_key": target_key,
             "parameters": parameters,
             "idempotency_key": self._action_idempotency_key(
                 task_id,
@@ -7872,7 +7745,7 @@ class GenericAgentService:
 
     def _formal_goal(self, task: AgentTask) -> FormalGoalContract:
         try:
-            return load_formal_goal_for_task(self.db, self.scope, task)
+            return load_formal_goal_for_task(self.db, self.scope, task, for_execution=True)
         except FormalGoalPersistenceError as exc:
             raise GenericAgentError(exc.code, exc.message) from exc
 
@@ -11742,7 +11615,9 @@ def _vnext_goal_observation(
     ]
     observation: dict[str, object] = {
         "pipeline": "GOAL_RESOLVER_VNEXT",
+        "call_type": "DYNAMIC_GOAL" if frozen_family == "STATE" else terminal_stage,
         "stage": terminal_stage,
+        "attempt": attempt,
         "frozen_family": frozen_family,
         "result": result,
         "stages": stages,

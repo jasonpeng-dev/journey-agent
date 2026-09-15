@@ -16,16 +16,17 @@ from sqlalchemy.orm import Session
 
 import app.agent.provider as provider_module
 from app.agent.generic import GenericAgentError, GenericAgentService, proposal_signature
-from app.agent.planning_context import PlanningContinuityBuilder, legal_candidate_id
+from app.agent.planning_context import PlanningContinuityBuilder
 from app.agent.provider import (
+    DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRouting,
+    DynamicGoalFamilyRoutingRequest,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     GenericProviderError,
-    GoalSelection,
-    GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
     PlannerInput,
     PlanProposal,
@@ -62,20 +63,13 @@ class RecordingProvider:
     def __init__(
         self,
         *,
-        selected: tuple[str, ...] = (),
         proposals: Iterable[tuple[PlanStepProposal, ...]] = (),
         dynamic_interpretation: DynamicGoalInterpretation | None = None,
     ) -> None:
-        self.selected = selected
         self.proposals = deque(proposals)
         self.dynamic_interpretation = dynamic_interpretation
-        self.goal_requests: list[GoalSelectionRequest] = []
         self.dynamic_requests: list[DynamicGoalInterpretationRequest] = []
         self.plan_requests: list[PlanRequest] = []
-
-    def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
-        self.goal_requests.append(request)
-        return GoalSelection(objective_keys=self.selected)
 
     def ground_dynamic_goal_entities(
         self, request: DynamicGoalEntityGroundingRequest
@@ -115,6 +109,17 @@ class RecordingProvider:
     ) -> DynamicGoalInterpretation:
         self.dynamic_requests.append(request)
         return self.dynamic_interpretation or DynamicGoalInterpretation(status="UNSUPPORTED")
+
+    def decide_dynamic_goal_family(
+        self, _request: DynamicGoalFamilyRoutingRequest
+    ) -> DynamicGoalFamilyRouting:
+        return DynamicGoalFamilyRouting(family="STATE")
+
+    def route_dynamic_goal_action(self, _request: DynamicGoalActionRoutingRequest) -> object:
+        raise AssertionError("The provider wiring tests use state interpretation")
+
+    def ground_dynamic_goal_operation(self, _request: object) -> object:
+        raise AssertionError("The provider wiring tests use state interpretation")
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
@@ -202,7 +207,9 @@ def _step(
     parameters: dict[str, object] | None = None,
 ) -> PlanStepProposal:
     return PlanStepProposal(
-        candidate_id=legal_candidate_id(action_key, actor_key, target_key),
+        action_key=action_key,
+        actor_key=actor_key,
+        target_key=target_key,
         parameters=parameters or {},  # type: ignore[arg-type]
     )
 
@@ -241,7 +248,6 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
 
     assert submission.draft is not None
     task = orchestrator.confirm_goal_draft(submission.draft.id)
-    assert provider.goal_requests == []
     assert provider.plan_requests == []
     original_propose_plan = provider.propose_plan
     observed_started_calls: list[dict[str, object]] = []
@@ -277,10 +283,11 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     assert "planner_input" in calls[-1]["provider_payload"]
     assert calls[-1]["proposal_stop_reason"] == "OBJECTIVE_COMPLETION"
     assert calls[-1]["validator_violations"] == []
-    catalog = {item.action_key: item for item in provider.plan_requests[0].planning_action_catalog}
-    assert catalog["diagnose_patient"].currently_executable is True
-    assert catalog["treat_patient"].currently_executable is False
-    assert catalog["treat_patient"].known_blockers[0]["code"] == ("PUBLIC_PREREQUISITE_UNSATISFIED")
+    action_keys = {
+        item.action_key
+        for item in provider.plan_requests[0].planner_input.action_contracts
+    }
+    assert {"diagnose_patient", "treat_patient"} <= action_keys
 
 
 def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
@@ -327,7 +334,7 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
 ) -> None:
     provider = RecordingProvider(
         proposals=[
-            (PlanStepProposal(candidate_id="candidate_invented"),),
+            (_step("invented_action", "patient_one", "doctor_lee"),),
             _generic_plan(),
         ]
     )
@@ -380,7 +387,6 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
         accepted_values=(True,),
     )
     provider = RecordingProvider(
-        selected=("stabilize_patient",),
         dynamic_interpretation=DynamicGoalInterpretation(requirements=(dynamic_candidate,)),
         proposals=[_generic_plan()],
     )
@@ -399,13 +405,12 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
     assert accepted.resolution.objective_keys == ()
     assert accepted.resolution.dynamic_requirements == (dynamic_candidate,)
     assert accepted.resolution.source == "AD_HOC_DYNAMIC"
-    assert provider.goal_requests == []
     assert len(provider.dynamic_requests) == 1
     accepted_task = orchestrator.confirm_goal_draft(accepted.draft.id)
     assert accepted_task.formal_goal_source_kind == "AD_HOC_DYNAMIC"
 
     accepted_task.status = "SUCCEEDED"
-    invented = RecordingProvider(selected=("invented_objective",))
+    invented = RecordingProvider()
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: invented
     )
@@ -414,8 +419,7 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
     ).submit_goal("do something the scenario never defined", idempotency_key=str(uuid4()))
     assert rejected.draft is None
     assert rejected.resolution.status == "UNSUPPORTED"
-    assert invented.goal_requests == []
-    assert len(invented.dynamic_requests) == 2
+    assert len(invented.dynamic_requests) == 1
 
 
 def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
@@ -438,17 +442,9 @@ def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
     agent = GenericAgentService(session, scope, provider=repeated)
     task = agent.create_task(runtime.session, "stabilize the patient")
     first = _generic_plan()[0]
-    diagnose = next(
-        item
-        for item in repeated.plan_requests[0].planning_action_catalog
-        if item.candidate_id == first.candidate_id
-    )
     treatment_step = _generic_plan()[1]
-    treatment = next(
-        item
-        for item in repeated.plan_requests[0].planning_action_catalog
-        if item.candidate_id == treatment_step.candidate_id
-    )
+    diagnose = first
+    treatment = treatment_step
     task.rejected_proposal_signatures = [
         proposal_signature(
             diagnose.actor_key,
@@ -472,7 +468,7 @@ def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
 def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
+    unknown = (_step("invented_action", "patient_one", "doctor_lee"),)
     invalid_parameters = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
     provider = RecordingProvider(proposals=[unknown, invalid_parameters, _generic_plan()])
     monkeypatch.setattr(
@@ -494,13 +490,13 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         for item in provider.plan_requests[1].repair_diagnostics
     ) == (
         {
-            "code": "UNKNOWN_CANDIDATE",
-            "failure_code": "UNKNOWN_CANDIDATE",
-            "dimension": "CANDIDATE_BINDING",
-            "candidate_id": "candidate_invented",
+            "code": "UNKNOWN_ACTION",
+            "failure_code": "UNKNOWN_ACTION",
+            "dimension": "ACTION_BINDING",
             "step_id": unknown[0].step_id,
-            "required": "KNOWN_CANDIDATE_OR_DIRECT_BINDING",
-            "actual": "candidate_invented",
+            "action_key": "invented_action",
+            "required": "KNOWN_ACTION_KEY",
+            "actual": "invented_action",
         },
     )
     assert provider.plan_requests[1].rejected_segment is not None
@@ -518,7 +514,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert parameter_diagnostic.validation_error
     assert len(provider.plan_requests[2].anti_regression_memory) == 1
     historical = provider.plan_requests[2].anti_regression_memory[0]
-    assert historical.code == "UNKNOWN_CANDIDATE"
+    assert historical.code == "UNKNOWN_ACTION"
     assert historical.step_id is None
     assert historical.first_seen_attempt == 0
     assert historical.last_seen_attempt == 0
@@ -553,7 +549,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert (
         len(
             {
-                json.dumps(request.objective_scope, sort_keys=True)
+                json.dumps(request.planner_input.objective, sort_keys=True)
                 for request in provider.plan_requests
             }
         )
@@ -618,7 +614,7 @@ def test_provider_repair_attempt_limit_comes_from_settings(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert Settings(_env_file=None).model_max_repair_attempts_per_cycle == 2
-    unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
+    unknown = (_step("invented_action", "patient_one", "doctor_lee"),)
     provider = RecordingProvider(proposals=[unknown, unknown, unknown, unknown, _generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
@@ -739,14 +735,20 @@ def test_draft_sandbox_uses_same_provider_composition_without_formal_game_row(
 
 def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> None:
     settings = _settings("openai_compatible")
-    request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
+    request = PlanRequest(
+        call_type="INITIAL_PLAN",
+        planner_input=PlannerInput(
+            objective={"objective_keys": ["known"]},
+            known_world={"facts": {}},
+        ),
+    )
 
     def timeout(_request: httpx.Request) -> NoReturn:
         raise httpx.ReadTimeout("timed out")
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(timeout))
     with pytest.raises(GenericProviderError) as timed_out:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
     assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
     assert "not-a-real-key" not in str(timed_out.value)
     assert provider.last_call_metadata is not None
@@ -764,7 +766,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         ),
     )
     with pytest.raises(GenericProviderError) as malformed:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
     assert malformed.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
 
     provider = OpenAICompatibleGenericProvider(
@@ -778,7 +780,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         ),
     )
     with pytest.raises(GenericProviderError) as wrong_schema:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
     assert wrong_schema.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
 
     provider = OpenAICompatibleGenericProvider(
@@ -786,7 +788,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         transport=httpx.MockTransport(lambda request: httpx.Response(503, request=request)),
     )
     with pytest.raises(GenericProviderError) as http_error:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
     assert http_error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
 
 
@@ -1002,7 +1004,13 @@ def test_plan_timeout_bounds_a_slow_sync_provider_call() -> None:
     settings = _settings("openai_compatible").model_copy(
         update={"plan_timeout_seconds": 0.02, "plan_total_timeout_seconds": None}
     )
-    request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
+    request = PlanRequest(
+        call_type="INITIAL_PLAN",
+        planner_input=PlannerInput(
+            objective={"objective_keys": ["known"]},
+            known_world={"facts": {}},
+        ),
+    )
 
     def slow_post(_request: httpx.Request) -> httpx.Response:
         sleep(0.15)
@@ -1014,7 +1022,7 @@ def test_plan_timeout_bounds_a_slow_sync_provider_call() -> None:
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(slow_post))
     with pytest.raises(GenericProviderError) as timed_out:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
 
     assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
     assert provider.last_call_metadata is not None
@@ -1028,7 +1036,13 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _settings("openai_compatible")
-    request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
+    request = PlanRequest(
+        call_type="INITIAL_PLAN",
+        planner_input=PlannerInput(
+            objective={"objective_keys": ["known"]},
+            known_world={"facts": {}},
+        ),
+    )
     events: list[tuple[str, dict[str, object]]] = []
     monkeypatch.setattr(
         provider_module,
@@ -1057,7 +1071,7 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     )
 
     with pytest.raises(GenericProviderError) as http_error:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
 
     assert http_error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
     assert len(events) == 1
@@ -1120,8 +1134,6 @@ def test_generic_planner_prompt_defines_local_and_risk_frontier_tie_breakers() -
         provider.propose_plan(
             PlanRequest(
                 call_type=call_type,
-                goal="known goal",
-                objective_keys=("known_objective",),
                 planner_input=planner_input,
             )
         )
@@ -1262,7 +1274,7 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
 def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rejected = (PlanStepProposal(candidate_id="candidate_invented"),)
+    rejected = (_step("invented_action", "patient_one", "doctor_lee"),)
     provider = RecordingProvider(proposals=[rejected, rejected, rejected])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider

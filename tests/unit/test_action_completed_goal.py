@@ -14,14 +14,22 @@ from app.agent.generic import (
     _validate_dynamic_goal_lossless_operation_semantics,
 )
 from app.agent.provider import (
+    DynamicGoalActionRouting,
+    DynamicGoalActionRoutingRequest,
     DynamicGoalCandidateReference,
     DynamicGoalEntityGrounding,
     DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRouting,
+    DynamicGoalFamilyRoutingRequest,
     DynamicGoalIntentDraft,
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     DynamicGoalMentionSlot,
+    DynamicGoalOperationGrounding,
+    DynamicGoalOperationGroundingRequest,
     DynamicGoalScalarMentionSlot,
+    OperationContractSlot,
+    OperationIntentDraft,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -69,6 +77,41 @@ class _RecordingProvider:
 
 
 class _OperationGoalResolverProvider(_RecordingProvider):
+    def decide_dynamic_goal_family(
+        self,
+        _request: DynamicGoalFamilyRoutingRequest,
+    ) -> DynamicGoalFamilyRouting:
+        return DynamicGoalFamilyRouting(family="OPERATION")
+
+    def route_dynamic_goal_action(
+        self,
+        _request: DynamicGoalActionRoutingRequest,
+    ) -> DynamicGoalActionRouting:
+        return DynamicGoalActionRouting(action_match="MATCHED", action_key="diagnose_patient")
+
+    def ground_dynamic_goal_operation(
+        self,
+        _request: DynamicGoalOperationGroundingRequest,
+    ) -> DynamicGoalOperationGrounding:
+        return DynamicGoalOperationGrounding(
+            status="RESOLVED",
+            intent=OperationIntentDraft(
+                action_key="diagnose_patient",
+                actor=OperationContractSlot(
+                    slot_key="actor",
+                    expected_type="ACTOR",
+                    status="NOT_SPECIFIED",
+                ),
+                target=OperationContractSlot(
+                    slot_key="target",
+                    expected_type="NODE",
+                    status="GROUNDED",
+                    ref_type="NODE",
+                    key="patient_one",
+                ),
+            ),
+        )
+
     def ground_dynamic_goal_entities(
         self,
         _request: DynamicGoalEntityGroundingRequest,
