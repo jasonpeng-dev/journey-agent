@@ -573,9 +573,6 @@ def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
 
     projection = SharedKnowledgeProjection(session, scope, definition)
     sparse = projection.planner_action_requirements()
-    assert projection.planner_action_requirements(
-        include_authored_hidden_target_requirements=True
-    ) == sparse
     water = next(item for item in sparse if item["target_key"] == "water_treatment_plant")
     assert not any(
         item["action_key"] == "repair_facility" for item in water["requirements"]

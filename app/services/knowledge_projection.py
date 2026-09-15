@@ -644,21 +644,14 @@ class SharedKnowledgeProjection:
         )
         return regions[0] if len(regions) == 1 else None
 
-    def planner_action_requirements(
-        self,
-        *,
-        include_authored_hidden_target_requirements: bool = False,
-    ) -> tuple[dict[str, Any], ...]:
+    def planner_action_requirements(self) -> tuple[dict[str, Any], ...]:
         """Return target requirements derived from the shared target projection.
 
         This is a Planner-shaped adapter only.  It contains no independent
         visibility logic and never enriches a target from authored hidden
-        Scenario rules.  The keyword is retained for call-site compatibility;
-        both values intentionally produce the same Knowledge-safe projection.
+        Scenario rules.
         """
 
-        # Do not reintroduce the former Planner-only authored enrichment mode.
-        _ = include_authored_hidden_target_requirements
         by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for contract in self.target_knowledge_contracts():
             target_key = contract.get("target_key")
