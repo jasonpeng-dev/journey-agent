@@ -16,8 +16,9 @@ from app.domain.scenario_v2 import ObjectiveRequirementKind
 from app.infrastructure.db.models import AgentTask, FormalGoalImmutableError
 from app.scenarios.builtin import require_builtin_v2_version
 from app.scenarios.versions import ScenarioVersionRepository
-from app.services.formal_goal import load_formal_goal_for_task
+from app.services.formal_goal import FormalGoalPersistenceError, load_formal_goal_for_task
 from app.services.game_instances import GameInstanceService
+from app.services.game_lifecycle import GameLifecycleError, require_scope_writable
 from app.services.runtime_initialization import RuntimeInitializationService
 from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
 from tests.scenario_fixtures import GENERIC_TEST
@@ -79,6 +80,18 @@ def test_legacy_predefined_task_compiles_transiently_without_write_back(session:
     assert contract.predefined_objectives[0].objective_key == task.objective_scope_keys[0]
     assert task.formal_goal_contract_json is None
     assert task.formal_goal_contract_hash is None
+
+
+def test_legacy_task_is_readable_but_not_admitted_to_execution(session: Session) -> None:
+    task, _runtime_value, scope = _task(session, formal=False)
+
+    with pytest.raises(FormalGoalPersistenceError) as loader_error:
+        load_formal_goal_for_task(session, scope, task, for_execution=True)
+    assert loader_error.value.code == "LEGACY_TASK_EXECUTION_UNSUPPORTED"
+
+    with pytest.raises(GameLifecycleError) as scope_error:
+        require_scope_writable(session, task.game_instance_id)
+    assert scope_error.value.code == "LEGACY_GAME_INSTANCE_READ_ONLY"
 
 
 def test_persisted_formal_goal_validates_hash_and_exact_scenario(session: Session) -> None:

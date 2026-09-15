@@ -181,12 +181,15 @@ def load_formal_goal_for_task(
     db: Session,
     scope: RuntimeScope,
     task: AgentTask,
+    *,
+    for_execution: bool = False,
 ) -> FormalGoalContract:
-    """Load a stored contract or compile a legacy PREDEFINED Task transiently.
+    """Load a stored contract or compile a legacy Task for historical READ.
 
-    The compatibility path is deliberately read-only. In particular, an
-    archived GameInstance is never modified merely because an old Task is
-    inspected.
+    Legacy ObjectiveScope data may still be converted into a historical view,
+    but it is never admitted to the current Planner/Runtime execution path.
+    In particular, an archived GameInstance is never modified merely because
+    an old Task is inspected.
     """
 
     if task.game_instance_id != scope.game_instance_id or task.player_id != scope.player_id:
@@ -217,6 +220,11 @@ def load_formal_goal_for_task(
         raise FormalGoalPersistenceError(
             "FORMAL_GOAL_PERSISTENCE_INCOMPLETE",
             "Persisted Formal Goal fields are incomplete",
+        )
+    if for_execution:
+        raise FormalGoalPersistenceError(
+            "LEGACY_TASK_EXECUTION_UNSUPPORTED",
+            "This historical Task has no current Formal Goal contract and is read-only",
         )
     return _compile_legacy_predefined_task(task, snapshot)
 

@@ -39,6 +39,10 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.services.runtime_initialization import InitializedRuntime, RuntimeInitializationService
+from app.services.scenario_compatibility import (
+    check_scenario_version_execution_compatibility,
+    has_legacy_execution_tasks,
+)
 
 PLATFORM_PLAYER_ID = uuid5(NAMESPACE_URL, "journey-agent:phase-d:platform-player")
 
@@ -67,6 +71,12 @@ class GameLifecycleService:
         if version is None:
             raise GameLifecycleError(
                 "SCENARIO_VERSION_NOT_FOUND", "The published ScenarioVersion does not exist"
+            )
+        compatibility = check_scenario_version_execution_compatibility(self.db, version.id)
+        if not compatibility.compatible:
+            raise GameLifecycleError(
+                "LEGACY_SCENARIO_VERSION_READ_ONLY",
+                compatibility.reason or "This ScenarioVersion is read-only for gameplay",
             )
         scenario = self.db.get(Scenario, version.scenario_id)
         if scenario is None or scenario.status == "ARCHIVED":
@@ -388,6 +398,22 @@ def require_scope_writable(db: Session, game_instance_id: UUID) -> None:
     if instance is None:
         raise GameLifecycleError("GAME_INSTANCE_NOT_FOUND", "The Game does not exist")
     require_active_instance(instance)
+    with db.no_autoflush:
+        compatibility = check_scenario_version_execution_compatibility(
+            db,
+            instance.scenario_version_id,
+        )
+        if not compatibility.compatible:
+            raise GameLifecycleError(
+                "LEGACY_SCENARIO_VERSION_READ_ONLY",
+                compatibility.reason or "This historical ScenarioVersion is read-only",
+            )
+        if has_legacy_execution_tasks(db, instance.id):
+            raise GameLifecycleError(
+                "LEGACY_GAME_INSTANCE_READ_ONLY",
+                "This historical GameInstance contains a legacy execution contract "
+                "and is read-only",
+            )
 
 
 __all__ = [
