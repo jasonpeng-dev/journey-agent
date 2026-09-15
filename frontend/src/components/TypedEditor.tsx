@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { factInitialValueMetadata, metadataForKind, rootFieldRegistry, type FieldMetadata } from "../editor-registry";
+import type { RootCollectionSelection } from "../editor-collections";
 import type { DraftObject, JsonObject } from "../editor";
 import { fieldLabel } from "../ui";
 import {
@@ -23,6 +24,9 @@ import {
   DerivedStateEditor,
   GoalResolutionEditor,
   InitializationEditor,
+  MasterDetailInitializationEditor,
+  MasterDetailPlanningEditor,
+  MasterDetailPublicKnowledgeEditor,
   ObjectiveEditor,
   PlanningEditor,
   PublicKnowledgeEditor,
@@ -37,6 +41,9 @@ type Props = {
   onChange: (value: unknown) => void;
   path?: string;
   focusPath?: string | null;
+  collectionSelection?: RootCollectionSelection | null;
+  onCollectionChange?: (value: JsonObject) => void;
+  onCollectionRemove?: () => void;
 };
 
 function cloneObject(value: unknown): JsonObject {
@@ -139,13 +146,13 @@ function RootEditor({ rootKey, value, document, onChange }: { rootKey: string; v
   return <div className="typed-root-editor"><div className="typed-grid">{fields.map((metadata) => <FieldRow key={metadata.path} metadata={metadata} value={object} document={document} path={rootKey} onChange={onChange as (value: JsonObject) => void} />)}</div>{rootKey === "initialization" && <p className="typed-help">Resource definitions 在 World 中维护；resource initial states、pools 和 region knowledge 属于初始化数据，当前保留为 Advanced 结构。</p>}{rootKey === "planning" && <p className="typed-help">Planning instructions 已提供 typed 文本数组入口；recovery hints 在 Phase 3 Rule/Planning 表单中展开。</p>}</div>;
 }
 
-export function TypedEditor({ section, value, document, onChange, path = section, focusPath }: Props) {
+export function TypedEditor({ section, value, document, onChange, path = section, focusPath, collectionSelection = null, onCollectionChange, onCollectionRemove }: Props) {
   if (section === "overview" || section === "initialization" || section === "goal-resolution" || section === "planning" || section === "public-knowledge") {
     const rootKey = section === "overview" ? "metadata" : section === "goal-resolution" ? "goal_resolution" : section === "public-knowledge" ? "public_knowledge" : section;
-    if (rootKey === "initialization" && value && typeof value === "object" && !Array.isArray(value)) return <InitializationEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
-    if (rootKey === "planning" && value && typeof value === "object" && !Array.isArray(value)) return <PlanningEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "initialization" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailInitializationEditor value={value as JsonObject} document={document} selection={collectionSelection} onChange={onChange as (value: JsonObject) => void} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} /> : <InitializationEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "planning" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailPlanningEditor value={value as JsonObject} document={document} selection={collectionSelection} onChange={onChange as (value: JsonObject) => void} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} /> : <PlanningEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
     if (rootKey === "goal_resolution" && value && typeof value === "object" && !Array.isArray(value)) return <GoalResolutionEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
-    if (rootKey === "public_knowledge" && value && typeof value === "object" && !Array.isArray(value)) return <PublicKnowledgeEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "public_knowledge" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailPublicKnowledgeEditor value={value as JsonObject} document={document} selection={collectionSelection} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} /> : <PublicKnowledgeEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
     return <RootEditor rootKey={rootKey} value={value} document={document} onChange={onChange} />;
   }
   if (value && typeof value === "object" && !Array.isArray(value) && "kind" in value && typeof (value as JsonObject).kind === "string") {

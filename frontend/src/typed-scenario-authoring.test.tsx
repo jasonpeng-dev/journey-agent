@@ -150,4 +150,17 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expandNestedCards();
     expect(screen.getByLabelText("资源")).toHaveValue("fuel");
   });
+
+  it("uses master-detail rendering for root collection sections", () => {
+    const onCollectionChange = vi.fn();
+    render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }, { failure_code: "RETRY", hint: "Try again" }] }} document={document} collectionSelection={{ collection: "recovery_hints", index: 0 }} onChange={vi.fn()} onCollectionChange={onCollectionChange} onCollectionRemove={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "恢复提示" })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("BLOCKED")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Inspect again")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("RETRY")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByDisplayValue("BLOCKED"), { target: { value: "MODEL_PROVIDER_TIMEOUT" } });
+    expect(onCollectionChange).toHaveBeenCalledWith(expect.objectContaining({ failure_code: "MODEL_PROVIDER_TIMEOUT" }));
+  });
 });
