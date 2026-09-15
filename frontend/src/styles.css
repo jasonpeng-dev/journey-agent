@@ -37,8 +37,9 @@ h1 { margin: 5px 0 28px; font-family: Georgia, serif; font-size: 38px; }
 .editor-main { padding: 28px; min-width: 0; }
 .editor-heading h1 { margin-bottom: 12px; }
 .save-state { padding: 7px 12px; border-radius: 18px; color: #49645b; background: #e4ece8; font-size: 13px; }
-.save-state.editing, .save-state.saving { color: #875728; background: #f7e9d6; }
+.save-state.dirty, .save-state.saving { color: #875728; background: #f7e9d6; }
 .save-state.conflict, .save-state.error { color: #9c342f; background: #f7dedb; }
+.editor-save-button { margin-top: 0; padding: 7px 12px; border: 0; cursor: pointer; font-size: 12px; }
 .conflict-banner { display: flex; justify-content: space-between; padding: 10px 16px; border: 1px solid #d4877f; border-radius: 8px; background: #fff0ed; }
 .editor-columns { display: grid; grid-template-columns: 230px minmax(300px, 1fr) 280px; gap: 14px; margin-top: 16px; }
 .object-list, .canvas, .inspector { min-height: 560px; padding: 17px; border: 1px solid #d7d3c8; border-radius: 10px; background: #fffefa; }
