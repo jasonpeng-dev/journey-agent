@@ -43,13 +43,20 @@ EXPECTED_REPAIR_TARGET_ROLES = {
 
 LEGACY_REPAIR_RULE_COUNT = 71
 LEGACY_REPAIR_RULE_SEMANTIC_HASH = (
-    "184ec249f7577205dcb010195f6f694ac56d05da5635c2c077c1db9457d544e0"
+    # Intentional Phase 2 root-repair change; old hash was
+    # 184ec249f7577205dcb010195f6f694ac56d05da5635c2c077c1db9457d544e0.
+    "ae4542484cef9539795c67c49257510d01b75152aaa95bb5fc30946d5e0d9ecc"
 )
 LEGACY_FACILITY_FACT_SEMANTIC_HASH = (
-    "9bc794c0f53e3fe35e63e54e8766fa906d5ac59a596eb8ced230d1ba42eaa209"
+    # Intentional Phase 2 change: remove power_generation_capable and make the
+    # root power station's authored initial power state available; old hash
+    # was 9bc794c0f53e3fe35e63e54e8766fa906d5ac59a596eb8ced230d1ba42eaa209.
+    "d509fc9aaedd07e0198ea34a7cb6d9a5a373ff2a0090de9ac411a5e9ba02cd4c"
 )
 LEGACY_INITIAL_FACT_SEMANTIC_HASH = (
-    "62be14f9535df02fef8799dc612d20f29606858d324393295ac68f04dff91b26"
+    # Intentional Phase 2 initial-Fact semantic migration; old hash was
+    # 62be14f9535df02fef8799dc612d20f29606858d324393295ac68f04dff91b26.
+    "3a88bf989f79bb94799aa8ee841e4be491879b4eaa0656731cb8bfdf7f261988"
 )
 LEGACY_POWER_TOPOLOGY_SEMANTIC_HASH = (
     "a472c4331fb65d2d69d8096b753528eb84477a5b442ce57f6749a56469dcb29a"

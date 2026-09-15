@@ -3105,9 +3105,7 @@ describe("Formal Play player projections", () => {
           { node_key: "east_distribution_station", fact_key: "power_supply", name: "Power supply", value: "UNAVAILABLE", node_name: "East Substation", node_type_key: "facility", region_key: "east", region_name: "East Region" },
           { node_key: "utility_service_depot", fact_key: "operational", name: "Operational", value: false, node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
           { node_key: "utility_service_depot", fact_key: "power_supply", name: "Power supply", value: "UNAVAILABLE", node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
-          { node_key: "utility_service_depot", fact_key: "power_generation_capable", name: "Power generation capable", value: false, node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
           { node_key: "utility_service_depot", fact_key: "heavy_engineering_support", name: "Heavy engineering support", value: "UNAVAILABLE", node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
-          { node_key: "emergency_generator", fact_key: "power_generation_capable", name: "Power generation capable", value: true, node_name: "Emergency Generator", node_type_key: "facility", region_key: "north", region_name: "North Region" },
         ]}
         knownRelations={[
           {
@@ -3231,7 +3229,8 @@ describe("Formal Play player projections", () => {
     expect(substation).not.toHaveTextContent("发电能力：");
     const generator = screen.getByTestId("facility-card-emergency_generator");
     fireEvent.click(generator.querySelector("summary")!);
-    expect(generator).toHaveTextContent("发电能力：已具备");
+    expect(generator).toHaveTextContent("暂无更多已知信息");
+    expect(generator).not.toHaveTextContent("发电能力");
     expect(screen.queryByTestId("knowledge-accordion-facts")).not.toBeInTheDocument();
     expect(screen.queryByTestId("knowledge-accordion-relations")).not.toBeInTheDocument();
   });

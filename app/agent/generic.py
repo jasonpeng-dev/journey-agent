@@ -5977,28 +5977,10 @@ class GenericAgentService:
                     },
                 },
             )
-        for fact_key, expected, code in (
-            ("operational", True, "SUPPLY_POWER_SOURCE_NOT_OPERATIONAL"),
-            ("power_supply", "AVAILABLE", "SUPPLY_POWER_SOURCE_UNAVAILABLE"),
-        ):
-            fact = projected_known_facts.get((source_key, fact_key))
-            if fact is not None and fact.visibility == Visibility.KNOWN and fact.value != expected:
-                raise GenericAgentError(
-                    code,
-                    "The power source does not satisfy its known power requirement",
-                    details={
-                        "dimension": "POWER_SOURCE_REQUIREMENT",
-                        "required": expected,
-                        "actual": fact.value,
-                        "known_predicate": {
-                            "node_key": source_key,
-                            "fact_key": fact_key,
-                            "operator": "EQ",
-                            "expected": expected,
-                            "actual": fact.value,
-                        },
-                    },
-                )
+        # Source Facts are authored PREFLIGHT predicates.  The generic
+        # preflight projection above validates them for this Action, so this
+        # behavior-level adapter owns only the public direct-relation
+        # requirement and does not maintain a second power-source predicate.
 
     @classmethod
     def _known_preflight_failure(

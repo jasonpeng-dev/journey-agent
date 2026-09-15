@@ -9,7 +9,6 @@ import {
   factDisplayLabel,
   factDisplayValue,
   facilityStatusDisplayValue,
-  generationCapabilityDisplayValue,
   publicFactRequirementText,
   resourceDisplayName,
   resourceAvailabilityRequirementText,
@@ -1542,7 +1541,7 @@ export function KnownWorldAccordions({
       ? "neutral"
       : "success";
   const targetContractsFor = (nodeKey: string) => contractsByTarget.get(nodeKey) ?? [];
-  const facilityMetadataFacts = new Set(["operational", "power_supply", "power_generation_capable", "generation_capable", "repair_profile"]);
+  const facilityMetadataFacts = new Set(["operational", "power_supply", "repair_profile"]);
 
 
   const renderKnownLocations = () => (
@@ -1592,15 +1591,11 @@ export function KnownWorldAccordions({
                   const powerFact = nodeFacts.find((fact) => fact.fact_key === "power_supply");
                   const operationalFact = nodeFacts.find((fact) => fact.fact_key === "operational");
                   const passabilityFact = nodeFacts.find((fact) => fact.fact_key === "passable");
-                  const generationFact = nodeFacts.find(
-                    (fact) => fact.fact_key === "power_generation_capable" || fact.fact_key === "generation_capable",
-                  );
                   const hasPowerOutputRelation = nodeRelations.some(
                     (relation) =>
                       relation.source_node_key === node.key
                       && relation.relation_type_key === "supplies_power_to",
                   );
-                  const hasGenerationSemantics = generationFact?.value === true;
                   const targetContracts = targetContractsFor(node.key);
                   const additionalFacts = nodeFacts.filter((fact) => !facilityMetadataFacts.has(fact.fact_key));
                   const associatedResources = (node.associated_known_resources ?? [])
@@ -1705,7 +1700,6 @@ export function KnownWorldAccordions({
                   const hasFacilityDetails = targetActionRequirementRows.length > 0
                     || associatedResources.length > 0
                     || hasPowerOutputRelation
-                    || hasGenerationSemantics
                     || additionalFacts.length > 0
                     || nodeRelations.length > 0;
                   const associatedResourceText = associatedResources
@@ -1814,14 +1808,6 @@ export function KnownWorldAccordions({
                                 && (powerFact?.value === "AVAILABLE" || powerFact?.value === true)
                                   ? "已具备"
                                   : "未具备"}
-                              </span>
-                            </div>
-                          )}
-                          {hasGenerationSemantics && generationFact && (
-                            <div className="knowledge-facility-attribute">
-                              <span className="knowledge-facility-attribute-label">{"发电能力："}</span>
-                              <span className="knowledge-facility-attribute-value">
-                                {generationCapabilityDisplayValue(generationFact)}
                               </span>
                             </div>
                           )}

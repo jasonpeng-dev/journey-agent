@@ -517,7 +517,6 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     )
     assert {item["fact_key"] for item in supply["planner_constraints"]["known_preconditions"]} >= {
         "operational",
-        "power_generation_capable",
         "power_supply",
     }
 

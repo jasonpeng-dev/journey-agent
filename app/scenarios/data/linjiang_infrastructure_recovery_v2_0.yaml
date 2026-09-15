@@ -237,14 +237,6 @@ world:
       initial_visibility: HIDDEN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -297,14 +289,6 @@ world:
       - Restore central communications
       goal_target_values:
       - true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
       allowed_values: []
     - key: power_supply
       name: 供电状态
@@ -379,14 +363,6 @@ world:
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -423,14 +399,6 @@ world:
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -462,14 +430,6 @@ world:
     - key: operational
       name: 运行状态
       description: 运行状态
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
@@ -522,14 +482,6 @@ world:
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -561,14 +513,6 @@ world:
     - key: operational
       name: 运行状态
       description: 运行状态
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: KNOWN
@@ -693,14 +637,6 @@ world:
       initial_visibility: HIDDEN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -732,14 +668,6 @@ world:
     - key: operational
       name: 运行状态
       description: 运行状态
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
@@ -825,14 +753,6 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: true
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
       initial_visibility: HIDDEN
       goal_addressable: true
       allowed_values: []
@@ -973,14 +893,6 @@ world:
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -1030,14 +942,6 @@ world:
     - key: operational
       name: 运行状态
       description: 运行状态
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
@@ -1115,14 +1019,6 @@ world:
       initial_visibility: HIDDEN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -1154,14 +1050,6 @@ world:
     - key: operational
       name: 运行状态
       description: 运行状态
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
@@ -1228,14 +1116,6 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: true
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values: []
@@ -1243,7 +1123,7 @@ world:
       name: 供电状态
       description: 供电状态
       value_type: ENUM
-      initial_value: UNAVAILABLE
+      initial_value: AVAILABLE
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values:
@@ -1315,14 +1195,6 @@ world:
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -1354,14 +1226,6 @@ world:
     - key: operational
       name: 运行状态
       description: 运行状态
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
       value_type: BOOLEAN
       initial_value: false
       initial_visibility: HIDDEN
@@ -1457,14 +1321,6 @@ world:
       initial_visibility: HIDDEN
       goal_addressable: true
       allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      goal_addressable: true
-      allowed_values: []
     - key: power_supply
       name: 供电状态
       description: 供电状态
@@ -1515,14 +1371,6 @@ world:
       description: 运行状态
       value_type: BOOLEAN
       initial_value: true
-      initial_visibility: KNOWN
-      goal_addressable: true
-      allowed_values: []
-    - key: power_generation_capable
-      name: 供电能力
-      description: 供电能力
-      value_type: BOOLEAN
-      initial_value: false
       initial_visibility: KNOWN
       goal_addressable: true
       allowed_values: []
@@ -4271,29 +4119,6 @@ rules:
     retryable: false
     memory_key: null
     memory_content: null
-  - kind: SET_FACT
-    node:
-      kind: CURRENT_TARGET
-      node_key: null
-      anchor_node_key: null
-      relation_type_key: null
-      direction: null
-      required_fact_key: null
-    fact_key: power_supply
-    value:
-      source: LITERAL
-      literal: AVAILABLE
-      parameter_key: null
-    access: null
-    resource_key: null
-    resource_scope: null
-    amount: null
-    outcome_code: null
-    failure_code: null
-    message: null
-    retryable: false
-    memory_key: null
-    memory_content: null
   - kind: ADJUST_RESOURCE
     node: null
     fact_key: null
@@ -6619,58 +6444,22 @@ rules:
   action_key: supply_power
   priority: 90
   condition:
-    kind: ALL
-    conditions:
-    - kind: FACT_EQUALS
-      conditions: []
-      condition: null
-      node:
-        kind: ACTION_SOURCE
-        node_key: null
-        anchor_node_key: null
-        relation_type_key: null
-        direction: null
-        required_fact_key: null
-      fact_key: power_generation_capable
-      resource_key: null
-      resource_scope: null
-      parameter_key: null
-      operator: null
-      value: false
-      values: []
-      visibility: null
-      access: null
-      relation_type_key: null
-      relation_direction: null
-    - kind: FACT_NOT_EQUALS
-      conditions: []
-      condition: null
-      node:
-        kind: ACTION_SOURCE
-        node_key: null
-        anchor_node_key: null
-        relation_type_key: null
-        direction: null
-        required_fact_key: null
-      fact_key: power_supply
-      resource_key: null
-      resource_scope: null
-      parameter_key: null
-      operator: null
-      value: AVAILABLE
-      values: []
-      visibility: null
-      access: null
-      relation_type_key: null
-      relation_direction: null
+    kind: FACT_NOT_EQUALS
+    conditions: []
     condition: null
-    node: null
-    fact_key: null
+    node:
+      kind: ACTION_SOURCE
+      node_key: null
+      anchor_node_key: null
+      relation_type_key: null
+      direction: null
+      required_fact_key: null
+    fact_key: power_supply
     resource_key: null
     resource_scope: null
     parameter_key: null
     operator: null
-    value: null
+    value: AVAILABLE
     values: []
     visibility: null
     access: null

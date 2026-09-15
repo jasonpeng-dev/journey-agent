@@ -264,7 +264,6 @@ def test_facility_identity_is_known_while_authored_facts_stay_hidden(session: Se
     assert inspected.outcome.failure is None
     assert {item.key for item in inspected.knowledge_changes} == {
         "central_hospital.operational",
-        "central_hospital.power_generation_capable",
         "central_hospital.power_supply",
     }
     region_knowledge = session.get(

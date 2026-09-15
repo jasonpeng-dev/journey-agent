@@ -6,6 +6,7 @@ import pytest
 from app.agent.planner_contract import (
     action_planner_constraints,
     action_planner_effects,
+    planner_source_preconditions,
     planner_target_contracts,
 )
 from app.domain.action_invocation import canonical_action_invocation_contract
@@ -64,7 +65,7 @@ def test_linjiang_facility_authoring_invariant_is_complete() -> None:
         assert {"repairable", "power_targetable"}.issubset(facility.interaction_keys), facility.key
 
 
-def test_linjiang_repair_migration_preserves_initial_state_and_power_topology() -> None:
+def test_linjiang_power_migration_changes_intended_state_and_preserves_topology() -> None:
     assert facility_fact_semantic_hash(LINJIANG_V2_TEST) == LEGACY_FACILITY_FACT_SEMANTIC_HASH
     assert initial_fact_semantic_hash(LINJIANG_V2_TEST) == LEGACY_INITIAL_FACT_SEMANTIC_HASH
     assert power_topology_semantic_hash(LINJIANG_V2_TEST) == LEGACY_POWER_TOPOLOGY_SEMANTIC_HASH
@@ -75,6 +76,52 @@ def test_linjiang_repair_migration_preserves_initial_state_and_power_topology() 
         )
         == 7
     )
+
+
+def test_linjiang_power_source_contract_has_one_authored_predicate() -> None:
+    definition = LINJIANG_V2_TEST
+    root = definition.world.node("southeast_emergency_power_station")
+    assert root is not None
+    facts = {fact.key: fact for fact in root.facts}
+    assert facts["operational"].initial_value is False
+    assert facts["operational"].initial_visibility.value == "KNOWN"
+    assert facts["power_supply"].initial_value == "AVAILABLE"
+    assert facts["power_supply"].initial_visibility.value == "KNOWN"
+    assert "power_generation_capable" not in {
+        fact.key for node in definition.world.nodes for fact in node.facts
+    }
+
+    repair_rule = next(
+        item
+        for item in definition.rules
+        if item.key == "repair_facility_electrical_southeast_emergency_power_station_resolution"
+    )
+    assert [effect.fact_key for effect in repair_rule.effects if effect.fact_key] == [
+        "operational"
+    ]
+
+    supply_rule = next(
+        item for item in definition.rules if item.key == "supply_power_source_unavailable"
+    )
+    assert supply_rule.condition is not None
+    assert supply_rule.condition.kind.value == "FACT_NOT_EQUALS"
+    assert supply_rule.condition.fact_key == "power_supply"
+    assert supply_rule.condition.value == "AVAILABLE"
+
+    supply_action = next(item for item in definition.actions if item.key == "supply_power")
+    source_preconditions = planner_source_preconditions(definition, supply_action)
+    assert {
+        (
+            condition["kind"],
+            condition["fact_key"],
+            condition.get("value"),
+        )
+        for entry in source_preconditions
+        for condition in [entry["failure_condition"]]
+    } == {
+        ("FACT_NOT_EQUALS", "operational", True),
+        ("FACT_NOT_EQUALS", "power_supply", "AVAILABLE"),
+    }
 
 
 def test_linjiang_repair_specialization_and_rule_semantics_are_preserved() -> None:

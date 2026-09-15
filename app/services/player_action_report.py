@@ -13,8 +13,6 @@ from app.engine.locality import LocalityEngineError, region_for_node
 _FACT_LABELS = {
     "operational": "设备状态",
     "power_supply": "供电状态",
-    "power_generation_capable": "发电能力",
-    "generation_capable": "发电能力",
     "emergency_power": "应急供电",
     "passable": "通行状态",
     "heavy_engineering_support": "重型工程支援",
@@ -39,10 +37,6 @@ _FACT_VALUE_LABELS: dict[tuple[str | None, object], str] = {
     ("heavy_engineering_support", "UNAVAILABLE"): "不可用",
     ("heavy_engineering_support_ready", True): "已部署",
     ("heavy_engineering_support_ready", False): "未部署",
-    ("power_generation_capable", True): "具备",
-    ("power_generation_capable", False): "不具备",
-    ("generation_capable", True): "具备",
-    ("generation_capable", False): "不具备",
 }
 
 _ENUM_VALUE_LABELS = {
@@ -255,17 +249,7 @@ class PlayerActionReportFormatter:
     def _should_display_fact(self, node_key: str, fact_key: str) -> bool:
         """Keep only player-useful facts in an action knowledge report."""
 
-        if fact_key == "repair_profile":
-            return False
-        if fact_key not in {"power_generation_capable", "generation_capable"}:
-            return True
-        node = self.definition.world.node(node_key)
-        fact = node.fact(fact_key) if node is not None else None
-        # The capability fact is present on every Facility for a shared
-        # gameplay contract.  Only a definition that advertises the
-        # capability as true is a genuine generation facility; ordinary
-        # facilities' false value is not player-facing information.
-        return fact is not None and fact.initial_value is True
+        return fact_key != "repair_profile"
 
     def _parse_resource_identity(self, key: str) -> _ResourceIdentity | None:
         parts = key.split("@")

@@ -84,8 +84,6 @@ function knownRelationRequirementDescription(relationTypeKey: string): string {
 const FACT_LABELS: Record<string, string> = {
   operational: "运行状态",
   power_supply: "供电状态",
-  power_generation_capable: "发电能力",
-  generation_capable: "发电能力",
   emergency_power: "应急供电",
   passable: "通行状态",
   heavy_engineering_support: "重型工程支援",
@@ -120,9 +118,6 @@ export function factDisplayValue(
     if (fact.fact_key === "passable") return value ? "可通行" : "待修复";
     if (fact.fact_key === "heavy_engineering_support_ready") return value ? "已部署" : "未部署";
     if (fact.fact_key === "heavy_engineering_support") return value ? "可用" : "不可用";
-    if (fact.fact_key === "generation_capable" || fact.fact_key === "power_generation_capable") {
-      return value ? "具备" : "不具备";
-    }
     return value ? "是" : "否";
   }
   if (typeof value === "number") return String(value);
@@ -202,14 +197,6 @@ export function facilityStatusDisplayValue(
   if (fact.fact_key === "operational" && typeof fact.value === "boolean") {
     return fact.value ? "设备正常" : "待修复";
   }
-  return factDisplayValue(fact);
-}
-
-export function generationCapabilityDisplayValue(
-  fact: PlayerGameState["known_facts"][number],
-): string {
-  if (fact.value === true || fact.value === "AVAILABLE") return "已具备";
-  if (fact.value === false || fact.value === "UNAVAILABLE") return "未具备";
   return factDisplayValue(fact);
 }
 
