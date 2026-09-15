@@ -1,8 +1,7 @@
-"""Knowledge-safe PlanningContext V1 and the legacy catalog compatibility view."""
+"""Knowledge-safe PlanningContext and canonical PlannerInput construction."""
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping
 from typing import cast
 from uuid import UUID
@@ -11,7 +10,6 @@ from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.authority import actor_binding_matches
 from app.agent.dependency_closure import DependencyClosureResult, build_dependency_closure
 from app.agent.formal_goal_projection import (
     formal_goal_operation_goal,
@@ -35,11 +33,9 @@ from app.agent.provider import (
     PlannerKnownWorldSlice,
     PlannerResourceSourceHint,
     PlannerTargetBinding,
-    PlanningActionCandidate,
     PlanningContext,
     PlanningContinuity,
 )
-from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.formal_goal import FormalGoalContract
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
@@ -61,7 +57,6 @@ from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
-    GameInstanceResourceState,
     PlanningAttempt,
     WorldOperation,
 )
@@ -627,10 +622,7 @@ class PlanningContextBuilder:
 
     This class performs only knowledge filtering, relevance retrieval,
     semantic normalization, and compression.  It never binds an Actor to an
-    Action/Target, chooses a route, or orders steps.  The old
-    ``PlanningActionCatalogBuilder`` below remains as a compatibility view for
-    in-process callers while migration completes; it is deliberately not used
-    by the OpenAI-compatible provider payload.
+    Action/Target, chooses a route, or orders steps.
     """
 
     def __init__(self, db: Session, scope: RuntimeScope, *, retrieval_hops: int = 3) -> None:
@@ -658,9 +650,8 @@ class PlanningContextBuilder:
             )
         if objectives is None:
             raise ValueError("PlanningContext needs a Formal Goal or Objective projection")
-        legacy = PlanningActionCatalogBuilder(self.db, self.scope)
-        known_refs = legacy.known_fact_refs()
-        known_world = legacy.known_world(definition)
+        known_refs = self.known_fact_refs()
+        known_world = self.known_world(definition)
         knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
         target_knowledge_contracts = knowledge_projection.target_knowledge_contracts()
         target_action_requirements = knowledge_projection.planner_action_requirements()
@@ -1466,337 +1457,9 @@ class PlanningContextBuilder:
         )
 
 
-class PlanningActionCatalogBuilder:
-    """Expose known, statically legal action bindings, including future steps."""
-
-    def __init__(self, db: Session, scope: RuntimeScope) -> None:
-        self.db = db
-        self.scope = scope
-
-    def build(
-        self,
-        definition: ScenarioDefinitionV2,
-        objectives: tuple[ObjectiveDefinitionV2, ...],
-        *,
-        task: AgentTask,
-        replan_reason: str | None,
-        planner_input: PlannerInput | None = None,
-    ) -> tuple[PlanningActionCandidate, ...]:
-        actors = tuple(
-            self.db.scalars(
-                select(GameInstanceActor).where(
-                    GameInstanceActor.game_instance_id == self.scope.game_instance_id,
-                    GameInstanceActor.status == "ACTIVE",
-                )
-            )
-        )
-        node_states = tuple(
-            self.db.scalars(
-                select(GameInstanceNodeState).where(
-                    GameInstanceNodeState.game_instance_id == self.scope.game_instance_id,
-                    GameInstanceNodeState.visibility == Visibility.KNOWN,
-                )
-            )
-        )
-        known_fact_refs = self.known_fact_refs()
-        known_facts = {
-            (item.node_key, item.fact_key): item.truth_value
-            for item in self.db.scalars(
-                select(GameInstanceFactState).where(
-                    GameInstanceFactState.game_instance_id == self.scope.game_instance_id,
-                    GameInstanceFactState.visibility == Visibility.KNOWN,
-                )
-            )
-        }
-        objective_refs = _objective_refs(
-            objectives,
-            definition=definition,
-            known_facts=known_facts,
-        )
-        successful_bindings = {
-            (item.action_key, item.target_key)
-            for item in self.db.scalars(
-                select(WorldOperation).where(
-                    WorldOperation.game_instance_id == self.scope.game_instance_id,
-                    WorldOperation.task_id == task.id,
-                    WorldOperation.status == WorldOperationStatus.RESOLVED,
-                )
-            )
-            if isinstance(item.outcome, dict) and item.outcome.get("failure") is None
-        }
-        needed_refs = _unsatisfied_objective_refs(
-            self.db,
-            self.scope,
-            objectives,
-            definition,
-            known_facts=known_facts,
-        )
-        public_prerequisites = _public_prerequisites(objectives)
-        candidates: list[PlanningActionCandidate] = []
-        canonical_contracts = (
-            {item.action_key: item for item in planner_input.action_contracts}
-            if planner_input is not None
-            else None
-        )
-        canonical_bindings = (
-            {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
-            if planner_input is not None
-            else None
-        )
-        canonical_actors = (
-            {item.actor_key: item for item in planner_input.actors}
-            if planner_input is not None
-            else None
-        )
-        canonical_nodes = (
-            tuple(
-                item for item in planner_input.known_world.nodes if isinstance(item.get("key"), str)
-            )
-            if planner_input is not None
-            else None
-        )
-        actor_by_key = {item.actor_key: item for item in actors}
-        target_rows: tuple[tuple[str, dict[str, object] | None, str], ...] = (
-            tuple(
-                (str(item["key"]), item, ActionTargetKind.NODE.value)
-                for item in canonical_nodes or ()
-                if isinstance(item.get("key"), str)
-            )
-            if canonical_nodes is not None
-            else tuple((item.node_key, None, ActionTargetKind.NODE.value) for item in node_states)
-        )
-        target_rows += tuple(
-            (actor_key, None, ActionTargetKind.ACTOR.value) for actor_key in sorted(actor_by_key)
-        )
-        binding_targets: dict[str, set[str]] = {}
-        if planner_input is not None:
-            for binding in planner_input.target_bindings:
-                binding_targets.setdefault(binding.action_key, set()).add(binding.target_key)
-        for target_key, target_projection, target_kind in sorted(
-            target_rows, key=lambda item: (item[0], item[2])
-        ):
-            node_state = next(
-                (item for item in node_states if item.node_key == target_key),
-                None,
-            )
-            target = definition.world.node(target_key)
-            target_actor = actor_by_key.get(target_key)
-            if target_kind == ActionTargetKind.NODE.value and target is None:
-                continue
-            for action in sorted(definition.actions, key=lambda item: item.key):
-                if action.target_kind.value != target_kind:
-                    continue
-                if canonical_contracts is not None and action.key not in canonical_contracts:
-                    continue
-                if action.key in binding_targets and target_key not in binding_targets[action.key]:
-                    continue
-                canonical_contract = (
-                    canonical_contracts.get(action.key) if canonical_contracts is not None else None
-                )
-                if canonical_contracts is not None and canonical_contract is None:
-                    continue
-                canonical_binding = (
-                    canonical_bindings.get((action.key, target_key))
-                    if canonical_bindings is not None
-                    else None
-                )
-                target_interaction = (
-                    canonical_contract.target_contract.get("required_interaction_key")
-                    if canonical_contract is not None
-                    else action.required_interaction_key
-                )
-                if (
-                    target_kind == ActionTargetKind.NODE.value
-                    and target is not None
-                    and isinstance(target_interaction, str)
-                    and target_interaction not in target.interaction_keys
-                ):
-                    continue
-                target_node_types = (
-                    canonical_contract.target_contract.get("node_type_keys")
-                    if canonical_contract is not None
-                    else list(action.target_node_type_keys)
-                )
-                if (
-                    target_kind == ActionTargetKind.NODE.value
-                    and target is not None
-                    and isinstance(target_node_types, list)
-                    and target_node_types
-                    and target.node_type_key not in target_node_types
-                ):
-                    continue
-                if target_kind == ActionTargetKind.ACTOR.value and target_actor is None:
-                    continue
-                visible_effects = tuple(
-                    item
-                    for item in (
-                        *action.planning.terminal_effects_for_target(target_key),
-                        *action.planning.supporting_effects,
-                    )
-                    if (item.node_key, item.fact_key) in known_fact_refs
-                )
-                if canonical_contract is not None:
-                    canonical_effects = (
-                        *canonical_contract.deterministic_effects,
-                        *(
-                            canonical_binding.deterministic_effects
-                            if canonical_binding is not None
-                            else ()
-                        ),
-                    )
-                    projected_refs: set[tuple[str, str]] = set()
-                    for effect in canonical_effects:
-                        if effect.get("type") != "FACT_MUTATION":
-                            continue
-                        fact_key = effect.get("fact_key")
-                        if not isinstance(fact_key, str):
-                            continue
-                        resolved_target = (
-                            target_key
-                            if effect.get("target") in {"target_key", "target_node"}
-                            else effect.get("target")
-                        )
-                        if isinstance(resolved_target, str):
-                            projected_refs.add((resolved_target, fact_key))
-                else:
-                    projected_refs = {(item.node_key, item.fact_key) for item in visible_effects}
-                relevant = projected_refs & objective_refs
-                if (
-                    not relevant
-                    and not action.planning.supporting_effects
-                    and (
-                        action.behavior == ActionBehavior.RULE
-                        and action.locality == ActionLocality.NONE
-                    )
-                ):
-                    continue
-                for actor in sorted(actors, key=lambda item: item.actor_key):
-                    if not _actor_can_execute(definition, actor, action.key):
-                        continue
-                    canonical_actor = (
-                        canonical_actors.get(actor.actor_key)
-                        if canonical_actors is not None
-                        else None
-                    )
-                    if canonical_actors is not None and canonical_actor is None:
-                        continue
-                    if (
-                        canonical_actor is not None
-                        and action.key not in canonical_actor.allowed_action_keys
-                    ):
-                        continue
-                    if (action.key, target_key) in successful_bindings and not (
-                        projected_refs & needed_refs
-                    ):
-                        continue
-                    if (
-                        target_kind == ActionTargetKind.ACTOR.value
-                        and action.behavior == ActionBehavior.RELAY_MESSAGE
-                        and target_key == actor.actor_key
-                    ):
-                        continue
-                    candidate_id = legal_candidate_id(action.key, actor.actor_key, target_key)
-                    blockers = _known_blockers(
-                        node_state.status if node_state is not None else NodeStatus.AVAILABLE,
-                        projected_refs,
-                        objectives,
-                        needed_refs,
-                    )
-                    if canonical_actor is not None and canonical_contracts is not None:
-                        required_reachability = canonical_contracts[
-                            action.key
-                        ].executor_requirements.get("command_reachability")
-                        if (
-                            required_reachability == "ONLINE"
-                            and canonical_actor.command_reachability != "ONLINE"
-                        ):
-                            blockers = (*blockers, {"code": "ACTOR_COMMAND_DISCONNECTED"})
-                        locality = canonical_contracts[action.key].locality.get("type")
-                        canonical_target_actor = (
-                            canonical_actors.get(target_key)
-                            if target_kind == ActionTargetKind.ACTOR.value
-                            and canonical_actors is not None
-                            else None
-                        )
-                        target_region = (
-                            canonical_target_actor.current_region
-                            if canonical_target_actor is not None
-                            else _canonical_node_region(target_projection, definition, target_key)
-                        )
-                        if (
-                            locality
-                            in {
-                                "ACTOR_SAME_REGION",
-                                "TARGET_SAME_REGION",
-                                "FACILITY_REGION",
-                                "LOCAL_TARGET",
-                                "LOCAL_TARGET_FACILITY_OR_TRANSPORT",
-                                "REGION",
-                            }
-                            and canonical_actor.current_region
-                            and target_region
-                            and (canonical_actor.current_region != target_region)
-                        ):
-                            blockers = (*blockers, {"code": "LOCALITY_INVALID"})
-                        target_contract = canonical_contracts[action.key].target_contract
-                        target_reachability = target_contract.get("command_reachability")
-                        if (
-                            isinstance(target_reachability, str)
-                            and canonical_target_actor is not None
-                            and canonical_target_actor.command_reachability != target_reachability
-                        ):
-                            blockers = (
-                                *blockers,
-                                {"code": "TARGET_COMMAND_REACHABILITY_INVALID"},
-                            )
-                    candidates.append(
-                        PlanningActionCandidate(
-                            candidate_id=candidate_id,
-                            action_key=action.key,
-                            action_name=action.name,
-                            actor_key=actor.actor_key,
-                            actor_name=actor.name,
-                            target_key=target_key,
-                            target_name=(
-                                target.name
-                                if target is not None
-                                else (target_actor.name if target_actor is not None else target_key)
-                            ),
-                            target_kind=action.target_kind.value,
-                            parameter_domain=tuple(
-                                canonical_contract.parameters
-                                if canonical_contract is not None
-                                else tuple(
-                                    item.model_dump(mode="json") for item in action.parameters
-                                )
-                            ),
-                            public_effects=tuple(
-                                {
-                                    "kind": "DECLARED",
-                                    "node_key": node_key,
-                                    "fact_key": fact_key,
-                                }
-                                for node_key, fact_key in sorted(projected_refs)
-                                if (node_key, fact_key) in known_fact_refs
-                            ),
-                            objective_relevance=tuple(
-                                {"node_key": node_key, "fact_key": fact_key}
-                                for node_key, fact_key in sorted(projected_refs & objective_refs)
-                            ),
-                            currently_executable=not blockers,
-                            known_blockers=blockers,
-                            public_prerequisites=public_prerequisites,
-                            authority={
-                                "actor_policy": actor.authority_policy,
-                                "action_policy": action.authority_policy.model_dump(mode="json"),
-                            },
-                            action_behavior=action.behavior.value,
-                            action_locality=action.locality.value,
-                        )
-                    )
-        return tuple(candidates)
-
     def known_world(self, definition: ScenarioDefinitionV2) -> dict[str, object]:
+        """Return the shared knowledge projection used to build PlannerInput."""
+
         knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
         node_states = knowledge_projection.known_node_rows()
         known_keys = {item.node_key for item in node_states}
@@ -1811,9 +1474,7 @@ class PlanningActionCatalogBuilder:
                     "known_available": region_summary["known_available"],
                     "pools": region_summary["pools"],
                     **(
-                        {
-                            "knowledge_status": region_summary["knowledge_status"],
-                        }
+                        {"knowledge_status": region_summary["knowledge_status"]}
                         if isinstance(region_summary.get("knowledge_status"), str)
                         else {}
                     ),
@@ -1858,69 +1519,6 @@ class PlanningActionCatalogBuilder:
                 )
             )
         }
-
-
-def _group_resources(
-    rows: tuple[GameInstanceResourceState, ...],
-) -> dict[str, list[GameInstanceResourceState]]:
-    grouped: dict[str, list[GameInstanceResourceState]] = {}
-    for row in rows:
-        grouped.setdefault(row.resource_key, []).append(row)
-    return grouped
-
-
-def _resource_context(rows: list[GameInstanceResourceState]) -> dict[str, object]:
-    if len(rows) == 1 and rows[0].scope_node_key is None:
-        row = rows[0]
-        return {"value": row.value, "reserved": row.reserved_value}
-    scopes: dict[str, dict[str, int]] = {}
-    for row in sorted(rows, key=lambda item: item.scope_node_key or ""):
-        scope_key = row.scope_node_key or "global"
-        scopes[scope_key] = {"value": row.value, "reserved": row.reserved_value}
-    return {"scopes": scopes}
-
-
-def objective_context(
-    objectives: tuple[ObjectiveDefinitionV2, ...],
-    *,
-    known_fact_refs: set[tuple[str, str]],
-    known_facts: dict[tuple[str, str], object] | None = None,
-    definition: ScenarioDefinitionV2 | None = None,
-) -> tuple[dict[str, object], ...]:
-    facts = known_facts or {}
-    return tuple(
-        {
-            "key": objective.key,
-            "name": objective.name,
-            "description": objective.description,
-            **(
-                {"planning_guidance": objective.planning_guidance}
-                if objective.planning_guidance is not None
-                else {}
-            ),
-            "completion_requirements": [
-                item.model_dump(mode="json")
-                for item in objective.completion_requirements
-                if _requirement_is_public(item, known_fact_refs, facts, definition)
-            ],
-            "prerequisites": [
-                {
-                    **item.model_dump(mode="json", exclude={"requirements"}),
-                    "requirements": [
-                        requirement.model_dump(mode="json")
-                        for requirement in item.requirements
-                        if _requirement_is_public(requirement, known_fact_refs, facts, definition)
-                    ],
-                }
-                for item in objective.prerequisites
-                if any(
-                    _requirement_is_public(requirement, known_fact_refs, facts, definition)
-                    for requirement in item.requirements
-                )
-            ],
-        }
-        for objective in objectives
-    )
 
 
 def _objective_refs(
@@ -2062,150 +1660,6 @@ def _known_world_facts(known_world: dict[str, object]) -> dict[tuple[str, str], 
     return result
 
 
-def _unsatisfied_objective_refs(
-    db: Session,
-    scope: RuntimeScope,
-    objectives: tuple[ObjectiveDefinitionV2, ...],
-    definition: ScenarioDefinitionV2 | None = None,
-    *,
-    known_facts: Mapping[tuple[str, str], object] | None = None,
-) -> set[tuple[str, str]]:
-    needed: set[tuple[str, str]] = set()
-    visited_derived: set[str] = set()
-    public_known_facts = known_facts or {
-        (item.node_key, item.fact_key): item.truth_value
-        for item in db.scalars(
-            select(GameInstanceFactState).where(
-                GameInstanceFactState.game_instance_id == scope.game_instance_id,
-                GameInstanceFactState.visibility == Visibility.KNOWN,
-            )
-        )
-    }
-
-    def add_derived_dependencies(derived_key: str) -> None:
-        if definition is None or derived_key in visited_derived:
-            return
-        state = definition.derived_state_definitions.get(derived_key)
-        if state is None:
-            return
-        visited_derived.add(derived_key)
-        for dependency in state.dependencies:
-            gate = dependency.knowledge_gate
-            if not knowledge_gate_is_revealed(
-                gate,
-                public_known_facts.get((gate.node_key, gate.fact_key))
-                if gate is not None
-                else None,
-            ):
-                continue
-            if dependency.kind.value == "FACT":
-                assert dependency.node_key is not None and dependency.fact_key is not None
-                needed.add((dependency.node_key, dependency.fact_key))
-            elif dependency.kind.value == "DERIVED_STATE":
-                assert dependency.derived_key is not None
-                add_derived_dependencies(dependency.derived_key)
-
-    for objective in objectives:
-        requirements = (
-            *objective.completion_requirements,
-            *(item for group in objective.prerequisites for item in group.requirements),
-        )
-        for requirement in requirements:
-            gate = requirement.knowledge_gate
-            if not knowledge_gate_is_revealed(
-                gate,
-                public_known_facts.get((gate.node_key, gate.fact_key))
-                if gate is not None
-                else None,
-            ):
-                continue
-            if requirement.derived_ref is not None:
-                add_derived_dependencies(requirement.derived_ref)
-                continue
-            if requirement.fact_ref is None:
-                continue
-            state = db.get(
-                GameInstanceFactState,
-                (scope.game_instance_id, requirement.node_key, requirement.fact_key),
-            )
-            if (
-                state is None
-                or state.visibility != Visibility.KNOWN
-                or state.truth_value not in requirement.accepted_values
-            ):
-                needed.add(requirement.fact_ref)
-    return needed
-
-
-def _public_prerequisites(
-    objectives: tuple[ObjectiveDefinitionV2, ...],
-) -> tuple[dict[str, object], ...]:
-    return tuple(
-        {
-            "objective_key": objective.key,
-            "key": group.key,
-            "description": group.description,
-            "requirements": [item.model_dump(mode="json") for item in group.requirements],
-        }
-        for objective in objectives
-        for group in objective.prerequisites
-    )
-
-
-def _known_blockers(
-    access: NodeStatus,
-    projected_refs: set[tuple[str, str]],
-    objectives: tuple[ObjectiveDefinitionV2, ...],
-    needed_refs: set[tuple[str, str]],
-) -> tuple[dict[str, object], ...]:
-    blockers: list[dict[str, object]] = []
-    if access == NodeStatus.LOCKED:
-        blockers.append({"code": "TARGET_CURRENTLY_LOCKED"})
-    completion_refs = {
-        (item.node_key, item.fact_key)
-        for objective in objectives
-        for item in objective.completion_requirements
-    }
-    if projected_refs & completion_refs:
-        for objective in objectives:
-            for group in objective.prerequisites:
-                unmet = [
-                    item.model_dump(mode="json")
-                    for item in group.requirements
-                    if (item.node_key, item.fact_key) in needed_refs
-                ]
-                if unmet:
-                    blockers.append(
-                        {
-                            "code": "PUBLIC_PREREQUISITE_UNSATISFIED",
-                            "prerequisite_key": group.key,
-                            "requirements": unmet,
-                        }
-                    )
-    return tuple(blockers)
-
-
-def _actor_can_execute(
-    definition: ScenarioDefinitionV2,
-    actor: GameInstanceActor,
-    action_key: str,
-) -> bool:
-    action = next((item for item in definition.actions if item.key == action_key), None)
-    return bool(
-        action is not None
-        and actor_binding_matches(definition, actor)
-        and action.key in actor.allowed_action_keys
-        and {item.value for item in action.allowed_actor_capabilities}.issubset(
-            set(actor.capabilities)
-        )
-    )
-
-
-def legal_candidate_id(action_key: str, actor_key: str, target_key: str) -> str:
-    digest = hashlib.sha256(f"{action_key}|{actor_key}|{target_key}".encode()).hexdigest()[:12]
-    return f"candidate_{digest}"
-
-
 def _node_context(
     definition: ScenarioDefinitionV2,
     state: GameInstanceNodeState,
@@ -2220,25 +1674,8 @@ def _node_context(
     }
 
 
-def _canonical_node_region(
-    projection: dict[str, object] | None,
-    definition: ScenarioDefinitionV2,
-    target_key: str,
-) -> str | None:
-    if isinstance(projection, dict) and isinstance(projection.get("region_key"), str):
-        return str(projection["region_key"])
-    locality = definition.metadata.locality
-    target = definition.world.node(target_key)
-    if target is not None and target.node_type_key == locality.region_node_type_key:
-        return target.key
-    return None
-
-
 __all__ = [
-    "PlanningActionCatalogBuilder",
     "PlanningContext",
     "PlanningContextBuilder",
     "PlanningContinuityBuilder",
-    "legal_candidate_id",
-    "objective_context",
 ]

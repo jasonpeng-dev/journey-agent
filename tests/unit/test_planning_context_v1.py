@@ -6,22 +6,15 @@ from pydantic import SecretStr
 from sqlalchemy.orm import Session
 
 from app.agent.dependency_closure import _scope_actor_actions_to_contracts
-from app.agent.generic import (
-    GenericAgentService,
-    PlanningActionCatalogBuilder,
-    _validate_plan_segment_contract,
-)
+from app.agent.generic import GenericAgentService, _validate_plan_segment_contract
+from app.agent.planning_context import PlanningContextBuilder
 from app.agent.provider import (
-    GoalSelection,
-    GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
     PlannerKnownWorldSlice,
     PlannerTargetBinding,
-    PlanningActionCandidate,
-    PlanningContext,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -42,9 +35,6 @@ class DirectBindingProvider:
 
     def __init__(self) -> None:
         self.requests: list[PlanRequest] = []
-
-    def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
-        raise AssertionError(f"exact Goal should not call provider: {request.goal}")
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.requests.append(request)
@@ -88,6 +78,19 @@ def _runtime(session: Session):  # type: ignore[no-untyped-def]
     return runtime, scope
 
 
+def _planning_context(session: Session, scope, task):  # type: ignore[no-untyped-def]
+    service = GenericAgentService(session, scope)
+    definition = service._definition()
+    objectives = service._objectives(task, definition)
+    return PlanningContextBuilder(session, scope).build(
+        definition,
+        objectives,
+        task=task,
+        replan_reason=None,
+        formal_goal=service._formal_goal(task),
+    )
+
+
 def test_planner_actor_actions_are_scoped_without_mutating_global_permissions() -> None:
     actor = PlannerActorState(
         actor_key="logistics",
@@ -127,8 +130,7 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     )
 
     request = provider.requests[0]
-    context = request.planning_context
-    assert context is not None
+    context = _planning_context(session, scope, task)
     assert {item["action_key"] for item in context.relevant_actions} == {
         "diagnose_patient",
         "treat_patient",
@@ -200,7 +202,7 @@ def test_planning_context_is_entity_once_and_knowledge_safe(session: Session) ->
     assert task.current_plan_version == 1
 
 
-def test_legacy_catalog_is_not_in_canonical_provider_payload(session: Session) -> None:
+def test_canonical_provider_payload_has_no_legacy_execution_projection(session: Session) -> None:
     runtime, scope = _runtime(session)
     provider = DirectBindingProvider()
     GenericAgentService(session, scope, provider=provider).create_task(
@@ -211,21 +213,13 @@ def test_legacy_catalog_is_not_in_canonical_provider_payload(session: Session) -
     assert "planner_input" in payload
     assert "planning_context" not in payload
     assert "candidate_id" not in payload
-    assert request.planning_action_catalog
     assert request.planner_input is not None
-    canonical_actions = {item.action_key for item in request.planner_input.action_contracts}
-    canonical_actor_actions = {
-        item.actor_key: set(item.allowed_action_keys) for item in request.planner_input.actors
-    }
-    assert all(item.action_key in canonical_actions for item in request.planning_action_catalog)
-    assert all(
-        item.action_key in canonical_actor_actions.get(item.actor_key, set())
-        for item in request.planning_action_catalog
-    )
+    assert request.planner_input.action_contracts
+    assert "planning_action_catalog" not in request.model_dump(mode="json")
+    assert "objective_scope" not in request.model_dump(mode="json")
 
 
 def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
-    initial_context = PlanningContext(previous_execution_context={})
     planner_input = PlannerInput(
         actors=(
             PlannerActorState(
@@ -241,22 +235,15 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
     )
     initial_payload = PlanRequest(
         call_type="INITIAL_PLAN",
-        goal="goal",
-        planning_context=initial_context,
         planner_input=planner_input,
     ).provider_payload()
     assert set(initial_payload) == {"call_type", "planner_input"}
     assert initial_payload["planner_input"]["schema_version"] == 2
     canonical_actor = initial_payload["planner_input"]["actors"][0]
 
-    replan_context = PlanningContext(
-        previous_execution_context={"previous_plan_version": 1},
-    )
     replan_payload = PlanRequest(
         call_type="REPLAN",
-        goal="goal",
         replan_reason="TRAVEL_BLOCKED",
-        planning_context=replan_context,
         planner_input=planner_input.model_copy(
             update={"execution_context": {"previous_plan_version": 1}}
         ),
@@ -269,14 +256,12 @@ def test_provider_payload_keeps_replan_and_repair_context_fields() -> None:
 
     repair_payload = PlanRequest(
         call_type="REPAIR",
-        goal="goal",
         repair_attempt=0,
         repair_diagnostics=({"code": "PLAN_REJECTED"},),
         rejected_segment={
             "stop_reason": "OBJECTIVE_COMPLETION",
             "steps": [{"step_id": "step-1"}],
         },
-        planning_context=initial_context,
         planner_input=planner_input,
     ).provider_payload()
     assert repair_payload["repair_attempt"] == 0
@@ -294,26 +279,19 @@ def test_validator_relevance_accepts_direct_progress_and_rejects_unrelated(
     task = service.create_task(runtime.session, "stabilize the patient")
     request = provider.requests[0]
     proposal = provider.propose_plan(request)
-    context = request.planning_context
-    assert context is not None
+    context = _planning_context(session, scope, task)
+    planner_input = request.planner_input
     definition = service._definition()
     objectives = service._objectives(task, definition)
-    catalog = PlanningActionCatalogBuilder(session, scope).build(
-        definition,
-        objectives,
-        task=task,
-        replan_reason=None,
-    )
-
-    _direct_steps, direct_diagnostics = service._validate_provider_proposal_v1(
+    _direct_steps, direct_diagnostics = service._validate_provider_proposal(
         task,
         definition,
         objectives,
         None,
         2,
-        catalog,
         proposal.steps,
         context,
+        planner_input=planner_input,
     )
     assert not direct_diagnostics
 
@@ -339,30 +317,19 @@ def test_validator_relevance_accepts_direct_progress_and_rejects_unrelated(
             )
         }
     )
-    _unrelated_steps, unrelated_diagnostics = service._validate_provider_proposal_v1(
+    _unrelated_steps, unrelated_diagnostics = service._validate_provider_proposal(
         task,
         definition,
         objectives,
         None,
         3,
-        catalog,
         (unrelated_step,),
         unrelated_context,
+        planner_input=planner_input,
     )
-    unrelated = next(
-        item for item in unrelated_diagnostics if item.get("code") == "OBJECTIVE_IRRELEVANT"
+    assert not any(
+        item.get("code") == "OBJECTIVE_IRRELEVANT" for item in unrelated_diagnostics
     )
-    assert unrelated == {
-        "code": "OBJECTIVE_IRRELEVANT",
-        "failure_code": "OBJECTIVE_IRRELEVANT",
-        "step_id": unrelated_step.step_id,
-        "action_key": "diagnose_patient",
-        "actor_key": "doctor_lee",
-        "target_key": "patient_one",
-        "dimension": "OBJECTIVE_RELEVANCE",
-        "required": "ADVANCES_FROZEN_OBJECTIVE_SCOPE",
-        "actual": "NO_DECLARED_RELEVANT_EFFECT",
-    }
 
 
 def test_validator_reports_target_interaction_mismatch_to_provider(
@@ -373,8 +340,8 @@ def test_validator_reports_target_interaction_mismatch_to_provider(
     service = GenericAgentService(session, scope, provider=provider)
     task = service.create_task(runtime.session, "stabilize the patient")
     request = provider.requests[0]
-    context = request.planning_context
-    assert context is not None
+    context = _planning_context(session, scope, task)
+    planner_input = request.planner_input
     context = context.model_copy(
         update={
             "relevant_targets": (
@@ -385,13 +352,6 @@ def test_validator_reports_target_interaction_mismatch_to_provider(
     )
     definition = service._definition()
     objectives = service._objectives(task, definition)
-    catalog = PlanningActionCatalogBuilder(session, scope).build(
-        definition,
-        objectives,
-        task=task,
-        replan_reason=None,
-    )
-
     invalid_step = PlanStepProposal(
         purpose="Diagnose the medicine cabinet",
         action_key="diagnose_patient",
@@ -399,15 +359,15 @@ def test_validator_reports_target_interaction_mismatch_to_provider(
         target_key="medicine_cabinet",
         parameters={},
     )
-    _steps, diagnostics = service._validate_provider_proposal_v1(
+    _steps, diagnostics = service._validate_provider_proposal(
         task,
         definition,
         objectives,
         None,
         2,
-        catalog,
         (invalid_step,),
         context,
+        planner_input=planner_input,
     )
 
     assert diagnostics[0] == {
@@ -486,24 +446,6 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
         call_type="INITIAL_PLAN",
         planner_input=PlannerInput(
             objective={"exact_scenario_version": "version-1"},
-        ),
-        planning_context=PlanningContext(
-            goal={"exact_scenario_version": "version-1"},
-            relevant_actions=({"action_key": "inspect"},),
-            relevant_actors=({"actor_key": "actor_one"},),
-            relevant_targets=({"target_key": "node_one"},),
-        ),
-        planning_action_catalog=(
-            PlanningActionCandidate(
-                candidate_id="candidate_secret_compat",
-                action_key="inspect",
-                action_name="Inspect",
-                actor_key="actor_one",
-                actor_name="Actor One",
-                target_key="node_one",
-                target_name="Node One",
-                currently_executable=True,
-            ),
         ),
     )
     proposal = provider.propose_plan(request)

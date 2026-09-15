@@ -76,7 +76,6 @@ def test_planning_continuity_exposes_intent_and_new_knowledge_without_authority(
     )
     request = PlanRequest(
         call_type="REPLAN",
-        goal="restore emergency power",
         planner_input=PlannerInput(
             objective={"objective_keys": ["restore_emergency_power"]},
             execution_context={

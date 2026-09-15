@@ -43,9 +43,6 @@ class _KnowledgeReplanProvider:
     def __init__(self) -> None:
         self.plan_requests: list[PlanRequest] = []
 
-    def select_objectives(self, _request: object) -> object:
-        raise AssertionError("The regression uses an exact ObjectiveScope")
-
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
         dependencies = request.planner_input.known_world.unknown_dependencies

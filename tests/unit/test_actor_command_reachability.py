@@ -330,23 +330,28 @@ def test_plan_projection_allows_relay_then_disconnected_actor_action(
 
     assert task.current_plan_version == 1
     request = provider.requests[0]
-    assert request.planning_context is not None
+    planner_input = request.planner_input
     disconnected = next(
         item
-        for item in request.planning_context.relevant_actors
-        if item["actor_key"] == "nurse_ana"
+        for item in planner_input.actors
+        if item.actor_key == "nurse_ana"
     )
-    assert disconnected["current_known_state"]["command_reachability"] == "DISCONNECTED"
-    assert disconnected["execution_state"]["status"] == "KNOWN_BLOCKED"
-    assert disconnected["execution_state"]["known_blockers"][0]["type"] == ("COMMAND_REACHABILITY")
-    assert "diagnose_patient" in disconnected["allowed_action_keys"]
-    assert "nurse_ana" in {item["target_key"] for item in request.planning_context.relevant_targets}
+    assert disconnected.command_reachability == "DISCONNECTED"
+    assert disconnected.execution_state["status"] == "KNOWN_BLOCKED"
+    assert disconnected.execution_state["known_blockers"][0]["type"] == (
+        "COMMAND_REACHABILITY"
+    )
+    assert "diagnose_patient" in disconnected.allowed_action_keys
+    assert any(
+        item.target_contract.get("kind") == "ACTOR"
+        for item in planner_input.action_contracts
+    )
     relay = next(
         item
-        for item in request.planning_context.relevant_actions
-        if item["action_key"] == "relay_message"
+        for item in planner_input.action_contracts
+        if item.action_key == "relay_message"
     )
-    assert relay["target_kind"] == "ACTOR"
+    assert relay.target_contract["kind"] == "ACTOR"
 
 
 def test_plan_projection_rejects_ordinary_action_before_relay(session: Session) -> None:

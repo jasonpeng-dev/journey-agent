@@ -15,11 +15,10 @@ from app.agent.dependency_closure import (
 from app.agent.generic import (
     GenericAgentError,
     GenericAgentService,
-    PlanningActionCatalogBuilder,
     _ProjectedRegionResourceKnowledge,
     _ProjectedResourcePool,
 )
-from app.agent.planning_context import PlanningContextBuilder, objective_context
+from app.agent.planning_context import PlanningContextBuilder
 from app.agent.provider import (
     PlannerActionContract,
     PlannerInput,
@@ -1474,7 +1473,6 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
         initialize_plan=False,
     )
     objective = definition.objectives[0]
-    known_refs = PlanningActionCatalogBuilder(session, scope).known_fact_refs()
     builder = PlanningContextBuilder(session, scope)
 
     for call_type, reason in (
@@ -1496,17 +1494,12 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
         )
         request = PlanRequest(
             call_type=call_type,
-            goal=task.goal_description,
-            objective_scope=objective_context(
-                (objective,),
-                known_fact_refs=known_refs,
-            ),
             planner_input=planner_input,
         )
         assert context.goal["objectives"][0]["planning_guidance"] == (
             "Prefer known reachable Regions and preserve enough parts for repair."
         )
-        assert request.objective_scope[0]["planning_guidance"] == (
+        assert request.planner_input.objective["objectives"][0]["planning_guidance"] == (
             "Prefer known reachable Regions and preserve enough parts for repair."
         )
         assert (

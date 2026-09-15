@@ -252,9 +252,6 @@ class _RepeatingPlanProvider:
         self.steps = steps
         self.requests: list[PlanRequest] = []
 
-    def select_objectives(self, request: object) -> object:
-        raise AssertionError(f"exact objective should not call goal selection: {request}")
-
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.requests.append(request)
         return PlanProposal(
@@ -268,9 +265,6 @@ class _RepeatingPlanProvider:
 
 class _InspectBoundaryProvider:
     model_name = "inspect-boundary-test-provider"
-
-    def select_objectives(self, request: object) -> object:
-        raise AssertionError(f"exact objective should not call goal selection: {request}")
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         planner_input = request.planner_input

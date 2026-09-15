@@ -24,10 +24,7 @@ from app.agent.provider import (
     DynamicGoalOperationGrounding,
     DynamicGoalOperationGroundingRequest,
     DynamicGoalScalarMentionSlot,
-    DynamicGoalSemanticRouting,
-    DynamicGoalSemanticRoutingRequest,
     GenericProviderError,
-    GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
     PlannerInput,
     PlanRequest,
@@ -53,98 +50,6 @@ def _settings(*, plan_timeout: float = 1.0, observability: str = "NORMAL") -> Se
         plan_total_timeout_seconds=None,
         goal_resolution_observability=observability,
     )
-
-
-def test_semantic_routing_request_is_small_closed_and_observable() -> None:
-    captured: list[dict[str, object]] = []
-
-    def complete(request: httpx.Request) -> httpx.Response:
-        captured.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                {
-                                    "family": "OPERATION",
-                                    "action_match": "MATCHED",
-                                    "action_key": "move_cargo",
-                                    "candidate_keys": [],
-                                    "clarification_prompt": None,
-                                }
-                            )
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 10},
-            },
-        )
-
-    provider = OpenAICompatibleGenericProvider(
-        _settings(observability="DEBUG"), transport=httpx.MockTransport(complete)
-    )
-    result = provider.route_dynamic_goal(
-        DynamicGoalSemanticRoutingRequest(
-            goal="move cargo",
-            action_catalog=(
-                {
-                    "key": "move_cargo",
-                    "name": "Move cargo",
-                    "description": "Move a resource between regions",
-                    "target": {"expected_type": "REGION"},
-                    "bindings": [{"slot_key": "source", "expected_type": "REGION"}],
-                    "parameters": [{"slot_key": "resource", "expected_type": "RESOURCE"}],
-                },
-            ),
-        )
-    )
-
-    assert result.action_key == "move_cargo"
-    user_payload = json.loads(captured[0]["messages"][1]["content"])
-    assert set(user_payload) == {
-        "goal",
-        "action_catalog",
-        "state_catalog",
-        "recovery_attempt",
-        "recovery_feedback",
-    }
-    assert "public_topology" not in str(user_payload)
-    assert "temperature" not in captured[0]
-    metadata = provider.call_metadata_history[-1]
-    assert metadata.request_hash
-    assert metadata.response_validation == "ACCEPTED"
-    assert metadata.debug_snapshot is not None
-    assert metadata.debug_snapshot["output"]["action_key"] == "move_cargo"
-    assert metadata.prompt_template_version == "dynamic-goal-routing-v3"
-    system_prompt = captured[0]["messages"][0]["content"]
-    assert '"action_match":"MATCHED"' in system_prompt
-    assert '"action_key":"exact_public_action_key","candidate_keys":[]' in system_prompt
-    assert "Judge the player's semantic intent, not keyword matching." in system_prompt
-    assert (
-        "even when it produces a public terminal State, preserve OPERATION and never rewrite "
-        "it as STATE"
-    ) in system_prompt
-    assert (
-        "Once the intent is OPERATION, if exactly one Action in action_catalog semantically "
-        "matches the requested invocation, return MATCHED"
-    ) in system_prompt
-    assert (
-        "If multiple Actions genuinely compete for an OPERATION intent, return OPERATION with "
-        "action_match AMBIGUOUS and every candidate_key"
-    ) in system_prompt
-    assert (
-        "if no Action expresses the requested invocation, return OPERATION with action_match "
-        "NO_MATCH"
-    ) in system_prompt
-    assert "how to reach it remains HOW" in system_prompt
-    assert "把30个燃料运到南部 => OPERATION" in system_prompt
-    assert "南部至少有30个燃料 => STATE" in system_prompt
-    assert "修复中央河底隧道 => OPERATION" in system_prompt
-    assert "让中央河底隧道处于可通行状态 => STATE" in system_prompt
-    assert "keyword X means OPERATION" not in system_prompt
 
 
 def test_family_routing_request_excludes_action_and_state_catalogs() -> None:
@@ -404,47 +309,6 @@ def test_action_routing_accepts_valid_typed_no_match_and_ambiguous_boundary() ->
     assert ambiguous.no_match_reason is None
 
 
-def test_semantic_routing_does_not_force_temperature_zero() -> None:
-    provider = OpenAICompatibleGenericProvider(_settings())
-
-    routing_body, _ = provider._build_request_body(
-        "dynamic_goal_routing",
-        DynamicGoalSemanticRoutingRequest(goal="move cargo", action_catalog=()).model_dump(
-            mode="json"
-        ),
-    )
-    operation_body, _ = provider._build_request_body("dynamic_goal_operation", {})
-    family_body, _ = provider._build_request_body("dynamic_goal_family_routing", {})
-    action_body, _ = provider._build_request_body("dynamic_goal_action_routing", {})
-    state_body, _ = provider._build_request_body("dynamic_goal", {})
-
-    assert "temperature" not in routing_body
-    assert "temperature" not in operation_body
-    assert "temperature" not in family_body
-    assert "temperature" not in action_body
-    assert "temperature" not in state_body
-
-
-def test_semantic_routing_prompt_treats_topology_as_derived_action_evidence() -> None:
-    provider = OpenAICompatibleGenericProvider(_settings())
-
-    body, _ = provider._build_request_body("dynamic_goal_routing", {})
-    prompt = body["messages"][0]["content"]
-
-    assert "exact Region endpoint pair plus exactly one TOPOLOGY_ENRICHED Node" in prompt
-    assert "one derived target evidence unit" in prompt
-    assert (
-        "do not treat the two Regions and that Node as three competing target identities" in prompt
-    )
-    assert "slot-shape compatibility establishes only structural applicability" in prompt
-    assert "not a semantic Action match" in prompt
-    assert "merely accepting a Node target or fitting Regions into slots is insufficient" in prompt
-    assert "does not override the Family decision" in prompt
-    assert "a genuinely terminal-state-only reading may remain STATE" in prompt
-    assert "repair means clear_transport" not in prompt
-    assert "road means transport Node" not in prompt
-
-
 def test_operation_prompt_commits_unique_topology_target_without_guessing() -> None:
     provider = OpenAICompatibleGenericProvider(_settings())
 
@@ -670,103 +534,6 @@ def test_operation_invalid_top_level_status_gets_typed_recovery_feedback() -> No
     assert diagnostic["preserve"] == {"frozen_family": "OPERATION"}
 
 
-def test_semantic_routing_normalizes_only_redundant_matched_candidate_key() -> None:
-    def complete(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": (
-                                '{"family":"OPERATION","action_match":"MATCHED",'
-                                '"action_key":"move_cargo","candidate_keys":["move_cargo"],'
-                                '"clarification_prompt":null}'
-                            )
-                        },
-                        "finish_reason": "stop",
-                    }
-                ]
-            },
-            request=request,
-        )
-
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
-
-    result = provider.route_dynamic_goal(
-        DynamicGoalSemanticRoutingRequest(goal="move cargo", action_catalog=())
-    )
-
-    assert result == DynamicGoalSemanticRouting(
-        family="OPERATION",
-        action_match="MATCHED",
-        action_key="move_cargo",
-        candidate_keys=(),
-    )
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {
-            "family": "OPERATION",
-            "action_match": "MATCHED",
-            "action_key": "move_cargo",
-            "candidate_keys": ["move_cargo", "carry_cargo"],
-        },
-        {
-            "family": "OPERATION",
-            "action_match": "AMBIGUOUS",
-            "action_key": "move_cargo",
-            "candidate_keys": ["move_cargo", "carry_cargo"],
-        },
-    ],
-)
-def test_semantic_routing_does_not_normalize_non_equivalent_shapes(
-    payload: dict[str, object],
-) -> None:
-    def complete(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": json.dumps(payload)}, "finish_reason": "stop"}]
-            },
-            request=request,
-        )
-
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
-
-    with pytest.raises(GenericProviderError) as captured:
-        provider.route_dynamic_goal(
-            DynamicGoalSemanticRoutingRequest(goal="move cargo", action_catalog=())
-        )
-
-    if payload["action_match"] == "MATCHED":
-        assert captured.value.validation_diagnostics[0]["code"] == ("MATCHED_HAS_CANDIDATE_KEYS")
-        assert captured.value.validation_diagnostics[0]["preserve"] == {
-            "family": "OPERATION",
-            "action_match": "MATCHED",
-            "action_key": "move_cargo",
-        }
-
-
-def _goal_response(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            "choices": [
-                {
-                    "message": {
-                        "content": '{"status":"SELECTED","objective_keys":["known"]}',
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-        },
-        request=request,
-    )
-
-
 def _plan_response(request: httpx.Request) -> httpx.Response:
     return httpx.Response(
         200,
@@ -786,6 +553,15 @@ def _plan_response(request: httpx.Request) -> httpx.Response:
             ],
         },
         request=request,
+    )
+
+
+def _plan_request(
+    call_type: Literal["INITIAL_PLAN", "REPLAN", "REPAIR"] = "INITIAL_PLAN",
+) -> PlanRequest:
+    return PlanRequest(
+        call_type=call_type,
+        planner_input=PlannerInput(objective={"objective_keys": ["known"]}),
     )
 
 
@@ -816,14 +592,12 @@ class _DelayedBody(httpx.SyncByteStream):
 
 def test_fast_response_records_headers_first_byte_and_bytes() -> None:
     provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(_goal_response)
+        _settings(), transport=httpx.MockTransport(_plan_response)
     )
 
-    result = provider.select_objectives(
-        GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
-    )
+    result = provider.propose_plan(_plan_request())
 
-    assert result.objective_keys == ("known",)
+    assert result.steps[0].action_key == "inspect"
     metadata = provider.last_call_metadata
     assert metadata is not None
     assert metadata.outcome == "SUCCESS"
@@ -907,7 +681,6 @@ def test_dynamic_goal_payloads_use_separate_public_grounding_and_interpretation_
         )
     )
 
-    assert grounding.candidate_keys == ()
     assert grounding.candidate_refs == (
         DynamicGoalCandidateReference(ref_type="NODE", key="public_node"),
     )
@@ -1075,7 +848,7 @@ def test_dynamic_goal_recovery_feedback_contains_the_legal_derived_shape() -> No
         recovery_feedback=feedback,
     )
     provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(lambda request: _goal_response(request))
+        _settings(), transport=httpx.MockTransport(lambda request: _plan_response(request))
     )
     body, _ = provider._build_request_body("dynamic_goal", request.model_dump(mode="json"))
     user_payload = json.loads(body["messages"][1]["content"])
@@ -1741,7 +1514,6 @@ def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoni
     provider.propose_plan(
         PlanRequest(
             call_type="INITIAL_PLAN",
-            goal="known goal",
             planner_input=PlannerInput(objective={"objective_keys": ["known"]}),
         )
     )
@@ -1843,15 +1615,15 @@ def test_retryable_transport_failure_retries_once_and_records_each_network_call(
         calls += 1
         if calls == 1:
             raise httpx.RemoteProtocolError("peer closed the connection", request=request)
-        return _goal_response(request)
+        return _plan_response(request)
 
     provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(flaky))
 
-    result = provider.select_objectives(
-        GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+    result = provider.propose_plan(
+        _plan_request()
     )
 
-    assert result.objective_keys == ("known",)
+    assert result.steps[0].action_key == "inspect"
     assert calls == 2
     metadata = provider.last_call_metadata
     assert metadata is not None
@@ -1878,8 +1650,8 @@ def test_retryable_transport_failure_is_bounded_to_one_retry() -> None:
     provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(broken))
 
     with pytest.raises(GenericProviderError) as error:
-        provider.select_objectives(
-            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        provider.propose_plan(
+            _plan_request()
         )
 
     assert error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
@@ -1904,8 +1676,8 @@ def test_completed_response_or_invalid_response_is_never_retried() -> None:
         _settings(), transport=httpx.MockTransport(status_error)
     )
     with pytest.raises(GenericProviderError) as status_failure:
-        provider.select_objectives(
-            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        provider.propose_plan(
+            _plan_request()
         )
     assert status_failure.value.code == "MODEL_PROVIDER_HTTP_ERROR"
     assert status_calls == 1
@@ -1925,8 +1697,8 @@ def test_completed_response_or_invalid_response_is_never_retried() -> None:
         _settings(), transport=httpx.MockTransport(malformed)
     )
     with pytest.raises(GenericProviderError) as malformed_failure:
-        provider.select_objectives(
-            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        provider.propose_plan(
+            _plan_request()
         )
     assert malformed_failure.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
     assert malformed_calls == 1
@@ -1945,7 +1717,7 @@ def test_transport_retry_obeys_one_logical_plan_timeout() -> None:
         if calls == 1:
             raise httpx.RemoteProtocolError("peer closed the connection", request=request)
         sleep(0.15)
-        return _goal_response(request)
+        return _plan_response(request)
 
     provider = OpenAICompatibleGenericProvider(
         _settings(plan_timeout=0.02),
@@ -1953,8 +1725,8 @@ def test_transport_retry_obeys_one_logical_plan_timeout() -> None:
     )
 
     with pytest.raises(GenericProviderError) as error:
-        provider.select_objectives(
-            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        provider.propose_plan(
+            _plan_request()
         )
 
     assert error.value.code == "MODEL_PROVIDER_TIMEOUT"
@@ -1977,18 +1749,18 @@ def test_goal_resolution_calls_share_one_operation_deadline() -> None:
         calls += 1
         if calls == 2:
             sleep(0.15)
-        return _goal_response(request)
+        return _plan_response(request)
 
     provider = OpenAICompatibleGenericProvider(
         _settings(plan_timeout=300),
         transport=httpx.MockTransport(slow_second_call),
     )
-    request = GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+    request = _plan_request()
 
     with goal_resolution_operation(0.05):
-        provider.select_objectives(request)
+        provider.propose_plan(request)
         with pytest.raises(GenericProviderError) as error:
-            provider.select_objectives(request)
+            provider.propose_plan(request)
 
     assert error.value.code == "MODEL_PROVIDER_TIMEOUT"
     assert calls == 2
@@ -2025,7 +1797,6 @@ def test_plan_provider_uses_finite_invocation_and_unlimited_http_settings(
     provider.propose_plan(
         PlanRequest(
             call_type=call_type,
-            goal="known goal",
             planner_input=PlannerInput(objective={"objective_keys": ["known"]}),
         )
     )
@@ -2144,8 +1915,8 @@ def test_headers_received_but_slow_body_is_distinguished_from_no_response() -> N
     )
 
     with pytest.raises(GenericProviderError) as error:
-        provider.select_objectives(
-            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        provider.propose_plan(
+            _plan_request()
         )
 
     assert error.value.code == "MODEL_PROVIDER_TIMEOUT"
@@ -2161,15 +1932,15 @@ def test_headers_received_but_slow_body_is_distinguished_from_no_response() -> N
 def test_plan_timeout_without_response_keeps_response_phase_fields_null() -> None:
     def no_response(request: httpx.Request) -> httpx.Response:
         sleep(0.15)
-        return _goal_response(request)
+        return _plan_response(request)
 
     provider = OpenAICompatibleGenericProvider(
         _settings(plan_timeout=0.02), transport=httpx.MockTransport(no_response)
     )
 
     with pytest.raises(GenericProviderError):
-        provider.select_objectives(
-            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        provider.propose_plan(
+            _plan_request()
         )
 
     metadata = provider.last_call_metadata
@@ -2195,8 +1966,8 @@ def test_partial_body_before_plan_timeout_preserves_received_bytes() -> None:
     )
 
     with pytest.raises(GenericProviderError):
-        provider.select_objectives(
-            GoalSelectionRequest(goal="known", objective_candidates=({"key": "known"},))
+        provider.propose_plan(
+            _plan_request()
         )
 
     assert first_chunk_sent.is_set()
@@ -2216,7 +1987,6 @@ def test_phase_telemetry_does_not_change_plan_parsing() -> None:
     proposal = provider.propose_plan(
         PlanRequest(
             call_type="INITIAL_PLAN",
-            goal="known goal",
             planner_input=PlannerInput(
                 objective={"objective_keys": ["known"]},
                 known_world={"facts": {}},

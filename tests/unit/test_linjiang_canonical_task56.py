@@ -202,9 +202,6 @@ class _Task6ReplanProvider:
     def __init__(self) -> None:
         self.plan_requests: list[PlanRequest] = []
 
-    def select_objectives(self, _request: object) -> object:
-        raise AssertionError("Task6 regression uses an exact predefined Objective")
-
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
         if len(self.plan_requests) == 1:
