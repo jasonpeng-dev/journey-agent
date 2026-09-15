@@ -912,6 +912,34 @@ def build_dependency_closure(
                 selected_binding_actor_keys.add(actor.actor_key)
                 if actor.current_region:
                     relevant_nodes.add(actor.current_region)
+                if (
+                    contract.executor_requirements.get("command_reachability") == "ONLINE"
+                    and actor.command_reachability != "ONLINE"
+                ):
+                    reachability = TypedDependency(
+                        "ACTOR_COMMAND_REACHABILITY",
+                        actor.actor_key,
+                        required="ONLINE",
+                    )
+                    if _has_public_reachability_producer(
+                        definition,
+                        planner_input,
+                        contracts,
+                        bindings,
+                        actor.actor_key,
+                        seen_actions=frozenset({action_key}),
+                    ):
+                        queue.append(
+                            (
+                                reachability,
+                                (
+                                    *path,
+                                    f"binding:{action_key}:{target_key}",
+                                    f"executor:{actor.actor_key}",
+                                ),
+                                action_key,
+                            )
+                        )
         _queue_binding_resource_dependencies(binding, path, action_key, demand_group)
         expand_source_dependencies(contracts[action_key], target_key, path)
         return True

@@ -1068,6 +1068,94 @@ def test_dependency_closure_keeps_recoverable_disconnected_executor_and_relay(
     assert {"municipal_transport_team", "logistics_team_alpha"}.issubset(actor_keys)
 
 
+def test_dependency_closure_requeues_binding_specific_reachability_recovery(
+    session: Session,
+) -> None:
+    runtime, scope = _linjiang_v4_runtime(
+        session,
+        "linjiang-binding-specific-reachability",
+    )
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "restore riverside shelter",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
+        initialize_plan=False,
+    )
+    objective = ObjectiveDefinitionV2(
+        key="restore_riverside_shelter",
+        name="Restore riverside shelter",
+        description="Restore the riverside shelter.",
+        completion_requirements=(
+            ObjectiveRequirementV2(
+                key="riverside_shelter_operational",
+                node_key="riverside_shelter",
+                fact_key="operational",
+                accepted_values=(True,),
+                description="Riverside shelter is operational.",
+            ),
+        ),
+    )
+    definition = agent._definition()
+    planner_input = _canonical_planner_input(
+        PlanningContextBuilder(session, scope).build(
+            definition,
+            (objective,),
+            task=task,
+            replan_reason=None,
+        )
+    )
+    repair_binding = next(
+        item
+        for item in planner_input.target_bindings
+        if item.action_key == "repair_facility" and item.target_key == "riverside_shelter"
+    )
+    assert {
+        item.get("required_actor_role_key")
+        for item in repair_binding.requirements
+        if isinstance(item.get("required_actor_role_key"), str)
+    } == {"industrial_repair_team"}
+    planner_input = planner_input.model_copy(
+        update={
+            "actors": tuple(
+                actor.model_copy(
+                    update={
+                        "allowed_action_keys": tuple(
+                            (*actor.allowed_action_keys, "repair_facility")
+                        )
+                    }
+                )
+                if actor.actor_key == "logistics_team_alpha"
+                else actor
+                for actor in planner_input.actors
+            )
+        }
+    )
+
+    closure = build_dependency_closure(definition, (objective,), planner_input)
+    action_keys = {item.action_key for item in closure.planner_input.action_contracts}
+    actor_keys = {item.actor_key for item in closure.planner_input.actors}
+    binding_keys = {
+        (item.action_key, item.target_key)
+        for item in closure.planner_input.target_bindings
+    }
+    industrial = next(
+        item
+        for item in closure.planner_input.actors
+        if item.actor_key == "industrial_repair_team_alpha"
+    )
+
+    assert ("repair_facility", "riverside_shelter") in binding_keys
+    assert "relay_message" in action_keys
+    assert "travel" in action_keys
+    assert "industrial_repair_team_alpha" in actor_keys
+    assert industrial.command_reachability == CommandReachability.DISCONNECTED.value
+    assert any(
+        "executor:industrial_repair_team_alpha" in " ".join(item["dependency_path"])
+        for item in closure.relevance_reason["relay_message"]
+    )
+
+
 def test_dependency_closure_drops_disconnected_executor_without_reachability_producer(
     session: Session,
 ) -> None:
