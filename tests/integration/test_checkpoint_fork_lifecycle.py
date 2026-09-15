@@ -15,6 +15,7 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.builtin import require_builtin_v2_version
 from app.services.game_instances import GameInstanceService
+from tests.goal_confirmation_helpers import parse_and_confirm_api
 from tests.scenario_fixtures import GENERIC_TEST
 
 
@@ -118,11 +119,12 @@ def test_nested_checkpoint_fork_lifecycle_preserves_history_and_delete_independe
     final_fork = _fork(client, str(checkpoint_two_id), "nested-fork-two")
     final_fork_id = UUID(str(final_fork["id"]))
     assert final_fork["inherited_task_count"] == 4
-    new_task = client.post(
-        f"/api/v1/games/{final_fork_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": "nested-task-five"},
+    parse_and_confirm_api(
+        client,
+        str(final_fork_id),
+        "stabilize the patient",
+        idempotency_key="nested-task-five",
     )
-    assert new_task.status_code == 200, new_task.text
     history = client.get(f"/api/v1/games/{final_fork_id}/play")
     assert history.status_code == 200
     assert [item["sequence"] for item in history.json()["task_history"]] == [1, 2, 3, 4, 5]

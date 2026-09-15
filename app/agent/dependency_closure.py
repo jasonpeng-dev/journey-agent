@@ -10,18 +10,28 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Any
 
+from app.agent.formal_goal_projection import (
+    formal_goal_operation_goal,
+    formal_goal_planning_objectives,
+)
 from app.agent.provider import (
+    GoalDependencyProjection,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
     PlannerKnownWorldSlice,
+    PlannerResourceSourceHint,
     PlannerTargetBinding,
 )
 from app.domain.enums import ResourceInventoryVisibility
+from app.domain.formal_goal import FormalGoalContract
 from app.domain.scenario_v2 import (
+    DerivedDependencyKind,
     ObjectiveDefinitionV2,
     ObjectiveRequirementKind,
+    ObjectiveRequirementV2,
     ScenarioDefinitionV2,
+    knowledge_gate_is_revealed,
 )
 from app.services.knowledge_projection import resource_knowledge_status
 
@@ -44,6 +54,17 @@ class DependencyClosureResult:
     relevance_reason: dict[str, tuple[dict[str, object], ...]]
 
 
+@dataclass(frozen=True)
+class _GoalDependencySpec:
+    """Typed public identity collected while walking the Goal dependency graph."""
+
+    dependency: TypedDependency
+    kind: str
+    dependency_id: str
+    parent_dependency_id: str | None
+    accepted_values: tuple[object, ...] = ()
+
+
 def _scope_actor_actions_to_contracts(
     actors: tuple[PlannerActorState, ...],
     action_contracts: tuple[PlannerActionContract, ...],
@@ -63,6 +84,43 @@ def _scope_actor_actions_to_contracts(
         )
         for actor in actors
     )
+
+
+def _binding_required_actor_roles(
+    binding: PlannerTargetBinding,
+    contract: PlannerActionContract,
+) -> set[str]:
+    """Return authored executor roles for one target binding.
+
+    Target-specific roles are carried by the binding requirement when the
+    Knowledge projection can expose it.  Fall back to the action contract's
+    target-role declaration and finally its action-level role.  This is only
+    candidate retention; Closure never selects an executor.
+    """
+
+    roles = {
+        role
+        for requirement in binding.requirements
+        for role in (requirement.get("required_actor_role_key"),)
+        if isinstance(role, str)
+    }
+    if roles:
+        return roles
+    target_roles = contract.executor_requirements.get("target_role_requirements")
+    if isinstance(target_roles, (list, tuple)):
+        roles.update(
+            str(item["required_role_key"])
+            for item in target_roles
+            if isinstance(item, dict)
+            and item.get("target_key") == binding.target_key
+            and isinstance(item.get("required_role_key"), str)
+        )
+    if roles:
+        return roles
+    action_role = contract.executor_requirements.get("required_role_key")
+    if isinstance(action_role, str):
+        roles.add(action_role)
+    return roles
 
 
 def _relation_is_public(relation: dict[str, object]) -> bool:
@@ -359,18 +417,168 @@ def _source_precondition_dependencies(
 
 def build_dependency_closure(
     definition: ScenarioDefinitionV2,
-    objectives: tuple[ObjectiveDefinitionV2, ...],
+    objectives: tuple[ObjectiveDefinitionV2, ...] | None,
     planner_input: PlannerInput,
     *,
+    formal_goal: FormalGoalContract | None = None,
     dependency_limit: int = 128,
     action_limit: int = 64,
 ) -> DependencyClosureResult:
     """Return a fixed-point slice; never choose bindings or order Plan steps."""
 
+    if formal_goal is not None:
+        objectives = formal_goal_planning_objectives(formal_goal, definition)
+    if objectives is None:
+        raise ValueError("Dependency closure needs a Formal Goal or Objective projection")
+    operation_goal = planner_input.operation_goal
+    if operation_goal is None and formal_goal is not None:
+        operation_goal = formal_goal_operation_goal(formal_goal)
+
     contracts = {item.action_key: item for item in planner_input.action_contracts}
     bindings = {(item.action_key, item.target_key): item for item in planner_input.target_bindings}
     queue: deque[tuple[TypedDependency, tuple[str, ...], str | None]] = deque()
     known_facts = planner_input.known_world.facts
+
+    def root_dependency(requirement: ObjectiveRequirementV2) -> TypedDependency:
+        # Older lightweight Objective projections predate the typed
+        # discriminator and represent every requirement as a Fact.  Keep that
+        # adapter shape valid while treating all parsed V2 requirements
+        # through the explicit typed branch below.
+        kind = getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
+        if kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+            assert requirement.resource_key is not None
+            assert requirement.region_key is not None
+            assert requirement.minimum is not None
+            return TypedDependency(
+                "RESOURCE_SOURCE",
+                requirement.resource_key,
+                requirement.region_key,
+                requirement.minimum,
+            )
+        if kind == ObjectiveRequirementKind.DERIVED_STATE:
+            assert requirement.derived_key is not None
+            return TypedDependency(
+                "DERIVED_STATE",
+                requirement.derived_key,
+                required=repr(tuple(requirement.accepted_values)),
+            )
+        assert requirement.node_key is not None and requirement.fact_key is not None
+        return TypedDependency(
+            "FACT",
+            requirement.node_key,
+            requirement.fact_key,
+            repr(tuple(requirement.accepted_values)),
+        )
+
+    goal_dependency_specs: dict[TypedDependency, _GoalDependencySpec] = {}
+    expanded_goal_derived: set[str] = set()
+
+    def register_goal_dependency(
+        dependency: TypedDependency,
+        *,
+        kind: str,
+        accepted_values: tuple[object, ...] = (),
+        parent_dependency_id: str | None = None,
+    ) -> str:
+        dependency_id = _goal_dependency_id(dependency)
+        if dependency not in goal_dependency_specs:
+            goal_dependency_specs[dependency] = _GoalDependencySpec(
+                dependency=dependency,
+                kind=kind,
+                dependency_id=dependency_id,
+                parent_dependency_id=parent_dependency_id,
+                accepted_values=accepted_values,
+            )
+        return goal_dependency_specs[dependency].dependency_id
+
+    def register_derived_children(
+        derived_key: str,
+        parent_dependency_id: str,
+    ) -> None:
+        if derived_key in expanded_goal_derived:
+            return
+        state = definition.derived_state_definitions.get(derived_key)
+        if state is None:
+            return
+        expanded_goal_derived.add(derived_key)
+        for nested in state.dependencies:
+            gate = nested.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+            ):
+                continue
+            if nested.kind == DerivedDependencyKind.FACT:
+                assert nested.node_key is not None and nested.fact_key is not None
+                child = TypedDependency(
+                    "FACT",
+                    nested.node_key,
+                    nested.fact_key,
+                    repr(tuple(nested.accepted_values)),
+                )
+                register_goal_dependency(
+                    child,
+                    kind="FACT",
+                    accepted_values=tuple(nested.accepted_values),
+                    parent_dependency_id=parent_dependency_id,
+                )
+            elif nested.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+                assert nested.region_key is not None and nested.resource_key is not None
+                assert nested.minimum is not None
+                child = TypedDependency(
+                    "RESOURCE_SOURCE",
+                    nested.resource_key,
+                    nested.region_key,
+                    nested.minimum,
+                )
+                register_goal_dependency(
+                    child,
+                    kind="RESOURCE_AT_LEAST",
+                    parent_dependency_id=parent_dependency_id,
+                )
+            elif nested.kind == DerivedDependencyKind.DERIVED_STATE:
+                assert nested.derived_key is not None
+                child = TypedDependency(
+                    "DERIVED_STATE",
+                    nested.derived_key,
+                    required=repr(tuple(nested.accepted_values)),
+                )
+                child_id = register_goal_dependency(
+                    child,
+                    kind="DERIVED_STATE",
+                    accepted_values=tuple(nested.accepted_values),
+                    parent_dependency_id=parent_dependency_id,
+                )
+                register_derived_children(nested.derived_key, child_id)
+
+    def register_goal_requirement(requirement: ObjectiveRequirementV2) -> None:
+        gate = getattr(requirement, "knowledge_gate", None)
+        if not knowledge_gate_is_revealed(
+            gate,
+            known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+        ):
+            return
+        dependency = root_dependency(requirement)
+        kind = getattr(getattr(requirement, "kind", ObjectiveRequirementKind.FACT), "value", None)
+        if kind is None:
+            kind = str(getattr(requirement, "kind", ObjectiveRequirementKind.FACT))
+        dependency_id = register_goal_dependency(
+            dependency,
+            kind=kind,
+            accepted_values=(
+                tuple(requirement.accepted_values)
+                if kind
+                in {
+                    ObjectiveRequirementKind.FACT.value,
+                    ObjectiveRequirementKind.DERIVED_STATE.value,
+                }
+                else ()
+            ),
+        )
+        if kind == ObjectiveRequirementKind.DERIVED_STATE.value:
+            assert requirement.derived_key is not None
+            register_derived_children(requirement.derived_key, dependency_id)
+
     for objective in objectives:
         requirements = (
             *objective.completion_requirements,
@@ -382,31 +590,13 @@ def build_dependency_closure(
         )
         for requirement in requirements:
             gate = getattr(requirement, "knowledge_gate", None)
-            if gate is not None and known_facts.get(f"{gate.node_key}.{gate.fact_key}") not in (
-                gate.accepted_values
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
             ):
                 continue
-            if (
-                getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
-                == ObjectiveRequirementKind.RESOURCE_AT_LEAST
-            ):
-                assert requirement.resource_key is not None
-                assert requirement.region_key is not None
-                assert requirement.minimum is not None
-                dependency = TypedDependency(
-                    "RESOURCE_SOURCE",
-                    requirement.resource_key,
-                    requirement.region_key,
-                    requirement.minimum,
-                )
-            else:
-                assert requirement.node_key is not None and requirement.fact_key is not None
-                dependency = TypedDependency(
-                    "FACT",
-                    requirement.node_key,
-                    requirement.fact_key,
-                    repr(tuple(requirement.accepted_values)),
-                )
+            register_goal_requirement(requirement)
+            dependency = root_dependency(requirement)
             queue.append(
                 (
                     dependency,
@@ -415,28 +605,77 @@ def build_dependency_closure(
                 )
             )
 
+    if operation_goal is not None:
+        queue.append(
+            (
+                TypedDependency(
+                    "ACTION_COMPLETED",
+                    operation_goal.action_key,
+                    required=operation_goal.requirement_identity or "",
+                ),
+                ("operation_goal", operation_goal.action_key),
+                None,
+            )
+        )
+
     visited: set[TypedDependency] = set()
     selected_actions: set[str] = set()
     selected_bindings: set[tuple[str, str]] = set()
-    relevant_nodes = {
-        node_key
-        for objective in objectives
+    relevant_nodes: set[str] = set()
+    relevant_resources: set[str] = set()
+    relevant_resource_source_hint_resources: set[str] = set()
+
+    def include_derived_dependencies(derived_key: str, seen: set[str]) -> None:
+        if derived_key in seen:
+            return
+        state = definition.derived_state_definitions.get(derived_key)
+        if state is None:
+            return
+        seen.add(derived_key)
+        for dependency in state.dependencies:
+            gate = dependency.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+            ):
+                continue
+            if dependency.kind == DerivedDependencyKind.FACT:
+                assert dependency.node_key is not None
+                relevant_nodes.add(dependency.node_key)
+            elif dependency.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+                assert dependency.region_key is not None and dependency.resource_key is not None
+                relevant_nodes.add(dependency.region_key)
+                relevant_resources.add(dependency.resource_key)
+            elif dependency.kind == DerivedDependencyKind.DERIVED_STATE:
+                assert dependency.derived_key is not None
+                include_derived_dependencies(dependency.derived_key, seen)
+
+    for objective in objectives:
         for requirement in (
             *objective.completion_requirements,
             *(item for group in objective.prerequisites for item in group.requirements),
-        )
-        for node_key in (
-            requirement.node_key
-            if getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
-            == ObjectiveRequirementKind.FACT
-            else requirement.region_key,
-        )
-        if node_key is not None
-    }
-    relevant_resources: set[str] = set()
+        ):
+            gate = getattr(requirement, "knowledge_gate", None)
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+            ):
+                continue
+            kind = getattr(requirement, "kind", ObjectiveRequirementKind.FACT)
+            if kind == ObjectiveRequirementKind.FACT:
+                assert requirement.node_key is not None
+                relevant_nodes.add(requirement.node_key)
+            elif kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+                assert requirement.region_key is not None and requirement.resource_key is not None
+                relevant_nodes.add(requirement.region_key)
+                relevant_resources.add(requirement.resource_key)
+            elif kind == ObjectiveRequirementKind.DERIVED_STATE:
+                assert requirement.derived_key is not None
+                include_derived_dependencies(requirement.derived_key, set())
     unknowns: dict[str, dict[str, object]] = {}
     audit: dict[str, list[dict[str, object]]] = {}
     selected_actor_targets: set[str] = set()
+    selected_binding_actor_keys: set[str] = set()
     selected_diagnostic_actor_keys: set[str] = set()
     expanded_source_targets: set[tuple[str, str]] = set()
     queued_resource_dependencies: set[TypedDependency] = set()
@@ -654,6 +893,53 @@ def build_dependency_closure(
             }
         )
         relevant_nodes.add(target_key)
+        contract = contracts.get(action_key)
+        if contract is not None:
+            required_roles = _binding_required_actor_roles(binding, contract)
+            for actor in planner_input.actors:
+                if (
+                    actor.availability != "ACTIVE"
+                    or not _actor_matches_executor(actor, contract)
+                    or (
+                        operation_goal is not None
+                        and operation_goal.action_key == action_key
+                        and operation_goal.actor_key is not None
+                        and operation_goal.actor_key != actor.actor_key
+                    )
+                    or (required_roles and actor.role_key not in required_roles)
+                ):
+                    continue
+                selected_binding_actor_keys.add(actor.actor_key)
+                if actor.current_region:
+                    relevant_nodes.add(actor.current_region)
+                if (
+                    contract.executor_requirements.get("command_reachability") == "ONLINE"
+                    and actor.command_reachability != "ONLINE"
+                ):
+                    reachability = TypedDependency(
+                        "ACTOR_COMMAND_REACHABILITY",
+                        actor.actor_key,
+                        required="ONLINE",
+                    )
+                    if _has_public_reachability_producer(
+                        definition,
+                        planner_input,
+                        contracts,
+                        bindings,
+                        actor.actor_key,
+                        seen_actions=frozenset({action_key}),
+                    ):
+                        queue.append(
+                            (
+                                reachability,
+                                (
+                                    *path,
+                                    f"binding:{action_key}:{target_key}",
+                                    f"executor:{actor.actor_key}",
+                                ),
+                                action_key,
+                            )
+                        )
         _queue_binding_resource_dependencies(binding, path, action_key, demand_group)
         expand_source_dependencies(contracts[action_key], target_key, path)
         return True
@@ -706,6 +992,11 @@ def build_dependency_closure(
         action_key: str,
         demand_group: str,
     ) -> None:
+        pending: dict[tuple[str, str], int] = {}
+        for requirement in contract.resource_requirements:
+            target_key = _resource_requirement_target_key(requirement.scope)
+            identity = (requirement.resource_key, target_key)
+            pending[identity] = max(pending.get(identity, 0), requirement.minimum)
         for effect in contract.deterministic_effects:
             resource_key = effect.get("resource_key")
             amount = effect.get("amount")
@@ -717,10 +1008,20 @@ def build_dependency_closure(
                 or amount >= 0
             ):
                 continue
+            matching_targets = {
+                target_key
+                for required_resource, target_key in pending
+                if required_resource == resource_key
+            }
+            target_keys = matching_targets or {""}
+            for target_key in target_keys:
+                identity = (resource_key, target_key)
+                pending[identity] = max(pending.get(identity, 0), -amount)
+        for (resource_key, target_key), required_amount in sorted(pending.items()):
             _queue_resource_dependency(
                 resource_key,
-                -amount,
-                "",
+                required_amount,
+                target_key,
                 path,
                 action_key,
                 demand_group,
@@ -734,8 +1035,21 @@ def build_dependency_closure(
     ) -> None:
         """Queue source knowledge for one selected target binding only."""
 
-        for requirement in binding.requirements:
-            cost = requirement.get("cost")
+        pending: dict[tuple[str, str], int] = {}
+        legacy_pending: dict[tuple[str, str], set[int]] = {}
+        typed_resources = {item.resource_key for item in binding.resource_requirements}
+        for typed_requirement in binding.resource_requirements:
+            target_key = _resource_requirement_target_key(
+                typed_requirement.scope,
+                fallback_target_key=binding.target_key,
+            )
+            resource_identity = (typed_requirement.resource_key, target_key)
+            pending[resource_identity] = max(
+                pending.get(resource_identity, 0), typed_requirement.minimum
+            )
+
+        for raw_requirement in binding.requirements:
+            cost = raw_requirement.get("cost")
             if isinstance(cost, dict):
                 for resource_key, required_amount in cost.items():
                     if (
@@ -743,19 +1057,13 @@ def build_dependency_closure(
                         or isinstance(required_amount, bool)
                         or not isinstance(required_amount, int)
                         or required_amount <= 0
+                        or resource_key in typed_resources
                     ):
                         continue
-                    _queue_resource_dependency(
-                        resource_key,
-                        required_amount,
-                        binding.target_key,
-                        path,
-                        action_key,
-                        demand_group,
-                        binding.target_key,
-                    )
+                    identity = (resource_key, binding.target_key)
+                    legacy_pending.setdefault(identity, set()).add(required_amount)
 
-            special_requirements = requirement.get("special_requirements")
+            special_requirements = raw_requirement.get("special_requirements")
             if not isinstance(special_requirements, (list, tuple)):
                 continue
             for special in special_requirements:
@@ -767,14 +1075,14 @@ def build_dependency_closure(
                 value = special.get("value")
                 if not isinstance(node_key, str) or not isinstance(fact_key, str):
                     continue
-                identity = f"{node_key}.{fact_key}"
-                current = known_facts.get(identity)
+                fact_identity = f"{node_key}.{fact_key}"
+                current = known_facts.get(fact_identity)
                 if operator == "EQ":
                     accepted_values = (value,)
-                    satisfied = identity in known_facts and current == value
+                    satisfied = fact_identity in known_facts and current == value
                 elif operator == "IN" and isinstance(value, (list, tuple)):
                     accepted_values = tuple(value)
-                    satisfied = identity in known_facts and current in value
+                    satisfied = fact_identity in known_facts and current in value
                 else:
                     continue
                 if satisfied:
@@ -803,15 +1111,30 @@ def build_dependency_closure(
                 or amount >= 0
             ):
                 continue
+            identity = (resource_key, binding.target_key)
+            pending[identity] = max(pending.get(identity, 0), -amount)
+
+        for (resource_key, target_key), required_amount in sorted(pending.items()):
             _queue_resource_dependency(
                 resource_key,
-                -amount,
-                binding.target_key,
+                required_amount,
+                target_key,
                 path,
                 action_key,
                 demand_group,
                 binding.target_key,
             )
+        for (resource_key, target_key), amounts in sorted(legacy_pending.items()):
+            for required_amount in sorted(amounts):
+                _queue_resource_dependency(
+                    resource_key,
+                    required_amount,
+                    target_key,
+                    path,
+                    action_key,
+                    demand_group,
+                    binding.target_key,
+                )
 
     def expand_source_dependencies(
         contract: PlannerActionContract,
@@ -868,6 +1191,75 @@ def build_dependency_closure(
             )
         visited.add(dependency)
         state_changed = True
+        if dependency.dimension == "DERIVED_STATE":
+            state = definition.derived_state_definitions.get(dependency.subject)
+            if state is None:
+                return
+            audit.setdefault(
+                f"derived:{state.key}",
+                [],
+            ).append(
+                {
+                    "producer_for": dependency.subject,
+                    "dependency_path": list(path),
+                    "derived_state": state.key,
+                }
+            )
+            for nested in state.dependencies:
+                gate = nested.knowledge_gate
+                if not knowledge_gate_is_revealed(
+                    gate,
+                    known_facts.get(f"{gate.node_key}.{gate.fact_key}")
+                    if gate is not None
+                    else None,
+                ):
+                    # The dependency exists in the immutable definition, but
+                    # it is not an exposed planning root until its authored
+                    # Knowledge gate has been revealed.
+                    continue
+                if nested.kind == DerivedDependencyKind.FACT:
+                    assert nested.node_key is not None and nested.fact_key is not None
+                    queue.append(
+                        (
+                            TypedDependency(
+                                "FACT",
+                                nested.node_key,
+                                nested.fact_key,
+                                repr(tuple(nested.accepted_values)),
+                            ),
+                            (*path, f"derived:{state.key}"),
+                            consumer_action,
+                        )
+                    )
+                elif nested.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+                    assert nested.region_key is not None and nested.resource_key is not None
+                    assert nested.minimum is not None
+                    queue.append(
+                        (
+                            TypedDependency(
+                                "RESOURCE_SOURCE",
+                                nested.resource_key,
+                                nested.region_key,
+                                nested.minimum,
+                            ),
+                            (*path, f"derived:{state.key}"),
+                            consumer_action,
+                        )
+                    )
+                elif nested.kind == DerivedDependencyKind.DERIVED_STATE:
+                    assert nested.derived_key is not None
+                    queue.append(
+                        (
+                            TypedDependency(
+                                "DERIVED_STATE",
+                                nested.derived_key,
+                                required=repr(tuple(nested.accepted_values)),
+                            ),
+                            (*path, f"derived:{state.key}"),
+                            consumer_action,
+                        )
+                    )
+            return
         if dependency.dimension == "FACT":
             fact_identity = f"{dependency.subject}.{dependency.key}"
             # A canonical producer can intentionally hide its planning relevance
@@ -876,8 +1268,10 @@ def build_dependency_closure(
             # an ordinary FACT dependency and re-enters the same fixed point.
             for action in getattr(definition, "actions", ()):
                 gate = getattr(getattr(action, "planning", None), "knowledge_gate", None)
-                if gate is None or known_facts.get(f"{gate.node_key}.{gate.fact_key}") in (
-                    gate.accepted_values
+                if gate is None:
+                    continue
+                if knowledge_gate_is_revealed(
+                    gate, known_facts.get(f"{gate.node_key}.{gate.fact_key}")
                 ):
                     continue
                 effects = (
@@ -942,6 +1336,24 @@ def build_dependency_closure(
                         demand_group=demand_group,
                     )
             for action_key, contract in contracts.items():
+                binding_key = (action_key, dependency.subject)
+                binding = bindings.get(binding_key)
+                if binding is not None and _binding_declares_fact_effect(binding, dependency):
+                    if _binding_can_produce_fact_for_target(
+                        binding,
+                        contract,
+                        dependency,
+                    ):
+                        select_binding(
+                            binding_key,
+                            path,
+                            repr(dependency),
+                            demand_group=demand_group,
+                        )
+                    # A target binding is the authoritative target-specific
+                    # producer contract.  Do not fall back to the generic
+                    # action effect for this same target.
+                    continue
                 if not _contract_can_produce_fact_for_target(
                     contract,
                     dependency,
@@ -960,19 +1372,6 @@ def build_dependency_closure(
                         dependency.subject,
                         path,
                     )
-            for binding_key, binding in bindings.items():
-                for effect in binding.deterministic_effects:
-                    if (
-                        effect.get("type") == "FACT_MUTATION"
-                        and effect.get("fact_key") == dependency.key
-                        and binding.target_key == dependency.subject
-                    ):
-                        select_binding(
-                            binding_key,
-                            path,
-                            repr(dependency),
-                            demand_group=demand_group,
-                        )
         elif dependency.dimension in {"ACTOR_COMMAND_REACHABILITY", "ACTOR_LOCATION"}:
             effect_type = dependency.dimension
             if dependency.dimension == "ACTOR_COMMAND_REACHABILITY":
@@ -1008,6 +1407,10 @@ def build_dependency_closure(
             # not assign quantities to Pools or choose a source for Planner.
             relevant_demand = _resource_demand_total(dependency.subject, required_amount)
             if known_available_amount < relevant_demand:
+                # Authored source background is relevant only for an active
+                # unresolved shortage.  Known sufficient inventory, including
+                # inventory in a non-primary Region, suppresses the hint.
+                relevant_resource_source_hint_resources.add(dependency.subject)
                 for unlock_dependency in _known_linked_pool_unlock_dependencies(
                     known_resource,
                     planner_input,
@@ -1027,22 +1430,34 @@ def build_dependency_closure(
                 planner_input,
                 dependency.key,
             )
+            source_status = _resource_source_knowledge_status(
+                definition,
+                dependency,
+                known_resource,
+            )
             inventory_status = _resource_inventory_status(
                 known_resource,
                 planner_input,
                 required_amount=required_amount,
             )
-            if inventory_status == "UNKNOWN":
+            if source_status == "UNKNOWN" or inventory_status == "UNKNOWN":
+                knowledge_status_code = (
+                    "RESOURCE_SOURCE_UNKNOWN"
+                    if source_status == "UNKNOWN"
+                    else "RESOURCE_INVENTORY_UNKNOWN"
+                )
                 unknown: dict[str, object] = {
                     "dimension": "RESOURCE_SOURCE",
                     "resource_key": dependency.subject,
                     "target_key": dependency.key,
                     "required_amount": required_amount,
-                    "known_available_amount": known_available_amount,
-                    "deficit": required_amount - known_available_amount,
-                    "source_knowledge_status": "UNKNOWN",
+                    "source_knowledge_status": source_status,
+                    "inventory_knowledge_status": inventory_status,
+                    "knowledge_status_code": knowledge_status_code,
                     "status": "UNKNOWN",
-                    "blocks": "SOURCE_SELECTION",
+                    "blocks": (
+                        "SOURCE_SELECTION" if source_status == "UNKNOWN" else "SOURCE_INVENTORY"
+                    ),
                     "resolvable_by_effect_types": [
                         "REGION_RESOURCE_KNOWLEDGE",
                         "RESOURCE_POOL_KNOWLEDGE",
@@ -1094,6 +1509,75 @@ def build_dependency_closure(
                             demand_group=demand_group,
                         )
 
+        elif dependency.dimension == "ACTION_COMPLETED":
+            if operation_goal is None or dependency.subject != operation_goal.action_key:
+                return
+            action = next(
+                (item for item in definition.actions if item.key == operation_goal.action_key),
+                None,
+            )
+            if action is None:
+                return
+            if (
+                not select_action(
+                    operation_goal.action_key,
+                    path,
+                    "ACTION_COMPLETED_GOAL",
+                    demand_group=demand_group,
+                )
+                and operation_goal.action_key not in selected_actions
+            ):
+                return
+
+            if operation_goal.target_key is not None:
+                binding_key = (operation_goal.action_key, operation_goal.target_key)
+                known_target = operation_goal.target_key in {
+                    str(item.get("key"))
+                    for item in planner_input.known_world.nodes
+                    if isinstance(item.get("key"), str)
+                } or operation_goal.target_key in {
+                    actor.actor_key for actor in planner_input.actors
+                }
+                if binding_key not in bindings and known_target:
+                    bindings[binding_key] = PlannerTargetBinding(
+                        action_key=operation_goal.action_key,
+                        target_key=operation_goal.target_key,
+                    )
+                if binding_key in bindings:
+                    select_binding(
+                        binding_key,
+                        (*path, f"target:{operation_goal.target_key}"),
+                        "ACTION_COMPLETED_GOAL",
+                        demand_group=demand_group,
+                    )
+            else:
+                for binding_key in sorted(bindings):
+                    if binding_key[0] != operation_goal.action_key:
+                        continue
+                    select_binding(
+                        binding_key,
+                        (*path, f"target_option:{binding_key[1]}"),
+                        "ACTION_COMPLETED_GOAL",
+                        demand_group=demand_group,
+                    )
+
+            for constraint_binding in operation_goal.binding_constraints:
+                if isinstance(constraint_binding.value, str):
+                    relevant_nodes.add(constraint_binding.value)
+            raw_parameters = operation_goal.parameter_constraints
+            if isinstance(raw_parameters, dict):
+                raw_resources = raw_parameters.get("resources")
+                if isinstance(raw_resources, list):
+                    for item in raw_resources:
+                        if isinstance(item, dict) and isinstance(item.get("resource_key"), str):
+                            resource_key = str(item["resource_key"])
+                            relevant_resources.add(resource_key)
+                            relevant_resource_source_hint_resources.add(resource_key)
+                elif isinstance(raw_parameters.get("resource_key"), str):
+                    resource_key = str(raw_parameters["resource_key"])
+                    relevant_resources.add(resource_key)
+                    relevant_resource_source_hint_resources.add(resource_key)
+
     selected_actor_keys: set[str] = set()
     actor_states = {item.actor_key: item for item in planner_input.actors}
     passability_key = definition.metadata.locality.passability_fact_key
@@ -1112,6 +1596,14 @@ def build_dependency_closure(
             all_candidates = [
                 actor for actor in planner_input.actors if actor_matches_executor(actor, contract)
             ]
+            if (
+                operation_goal is not None
+                and operation_goal.action_key == action_key
+                and operation_goal.actor_key is not None
+            ):
+                all_candidates = [
+                    actor for actor in all_candidates if actor.actor_key == operation_goal.actor_key
+                ]
             candidates = all_candidates
             if contract.executor_requirements.get("command_reachability") == "ONLINE":
                 online = [
@@ -1159,6 +1651,18 @@ def build_dependency_closure(
             if target_actor.current_region:
                 relevant_nodes.add(target_actor.current_region)
 
+        # A selected target binding may narrow the legal executor Role beyond
+        # the action-level contract (for example water vs. industrial repair).
+        # Keep every public active candidate matching that authored binding
+        # role so Planner can choose; Closure does not choose one.
+        for actor_key in sorted(selected_binding_actor_keys):
+            binding_actor = actor_states.get(actor_key)
+            if binding_actor is None or binding_actor.availability != "ACTIVE":
+                continue
+            selected_actor_keys.add(actor_key)
+            if binding_actor.current_region:
+                relevant_nodes.add(binding_actor.current_region)
+
     state_changed = True
     while state_changed or queue:
         state_changed = False
@@ -1168,12 +1672,39 @@ def build_dependency_closure(
             len(selected_bindings),
             len(relevant_nodes),
             len(relevant_resources),
+            len(relevant_resource_source_hint_resources),
             len(unknowns),
             len(selected_actor_keys),
             len(selected_actor_targets),
         )
         while queue:
             process_dependency(*queue.popleft())
+
+        # Preserve a uniquely public, target-specific contract whenever its
+        # Action enters the closure. This is especially important for a
+        # target-owned resource requirement: the Action contract must not be
+        # re-expanded as a global requirement merely because the target was
+        # not itself a Fact producer.
+        for action_key in tuple(sorted(selected_actions)):
+            candidate_bindings = [
+                (binding_key, binding)
+                for binding_key, binding in bindings.items()
+                if binding_key[0] == action_key
+                and (
+                    binding.requirements
+                    or binding.resource_requirements
+                    or binding.deterministic_effects
+                )
+            ]
+            if len(candidate_bindings) != 1:
+                continue
+            binding_key, _binding = candidate_bindings[0]
+            select_binding(
+                binding_key,
+                (f"action:{action_key}", "unique_public_target_contract"),
+                action_key,
+                demand_group=repr(("UNIQUE_TARGET_CONTRACT", action_key)),
+            )
 
         for binding_key in tuple(selected_bindings):
             relevant_nodes.add(binding_key[1])
@@ -1198,6 +1729,11 @@ def build_dependency_closure(
             definition,
             planner_input,
             selected_actions,
+            relevant_nodes,
+        )
+        _include_relevant_resource_source_hint_regions(
+            planner_input,
+            relevant_resource_source_hint_resources,
             relevant_nodes,
         )
 
@@ -1252,6 +1788,7 @@ def build_dependency_closure(
             len(selected_bindings),
             len(relevant_nodes),
             len(relevant_resources),
+            len(relevant_resource_source_hint_resources),
             len(unknowns),
             len(selected_actor_keys),
             len(selected_actor_targets),
@@ -1263,6 +1800,13 @@ def build_dependency_closure(
         relevant_nodes,
         relevant_resources,
         tuple(unknowns.values()),
+        relevant_resource_source_hint_resources,
+    )
+    active_goal_dependencies = _active_goal_dependency_projections(
+        definition,
+        planner_input,
+        goal_dependency_specs,
+        visited,
     )
     sliced_action_contracts = tuple(
         item for item in planner_input.action_contracts if item.action_key in selected_actions
@@ -1282,6 +1826,8 @@ def build_dependency_closure(
                 for binding_key, item in sorted(bindings.items())
                 if binding_key in selected_bindings
             ),
+            "operation_goal": operation_goal,
+            "active_goal_dependencies": active_goal_dependencies,
             "known_world": known_world,
         }
     )
@@ -1289,6 +1835,67 @@ def build_dependency_closure(
         planner_input=sliced,
         relevance_reason={key: tuple(value) for key, value in audit.items()},
     )
+
+
+def _accepted_dependency_values(dependency: TypedDependency) -> tuple[object, ...]:
+    accepted_values: object = dependency.required
+    if isinstance(dependency.required, str):
+        try:
+            accepted_values = ast.literal_eval(dependency.required)
+        except (SyntaxError, ValueError):
+            accepted_values = dependency.required
+    if isinstance(accepted_values, (tuple, list, set, frozenset)):
+        return tuple(accepted_values)
+    return (accepted_values,)
+
+
+def _binding_declares_fact_effect(
+    binding: PlannerTargetBinding,
+    dependency: TypedDependency,
+) -> bool:
+    """Whether a target binding declares a deterministic mutation for a Fact."""
+
+    return any(
+        effect.get("type") == "FACT_MUTATION"
+        and effect.get("fact_key") == dependency.key
+        and effect.get("target") in {"target_key", "target_node", binding.target_key}
+        for effect in binding.deterministic_effects
+    )
+
+
+def _binding_can_produce_fact_for_target(
+    binding: PlannerTargetBinding,
+    contract: PlannerActionContract,
+    dependency: TypedDependency,
+) -> bool:
+    """Check one target binding against a typed FACT demand."""
+
+    accepted_values = _accepted_dependency_values(dependency)
+    for effect in binding.deterministic_effects:
+        if (
+            effect.get("type") != "FACT_MUTATION"
+            or effect.get("fact_key") != dependency.key
+            or effect.get("target") not in {"target_key", "target_node", binding.target_key}
+        ):
+            continue
+        effect_value = effect.get("value")
+        if effect_value in accepted_values:
+            return True
+        if isinstance(effect_value, dict) and isinstance(effect_value.get("from_parameter"), str):
+            parameter = next(
+                (
+                    item
+                    for item in contract.parameters
+                    if item.get("key") == effect_value.get("from_parameter")
+                ),
+                None,
+            )
+            allowed_values = parameter.get("allowed_values", []) if parameter else []
+            if isinstance(allowed_values, list) and any(
+                value in accepted_values for value in allowed_values
+            ):
+                return True
+    return False
 
 
 def _contract_can_produce_fact_for_target(
@@ -1311,14 +1918,14 @@ def _contract_can_produce_fact_for_target(
         not isinstance(interactions, list) or required_interaction not in interactions
     ):
         return False
-    accepted_values: object = dependency.required
-    if isinstance(dependency.required, str):
-        try:
-            accepted_values = ast.literal_eval(dependency.required)
-        except (SyntaxError, ValueError):
-            accepted_values = dependency.required
-    if not isinstance(accepted_values, (tuple, list, set, frozenset)):
-        accepted_values = (accepted_values,)
+    target_node_types = contract.target_contract.get("node_type_keys")
+    if (
+        isinstance(target_node_types, list)
+        and target_node_types
+        and target.get("type") not in target_node_types
+    ):
+        return False
+    accepted_values = _accepted_dependency_values(dependency)
     for effect in contract.deterministic_effects:
         effect_value = effect.get("value")
         if isinstance(effect_value, dict) and isinstance(effect_value.get("from_parameter"), str):
@@ -1536,18 +2143,64 @@ def _known_available_resource_amount(raw: object) -> int:
     )
 
 
+def _resource_requirement_target_key(
+    scope: dict[str, object],
+    *,
+    fallback_target_key: str = "",
+) -> str:
+    """Resolve only the public identity of a Resource requirement scope."""
+
+    kind = scope.get("kind")
+    if kind == "EXPLICIT":
+        node_key = scope.get("node_key")
+        return node_key if isinstance(node_key, str) else ""
+    if kind in {"ACTOR_CURRENT_REGION", "CURRENT_TARGET_REGION"}:
+        return fallback_target_key
+    return ""
+
+
+def _resource_source_knowledge_status(
+    definition: ScenarioDefinitionV2,
+    dependency: TypedDependency,
+    raw: object,
+) -> str:
+    """Return whether a public source scope is identified for a dependency.
+
+    A typed Resource requirement can identify its destination Region even when
+    that Region's inventory is still unknown.  Action-level consumption and a
+    resource summary without a public scope do not identify a source; neither
+    case may be represented as a known zero quantity.
+    """
+
+    target_key = dependency.key
+    locality = definition.metadata.locality
+    target_node = definition.world.node(target_key) if target_key else None
+    if (
+        target_node is not None
+        and locality.enabled
+        and target_node.node_type_key == locality.region_node_type_key
+    ):
+        return "KNOWN"
+    if isinstance(raw, dict):
+        scopes = raw.get("scopes")
+        if isinstance(scopes, dict) and scopes:
+            return "KNOWN"
+        if any(key in raw for key in ("global", "known_total", "known_available")):
+            return "KNOWN"
+    return "UNKNOWN"
+
+
 def _known_linked_pool_unlock_dependencies(
     raw_resource: object,
     planner_input: PlannerInput,
 ) -> tuple[TypedDependency, ...]:
     """Return public, unsatisfied unlock Facts for known unavailable Pools.
 
-    ``PlannerInput`` contains only the public Pool projection.  A requirement
-    is safe to expand only when its referenced Fact is also present in the
-    public Fact projection; a requirement definition alone must not reveal a
-    hidden Fact.  The helper deliberately returns Facts only.  Existing
-    producer/binding expansion remains the sole authority for deciding which
-    Action can satisfy them.
+    The requirement identity itself is authored public metadata.  It is safe
+    to expose the referenced Fact as an UNKNOWN dependency even before its
+    value is known; only the value remains hidden.  The helper deliberately
+    returns Facts only.  Existing producer/binding expansion remains the sole
+    authority for deciding which Action can satisfy them.
     """
 
     if not isinstance(raw_resource, dict):
@@ -1590,10 +2243,8 @@ def _known_linked_pool_unlock_dependencies(
             if operator not in {None, "EQ"}:
                 continue
             identity = f"{node_key}.{fact_key}"
-            if identity not in known_facts:
-                continue
             required_value = requirement.get("value")
-            if known_facts[identity] == required_value:
+            if identity in known_facts and known_facts[identity] == required_value:
                 continue
             dependencies.add(
                 TypedDependency(
@@ -1859,6 +2510,33 @@ def _include_public_resource_acquisition_regions(
     )
 
 
+def _include_relevant_resource_source_hint_regions(
+    planner_input: PlannerInput,
+    resource_keys: set[str],
+    relevant_nodes: set[str],
+) -> None:
+    """Expose public hinted Regions without selecting a source or route."""
+
+    if not resource_keys:
+        return
+    known_nodes = {
+        str(item["key"]): item
+        for item in planner_input.known_world.nodes
+        if isinstance(item.get("key"), str)
+    }
+    for hint in planner_input.known_world.resource_source_hints:
+        if hint.resource_key not in resource_keys:
+            continue
+        region_keys = (
+            *((hint.primary_region_key,) if hint.primary_region_key is not None else ()),
+            *hint.candidate_region_keys,
+        )
+        for region_key in region_keys:
+            node = known_nodes.get(region_key)
+            if node is not None and node.get("access") in {"AVAILABLE", "ENTERED"}:
+                relevant_nodes.add(region_key)
+
+
 def _dependency_id(dimension: str, **identity: object) -> str:
     """Return a stable ID from typed semantic keys, never display/scenario text."""
 
@@ -1874,11 +2552,266 @@ def _dependency_id(dimension: str, **identity: object) -> str:
     return f"dependency-{dimension.lower().replace('_', '-')}-{digest}"
 
 
+def _goal_dependency_id(dependency: TypedDependency) -> str:
+    """Use the existing closure identity for an active Goal projection."""
+
+    if dependency.dimension == "FACT":
+        return _dependency_id(
+            "OBJECTIVE_FACT_KNOWLEDGE",
+            subject_key=dependency.subject,
+            fact_key=dependency.key,
+        )
+    if dependency.dimension == "RESOURCE_SOURCE":
+        return _dependency_id(
+            "RESOURCE_SOURCE",
+            resource_key=dependency.subject,
+            target_key=dependency.key,
+            required_amount=int(dependency.required or 0),
+        )
+    if dependency.dimension == "DERIVED_STATE":
+        return _dependency_id(
+            "DERIVED_STATE",
+            derived_key=dependency.subject,
+            accepted_values=dependency.required,
+        )
+    return _dependency_id(
+        dependency.dimension,
+        subject_key=dependency.subject,
+        key=dependency.key,
+        required=dependency.required,
+    )
+
+
+def _public_resource_amount_at(
+    planner_input: PlannerInput,
+    resource_key: str,
+    region_key: str,
+) -> int | None:
+    """Return a scoped Resource amount only when that scope is public Knowledge."""
+
+    raw_resource = planner_input.known_world.resources.get(resource_key)
+    if not isinstance(raw_resource, dict):
+        return None
+    scopes = raw_resource.get("scopes")
+    if not isinstance(scopes, dict):
+        return None
+    raw_scope = scopes.get(region_key)
+    if not isinstance(raw_scope, dict):
+        raw_scope = {}
+    if raw_scope.get("knowledge_status") == "UNKNOWN":
+        return None
+
+    knowledge = next(
+        (
+            item
+            for item in planner_input.known_world.resource_knowledge
+            if isinstance(item, dict) and item.get("region_key") == region_key
+        ),
+        None,
+    )
+    visibility = (
+        knowledge.get("resource_inventory_visibility")
+        if knowledge is not None
+        else raw_scope.get("resource_inventory_visibility")
+    )
+    survey_completed = (
+        knowledge.get("resource_survey_completed")
+        if knowledge is not None
+        else raw_scope.get("resource_survey_completed")
+    )
+    visibility = getattr(visibility, "value", visibility)
+    if visibility != ResourceInventoryVisibility.VISIBLE.value or survey_completed is not True:
+        return None
+
+    amount = raw_scope.get("known_available")
+    if isinstance(amount, int) and not isinstance(amount, bool):
+        return max(0, amount)
+    # A visible, completed Region with no scoped entry is public known zero;
+    # normally the canonical projection materializes this entry explicitly.
+    return 0
+
+
+def _public_derived_knowledge_values(
+    definition: ScenarioDefinitionV2,
+    planner_input: PlannerInput,
+) -> dict[str, object | None]:
+    """Evaluate Derived values from the same public typed dependency inputs.
+
+    This is intentionally a projection helper, not an authoritative evaluator:
+    it never reads Truth or writes state, and it returns UNKNOWN when any public
+    dependency or its gate is unknown.  Runtime completion remains owned by
+    ``DerivedStateEvaluator``.
+    """
+
+    states = getattr(definition, "derived_state_definitions", {})
+    if not isinstance(states, dict):
+        return {}
+    known_facts = planner_input.known_world.facts
+    cache: dict[str, object | None] = {}
+    visiting: set[str] = set()
+
+    def evaluate(derived_key: str) -> object | None:
+        if derived_key in cache:
+            return cache[derived_key]
+        if derived_key in visiting:
+            # Valid Scenario definitions are DAGs; retain a safe projection if
+            # a lightweight synthetic definition violates that contract.
+            return None
+        state = states.get(derived_key)
+        if state is None:
+            cache[derived_key] = None
+            return None
+        visiting.add(derived_key)
+        statuses: list[bool | None] = []
+        for dependency in state.dependencies:
+            gate = dependency.knowledge_gate
+            if not knowledge_gate_is_revealed(
+                gate,
+                known_facts.get(f"{gate.node_key}.{gate.fact_key}") if gate is not None else None,
+            ):
+                statuses.append(None)
+                continue
+            kind = getattr(dependency.kind, "value", dependency.kind)
+            if kind == DerivedDependencyKind.FACT.value:
+                assert dependency.node_key is not None and dependency.fact_key is not None
+                identity = f"{dependency.node_key}.{dependency.fact_key}"
+                statuses.append(
+                    known_facts[identity] in dependency.accepted_values
+                    if identity in known_facts
+                    else None
+                )
+            elif kind == DerivedDependencyKind.RESOURCE_AT_LEAST.value:
+                assert dependency.region_key is not None and dependency.resource_key is not None
+                assert dependency.minimum is not None
+                amount = _public_resource_amount_at(
+                    planner_input,
+                    dependency.resource_key,
+                    dependency.region_key,
+                )
+                statuses.append(None if amount is None else amount >= dependency.minimum)
+            elif kind == DerivedDependencyKind.DERIVED_STATE.value:
+                assert dependency.derived_key is not None
+                child_value = evaluate(dependency.derived_key)
+                statuses.append(
+                    None if child_value is None else child_value in dependency.accepted_values
+                )
+            else:
+                statuses.append(None)
+        if any(status is False for status in statuses):
+            derived_value: object | None = state.unavailable_value
+        elif all(status is True for status in statuses):
+            derived_value = state.available_value
+        else:
+            derived_value = None
+        visiting.remove(derived_key)
+        cache[derived_key] = derived_value
+        return derived_value
+
+    for derived_key in sorted(states):
+        evaluate(derived_key)
+    return cache
+
+
+def _active_goal_dependency_projections(
+    definition: ScenarioDefinitionV2,
+    planner_input: PlannerInput,
+    goal_dependency_specs: dict[TypedDependency, _GoalDependencySpec],
+    visited: set[TypedDependency],
+) -> tuple[GoalDependencyProjection, ...]:
+    """Project only active unknown/known-unsatisfied Goal dependencies."""
+
+    derived_values = _public_derived_knowledge_values(definition, planner_input)
+    result: list[GoalDependencyProjection] = []
+    for spec in goal_dependency_specs.values():
+        if spec.dependency not in visited:
+            continue
+        dependency = spec.dependency
+        base: dict[str, object] = {
+            "dependency_id": spec.dependency_id,
+            "kind": spec.kind,
+            "parent_dependency_id": spec.parent_dependency_id,
+            "knowledge_status": "UNKNOWN",
+            "satisfaction_status": "UNKNOWN",
+        }
+        if spec.kind == ObjectiveRequirementKind.FACT.value:
+            identity = f"{dependency.subject}.{dependency.key}"
+            base.update(
+                {
+                    "node_key": dependency.subject,
+                    "fact_key": dependency.key,
+                    "accepted_values": spec.accepted_values,
+                }
+            )
+            if identity in planner_input.known_world.facts:
+                current = planner_input.known_world.facts[identity]
+                if current in spec.accepted_values:
+                    continue
+                base.update(
+                    {
+                        "knowledge_status": "KNOWN",
+                        "satisfaction_status": "UNSATISFIED",
+                        "current_known_value": current,
+                    }
+                )
+        elif spec.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST.value:
+            minimum = int(dependency.required or 0)
+            base.update(
+                {
+                    "region_key": dependency.key,
+                    "resource_key": dependency.subject,
+                    "minimum": minimum,
+                }
+            )
+            current = _public_resource_amount_at(
+                planner_input,
+                dependency.subject,
+                dependency.key,
+            )
+            if current is None:
+                pass
+            elif current >= minimum:
+                continue
+            else:
+                base.update(
+                    {
+                        "knowledge_status": "KNOWN",
+                        "satisfaction_status": "UNSATISFIED",
+                        "current_known_available": current,
+                        "deficit": minimum - current,
+                    }
+                )
+        elif spec.kind == ObjectiveRequirementKind.DERIVED_STATE.value:
+            base.update(
+                {
+                    "derived_key": dependency.subject,
+                    "accepted_values": spec.accepted_values,
+                }
+            )
+            current = derived_values.get(dependency.subject)
+            if current is None:
+                pass
+            elif current in spec.accepted_values:
+                continue
+            else:
+                base.update(
+                    {
+                        "knowledge_status": "KNOWN",
+                        "satisfaction_status": "UNSATISFIED",
+                        "current_known_value": current,
+                    }
+                )
+        else:
+            continue
+        result.append(GoalDependencyProjection(**base))
+    return tuple(result)
+
+
 def _slice_known_world(
     known_world: PlannerKnownWorldSlice,
     node_keys: set[str],
     resource_keys: set[str],
     unknown_dependencies: tuple[dict[str, object], ...],
+    resource_source_hint_resources: set[str],
 ) -> PlannerKnownWorldSlice:
     nodes = tuple(item for item in known_world.nodes if item.get("key") in node_keys)
     facts = {
@@ -1895,12 +2828,45 @@ def _slice_known_world(
     resource_knowledge = tuple(
         item for item in known_world.resource_knowledge if item.get("region_key") in node_keys
     )
+    surveyed_regions = {
+        str(item["region_key"])
+        for item in known_world.resource_knowledge
+        if isinstance(item.get("region_key"), str)
+        and item.get("resource_inventory_visibility") == "VISIBLE"
+        and item.get("resource_survey_completed") is True
+    }
+    resource_source_hints: list[PlannerResourceSourceHint] = []
+    for hint in known_world.resource_source_hints:
+        if hint.resource_key not in resource_source_hint_resources:
+            continue
+        primary_region_key = (
+            hint.primary_region_key
+            if hint.primary_region_key in node_keys
+            and hint.primary_region_key not in surveyed_regions
+            else None
+        )
+        candidate_region_keys = tuple(
+            region_key
+            for region_key in hint.candidate_region_keys
+            if region_key in node_keys and region_key not in surveyed_regions
+        )
+        if primary_region_key is None and not candidate_region_keys:
+            continue
+        resource_source_hints.append(
+            hint.model_copy(
+                update={
+                    "primary_region_key": primary_region_key,
+                    "candidate_region_keys": candidate_region_keys,
+                }
+            )
+        )
     return PlannerKnownWorldSlice(
         nodes=nodes,
         facts=facts,
         relations=relations,
         resources=resources,
         resource_knowledge=resource_knowledge,
+        resource_source_hints=tuple(resource_source_hints),
         unknown_dependencies=unknown_dependencies,
     )
 

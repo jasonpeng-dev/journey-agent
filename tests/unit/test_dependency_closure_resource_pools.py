@@ -321,6 +321,39 @@ def test_resource_objective_enters_closure_without_selecting_a_source() -> None:
     assert "synthetic_region" in _node_keys(result)
 
 
+def test_resource_objective_unknown_inventory_is_not_reported_as_unknown_source() -> None:
+    base = _planner_input(available_amount=0)
+    resources = {
+        "support_material": {
+            "scopes": {
+                "synthetic_region": {
+                    "knowledge_status": "UNKNOWN",
+                }
+            }
+        }
+    }
+    planner_input = base.model_copy(
+        update={"known_world": base.known_world.model_copy(update={"resources": resources})}
+    )
+
+    result = build_dependency_closure(
+        _definition(),
+        (_resource_objective(),),
+        planner_input,
+    )
+
+    unknown = next(
+        item
+        for item in result.planner_input.known_world.unknown_dependencies
+        if item.get("dimension") == "RESOURCE_SOURCE"
+    )
+    assert unknown["source_knowledge_status"] == "KNOWN"
+    assert unknown["inventory_knowledge_status"] == "UNKNOWN"
+    assert unknown["knowledge_status_code"] == "RESOURCE_INVENTORY_UNKNOWN"
+    assert "known_available_amount" not in unknown
+    assert "deficit" not in unknown
+
+
 def test_gated_resource_objective_is_absent_before_public_gate_reveal() -> None:
     result = build_dependency_closure(
         _definition(),
@@ -342,11 +375,17 @@ def test_unlock_fact_expansion_reaches_actor_and_resource_prerequisites() -> Non
     assert "unlock_material" in result.planner_input.known_world.resources
 
 
-def test_unknown_unlock_requirement_is_not_expanded_or_leaked() -> None:
+def test_unknown_unlock_requirement_expands_public_dependency_without_truth_leak() -> None:
     result = _run_closure(known_facts={"goal_node.complete": False})
-    assert "unlock_facility" not in _action_keys(result)
-    assert "unlock_facility_a" not in _node_keys(result)
+    assert "unlock_facility" in _action_keys(result)
+    assert "unlock_facility_a" in _node_keys(result)
     assert "unlock_facility_a.operational" not in result.planner_input.known_world.facts
+    assert any(
+        item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
+        and item.get("subject_key") == "unlock_facility_a"
+        and item.get("fact_key") == "operational"
+        for item in result.planner_input.known_world.unknown_dependencies
+    )
 
     unknown_status_pool = (
         {

@@ -114,6 +114,12 @@ class AgentTaskStatus(StrEnum):
     ABORTED = "ABORTED"
 
 
+class ResolvedGoalDraftStatus(StrEnum):
+    READY = "READY"
+    CONFIRMED = "CONFIRMED"
+    SUPERSEDED = "SUPERSEDED"
+
+
 class AgentPlanStatus(StrEnum):
     ACTIVE = "ACTIVE"
     SUPERSEDED = "SUPERSEDED"

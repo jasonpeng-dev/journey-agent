@@ -32,6 +32,7 @@ from app.domain.enums import (
     NodeStatus,
     PlayerStatus,
     RelationVisibility,
+    ResolvedGoalDraftStatus,
     ResourceInventoryVisibility,
     ResourcePoolAvailability,
     ResourcePoolVisibility,
@@ -222,6 +223,129 @@ def _reject_game_instance_binding_drift(
         raise GameInstanceBindingImmutableError(
             "GameInstance Player, ScenarioVersion, and creation bindings are immutable"
         )
+
+
+class GoalResolutionAttempt(UUIDPrimaryKey, TimestampMixin, Base):
+    """Safe, game-scoped audit data for one Goal resolution invocation.
+
+    It stores the submitted text and bounded public Goal provider snapshots,
+    but never hidden runtime values, provider reasoning, or credentials.  It
+    is committed before Task creation so an unresolved submission remains
+    diagnosable when the API rolls back its request.
+    """
+
+    __tablename__ = "goal_resolution_attempts"
+    __table_args__ = (
+        Index(
+            "ix_goal_resolution_attempts_instance_created",
+            "game_instance_id",
+            "created_at",
+        ),
+        Index(
+            "ix_goal_resolution_attempts_instance_goal",
+            "game_instance_id",
+            "goal_hash",
+            "created_at",
+        ),
+        Index(
+            "uq_goal_resolution_attempts_instance_submission_key",
+            "game_instance_id",
+            "submission_idempotency_key",
+            unique=True,
+            sqlite_where=text("submission_idempotency_key IS NOT NULL"),
+            postgresql_where=text("submission_idempotency_key IS NOT NULL"),
+        ),
+    )
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"),
+        index=True,
+    )
+    scenario_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("scenario_versions.id", ondelete="RESTRICT")
+    )
+    submission_idempotency_key: Mapped[str | None] = mapped_column(String(160))
+    original_goal_text: Mapped[str | None] = mapped_column(String(4000))
+    normalized_goal_text: Mapped[str | None] = mapped_column(String(4000))
+    goal_hash: Mapped[str] = mapped_column(String(64))
+    resolution_status: Mapped[str] = mapped_column(String(30))
+    resolver_source: Mapped[str] = mapped_column(String(100))
+    grounding_source: Mapped[str | None] = mapped_column(String(100))
+    grounded_public_entity_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    resolution_candidate_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    public_catalog_hash: Mapped[str | None] = mapped_column(String(64))
+    focused_ontology_hash: Mapped[str | None] = mapped_column(String(64))
+    interpretation_status: Mapped[str | None] = mapped_column(String(30))
+    attempt_count: Mapped[int | None] = mapped_column(Integer)
+    interpretation_attempts: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        default=list,
+    )
+    recovery_used: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text("false"),
+        nullable=False,
+    )
+    backend_validation_result: Mapped[str | None] = mapped_column(String(30))
+    rejection_code: Mapped[str | None] = mapped_column(String(100))
+    value_type_diagnostics: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        default=list,
+    )
+    provider_purpose: Mapped[str | None] = mapped_column(String(100))
+    provider_model: Mapped[str | None] = mapped_column(String(100))
+    provider_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    resolution_duration_ms: Mapped[int] = mapped_column(Integer)
+    presentation_text: Mapped[str | None] = mapped_column(Text)
+
+
+class ResolvedGoalDraft(UUIDPrimaryKey, TimestampMixin, Base):
+    """One immutable, compiled Goal proposal awaiting player confirmation."""
+
+    __tablename__ = "resolved_goal_drafts"
+    __table_args__ = (
+        Index(
+            "uq_resolved_goal_drafts_instance_ready",
+            "game_instance_id",
+            unique=True,
+            sqlite_where=text("status = 'READY'"),
+            postgresql_where=text("status = 'READY'"),
+        ),
+        CheckConstraint(
+            "(status = 'CONFIRMED' AND confirmed_task_id IS NOT NULL "
+            "AND confirmed_at IS NOT NULL) OR "
+            "(status IN ('READY','SUPERSEDED') AND confirmed_task_id IS NULL "
+            "AND confirmed_at IS NULL)",
+            name="ck_resolved_goal_drafts_confirmation",
+        ),
+    )
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), index=True
+    )
+    resolution_attempt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("goal_resolution_attempts.id", ondelete="RESTRICT"), unique=True
+    )
+    original_goal_text: Mapped[str] = mapped_column(String(4000))
+    scenario_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("scenario_versions.id", ondelete="RESTRICT")
+    )
+    scenario_content_hash: Mapped[str] = mapped_column(String(64))
+    formal_goal_contract_schema_version: Mapped[int] = mapped_column(Integer)
+    formal_goal_source_kind: Mapped[str] = mapped_column(String(30))
+    formal_goal_contract_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    formal_goal_contract_hash: Mapped[str] = mapped_column(String(64))
+    formal_goal_compiler_version: Mapped[str] = mapped_column(String(100))
+    resolver_source: Mapped[str] = mapped_column(String(100))
+    status: Mapped[ResolvedGoalDraftStatus] = mapped_column(
+        Enum(ResolvedGoalDraftStatus, native_enum=False, length=30),
+        default=ResolvedGoalDraftStatus.READY,
+    )
+    confirmed_task_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="RESTRICT"), unique=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GameInstanceNodeState(TimestampMixin, Base):
@@ -478,6 +602,17 @@ class AgentTask(UUIDPrimaryKey, TimestampMixin, Base):
     objective_scope_keys: Mapped[list[str] | None] = mapped_column(JSON)
     objective_catalog_version: Mapped[str | None] = mapped_column(String(100))
     objective_scope_hash: Mapped[str] = mapped_column(String(64))
+    # Formal Goal V1 is staged independently from the legacy ObjectiveScope
+    # columns. These fields stay nullable so v0.2 historical Tasks can be
+    # read through the deterministic compatibility loader without a SQL
+    # backfill.
+    formal_goal_contract_schema_version: Mapped[int | None] = mapped_column(Integer)
+    formal_goal_source_kind: Mapped[str | None] = mapped_column(String(30))
+    formal_goal_contract_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    formal_goal_contract_hash: Mapped[str | None] = mapped_column(String(64))
+    formal_goal_scenario_version_id: Mapped[UUID | None] = mapped_column()
+    formal_goal_scenario_content_hash: Mapped[str | None] = mapped_column(String(64))
+    formal_goal_compiler_version: Mapped[str | None] = mapped_column(String(100))
     objective_resolver_source: Mapped[str | None] = mapped_column(String(100))
     objective_resolver_version: Mapped[str | None] = mapped_column(String(100))
     objective_resolution_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -517,6 +652,7 @@ class PlanningCycle(UUIDPrimaryKey, TimestampMixin, Base):
     base_call_type: Mapped[str] = mapped_column(String(20))
     replan_reason: Mapped[str | None] = mapped_column(String(160))
     frozen_objective_scope: Mapped[list[str]] = mapped_column(JSON, default=list)
+    formal_goal_contract_hash: Mapped[str | None] = mapped_column(String(64))
     planner_input: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     planner_input_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(30), default="RUNNING")
@@ -575,6 +711,48 @@ class ObjectiveScopeImmutableError(RuntimeError):
     """Raised if persisted code attempts to drift a frozen Task objective scope."""
 
 
+class FormalGoalImmutableError(RuntimeError):
+    """Raised if persisted code attempts to drift a frozen Formal Goal."""
+
+
+class ResolvedGoalDraftImmutableError(RuntimeError):
+    """Raised if a Draft payload or terminal lifecycle state is changed."""
+
+
+@event.listens_for(ResolvedGoalDraft, "before_update")
+def _reject_resolved_goal_draft_drift(
+    _mapper: object, _connection: object, target: ResolvedGoalDraft
+) -> None:
+    state = inspect(target)
+    assert state is not None
+    payload_fields = (
+        "game_instance_id",
+        "resolution_attempt_id",
+        "original_goal_text",
+        "scenario_version_id",
+        "scenario_content_hash",
+        "formal_goal_contract_schema_version",
+        "formal_goal_source_kind",
+        "formal_goal_contract_json",
+        "formal_goal_contract_hash",
+        "formal_goal_compiler_version",
+        "resolver_source",
+    )
+    if any(state.attrs[name].history.has_changes() for name in payload_fields):
+        raise ResolvedGoalDraftImmutableError("A resolved Goal Draft payload is immutable")
+    status_history = state.attrs.status.history
+    if status_history.has_changes():
+        previous = status_history.deleted[0] if status_history.deleted else None
+        current = target.status
+        if previous != ResolvedGoalDraftStatus.READY or current not in (
+            ResolvedGoalDraftStatus.CONFIRMED,
+            ResolvedGoalDraftStatus.SUPERSEDED,
+        ):
+            raise ResolvedGoalDraftImmutableError(
+                "A resolved Goal Draft only transitions from READY to a terminal status"
+            )
+
+
 @event.listens_for(AgentTask, "before_update")
 def _reject_frozen_objective_scope_drift(
     _mapper: object, _connection: object, target: AgentTask
@@ -586,6 +764,19 @@ def _reject_frozen_objective_scope_drift(
         for name in ("objective_scope_keys", "objective_catalog_version", "objective_scope_hash")
     ):
         raise ObjectiveScopeImmutableError("A frozen Task ObjectiveScope is immutable")
+    if target.objective_frozen_at is not None and any(
+        state.attrs[name].history.has_changes()
+        for name in (
+            "formal_goal_contract_schema_version",
+            "formal_goal_source_kind",
+            "formal_goal_contract_json",
+            "formal_goal_contract_hash",
+            "formal_goal_scenario_version_id",
+            "formal_goal_scenario_content_hash",
+            "formal_goal_compiler_version",
+        )
+    ):
+        raise FormalGoalImmutableError("A frozen Task Formal Goal is immutable")
 
 
 class AgentPlan(UUIDPrimaryKey, Base):

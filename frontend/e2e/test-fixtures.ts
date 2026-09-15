@@ -29,8 +29,9 @@ export async function wireApi(page: Page): Promise<void> {
     const url = origin
       ? requestUrl.replace("http://127.0.0.1:4173", origin)
       : requestUrl;
-    const response = await route.fetch({ url });
-    await route.fulfill({ response });
+    // Let Playwright own the response lifecycle. Waiting for fetch/fulfill here
+    // can outlive the page during teardown when the UI has an in-flight request.
+    await route.continue({ url });
   });
 }
 

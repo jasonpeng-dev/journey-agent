@@ -1,6 +1,91 @@
 from app.agent.generic import GenericGoalResolver
+from app.agent.provider import (
+    DynamicGoalActionRouting,
+    DynamicGoalActionRoutingRequest,
+    DynamicGoalCandidateReference,
+    DynamicGoalEntityGrounding,
+    DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRouting,
+    DynamicGoalFamilyRoutingRequest,
+    DynamicGoalInterpretation,
+    DynamicGoalInterpretationRequest,
+    DynamicGoalOperationGrounding,
+    DynamicGoalOperationGroundingRequest,
+)
+from app.domain.formal_goal import FormalGoalSourceKind
+from app.domain.scenario_v2 import ObjectiveRequirementKind
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
-from tests.scenario_fixtures import LINJIANG_V2_TEST
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
+from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
+
+
+class _BuiltinDynamicProvider:
+    @property
+    def model_name(self) -> str:
+        return "builtin-dynamic-test-provider"
+
+    def ground_dynamic_goal_entities(
+        self,
+        request: DynamicGoalEntityGroundingRequest,
+    ) -> DynamicGoalEntityGrounding:
+        goal = request.goal.casefold()
+        if "通信" in request.goal or "communication" in goal:
+            return DynamicGoalEntityGrounding(
+                candidate_refs=(
+                    DynamicGoalCandidateReference(ref_type="NODE", key="central_telecom_hub"),
+                )
+            )
+        for state in LINJIANG_V2_TEST.derived_states:
+            terms = (state.key, state.name, *state.goal_aliases, *state.goal_examples)
+            if any(term and term.casefold() in goal for term in terms):
+                return DynamicGoalEntityGrounding(
+                    candidate_refs=(
+                        DynamicGoalCandidateReference(ref_type="DERIVED_STATE", key=state.key),
+                    )
+                )
+        return DynamicGoalEntityGrounding(status="UNSUPPORTED")
+
+    def interpret_dynamic_goal(
+        self,
+        request: DynamicGoalInterpretationRequest,
+    ) -> DynamicGoalInterpretation:
+        reference = request.grounded_candidate_refs[0]
+        if reference.ref_type == "NODE" and reference.key == "central_telecom_hub":
+            candidate = AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.FACT,
+                node_key=reference.key,
+                fact_key="operational",
+                accepted_values=(True,),
+            )
+        else:
+            state = LINJIANG_V2_TEST.derived_state_definitions[reference.key]
+            candidate = AdHocGoalRequirementCandidateV1(
+                kind=ObjectiveRequirementKind.DERIVED_STATE,
+                derived_key=state.key,
+                accepted_values=(state.available_value,),
+            )
+        return DynamicGoalInterpretation(requirements=(candidate,))
+
+    def decide_dynamic_goal_family(
+        self,
+        _request: DynamicGoalFamilyRoutingRequest,
+    ) -> DynamicGoalFamilyRouting:
+        return DynamicGoalFamilyRouting(family="STATE")
+
+    def route_dynamic_goal_action(
+        self,
+        _request: DynamicGoalActionRoutingRequest,
+    ) -> DynamicGoalActionRouting:
+        return DynamicGoalActionRouting(
+            action_match="NO_MATCH",
+            no_match_reason="NO_SEMANTIC_ACTION",
+        )
+
+    def ground_dynamic_goal_operation(
+        self,
+        _request: DynamicGoalOperationGroundingRequest,
+    ) -> DynamicGoalOperationGrounding:
+        return DynamicGoalOperationGrounding(status="UNSUPPORTED")
 
 
 def test_current_builtin_preserves_stable_keys_and_player_names() -> None:
@@ -33,33 +118,109 @@ def test_author_content_is_not_implicitly_translated() -> None:
 
 
 def test_linjiang_goal_aliases_resolve_declaratively() -> None:
-    resolver = GenericGoalResolver()
+    resolver = GenericGoalResolver(provider=_BuiltinDynamicProvider())
 
     for goal in (
-        "Restore central communications",
-        "restore_central_communication_capability",
+        "Restore east emergency power",
+        "east_emergency_power_network",
     ):
         resolution = resolver.resolve(goal, LINJIANG_V2_TEST)
 
         assert resolution.status == "RESOLVED"
-        assert resolution.objective_key == "restore_central_communication_capability"
-        assert resolution.objective_keys == ("restore_central_communication_capability",)
+        assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+        assert resolution.objective_keys == ()
+        assert len(resolution.dynamic_requirements) == 1
+        assert resolution.dynamic_requirements[0].kind == ObjectiveRequirementKind.DERIVED_STATE
+        assert resolution.dynamic_requirements[0].derived_key == ("east_emergency_power_network")
 
 
-def test_linjiang_unmatched_goal_can_use_generic_provider_fallback() -> None:
-    resolver = GenericGoalResolver(
-        selector=lambda _goal, _objectives: "restore_central_communication_capability"
+def test_linjiang_final_goal_vocabulary_has_five_derived_states_and_task1_fact() -> None:
+    resolver = GenericGoalResolver(provider=_BuiltinDynamicProvider())
+    assert {item.key for item in LINJIANG_V2_TEST.derived_states} == {
+        "east_emergency_power_network",
+        "east_emergency_water_supply",
+        "north_basic_engineering_support",
+        "citywide_sustained_emergency_support",
+        "southeast_sustained_emergency_generation",
+    }
+
+    task1 = next(
+        item
+        for item in LINJIANG_V2_TEST.objectives
+        if item.key == "restore_central_communication_capability"
     )
+    task1_requirement = task1.completion_requirements[0]
+    assert task1_requirement.kind == ObjectiveRequirementKind.FACT
+    assert task1_requirement.node_key == "central_telecom_hub"
+    assert task1_requirement.fact_key == "operational"
+    assert task1_requirement.accepted_values == (True,)
+    assert LINJIANG_V2_TEST.goal_resolution.world_goal_state_catalog is True
+    assert task1.key not in task1.goal_aliases
+    for goal in (task1.name, *task1.goal_aliases):
+        resolution = resolver.resolve(goal, LINJIANG_V2_TEST)
+        assert resolution.status == "RESOLVED"
+        assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+        assert resolution.objective_keys == ()
+        assert len(resolution.dynamic_requirements) == 1
+        assert resolution.dynamic_requirements[0].kind == ObjectiveRequirementKind.FACT
+        assert resolution.dynamic_requirements[0].node_key == "central_telecom_hub"
+        assert resolution.dynamic_requirements[0].fact_key == "operational"
+        assert resolution.dynamic_requirements[0].accepted_values == (True,)
+        assert resolution.provider_observation is not None
+        assert resolution.provider_observation["stage"] == "FORMAL_GOAL"
 
+    assert GenericGoalResolver().resolve(task1.key, LINJIANG_V2_TEST).status == "UNSUPPORTED"
+
+    derived_objectives = [
+        item
+        for item in LINJIANG_V2_TEST.objectives
+        if item.completion_requirements[0].kind == ObjectiveRequirementKind.DERIVED_STATE
+    ]
+    assert len(derived_objectives) == 5
+
+    for objective in derived_objectives:
+        requirement = objective.completion_requirements[0]
+        assert requirement.derived_key is not None
+        state = LINJIANG_V2_TEST.derived_state_definitions[requirement.derived_key]
+        for goal in (state.key, objective.name, *objective.goal_aliases):
+            resolution = resolver.resolve(goal, LINJIANG_V2_TEST)
+
+            assert resolution.status == "RESOLVED"
+            assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+            assert resolution.objective_keys == ()
+            assert resolution.dynamic_requirements[0].derived_key == state.key
+            assert resolution.provider_observation is not None
+            assert resolution.provider_observation["stage"] == "FORMAL_GOAL"
+
+
+def test_linjiang_unmatched_goal_does_not_use_authored_catalog_fallback() -> None:
+    resolver = GenericGoalResolver()
     resolution = resolver.resolve(
         "Please restore the central communication network.",
         LINJIANG_V2_TEST,
     )
 
     assert LINJIANG_V2_TEST.goal_resolution.allow_llm_fallback is True
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.objective_keys == ()
+
+
+def test_legacy_objective_catalog_still_routes_predefined() -> None:
+    resolution = GenericGoalResolver().resolve("stabilize_patient", GENERIC_TEST)
+
     assert resolution.status == "RESOLVED"
-    assert resolution.source == "MODEL_VALIDATED"
-    assert resolution.objective_keys == ("restore_central_communication_capability",)
+    assert resolution.source == "DETERMINISTIC"
+    assert resolution.objective_keys == ("stabilize_patient",)
+
+
+def test_migrated_objective_key_does_not_reactivate_the_legacy_bridge() -> None:
+    resolution = GenericGoalResolver().resolve(
+        "establish_citywide_sustained_emergency_support",
+        LINJIANG_V2_TEST,
+    )
+
+    assert resolution.status == "UNSUPPORTED"
+    assert resolution.objective_keys == ()
 
 
 def test_linjiang_unrelated_goal_remains_unsupported() -> None:

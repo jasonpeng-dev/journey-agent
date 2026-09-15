@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
 from app.agent.planning_context import PlanningContextBuilder
+from app.agent.provider import PlanProposal, PlanRequest, PlanStepProposal
 from app.domain.enums import (
     AgentTaskStatus,
     CommandReachability,
@@ -15,7 +16,14 @@ from app.domain.enums import (
     ResourcePoolVisibility,
 )
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
+from app.domain.scenario_v2 import (
+    DerivedDependencyKind,
+    EffectKind,
+    NodeSelectorKind,
+    ObjectiveRequirementKind,
+    ScenarioDefinitionV2,
+    ValueSource,
+)
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     GameInstanceActor,
@@ -27,11 +35,13 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.scenarios.validation import ScenarioDefinitionValidator
+from app.services.derived_state import evaluate_derived_states
 from app.services.game_instances import GameInstanceService
 from app.services.generic_actions import GenericActionService
+from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import LINJIANG_V2_TEST
+from tests.scenario_fixtures import LINJIANG_V2_TEST, predefined_goal_resolution
 
 
 def _definition() -> ScenarioDefinitionV2:
@@ -45,9 +55,11 @@ def _initial_fact(definition: ScenarioDefinitionV2, node_key: str, fact_key: str
 
 
 def _runtime(
-    session: Session, creation_key: str
+    session: Session,
+    creation_key: str,
+    definition: ScenarioDefinitionV2 | None = None,
 ) -> tuple[object, object, GenericAgentService, ScenarioDefinitionV2]:
-    definition = _definition()
+    definition = definition or _definition()
     scenario = ScenarioDefinitionRepository(session).persist_initial_draft(definition)
     version = ScenarioService(session).publish_draft(scenario.id, expected_revision=1).version
     player = Player(name=creation_key)
@@ -117,35 +129,167 @@ def _reveal_region_resources(
         row.resource_survey_completed = True
 
 
+def _derived_fact_dependencies(
+    definition: ScenarioDefinitionV2,
+    derived_key: str,
+) -> tuple[object, ...]:
+    return tuple(
+        item
+        for item in definition.derived_state_definitions[derived_key].dependencies
+        if item.kind == DerivedDependencyKind.FACT
+    )
+
+
+def _opposite_value(value: object) -> object:
+    if value is True:
+        return False
+    if value is False:
+        return True
+    if value == "AVAILABLE":
+        return "UNAVAILABLE"
+    if value == "UNAVAILABLE":
+        return "AVAILABLE"
+    raise AssertionError(f"No test opposite for {value!r}")
+
+
+def _condition_facts(condition: object | None) -> tuple[tuple[str | None, str], ...]:
+    if condition is None:
+        return ()
+    refs: list[tuple[str | None, str]] = []
+    fact_key = getattr(condition, "fact_key", None)
+    node = getattr(condition, "node", None)
+    if fact_key is not None and node is not None:
+        refs.append((node.node_key, fact_key))
+    refs.extend(
+        ref for child in getattr(condition, "conditions", ()) for ref in _condition_facts(child)
+    )
+    nested = getattr(condition, "condition", None)
+    if nested is not None:
+        refs.extend(_condition_facts(nested))
+    return tuple(refs)
+
+
+def _set_derived_facts(
+    session: Session,
+    game_instance_id: Any,
+    definition: ScenarioDefinitionV2,
+    derived_key: str,
+    *,
+    missing: tuple[str, str] | None = None,
+) -> None:
+    for dependency in _derived_fact_dependencies(definition, derived_key):
+        assert dependency.node_key is not None and dependency.fact_key is not None
+        value = dependency.accepted_values[0]
+        if missing == (dependency.node_key, dependency.fact_key):
+            value = _opposite_value(value)
+        node = session.get(GameInstanceNodeState, (game_instance_id, dependency.node_key))
+        assert node is not None
+        node.visibility = Visibility.KNOWN
+        _set_fact(
+            session,
+            game_instance_id,
+            dependency.node_key,
+            dependency.fact_key,
+            value,
+            visibility=Visibility.KNOWN,
+        )
+    session.flush()
+
+
+class _Task6ReplanProvider:
+    model_name = "synthetic-task6-replan"
+
+    def __init__(self) -> None:
+        self.plan_requests: list[PlanRequest] = []
+
+    def propose_plan(self, request: PlanRequest) -> PlanProposal:
+        self.plan_requests.append(request)
+        if len(self.plan_requests) == 1:
+            return PlanProposal(
+                segment_goal="generate power with the repaired plant",
+                goal_link="advances the frozen emergency power objective",
+                continuation_intent="continue with staged requirements after generation",
+                stop_reason="SEGMENT_COMPLETE",
+                steps=(
+                    PlanStepProposal(
+                        action_key="generate_power",
+                        actor_key="electrical_repair_team_alpha",
+                        target_key="southeast_fuel_emergency_power_plant",
+                    ),
+                ),
+            )
+        return PlanProposal(
+            segment_goal="continue the staged power recovery mainline",
+            goal_link="advances the frozen emergency power objective",
+            continuation_intent="continue toward sustained emergency generation",
+            stop_reason="SEGMENT_COMPLETE",
+            steps=(
+                PlanStepProposal(
+                    action_key="travel",
+                    actor_key="electrical_repair_team_alpha",
+                    target_key="south_waterfront_district",
+                ),
+            ),
+        )
+
+
 def test_task5_and_task6_objective_contracts_are_exact() -> None:
     definition = _definition()
     by_key = {item.key: item for item in definition.objectives}
     task5 = by_key["establish_citywide_sustained_emergency_support"]
     task6 = by_key["establish_sustained_emergency_generation"]
 
-    assert len(task5.completion_requirements) == 4
+    assert len(task5.completion_requirements) == 1
+    task5_requirement = task5.completion_requirements[0]
+    assert task5_requirement.kind == ObjectiveRequirementKind.DERIVED_STATE
+    assert task5_requirement.derived_key == "citywide_sustained_emergency_support"
+    task5_state = definition.derived_state_definitions[task5_requirement.derived_key]
     assert {
         (item.region_key, item.resource_key, item.minimum)
-        for item in task5.completion_requirements
-        if item.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST
+        for item in task5_state.dependencies
+        if item.kind == DerivedDependencyKind.RESOURCE_AT_LEAST
     } == {
         ("central_district", "emergency_relief_supplies", 30),
         ("east_residential_district", "emergency_relief_supplies", 30),
         ("southeast_heights_district", "emergency_relief_supplies", 30),
     }
-    assert len(task6.completion_requirements) == 2
+    assert len(task6.completion_requirements) == 1
+    task6_requirement = task6.completion_requirements[0]
+    assert task6_requirement.kind == ObjectiveRequirementKind.DERIVED_STATE
+    assert task6_requirement.derived_key == "southeast_sustained_emergency_generation"
+    task6_state = definition.derived_state_definitions[task6_requirement.derived_key]
     reserve = next(
         item
-        for item in task6.completion_requirements
-        if item.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST
+        for item in task6_state.dependencies
+        if item.kind == DerivedDependencyKind.RESOURCE_AT_LEAST
     )
     assert (reserve.region_key, reserve.resource_key, reserve.minimum) == (
         "southeast_heights_district",
         "emergency_fuel",
         100,
     )
-    assert reserve.knowledge_gate is not None
-    assert reserve.knowledge_gate.fact_key == "sustained_requirements_discovered"
+    gated_dependencies = tuple(
+        item for item in task6_state.dependencies if item.knowledge_gate is not None
+    )
+    assert {
+        (item.kind, item.node_key, item.fact_key, item.region_key, item.resource_key)
+        for item in gated_dependencies
+    } == {
+        (DerivedDependencyKind.FACT, "river_port", "operational", None, None),
+        (DerivedDependencyKind.FACT, "south_fuel_terminal", "operational", None, None),
+        (
+            DerivedDependencyKind.RESOURCE_AT_LEAST,
+            None,
+            None,
+            "southeast_heights_district",
+            "emergency_fuel",
+        ),
+    }
+    assert {
+        (item.knowledge_gate.node_key, item.knowledge_gate.fact_key)
+        for item in gated_dependencies
+        if item.knowledge_gate is not None
+    } == {("southeast_fuel_emergency_power_plant", "sustained_requirements_discovered")}
 
 
 def test_task56_resource_budget_and_hidden_supply_contract() -> None:
@@ -191,7 +335,7 @@ def test_task5_warehouse_bootstrap_unlocks_aid_and_supports_completion(
     actions = GenericActionService(session, scope)
     warehouse = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="emergency_supply_warehouse",
         parameters={},
         idempotency_key="task56-repair-warehouse",
@@ -212,12 +356,11 @@ def test_task5_warehouse_bootstrap_unlocks_aid_and_supports_completion(
     session.refresh(pools["warehouse_relief_supply"])
     assert pools["warehouse_relief_supply"].availability == ResourcePoolAvailability.UNAVAILABLE
 
-    _set_fact(
+    _set_derived_facts(
         session,
         game_id,
-        "city_distribution_center",
-        "sustained_humanitarian_logistics",
-        "AVAILABLE",
+        _definition_value,
+        "citywide_sustained_emergency_support",
     )
     for region in (
         "central_district",
@@ -225,10 +368,18 @@ def test_task5_warehouse_bootstrap_unlocks_aid_and_supports_completion(
         "southeast_heights_district",
     ):
         _known_inflow(session, game_id, region, "emergency_relief_supplies", 30)
+    _reveal_region_resources(
+        session,
+        game_id,
+        "central_district",
+        "east_residential_district",
+        "southeast_heights_district",
+    )
     session.flush()
     task = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
-        "establish_citywide_sustained_emergency_support",
+        "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
     assert task.status == AgentTaskStatus.SUCCEEDED
@@ -247,12 +398,9 @@ def test_task56_world_cleanup_bridge_and_reference_integrity() -> None:
     bridge = _initial_fact(definition, "south_bridge", "passable")
     assert bridge.initial_value is False
     assert bridge.initial_visibility.value == "HIDDEN"
-    assert {
-        "receive_external_relief_supplies",
-        "establish_sustained_humanitarian_logistics",
-        "generate_power",
-        "commission_sustained_generation",
-    }.issubset(action_keys)
+    assert {"receive_external_relief_supplies", "generate_power"}.issubset(action_keys)
+    assert "establish_sustained_humanitarian_logistics" not in action_keys
+    assert "commission_sustained_generation" not in action_keys
     assert ScenarioDefinitionValidator().validate(definition.model_dump(mode="json")).passed
 
 
@@ -271,29 +419,177 @@ def test_task5_public_dependency_and_transport_contract_is_complete() -> None:
         "waterfront_access_corridor",
         "west_freight_corridor",
     }
+    transport_passability = {
+        node.key: next(fact for fact in node.facts if fact.key == "passable").initial_value
+        for node in nodes.values()
+        if node.node_type_key == "transport"
+    }
+    assert transport_passability == {
+        "central_river_tunnel": True,
+        "north_service_corridor": True,
+        "south_bridge": False,
+        "southeast_access_corridor": True,
+        "waterfront_access_corridor": True,
+        "west_freight_corridor": True,
+    }
+    assert all(
+        next(fact for fact in nodes[key].facts if fact.key == "passable").initial_visibility.value
+        == "HIDDEN"
+        for key in transport_keys
+    )
+    assert all(
+        {fact.key for fact in nodes[key].facts}.isdisjoint(
+            {"heavy_engineering_support_required", "heavy_engineering_support_ready"}
+        )
+        for key in transport_keys
+    )
+    endpoint_pairs = {
+        node.key: {
+            relation.target_node_key
+            for relation in definition.world.relations
+            if relation.relation_type_key == "endpoint" and relation.source_node_key == node.key
+        }
+        for node in nodes.values()
+        if node.node_type_key == "transport"
+    }
+    assert endpoint_pairs["south_bridge"] == {
+        "south_waterfront_district",
+        "west_logistics_district",
+    }
     assert "clearable" in nodes["south_bridge"].interaction_keys
+    assert "heavy_support_target" not in nodes["south_bridge"].interaction_keys
     assert actions["receive_external_relief_supplies"].required_interaction_key == (
         "external_relief_intake"
     )
-    assert (
-        actions["establish_sustained_humanitarian_logistics"].required_interaction_key
-        == "sustained_logistics_control"
-    )
-
-    final_rules = [
-        item
-        for item in definition.rules
-        if item.action_key == "establish_sustained_humanitarian_logistics"
-        and item.phase.value == "PREFLIGHT"
-    ]
+    task5 = definition.derived_state_definitions["citywide_sustained_emergency_support"]
+    assert {
+        (
+            item.kind,
+            item.node_key,
+            item.fact_key,
+            item.region_key,
+            item.resource_key,
+            item.minimum,
+        )
+        for item in task5.dependencies
+    } == {
+        (
+            DerivedDependencyKind.FACT,
+            "rail_freight_yard",
+            "rail_freight_capability",
+            None,
+            None,
+            None,
+        ),
+        (
+            DerivedDependencyKind.FACT,
+            "emergency_supply_warehouse",
+            "operational",
+            None,
+            None,
+            None,
+        ),
+        (
+            DerivedDependencyKind.FACT,
+            "vehicle_depot",
+            "emergency_delivery_support",
+            None,
+            None,
+            None,
+        ),
+        (DerivedDependencyKind.FACT, "city_distribution_center", "operational", None, None, None),
+        *{
+            (DerivedDependencyKind.FACT, node_key, "passable", None, None, None)
+            for node_key in transport_keys
+        },
+        (
+            DerivedDependencyKind.RESOURCE_AT_LEAST,
+            None,
+            None,
+            "central_district",
+            "emergency_relief_supplies",
+            30,
+        ),
+        (
+            DerivedDependencyKind.RESOURCE_AT_LEAST,
+            None,
+            None,
+            "east_residential_district",
+            "emergency_relief_supplies",
+            30,
+        ),
+        (
+            DerivedDependencyKind.RESOURCE_AT_LEAST,
+            None,
+            None,
+            "southeast_heights_district",
+            "emergency_relief_supplies",
+            30,
+        ),
+    }
     passability_nodes = {
-        item.condition.node.node_key
-        for item in final_rules
-        if item.condition is not None
-        and item.condition.fact_key == "passable"
-        and item.condition.node is not None
+        item.node_key
+        for item in task5.dependencies
+        if item.kind == DerivedDependencyKind.FACT and item.fact_key == "passable"
     }
     assert passability_nodes == transport_keys
+
+
+def test_task5_capability_facts_are_real_base_contracts() -> None:
+    definition = _definition()
+    task5 = definition.derived_state_definitions["citywide_sustained_emergency_support"]
+    expected = {
+        "rail_freight_capability": (
+            "rail_freight_yard",
+            "repair_facility_industrial_rail_freight_yard_task56_resolution",
+            {"receive_relief_requires_rail"},
+        ),
+        "emergency_delivery_support": (
+            "vehicle_depot",
+            "repair_facility_industrial_vehicle_depot_task56_resolution",
+            {"repair_facility_industrial_city_distribution_center_prerequisite_1"},
+        ),
+    }
+
+    for fact_key, (node_key, producer_key, consumer_keys) in expected.items():
+        fact = _initial_fact(definition, node_key, fact_key)
+        assert fact.goal_addressable is True
+        assert fact.initial_value == "UNAVAILABLE"
+        assert fact.allowed_values == ("AVAILABLE", "UNAVAILABLE")
+
+        producer = next(rule for rule in definition.rules if rule.key == producer_key)
+        writes = tuple(
+            effect
+            for effect in producer.effects
+            if effect.kind == EffectKind.SET_FACT and effect.fact_key == fact_key
+        )
+        assert len(writes) == 1
+        assert writes[0].node is not None
+        assert writes[0].node.kind == NodeSelectorKind.CURRENT_TARGET
+        assert writes[0].value is not None
+        assert writes[0].value.source == ValueSource.LITERAL
+        assert writes[0].value.literal == "AVAILABLE"
+        assert any(
+            effect.kind == EffectKind.SET_FACT
+            and effect.fact_key == "operational"
+            and effect.value is not None
+            and effect.value.literal is True
+            for effect in producer.effects
+        )
+
+        consumers = {
+            rule.key
+            for rule in definition.rules
+            if (node_key, fact_key) in _condition_facts(rule.condition)
+        }
+        assert consumers == consumer_keys
+
+        assert any(
+            item.kind == DerivedDependencyKind.FACT
+            and item.node_key == node_key
+            and item.fact_key == fact_key
+            for item in task5.dependencies
+        )
 
 
 def test_task5_unknown_bridge_precondition_is_blocking_and_knowledge_safe(
@@ -302,7 +598,8 @@ def test_task5_unknown_bridge_precondition_is_blocking_and_knowledge_safe(
     runtime, scope, agent, definition = _runtime(session, "task56-unknown-bridge")
     task = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
-        "establish_citywide_sustained_emergency_support",
+        "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
 
@@ -313,58 +610,6 @@ def test_task5_unknown_bridge_precondition_is_blocking_and_knowledge_safe(
         replan_reason=None,
     )
     payload = closure.planner_input.model_dump(mode="json")
-    final_contract = next(
-        item
-        for item in payload["action_contracts"]
-        if item["action_key"] == "establish_sustained_humanitarian_logistics"
-    )
-    bridge = next(
-        item
-        for item in final_contract["known_preconditions"]
-        if item.get("node_key") == "south_bridge" and item.get("fact_key") == "passable"
-    )
-
-    assert bridge["knowledge_status"] == "UNKNOWN"
-    assert "current_value" not in bridge
-    for rule in definition.rules:
-        if (
-            rule.action_key != final_contract["action_key"]
-            or rule.phase.value != "PREFLIGHT"
-            or rule.condition is None
-            or rule.condition.kind.value != "FACT_NOT_EQUALS"
-            or rule.condition.node is None
-            or rule.condition.node.node_key is None
-            or rule.condition.node.node_key == "south_bridge"
-        ):
-            continue
-        _set_fact(
-            session,
-            runtime.instance.id,  # type: ignore[attr-defined]
-            rule.condition.node.node_key,
-            rule.condition.fact_key,
-            rule.condition.value,
-            visibility=Visibility.KNOWN,
-        )
-    session.flush()
-    final_action = next(
-        item
-        for item in definition.actions
-        if item.key == "establish_sustained_humanitarian_logistics"
-    )
-    preflight_failure = GenericAgentService._known_preflight_failure(
-        definition,
-        final_action,
-        "city_distribution_center",
-        {},
-        agent._known_fact_projection(),
-        agent._known_node_keys(),
-        agent._known_relation_keys(definition),
-    )
-    assert preflight_failure is not None
-    assert preflight_failure.failure_code == "ACTION_PRECONDITION_UNKNOWN"
-    assert preflight_failure.condition_status == "UNKNOWN"
-    assert preflight_failure.known_predicate["node_key"] == "south_bridge"
-    assert preflight_failure.known_predicate["actual"] == "UNKNOWN"
     unknowns = payload["known_world"]["unknown_dependencies"]
     assert any(
         item.get("subject_key") == "south_bridge"
@@ -416,14 +661,13 @@ def test_task5_and_task6_resource_budget_is_solvable_without_artificial_costs() 
 def test_task5_completion_and_same_objective_reissue_use_current_truth(
     session: Session,
 ) -> None:
-    runtime, _scope, agent, _definition_value = _runtime(session, "task56-reissue")
+    runtime, _scope, agent, definition = _runtime(session, "task56-reissue")
     game_id = runtime.instance.id  # type: ignore[attr-defined]
-    _set_fact(
+    _set_derived_facts(
         session,
         game_id,
-        "city_distribution_center",
-        "sustained_humanitarian_logistics",
-        "AVAILABLE",
+        definition,
+        "citywide_sustained_emergency_support",
     )
     pools = [
         _known_inflow(session, game_id, region, "emergency_relief_supplies", 30)
@@ -433,11 +677,19 @@ def test_task5_completion_and_same_objective_reissue_use_current_truth(
             "southeast_heights_district",
         )
     ]
+    _reveal_region_resources(
+        session,
+        game_id,
+        "central_district",
+        "east_residential_district",
+        "southeast_heights_district",
+    )
     session.flush()
 
     first = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
-        "establish_citywide_sustained_emergency_support",
+        "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
     assert first.status == AgentTaskStatus.SUCCEEDED
@@ -446,7 +698,8 @@ def test_task5_completion_and_same_objective_reissue_use_current_truth(
     session.flush()
     second = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
-        "establish_citywide_sustained_emergency_support",
+        "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
     assert second.status == AgentTaskStatus.ACTIVE
@@ -455,14 +708,13 @@ def test_task5_completion_and_same_objective_reissue_use_current_truth(
 
 
 def test_task5_then_task6_complete_sequentially_on_one_runtime(session: Session) -> None:
-    runtime, _scope, agent, _definition_value = _runtime(session, "task56-sequential")
+    runtime, _scope, agent, definition = _runtime(session, "task56-sequential")
     game_id = runtime.instance.id  # type: ignore[attr-defined]
-    _set_fact(
+    _set_derived_facts(
         session,
         game_id,
-        "city_distribution_center",
-        "sustained_humanitarian_logistics",
-        "AVAILABLE",
+        definition,
+        "citywide_sustained_emergency_support",
     )
     for region in (
         "central_district",
@@ -470,18 +722,27 @@ def test_task5_then_task6_complete_sequentially_on_one_runtime(session: Session)
         "southeast_heights_district",
     ):
         _known_inflow(session, game_id, region, "emergency_relief_supplies", 30)
+    _reveal_region_resources(
+        session,
+        game_id,
+        "central_district",
+        "east_residential_district",
+        "southeast_heights_district",
+    )
     session.flush()
 
     task5 = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
-        "establish_citywide_sustained_emergency_support",
+        "建立全城灾后持续应急保障网络",
+        resolved_goal=predefined_goal_resolution("establish_citywide_sustained_emergency_support"),
         initialize_plan=False,
     )
     assert task5.status == AgentTaskStatus.SUCCEEDED
 
     task6 = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
-        "establish_sustained_emergency_generation",
+        "建立持续应急发电保障",
+        resolved_goal=predefined_goal_resolution("establish_sustained_emergency_generation"),
         initialize_plan=False,
     )
     assert task6.status == AgentTaskStatus.ACTIVE
@@ -489,8 +750,25 @@ def test_task5_then_task6_complete_sequentially_on_one_runtime(session: Session)
         session,
         game_id,
         "southeast_fuel_emergency_power_plant",
-        "sustained_generation_capability",
-        "AVAILABLE",
+        "generating",
+        True,
+        visibility=Visibility.KNOWN,
+    )
+    _set_fact(
+        session,
+        game_id,
+        "river_port",
+        "operational",
+        True,
+        visibility=Visibility.KNOWN,
+    )
+    _set_fact(
+        session,
+        game_id,
+        "south_fuel_terminal",
+        "operational",
+        True,
+        visibility=Visibility.KNOWN,
     )
     fuel = _known_inflow(
         session,
@@ -499,11 +777,28 @@ def test_task5_then_task6_complete_sequentially_on_one_runtime(session: Session)
         "emergency_fuel",
         99,
     )
+    _reveal_region_resources(session, game_id, "southeast_heights_district")
     session.flush()
     assert not agent.evaluate(task6).completed
     fuel.value = 100
     session.flush()
-    assert agent.evaluate(task6).completed
+    evaluation = agent.evaluate(task6)
+    assert evaluation.authoritative_completed is True
+    assert evaluation.completed is False
+
+    gate = session.get(
+        GameInstanceFactState,
+        (
+            game_id,
+            "southeast_fuel_emergency_power_plant",
+            "sustained_requirements_discovered",
+        ),
+    )
+    assert gate is not None
+    gate.truth_value = True
+    gate.visibility = Visibility.KNOWN
+    session.flush()
+    assert agent.evaluate(task6).completed is True
 
 
 def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
@@ -513,7 +808,8 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
     game_id = runtime.instance.id  # type: ignore[attr-defined]
     task = agent.create_task(
         runtime.session,  # type: ignore[attr-defined]
-        "establish_sustained_emergency_generation",
+        "建立持续应急发电保障",
+        resolved_goal=predefined_goal_resolution("establish_sustained_emergency_generation"),
         initialize_plan=False,
     )
 
@@ -526,7 +822,9 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
     initial_payload = initial.planner_input.model_dump(mode="json")
     initial_serialized = json.dumps(initial_payload, ensure_ascii=False)
     requirements = initial_payload["objective"]["completion_requirements"]
-    assert [item["key"] for item in requirements] == ["generation_capability"]
+    assert len(requirements) == 1
+    assert requirements[0]["kind"] == ObjectiveRequirementKind.DERIVED_STATE.value
+    assert requirements[0]["derived_key"] == "southeast_sustained_emergency_generation"
     assert '"minimum": 100' not in initial_serialized
     assert "south_emergency_fuel" not in initial_serialized
     for node_key in ("river_port", "south_fuel_terminal"):
@@ -535,11 +833,30 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
     initial_actions = {item["action_key"] for item in initial_payload["action_contracts"]}
     assert "generate_power" in initial_actions
     assert "commission_sustained_generation" not in initial_actions
-    assert not {
+    generate_binding = next(
+        item
+        for item in initial_payload["target_bindings"]
+        if item["action_key"] == "generate_power"
+        and item["target_key"] == "southeast_fuel_emergency_power_plant"
+    )
+    assert any(
+        item.get("resource_key") == "emergency_fuel" and item.get("minimum") == 50
+        for item in generate_binding["resource_requirements"]
+    )
+    generate_contract = next(
+        item
+        for item in initial_payload["action_contracts"]
+        if item["action_key"] == "generate_power"
+    )
+    assert not any(
+        item.get("resource_key") == "emergency_fuel"
+        for item in generate_contract.get("resource_requirements", [])
+    )
+    assert {
         item["target_key"]
         for item in initial_payload["target_bindings"]
         if item["target_key"] in {"river_port", "south_fuel_terminal"}
-    }
+    } == set()
 
     plant = session.get(
         GameInstanceFactState,
@@ -600,23 +917,202 @@ def test_task6_hidden_requirement_and_supply_chain_reveal_are_knowledge_safe(
     )
     revealed_payload = revealed.planner_input.model_dump(mode="json")
     revealed_requirements = revealed_payload["objective"]["completion_requirements"]
-    assert {item["key"] for item in revealed_requirements} == {
-        "generation_capability",
-        "southeast_fuel_reserve",
-    }
-    assert (
-        next(item for item in revealed_requirements if item["key"] == "southeast_fuel_reserve")[
-            "minimum"
-        ]
-        == 100
+    assert len(revealed_requirements) == 1
+    assert revealed_requirements[0]["kind"] == ObjectiveRequirementKind.DERIVED_STATE.value
+    assert revealed_requirements[0]["derived_key"] == ("southeast_sustained_emergency_generation")
+    assert any(
+        item.get("resource_key") == "emergency_fuel" and item.get("required_amount") == 100
+        for item in revealed_payload["known_world"]["unknown_dependencies"]
     )
     revealed_nodes = {item["key"] for item in revealed_payload["known_world"]["nodes"]}
     assert {"river_port", "south_fuel_terminal"} <= revealed_nodes
     revealed_actions = {item["action_key"] for item in revealed_payload["action_contracts"]}
-    assert "commission_sustained_generation" in revealed_actions
-    assert {"river_port", "south_fuel_terminal"} <= {
-        item["target_key"] for item in revealed_payload["target_bindings"]
+    assert "commission_sustained_generation" not in revealed_actions
+
+
+def test_task6_generate_power_reveal_rebuilds_real_replan_input(
+    session: Session,
+) -> None:
+    provider = _Task6ReplanProvider()
+    runtime, scope, _agent, _definition = _runtime(session, "task56-real-replan")
+    game_id = runtime.instance.id  # type: ignore[attr-defined]
+    agent = GenericAgentService(session, scope, provider=provider)
+    task = agent.create_task(
+        runtime.session,  # type: ignore[attr-defined]
+        "寤虹珛鎸佺画搴旀€ュ彂鐢典繚闅?",
+        resolved_goal=predefined_goal_resolution("establish_sustained_emergency_generation"),
+        initialize_plan=False,
+    )
+
+    plant = session.get(
+        GameInstanceFactState,
+        (game_id, "southeast_fuel_emergency_power_plant", "operational"),
+    )
+    actor = session.get(GameInstanceActor, (game_id, "electrical_repair_team_alpha"))
+    assert plant is not None and actor is not None
+    plant.truth_value = True
+    actor.current_node_key = "southeast_heights_district"
+    actor.command_reachability = CommandReachability.ONLINE.value
+    _known_inflow(
+        session,
+        game_id,
+        "southeast_heights_district",
+        "emergency_fuel",
+        50,
+    )
+    session.flush()
+
+    first_plan = agent.plan(task)
+    assert first_plan.stop_reason == "SEGMENT_COMPLETE"
+    executed = agent.execute_next(task, replan_on_failure=False)
+    assert executed is not None and executed.status == "SUCCEEDED"
+    assert provider.plan_requests[0].call_type == "INITIAL_PLAN"
+
+    gate = session.get(
+        GameInstanceFactState,
+        (
+            game_id,
+            "southeast_fuel_emergency_power_plant",
+            "sustained_requirements_discovered",
+        ),
+    )
+    assert gate is not None and gate.truth_value is True and gate.visibility == Visibility.KNOWN
+
+    second_plan = agent.plan(task, reason="INFORMATION_BOUNDARY")
+    assert second_plan.stop_reason == "SEGMENT_COMPLETE"
+    assert provider.plan_requests[1].call_type == "REPLAN"
+    replanned_dependencies = provider.plan_requests[1].planner_input
+    assert replanned_dependencies is not None
+    unknown_dependencies = replanned_dependencies.known_world.unknown_dependencies
+    assert any(
+        item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
+        and item.get("subject_key") in {"river_port", "south_fuel_terminal"}
+        for item in unknown_dependencies
+    )
+    assert any(
+        item.get("dimension") == "RESOURCE_SOURCE"
+        and item.get("resource_key") == "emergency_fuel"
+        and item.get("required_amount") == 100
+        for item in unknown_dependencies
+    )
+    assert "commission_sustained_generation" not in {
+        item.action_key for item in replanned_dependencies.action_contracts
     }
+
+
+def test_task6_state_discovery_is_generic_and_sticky_for_an_alternative_action(
+    session: Session,
+) -> None:
+    definition = _definition()
+    source_action = next(item for item in definition.actions if item.key == "generate_power")
+    alternative_key = "alternative_generate_power"
+    alternative_action = source_action.model_copy(
+        update={
+            "key": alternative_key,
+            "name": "Alternative power generation",
+        }
+    )
+    alternative_rules = tuple(
+        rule.model_copy(
+            update={
+                "key": f"alternative_{rule.key}",
+                "action_key": alternative_key,
+            }
+        )
+        for rule in definition.rules
+        if rule.action_key == source_action.key
+    )
+    actors = definition.actors.model_copy(
+        update={
+            "actor_profiles": tuple(
+                actor.model_copy(
+                    update={
+                        "allowed_action_keys": (
+                            *actor.allowed_action_keys,
+                            alternative_key,
+                        )
+                    }
+                )
+                if actor.key == "electrical_repair_team_alpha"
+                else actor
+                for actor in definition.actors.actor_profiles
+            )
+        }
+    )
+    alternative_definition = definition.model_copy(
+        update={
+            "actors": actors,
+            "actions": (*definition.actions, alternative_action),
+            "rules": (*definition.rules, *alternative_rules),
+        }
+    )
+    runtime, scope, _agent, _definition_value = _runtime(
+        session,
+        "task56-alternative-state-trigger",
+        definition=alternative_definition,
+    )
+    game_id = runtime.instance.id  # type: ignore[attr-defined]
+    actor = session.get(GameInstanceActor, (game_id, "electrical_repair_team_alpha"))
+    plant = session.get(
+        GameInstanceFactState,
+        (game_id, "southeast_fuel_emergency_power_plant", "operational"),
+    )
+    assert actor is not None and plant is not None
+    actor.command_reachability = CommandReachability.ONLINE.value
+    actor.current_node_key = "southeast_heights_district"
+    plant.truth_value = True
+    _known_inflow(
+        session,
+        game_id,
+        "southeast_heights_district",
+        "emergency_fuel",
+        50,
+    )
+    session.flush()
+
+    result = GenericActionService(session, scope).execute_action(
+        actor_key=actor.actor_key,
+        action_key=alternative_key,
+        target_key="southeast_fuel_emergency_power_plant",
+        parameters={},
+        idempotency_key="task56-alternative-generate-power",
+    )
+    assert result.applied is not None and result.applied.outcome.failure is None
+    gate = session.get(
+        GameInstanceFactState,
+        (
+            game_id,
+            "southeast_fuel_emergency_power_plant",
+            "sustained_requirements_discovered",
+        ),
+    )
+    assert gate is not None and gate.truth_value is True and gate.visibility == Visibility.KNOWN
+    south_pool = next(
+        item
+        for item in session.scalars(
+            select(GameInstanceResourceState).where(
+                GameInstanceResourceState.game_instance_id == game_id
+            )
+        )
+        if item.pool_key == "south_emergency_fuel"
+    )
+    assert south_pool.visibility == ResourcePoolVisibility.VISIBLE
+
+    # Discovery is sticky: a later authoritative false value does not hide
+    # the already public gate or retract the downstream Knowledge boundary.
+    generating = session.get(
+        GameInstanceFactState,
+        (game_id, "southeast_fuel_emergency_power_plant", "generating"),
+    )
+    assert generating is not None
+    generating.truth_value = False
+    session.flush()
+    projection = SharedKnowledgeProjection(session, scope, alternative_definition)
+    known_gate = {
+        (row.node_key, row.fact_key): row.truth_value
+        for row in projection.known_fact_rows()
+    }
+    assert known_gate[("southeast_fuel_emergency_power_plant", "sustained_requirements_discovered")]
 
 
 def test_task6_generate_power_requires_operational_power_and_startup_fuel() -> None:
@@ -642,6 +1138,30 @@ def test_task6_generate_power_requires_operational_power_and_startup_fuel() -> N
     ]
     assert len(fuel_rules) == 1
     assert fuel_rules[0].condition.value == 50
+    resolution = next(
+        item
+        for item in definition.rules
+        if item.action_key == "generate_power" and item.phase.value == "RESOLVE"
+    )
+    resolution_effect_facts = {
+        effect.fact_key
+        for effect in resolution.effects
+        if effect.kind == EffectKind.SET_FACT
+    }
+    assert "generating" in resolution_effect_facts
+    assert "sustained_requirements_discovered" not in resolution_effect_facts
+    state_discovery_rules = [
+        item
+        for item in definition.rules
+        if item.trigger.value == "STATE"
+    ]
+    assert len(state_discovery_rules) == 1
+    assert state_discovery_rules[0].action_key is None
+    assert any(
+        effect.kind == EffectKind.REVEAL_FACT
+        and effect.fact_key == "sustained_requirements_discovered"
+        for effect in state_discovery_rules[0].effects
+    )
 
 
 def test_task6_fuel_repairs_explicitly_unlock_north_and_south_pools(
@@ -706,7 +1226,7 @@ def test_task6_fuel_repairs_explicitly_unlock_north_and_south_pools(
     actions = GenericActionService(session, scope)
     north_result = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="north_fuel_depot",
         parameters={},
         idempotency_key="task56-repair-north-fuel-depot",
@@ -723,7 +1243,14 @@ def test_task6_fuel_repairs_explicitly_unlock_north_and_south_pools(
     assert pools["north_emergency_fuel"].value == 50
 
     industrial.current_node_key = "south_waterfront_district"
-    _set_fact(session, game_id, "river_port", "operational", True)
+    _set_fact(
+        session,
+        game_id,
+        "river_port",
+        "operational",
+        True,
+        visibility=Visibility.KNOWN,
+    )
     _known_inflow(
         session,
         game_id,
@@ -742,7 +1269,7 @@ def test_task6_fuel_repairs_explicitly_unlock_north_and_south_pools(
 
     south_result = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="south_fuel_terminal",
         parameters={},
         idempotency_key="task56-repair-south-fuel-terminal",
@@ -815,7 +1342,7 @@ def test_task6_unlocked_fuel_supports_generation_and_commission_chain(
 
     north_repair = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="north_fuel_depot",
         parameters={},
         idempotency_key="task56-chain-repair-north",
@@ -849,7 +1376,7 @@ def test_task6_unlocked_fuel_supports_generation_and_commission_chain(
     session.flush()
     plant_repair = actions.execute_action(
         actor_key=electrical.actor_key,
-        action_key="repair_electrical",
+        action_key="repair_facility",
         target_key="southeast_fuel_emergency_power_plant",
         parameters={},
         idempotency_key="task56-chain-repair-power-plant",
@@ -872,7 +1399,14 @@ def test_task6_unlocked_fuel_supports_generation_and_commission_chain(
     assert south_node is not None and river_port is not None
     south_node.visibility = Visibility.KNOWN
     river_port.visibility = Visibility.KNOWN
-    _set_fact(session, game_id, "river_port", "operational", True)
+    _set_fact(
+        session,
+        game_id,
+        "river_port",
+        "operational",
+        True,
+        visibility=Visibility.KNOWN,
+    )
     _known_inflow(
         session,
         game_id,
@@ -890,12 +1424,18 @@ def test_task6_unlocked_fuel_supports_generation_and_commission_chain(
     session.flush()
     south_repair = actions.execute_action(
         actor_key=industrial.actor_key,
-        action_key="repair_industrial_facility",
+        action_key="repair_facility",
         target_key="south_fuel_terminal",
         parameters={},
         idempotency_key="task56-chain-repair-south-terminal",
     )
     assert south_repair.applied is not None and south_repair.applied.outcome.failure is None
+    south_operational = session.get(
+        GameInstanceFactState,
+        (game_id, "south_fuel_terminal", "operational"),
+    )
+    assert south_operational is not None
+    south_operational.visibility = Visibility.KNOWN
 
     transported_south_fuel = actions.execute_action(
         actor_key=logistics.actor_key,
@@ -911,16 +1451,7 @@ def test_task6_unlocked_fuel_supports_generation_and_commission_chain(
 
     electrical.current_node_key = "southeast_heights_district"
     session.flush()
-    commissioned = actions.execute_action(
-        actor_key=electrical.actor_key,
-        action_key="commission_sustained_generation",
-        target_key="southeast_fuel_emergency_power_plant",
-        parameters={},
-        idempotency_key="task56-chain-commission-generation",
-    )
-    assert commissioned.applied is not None and commissioned.applied.outcome.failure is None
-    capability = session.get(
-        GameInstanceFactState,
-        (game_id, "southeast_fuel_emergency_power_plant", "sustained_generation_capability"),
-    )
-    assert capability is not None and capability.truth_value == "AVAILABLE"
+    evaluation = evaluate_derived_states(session, scope, definition)
+    capability = evaluation.values["southeast_sustained_emergency_generation"]
+    assert capability.truth_value == "AVAILABLE"
+    assert capability.knowledge_value == "AVAILABLE"

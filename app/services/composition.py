@@ -18,6 +18,8 @@ def configured_play_orchestrator(
         db,
         game_instance_id,
         provider=provider,
+        goal_resolution_timeout_seconds=settings.goal_resolution_timeout_seconds,
+        plan_total_timeout_seconds=settings.plan_total_timeout_seconds,
         model_max_repair_attempts_per_cycle=(settings.model_max_repair_attempts_per_cycle),
     )
 

@@ -6,11 +6,11 @@ import type {
 import { uiLabel } from "./ui";
 
 const RESOURCE_LABELS: Record<string, string> = {
-  communication_equipment: "通信设备",
+  communication_equipment: "通信维修部件",
   electrical_repair_parts: "电力维修部件",
-  general_engineering_parts: "通用工程部件",
+  general_engineering_parts: "通用维修部件",
   municipal_repair_materials: "市政维修材料",
-  water_system_parts: "水务系统部件",
+  water_system_parts: "水务维修部件",
 };
 
 export function resourceDisplayName(key: string, candidate?: string): string {
@@ -84,8 +84,6 @@ function knownRelationRequirementDescription(relationTypeKey: string): string {
 const FACT_LABELS: Record<string, string> = {
   operational: "运行状态",
   power_supply: "供电状态",
-  power_generation_capable: "发电能力",
-  generation_capable: "发电能力",
   emergency_power: "应急供电",
   passable: "通行状态",
   heavy_engineering_support: "重型工程支援",
@@ -120,9 +118,6 @@ export function factDisplayValue(
     if (fact.fact_key === "passable") return value ? "可通行" : "待修复";
     if (fact.fact_key === "heavy_engineering_support_ready") return value ? "已部署" : "未部署";
     if (fact.fact_key === "heavy_engineering_support") return value ? "可用" : "不可用";
-    if (fact.fact_key === "generation_capable" || fact.fact_key === "power_generation_capable") {
-      return value ? "具备" : "不具备";
-    }
     return value ? "是" : "否";
   }
   if (typeof value === "number") return String(value);
@@ -143,6 +138,59 @@ export function factDisplayValue(
   return /^[a-z0-9_]+$/i.test(value) ? "当前状态已知" : uiLabel(value);
 }
 
+type PublicFactValue = PlayerGameState["known_facts"][number]["value"];
+
+function isPublicFactValue(value: unknown): value is PublicFactValue {
+  return typeof value === "boolean" || typeof value === "number" || typeof value === "string";
+}
+
+export function publicFactRequirementText(
+  requirement: Record<string, unknown>,
+  fact: PlayerGameState["known_facts"][number],
+  subjectName: string,
+): string | null {
+  // A prerequisite is only player-visible when its current Fact is known.
+  // Treat an explicit UNKNOWN value defensively as non-displayable too.
+  if (fact.value === "UNKNOWN") return null;
+
+  const operator = typeof requirement.operator === "string" ? requirement.operator : "EQ";
+  const expected = requirement.value;
+  if (operator === "EQ" && isPublicFactValue(expected)) {
+    const usesSpecializedPresentation = (
+      (fact.fact_key === "operational" && typeof expected === "boolean")
+      || (
+        fact.fact_key === "power_supply"
+        && (expected === true || expected === false || expected === "AVAILABLE" || expected === "UNAVAILABLE")
+      )
+      || (fact.fact_key === "passable" && typeof expected === "boolean")
+    );
+    if (usesSpecializedPresentation) {
+      return resourceAvailabilityRequirementText(requirement, subjectName);
+    }
+  }
+
+  if (operator === "IN" || operator === "NOT_IN") {
+    if (!Array.isArray(expected) || expected.length === 0 || !expected.every(isPublicFactValue)) {
+      return null;
+    }
+    const expectedText = expected.map((value) => factDisplayValue(fact, value)).join("、");
+    return `${subjectName}：${factDisplayLabel(fact)}${operator === "IN" ? "为" : "不为"}${expectedText}`;
+  }
+
+  if (!isPublicFactValue(expected)) return null;
+  const operatorText: Record<string, string> = {
+    EQ: "为",
+    NE: "不为",
+    GT: "大于",
+    GTE: "至少",
+    LT: "小于",
+    LTE: "至多",
+  };
+  const relation = operatorText[operator];
+  if (!relation) return null;
+  return `${subjectName}：${factDisplayLabel(fact)}${relation}${factDisplayValue(fact, expected)}`;
+}
+
 export function facilityStatusDisplayValue(
   fact: PlayerGameState["known_facts"][number],
 ): string {
@@ -152,12 +200,8 @@ export function facilityStatusDisplayValue(
   return factDisplayValue(fact);
 }
 
-export function generationCapabilityDisplayValue(
-  fact: PlayerGameState["known_facts"][number],
-): string {
-  if (fact.value === true || fact.value === "AVAILABLE") return "已具备";
-  if (fact.value === false || fact.value === "UNAVAILABLE") return "未具备";
-  return factDisplayValue(fact);
+export function publicFactIdentity(nodeKey: string, factKey: string): string {
+  return `${nodeKey}:${factKey}`;
 }
 
 function factLookupKey(nodeKey: string, factKey: string): string {

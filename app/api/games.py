@@ -24,6 +24,7 @@ from app.api.schemas.phase_d import (
     PlayerGameStateResponse,
     PlayerPacingRequest,
     PublicGameStatus,
+    PublicTaskResponse,
 )
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
@@ -116,19 +117,18 @@ def submit_goal(
         submission = configured_play_orchestrator(
             db, GameInstanceId(game_instance_id), settings
         ).submit_goal(request.goal, idempotency_key=request.idempotency_key)
-        if submission.task is None:
-            db.rollback()
-            status_value = GoalSubmissionStatus(submission.resolution.status)
-            return GoalSubmissionResponse(
-                status=status_value,
-                clarification_prompt=submission.resolution.clarification_prompt,
-                candidate_objective_names=list(submission.resolution.candidate_keys),
-                explanation="Goal must map to an Objective in this exact ScenarioVersion",
-            )
         db.commit()
-        state = PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
-        assert state.current_task is not None
-        return GoalSubmissionResponse(status=GoalSubmissionStatus.ACCEPTED, task=state.current_task)
+        return GoalSubmissionResponse(
+            resolution_id=submission.resolution_id,
+            submitted_goal=request.goal,
+            status=(
+                GoalSubmissionStatus.READY_FOR_CONFIRMATION
+                if submission.draft is not None
+                else GoalSubmissionStatus(submission.resolution.status)
+            ),
+            presentation_text=submission.presentation_text,
+            draft_id=submission.draft.id if submission.draft is not None else None,
+        )
     except (
         GameInstanceError,
         GameLifecycleError,
@@ -139,6 +139,36 @@ def submit_goal(
     ) as exc:
         db.rollback()
         _raise_http(exc)
+
+
+@router.post(
+    "/{game_instance_id}/goal-drafts/{draft_id}/confirm",
+    response_model=PublicTaskResponse,
+)
+def confirm_goal_draft(
+    game_instance_id: UUID,
+    draft_id: UUID,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PublicTaskResponse:
+    try:
+        task = configured_play_orchestrator(
+            db, GameInstanceId(game_instance_id), settings
+        ).confirm_goal_draft(draft_id)
+        db.commit()
+        state = PlayerProjectionService(db).game_state(GameInstanceId(game_instance_id))
+        assert state.current_task is not None and state.current_task.id == task.id
+        return state.current_task
+    except (
+        GameInstanceError,
+        GameLifecycleError,
+        GenericAgentError,
+        GenericActionError,
+        GenericProviderError,
+        PlayError,
+    ) as exc:
+        db.rollback()
+        _raise_http(exc, goal_confirmation=True)
 
 
 @router.post(
@@ -514,16 +544,37 @@ def _raise_http(
         | PlayError
         | RuntimeInitializationError
     ),
+    *,
+    goal_confirmation: bool = False,
 ) -> Never:
-    if exc.code == "MODEL_PROVIDER_TIMEOUT":
+    if goal_confirmation and _is_goal_integrity_failure(exc.code):
+        status_code = 500
+        message = "目标确认暂时失败，请重新尝试。"  # noqa: RUF001
+    elif exc.code == "MODEL_PROVIDER_TIMEOUT":
         status_code = 504
+        message = exc.message
     elif exc.code.startswith("MODEL_PROVIDER_"):
         status_code = 502
+        message = exc.message
     elif exc.code == "RUNTIME_CONTRACT_ERROR" or exc.code.startswith("RULE_"):
         status_code = 500
+        message = exc.message
     else:
         status_code = 404 if exc.code.endswith("NOT_FOUND") else 409
-    raise AppError(exc.code, exc.message, status_code=status_code) from exc
+        message = exc.message
+    raise AppError(exc.code, message, status_code=status_code) from exc
+
+
+def _is_goal_integrity_failure(code: str) -> bool:
+    """Keep persisted Goal/confirmation integrity failures system-classified."""
+
+    if code.startswith("FORMAL_GOAL_"):
+        return True
+    return code in {
+        "GENERIC_SESSION_SCOPE_INVALID",
+        "GOAL_DRAFT_CONFIRMATION_INCOMPLETE",
+        "PLAY_SESSION_NOT_FOUND",
+    }
 
 
 __all__ = ["game_summary", "router"]

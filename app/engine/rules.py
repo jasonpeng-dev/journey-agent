@@ -27,6 +27,7 @@ from app.domain.scenario_v2 import (
     RelationDirection,
     RuleDefinitionV2,
     RulePhase,
+    RuleTrigger,
     ScenarioDefinitionV2,
     StrictScalar,
     ValueExpressionV2,
@@ -264,6 +265,41 @@ class DeclarativeRuleEngine:
         resolve = self._select(RulePhase.RESOLVE, state, context, required=True)
         assert resolve is not None
         return self._outcome(resolve, state, context)
+
+    def evaluate_state_triggers(
+        self,
+        state: DeclarativeRuleState,
+        *,
+        exclude_rule_keys: set[str] | frozenset[str] = frozenset(),
+    ) -> tuple[GenericRuleOutcome, ...]:
+        """Evaluate data-driven STATE rules against authoritative runtime state.
+
+        STATE rules deliberately receive no Action target/source context.  The
+        Scenario contract restricts their selectors and resource scopes to
+        explicit identities, so a state transition caused by any Action can
+        activate the same rule without coupling discovery to that Action key.
+        """
+
+        context = ActionRuleContext(action_key="", target_node_key="", parameters={})
+        matches: list[RuleDefinitionV2] = []
+        for rule in self.definition.rules:
+            if (
+                rule.trigger != RuleTrigger.STATE
+                or rule.phase != RulePhase.RESOLVE
+                or rule.key in exclude_rule_keys
+            ):
+                continue
+            if rule.condition is None:
+                matches.append(rule)
+                continue
+            try:
+                if self._condition(rule.condition, state, context):
+                    matches.append(rule)
+            except RuleEngineError as exc:
+                if exc.code != "RULE_RESOURCE_MISSING":
+                    raise
+        matches.sort(key=lambda item: (-item.priority, item.key))
+        return tuple(self._outcome(rule, state, context) for rule in matches)
 
     def _select(
         self,
@@ -737,6 +773,76 @@ class DeclarativeRuleEngine:
                     raise RuleEngineError("RULE_PARAMETER_RANGE_INVALID", "Parameter below minimum")
                 if definition.maximum is not None and value > definition.maximum:
                     raise RuleEngineError("RULE_PARAMETER_RANGE_INVALID", "Parameter above maximum")
+
+
+def merge_rule_outcomes(outcomes: tuple[GenericRuleOutcome, ...]) -> GenericRuleOutcome:
+    """Join one Action outcome with any state-trigger side effects."""
+
+    if not outcomes:
+        raise ValueError("At least one Rule outcome is required")
+    primary = outcomes[0]
+    return GenericRuleOutcome(
+        selected_rule_key=primary.selected_rule_key,
+        outcome_code=next(
+            (item.outcome_code for item in outcomes if item.outcome_code is not None),
+            None,
+        ),
+        failure=next(
+            (item.failure for item in outcomes if item.failure is not None),
+            None,
+        ),
+        fact_updates=tuple(item for outcome in outcomes for item in outcome.fact_updates),
+        fact_visibility_updates=tuple(
+            item for outcome in outcomes for item in outcome.fact_visibility_updates
+        ),
+        node_visibility_updates=tuple(
+            item for outcome in outcomes for item in outcome.node_visibility_updates
+        ),
+        node_access_updates=tuple(
+            item for outcome in outcomes for item in outcome.node_access_updates
+        ),
+        resource_mutations=tuple(
+            item for outcome in outcomes for item in outcome.resource_mutations
+        ),
+        resource_reservations=tuple(
+            item for outcome in outcomes for item in outcome.resource_reservations
+        ),
+        memory_events=tuple(item for outcome in outcomes for item in outcome.memory_events),
+        actor_location_update=next(
+            (
+                item.actor_location_update
+                for item in outcomes
+                if item.actor_location_update is not None
+            ),
+            None,
+        ),
+        actor_command_reachability_updates=tuple(
+            item
+            for outcome in outcomes
+            for item in outcome.actor_command_reachability_updates
+        ),
+        region_resource_visibility_updates=tuple(
+            item
+            for outcome in outcomes
+            for item in outcome.region_resource_visibility_updates
+        ),
+        region_resource_survey_updates=tuple(
+            item for outcome in outcomes for item in outcome.region_resource_survey_updates
+        ),
+        resource_pool_visibility_updates=tuple(
+            item
+            for outcome in outcomes
+            for item in outcome.resource_pool_visibility_updates
+        ),
+        resource_pool_availability_updates=tuple(
+            item
+            for outcome in outcomes
+            for item in outcome.resource_pool_availability_updates
+        ),
+        relation_visibility_updates=tuple(
+            item for outcome in outcomes for item in outcome.relation_visibility_updates
+        ),
+    )
 
 
 def _required[Key, Value](mapping: Mapping[Key, Value], key: Key, code: str) -> Value:

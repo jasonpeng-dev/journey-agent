@@ -12,8 +12,6 @@ from app.agent.generic import (
 )
 from app.agent.provider import (
     GenericModelProvider,
-    GoalSelection,
-    GoalSelectionRequest,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -38,6 +36,7 @@ from app.services.game_instances import GameInstanceService
 from app.services.play import PlayError, PlayOrchestrator
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
+from tests.goal_confirmation_helpers import submit_and_confirm
 from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 
 
@@ -135,9 +134,6 @@ class _RecordingProvider:
     def model_name(self) -> str:
         return "synthetic-provider"
 
-    def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
-        raise AssertionError(f"Unexpected fuzzy goal selection: {request.goal}")
-
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
         return self.proposal
@@ -145,6 +141,9 @@ class _RecordingProvider:
 
 def _accepted_proposal(parameters: dict[str, int] | None = None) -> PlanProposal:
     return PlanProposal(
+        segment_goal="stabilize the patient",
+        goal_link="advances the frozen patient-care objective",
+        continuation_intent="no continuation after treatment succeeds",
         steps=(
             PlanStepProposal(
                 action_key="treat_patient",
@@ -152,7 +151,7 @@ def _accepted_proposal(parameters: dict[str, int] | None = None) -> PlanProposal
                 target_key="patient_one",
                 parameters=parameters or {"dosage": 2},
             ),
-        )
+        ),
     )
 
 
@@ -211,7 +210,7 @@ def _agent(
 
 def test_goal_resolver_uses_only_exact_version_candidates() -> None:
     definition = _definition()
-    resolver = GenericGoalResolver(selector=lambda _goal, _items: "invented_objective")
+    resolver = GenericGoalResolver()
 
     exact = resolver.resolve("stabilize the patient", definition)
     invented = resolver.resolve("conquer the galaxy", definition)
@@ -243,6 +242,12 @@ def test_generic_agent_completes_goal_plan_action_and_backend_objective(
     assert (
         task.objective_catalog_version == f"scenario-version:{runtime.instance.scenario_version_id}"
     )
+    assert task.formal_goal_contract_schema_version == 1
+    assert task.formal_goal_source_kind == "PREDEFINED"
+    assert task.formal_goal_contract_json is not None
+    assert task.formal_goal_contract_hash
+    assert task.formal_goal_scenario_version_id == runtime.instance.scenario_version_id
+    assert task.formal_goal_scenario_content_hash
     assert task.owner_actor_key == "doctor_lee"
     assert task.owner_actor_key == "doctor_lee"
 
@@ -395,6 +400,65 @@ def test_retryable_rule_failure_creates_generic_replan_without_fixed_fallback(
     assert task.status == AgentTaskStatus.SUCCEEDED
 
 
+def test_failed_plan_retires_unreachable_suffix_before_generic_replan(
+    session: Session,
+) -> None:
+    provider = _RecordingProvider(
+        PlanProposal(
+            segment_goal="retry patient treatment",
+            goal_link="advances the frozen patient-care objective",
+            continuation_intent="continue the unfinished treatment sequence",
+            steps=(
+                PlanStepProposal(
+                    action_key="treat_patient",
+                    actor_key="doctor_lee",
+                    target_key="patient_one",
+                    parameters={"dosage": 2},
+                ),
+                PlanStepProposal(
+                    action_key="treat_patient",
+                    actor_key="doctor_lee",
+                    target_key="patient_one",
+                    parameters={"dosage": 2},
+                ),
+            ),
+        )
+    )
+    agent, runtime = _agent(session, preflight=True, provider=provider)
+    task = agent.create_task(runtime.session, "stabilize the patient")
+    old_plan = session.scalar(
+        select(AgentPlan).where(
+            AgentPlan.task_id == task.id,
+            AgentPlan.status == AgentPlanStatus.ACTIVE,
+        )
+    )
+    assert old_plan is not None
+    old_steps = session.scalars(
+        select(AgentStep).where(AgentStep.plan_id == old_plan.id).order_by(AgentStep.sequence)
+    ).all()
+    assert len(old_steps) == 2
+
+    resource = session.get(GameInstanceResourceState, (runtime.instance.id, "medicine"))
+    assert resource is not None
+    resource.value = 0
+    session.flush()
+
+    failed_step = agent.execute_next(task)
+
+    assert failed_step is old_steps[0]
+    assert old_steps[0].status == AgentStepStatus.FAILED
+    assert old_steps[1].status == AgentStepStatus.SKIPPED
+    assert old_plan.status == AgentPlanStatus.SUPERSEDED
+    new_plan = session.scalar(
+        select(AgentPlan).where(
+            AgentPlan.task_id == task.id,
+            AgentPlan.status == AgentPlanStatus.ACTIVE,
+        )
+    )
+    assert new_plan is not None
+    assert new_plan.id != old_plan.id
+
+
 def test_generic_replan_hard_limit_remains_enforced(session: Session) -> None:
     agent, runtime = _agent(session)
     task = agent.create_task(runtime.session, "stabilize the patient")
@@ -426,11 +490,10 @@ def test_player_pacing_recovers_missing_checkpoint_and_enforces_phase(
 ) -> None:
     _agent_service, runtime = _agent(session)
     orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
-    submission = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key="pacing-recovery"
+    task = submit_and_confirm(
+        orchestrator, "stabilize the patient", idempotency_key="pacing-recovery"
     )
-    assert submission.task is not None
-    checkpoint = session.get(PlayerExecutionCheckpoint, submission.task.id)
+    checkpoint = session.get(PlayerExecutionCheckpoint, task.id)
     assert checkpoint is not None
     session.delete(checkpoint)
     session.flush()
@@ -438,27 +501,26 @@ def test_player_pacing_recovers_missing_checkpoint_and_enforces_phase(
 
     orchestrator.start_initial_planning(expected_pacing_version=1)
     orchestrator.acknowledge_action(expected_pacing_version=2)
-    recovered = session.get(PlayerExecutionCheckpoint, submission.task.id)
+    recovered = session.get(PlayerExecutionCheckpoint, task.id)
     assert recovered is not None
     assert recovered.phase == "AWAITING_DEBRIEF_ACK"
     with pytest.raises(PlayError) as caught:
         orchestrator.acknowledge_action(expected_pacing_version=recovered.version)
     assert caught.value.code == "PLAYER_PACING_PHASE_INVALID"
-    submission.task.status = AgentTaskStatus.ABORTED
-    assert orchestrator._phase_after_cycle(submission.task).value == "ABORTED"
+    task.status = AgentTaskStatus.ABORTED
+    assert orchestrator._phase_after_cycle(task).value == "ABORTED"
 
 
 def test_player_pacing_blocks_when_plan_has_no_action(session: Session) -> None:
     _agent_service, runtime = _agent(session)
     orchestrator = PlayOrchestrator(session, GameInstanceId(runtime.instance.id))
-    submission = orchestrator.submit_goal(
-        "stabilize the patient", idempotency_key="pacing-no-action"
+    task = submit_and_confirm(
+        orchestrator, "stabilize the patient", idempotency_key="pacing-no-action"
     )
-    assert submission.task is not None
     orchestrator.start_initial_planning(expected_pacing_version=1)
     plan = session.scalar(
         select(AgentPlan).where(
-            AgentPlan.task_id == submission.task.id,
+            AgentPlan.task_id == task.id,
             AgentPlan.status == AgentPlanStatus.ACTIVE,
         )
     )
@@ -526,6 +588,10 @@ def test_planner_owned_required_parameter_reaches_provider_without_prefill(
     assert len(provider.plan_requests) == 1
     assert plan.version == 1
     assert provider.plan_requests[0].planner_input is not None
+    formal_goal_projection = provider.plan_requests[0].planner_input.objective["formal_goal"]
+    assert isinstance(formal_goal_projection, dict)
+    assert formal_goal_projection["contract_hash"] == task.formal_goal_contract_hash
+    assert formal_goal_projection["requirements"]
     planner_parameters = provider.plan_requests[0].planner_input.action_contracts[0].parameters
     assert planner_parameters[0]["required"] is True
     assert planner_parameters[0]["default"] is None
@@ -568,12 +634,11 @@ def test_satisfied_objective_short_circuits_all_planning_and_execution(
         GameInstanceId(runtime.instance.id),
         provider=provider,
     )
-    submission = orchestrator.submit_goal(
+    task = submit_and_confirm(
+        orchestrator,
         "stabilize the patient",
         idempotency_key="already-complete",
     )
-    task = submission.task
-    assert task is not None
 
     assert task.status == AgentTaskStatus.SUCCEEDED
     checkpoint = session.get(PlayerExecutionCheckpoint, task.id)

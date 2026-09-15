@@ -19,6 +19,7 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.scenarios.builtin import require_builtin_v2_version
+from tests.goal_confirmation_helpers import parse_and_confirm_api
 from tests.scenario_fixtures import GENERIC_TEST
 
 
@@ -203,12 +204,8 @@ def test_archived_source_forks_exact_state_without_history(
         == 0
     )
 
-    goal = client.post(
-        f"/api/v1/games/{target_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-    assert goal.status_code == 200
-    assert goal.json()["status"] == "ACCEPTED"
+    goal = parse_and_confirm_api(client, str(target_id), "stabilize the patient")
+    assert goal["status"] == "ACTIVE"
 
 
 def test_same_archive_supports_multiple_forks_and_retry_is_idempotent(

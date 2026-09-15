@@ -4,11 +4,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.generic import GenericAgentError, GenericAgentService, GenericGoalResolver
-from app.agent.planning_context import legal_candidate_id
+from app.agent.generic import (
+    GenericAgentError,
+    GenericAgentService,
+    GenericGoalResolution,
+    GenericGoalResolver,
+)
 from app.agent.provider import (
-    GoalSelection,
-    GoalSelectionRequest,
     PlanProposal,
     PlanRequest,
     PlanStepProposal,
@@ -39,19 +41,18 @@ from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
 class FakeProvider:
     model_name = "fake-structured-model"
 
-    def __init__(self, *, selected: tuple[str, ...], proposed: tuple[PlanStepProposal, ...] = ()):
-        self.selected = selected
+    def __init__(self, *, proposed: tuple[PlanStepProposal, ...] = ()):
         self.proposed = proposed
-        self.goal_request: GoalSelectionRequest | None = None
         self.plan_request: PlanRequest | None = None
-
-    def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
-        self.goal_request = request
-        return GoalSelection(objective_keys=self.selected)
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_request = request
-        return PlanProposal(steps=self.proposed)
+        return PlanProposal(
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="continue the unfinished objective mainline",
+            steps=self.proposed,
+        )
 
 
 def _provider_step(
@@ -61,7 +62,9 @@ def _provider_step(
     parameters: dict[str, object],
 ) -> PlanStepProposal:
     return PlanStepProposal(
-        candidate_id=legal_candidate_id(action_key, actor_key, target_key),
+        action_key=action_key,
+        actor_key=actor_key,
+        target_key=target_key,
         parameters=parameters,  # type: ignore[arg-type]
     )
 
@@ -125,11 +128,18 @@ def test_nonempty_multi_objective_scope_is_frozen_and_uses_and_completion(
         }
     )
     _definition, runtime, scope = _runtime(session, document)
-    provider = FakeProvider(selected=("stabilize_patient", "restore_consciousness"))
+    provider = FakeProvider()
     resolver = GenericGoalResolver(provider=provider)
     agent = GenericAgentService(session, scope, goal_resolver=resolver)
 
-    task = agent.create_task(runtime.session, "help this patient")
+    task = agent.create_task(
+        runtime.session,
+        "help this patient",
+        resolved_goal=GenericGoalResolution(
+            "RESOLVED",
+            objective_keys=("stabilize_patient", "restore_consciousness"),
+        ),
+    )
 
     assert task.objective_scope_keys == ["restore_consciousness", "stabilize_patient"]
     assert task.objective_scope_hash
@@ -246,19 +256,16 @@ def test_provider_goal_and_plan_are_structured_exact_version_and_validated(
 ) -> None:
     _definition, runtime, scope = _runtime(session)
     provider = FakeProvider(
-        selected=("stabilize_patient",),
         proposed=(_provider_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 2}),),
     )
     agent = GenericAgentService(session, scope, provider=provider)
-    task = agent.create_task(runtime.session, "work out what is wrong")
+    task = agent.create_task(runtime.session, "stabilize the patient")
 
-    assert provider.goal_request is not None
-    assert {item["key"] for item in provider.goal_request.objective_candidates} == {
-        "stabilize_patient",
-    }
     assert provider.plan_request is not None
-    assert provider.plan_request.objective_keys == ("stabilize_patient",)
-    assert "patient_one.stable" in provider.plan_request.known_world["facts"]
+    assert provider.plan_request.planner_input.objective["objective_scope"] == [
+        "stabilize_patient"
+    ]
+    assert "patient_one.stable" in provider.plan_request.planner_input.known_world.facts
     assert task.status == AgentTaskStatus.ACTIVE
     # Phase D permits only one non-terminal Task per GameInstance. Complete this
     # task before exercising a second provider proposal in the same Runtime.
@@ -266,11 +273,10 @@ def test_provider_goal_and_plan_are_structured_exact_version_and_validated(
     session.flush()
 
     bad = FakeProvider(
-        selected=("stabilize_patient",),
         proposed=(_provider_step("treat_patient", "patient_one", "invented_actor", {"dosage": 2}),),
     )
     with pytest.raises(GenericAgentError) as caught:
         GenericAgentService(session, scope, provider=bad).create_task(
-            runtime.session, "another unclear diagnosis request"
+            runtime.session, "stabilize the patient"
         )
     assert caught.value.code == "MODEL_PLAN_REJECTED"

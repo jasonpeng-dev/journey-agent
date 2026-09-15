@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.generic import (
     GenericAgentError,
@@ -19,12 +22,21 @@ from app.agent.generic import (
     proposal_signature,
 )
 from app.agent.planning_context import PlanningContinuityBuilder
-from app.agent.provider import GenericModelProvider, GenericProviderError, PlanRequest
+from app.agent.provider import (
+    GenericModelProvider,
+    GenericProviderError,
+    PlanRequest,
+    ensure_goal_resolution_budget,
+    goal_resolution_operation,
+    plan_operation,
+    provider_call_history_metadata,
+)
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
     AgentTaskStatus,
     DecisionStatus,
+    ResolvedGoalDraftStatus,
     StepExecutionType,
     WorldOperationStatus,
 )
@@ -36,13 +48,26 @@ from app.infrastructure.db.models import (
     AgentStep,
     AgentTask,
     ConversationSession,
+    GoalResolutionAttempt,
     PlayerExecutionCheckpoint,
+    ResolvedGoalDraft,
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.formal_goal import FormalGoalPersistenceError, load_formal_goal_for_draft
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import require_scope_writable
 from app.services.generic_actions import GenericActionService
+from app.services.goal_presentation import (
+    SYSTEM_FAILURE_TEXT,
+    present_failed_goal,
+    present_resolved_goal,
+)
+from app.services.goal_resolution_observability import (
+    GoalResolutionAttemptConflict,
+    persist_goal_resolution_attempt,
+    reserve_goal_resolution_attempt,
+)
 from app.services.player_pacing import PlayerExecutionPhase
 
 
@@ -56,7 +81,9 @@ class PlayError(ValueError):
 @dataclass(frozen=True, slots=True)
 class GoalSubmission:
     resolution: GenericGoalResolution
-    task: AgentTask | None
+    resolution_id: UUID
+    presentation_text: str
+    draft: ResolvedGoalDraft | None
     replayed: bool = False
 
 
@@ -71,11 +98,27 @@ class PlayOrchestrator:
         game_instance_id: GameInstanceId,
         *,
         provider: GenericModelProvider | None = None,
+        audit_session_factory: Callable[[], Session] | None = None,
         model_max_repair_attempts_per_cycle: int = 2,
+        goal_resolution_timeout_seconds: float = 20,
+        plan_total_timeout_seconds: float | None = None,
     ) -> None:
         self.db = db
+        audit_bind = db.get_bind()
+        if isinstance(audit_bind, Connection):
+            audit_bind = audit_bind.engine
+        self.audit_session_factory: Callable[[], Session] = audit_session_factory or sessionmaker(
+            bind=audit_bind,
+            expire_on_commit=False,
+        )
         self.scope = GameInstanceService(db).load(game_instance_id)
-        self.goal_resolver = GenericGoalResolver(provider=provider)
+        self.goal_resolution_timeout_seconds = goal_resolution_timeout_seconds
+        self.plan_total_timeout_seconds = plan_total_timeout_seconds
+        self.goal_resolver = GenericGoalResolver(
+            provider=provider,
+            db=db,
+            scope=self.scope,
+        )
         self.agent = GenericAgentService(
             db,
             self.scope,
@@ -147,76 +190,144 @@ class PlayOrchestrator:
         require_scope_writable(self.db, self.scope.game_instance_id)
         if not idempotency_key.strip():
             raise PlayError("GOAL_IDEMPOTENCY_KEY_REQUIRED", "Goal requires an idempotency key")
-        existing = self.db.scalar(
-            select(AgentTask).where(
-                AgentTask.game_instance_id == self.scope.game_instance_id,
-                AgentTask.submission_idempotency_key == idempotency_key,
+        try:
+            attempt, replayed = reserve_goal_resolution_attempt(
+                self.audit_session_factory,
+                game_instance_id=self.scope.game_instance_id,
+                scenario_version_id=self.scope.scenario_version_id,
+                goal=goal,
+                idempotency_key=idempotency_key,
+                stale_after_seconds=self.goal_resolution_timeout_seconds,
             )
-        )
-        if existing is not None:
-            if existing.goal_description != goal:
-                raise PlayError(
-                    "GOAL_IDEMPOTENCY_CONFLICT",
-                    "The idempotency key is bound to another Goal",
+        except GoalResolutionAttemptConflict as exc:
+            code = str(exc)
+            message = {
+                "GOAL_IDEMPOTENCY_CONFLICT": "The idempotency key is bound to another Goal",
+                "AGENT_TASK_ALREADY_ACTIVE": "A GameInstance may have only one active Task",
+                "GAME_INSTANCE_NOT_FOUND": "The Game does not exist",
+                "GAME_INSTANCE_READ_ONLY": "Only an active GameInstance may parse a Goal",
+            }.get(code, "Goal Parse reservation failed")
+            raise PlayError(code, message) from exc
+        self.db.expire_all()
+        if replayed:
+            draft = self.db.scalar(
+                select(ResolvedGoalDraft).where(
+                    ResolvedGoalDraft.resolution_attempt_id == attempt.id
                 )
-            self._ensure_checkpoint(existing)
+            )
+            if attempt.resolution_status in {"ERROR", "IN_PROGRESS"}:
+                raise PlayError("GOAL_PARSE_REPLAY_FAILED", SYSTEM_FAILURE_TEXT)
+            resolution = GenericGoalResolution(
+                attempt.resolution_status,
+                candidate_keys=tuple(attempt.resolution_candidate_keys),
+                source=attempt.resolver_source,
+            )
             return GoalSubmission(
-                GenericGoalResolution(
-                    "RESOLVED",
-                    objective_keys=tuple(existing.objective_scope_keys or ()),
-                ),
-                existing,
+                resolution,
+                attempt.id,
+                attempt.presentation_text or present_failed_goal(resolution, goal),
+                draft,
                 True,
             )
         definition = (
             ScenarioVersionRepository(self.db).load(self.scope.scenario_version_id).definition
         )
+        provider_history_start = len(provider_call_history_metadata(self.goal_resolver.provider))
         resolution_started = perf_counter()
-        resolution = self.goal_resolver.resolve(goal, definition)
+        try:
+            with goal_resolution_operation(self.goal_resolution_timeout_seconds):
+                resolution = self.goal_resolver.resolve(goal, definition)
+                # A provider implementation may return a value after its
+                # transport boundary has crossed the shared operation budget.
+                # Do not allow that late value to become a READY draft.
+                ensure_goal_resolution_budget()
+        except GenericProviderError as exc:
+            persist_goal_resolution_attempt(
+                self.audit_session_factory,
+                game_instance_id=self.scope.game_instance_id,
+                scenario_version_id=self.scope.scenario_version_id,
+                goal=goal,
+                resolution=None,
+                resolution_duration_ms=_duration_ms(resolution_started),
+                provider=self.goal_resolver.provider,
+                error_code=exc.code,
+                validation_diagnostics=exc.validation_diagnostics,
+                resolution_observation=exc.resolution_observation,
+                provider_calls=provider_call_history_metadata(self.goal_resolver.provider)[
+                    provider_history_start:
+                ],
+                attempt_id=attempt.id,
+                submission_idempotency_key=idempotency_key,
+                presentation_text=SYSTEM_FAILURE_TEXT,
+            )
+            raise
         resolution_duration_ms = _duration_ms(resolution_started)
         if resolution.status != "RESOLVED":
-            return GoalSubmission(resolution, None)
-        conversation = self.db.scalar(
-            select(ConversationSession).where(
-                ConversationSession.game_instance_id == self.scope.game_instance_id,
-                ConversationSession.actor_key.is_not(None),
+            presentation_text = present_failed_goal(resolution, goal)
+            persist_goal_resolution_attempt(
+                self.audit_session_factory,
+                game_instance_id=self.scope.game_instance_id,
+                scenario_version_id=self.scope.scenario_version_id,
+                goal=goal,
+                resolution=resolution,
+                resolution_duration_ms=resolution_duration_ms,
+                provider=self.goal_resolver.provider,
+                provider_calls=provider_call_history_metadata(self.goal_resolver.provider)[
+                    provider_history_start:
+                ],
+                attempt_id=attempt.id,
+                submission_idempotency_key=idempotency_key,
+                presentation_text=presentation_text,
             )
+            return GoalSubmission(
+                resolution,
+                attempt.id,
+                presentation_text,
+                None,
+            )
+        formal_goal = self.agent.compile_formal_goal_for_resolution(resolution)
+        presentation_text = present_resolved_goal(
+            formal_goal,
+            definition,
+            provider_observation=resolution.provider_observation,
         )
-        if conversation is None:
-            raise PlayError("PLAY_SESSION_NOT_FOUND", "The Game has no playable Actor session")
-        try:
-            # Goal resolution and initial planning are separate player-facing
-            # operations.  GenericAgentService still owns task construction;
-            # Formal Play simply defers its first plan until the player
-            # acknowledges the resolved Goal.
-            task = self.agent.create_task(
-                conversation,
-                goal,
-                resolved_goal=resolution,
-                initialize_plan=False,
-            )
-        except GenericAgentError as exc:
-            if exc.code not in (*_UNREACHABLE_PLANNING_CODES, *_MODEL_PLAN_CODES):
-                raise
-            blocked_task = self._current_task()
-            if blocked_task is None:
-                raise
-            task = blocked_task
-            task.status = AgentTaskStatus.BLOCKED
-            task.last_error_code = (
-                "MODEL_PLAN_REJECTED"
-                if exc.code in _MODEL_PLAN_CODES
-                else "UNREACHABLE_IN_CURRENT_STATE"
-            )
-        task.submission_idempotency_key = idempotency_key
-        self._record_operation_duration(
-            task,
-            kind="GOAL_RESOLUTION",
-            duration_ms=resolution_duration_ms,
+        persist_goal_resolution_attempt(
+            self.audit_session_factory,
+            game_instance_id=self.scope.game_instance_id,
+            scenario_version_id=self.scope.scenario_version_id,
+            goal=goal,
+            resolution=resolution,
+            resolution_duration_ms=resolution_duration_ms,
+            provider=self.goal_resolver.provider,
+            provider_calls=provider_call_history_metadata(self.goal_resolver.provider)[
+                provider_history_start:
+            ],
+            attempt_id=attempt.id,
+            submission_idempotency_key=idempotency_key,
+            presentation_text=presentation_text,
         )
-        self._ensure_checkpoint(task)
+        draft = ResolvedGoalDraft(
+            game_instance_id=self.scope.game_instance_id,
+            resolution_attempt_id=attempt.id,
+            original_goal_text=goal,
+            scenario_version_id=self.scope.scenario_version_id,
+            scenario_content_hash=formal_goal.scenario.scenario_content_hash,
+            formal_goal_contract_schema_version=formal_goal.schema_version,
+            formal_goal_source_kind=formal_goal.source_kind.value,
+            formal_goal_contract_json=formal_goal.model_dump(mode="json"),
+            formal_goal_contract_hash=formal_goal.content_hash,
+            formal_goal_compiler_version=formal_goal.compiler_version,
+            resolver_source=resolution.source,
+            status=ResolvedGoalDraftStatus.READY,
+        )
+        self.db.add(draft)
         self.db.flush()
-        return GoalSubmission(resolution, task)
+        return GoalSubmission(
+            resolution,
+            attempt.id,
+            presentation_text,
+            draft,
+        )
 
     def start_initial_planning(self, *, expected_pacing_version: int) -> AgentTask:
         """Generate the first plan after the player accepts the resolved Goal."""
@@ -233,7 +344,8 @@ class PlayOrchestrator:
             )
         planning_started = perf_counter()
         try:
-            plan = self.agent.plan(task)
+            with plan_operation(self.plan_total_timeout_seconds):
+                plan = self.agent.plan(task)
         except GenericProviderError as exc:
             self._persist_provider_failure(
                 task,
@@ -277,6 +389,97 @@ class PlayOrchestrator:
         )
         checkpoint.version += 1
         self.db.flush()
+        return task
+
+    def confirm_goal_draft(self, draft_id: UUID) -> AgentTask:
+        """Create or replay one Task from an exact stored Draft contract."""
+
+        require_scope_writable(self.db, self.scope.game_instance_id)
+        draft = self.db.scalar(
+            select(ResolvedGoalDraft).where(ResolvedGoalDraft.id == draft_id).with_for_update()
+        )
+        if draft is None or draft.game_instance_id != self.scope.game_instance_id:
+            raise PlayError("GOAL_DRAFT_NOT_FOUND", "The Goal Draft does not belong to this Game")
+        if draft.status == ResolvedGoalDraftStatus.CONFIRMED:
+            if draft.confirmed_task_id is None:
+                raise PlayError(
+                    "GOAL_DRAFT_CONFIRMATION_INCOMPLETE",
+                    "The confirmed Goal Draft has no bound Task",
+                )
+            task = self.db.get(AgentTask, draft.confirmed_task_id)
+            if task is None or task.game_instance_id != self.scope.game_instance_id:
+                raise PlayError(
+                    "GOAL_DRAFT_CONFIRMATION_INCOMPLETE",
+                    "The confirmed Goal Draft Task is unavailable",
+                )
+            self._ensure_checkpoint(task)
+            return task
+        if draft.status == ResolvedGoalDraftStatus.SUPERSEDED:
+            raise PlayError("GOAL_DRAFT_SUPERSEDED", "The Goal Draft is no longer confirmable")
+        if self._current_task() is not None:
+            raise PlayError("AGENT_TASK_ALREADY_ACTIVE", "The Game already has an active Task")
+        try:
+            formal_goal = load_formal_goal_for_draft(self.db, self.scope, draft)
+        except FormalGoalPersistenceError as exc:
+            raise PlayError(exc.code, exc.message) from exc
+        conversation = self.db.scalar(
+            select(ConversationSession).where(
+                ConversationSession.game_instance_id == self.scope.game_instance_id,
+                ConversationSession.actor_key.is_not(None),
+            )
+        )
+        if conversation is None:
+            raise PlayError("PLAY_SESSION_NOT_FOUND", "The Game has no playable Actor session")
+        try:
+            with self.db.begin_nested():
+                task = self.agent.create_task_from_formal_goal(
+                    conversation,
+                    draft.original_goal_text,
+                    formal_goal=formal_goal,
+                    resolver_source=draft.resolver_source,
+                    initialize_plan=False,
+                    task_id=draft.id,
+                )
+                task.submission_idempotency_key = f"goal-draft:{draft.id}"
+                attempt = self.db.get(GoalResolutionAttempt, draft.resolution_attempt_id)
+                if attempt is not None:
+                    self._record_operation_duration(
+                        task,
+                        kind="GOAL_RESOLUTION",
+                        duration_ms=attempt.resolution_duration_ms,
+                    )
+                self._ensure_checkpoint(task)
+                draft.status = ResolvedGoalDraftStatus.CONFIRMED
+                draft.confirmed_task_id = task.id
+                draft.confirmed_at = datetime.now(UTC)
+                self.db.flush()
+        except IntegrityError as exc:
+            self.db.expire_all()
+            replay = self.db.get(AgentTask, draft_id)
+            if replay is not None and replay.game_instance_id == self.scope.game_instance_id:
+                return replay
+            raise PlayError(
+                "GOAL_DRAFT_CONFIRMATION_CONFLICT",
+                "The Goal Draft could not be confirmed concurrently",
+            ) from exc
+        except OperationalError as exc:
+            if self.db.get_bind().dialect.name != "sqlite" or "database is locked" not in str(exc):
+                raise
+            # SQLite has no SELECT ... FOR UPDATE. Two deferred transactions can
+            # therefore both read READY before one wins the deterministic Task
+            # insert. Roll back the losing snapshot and briefly wait for that
+            # exact Task id to become visible; no semantic work is repeated.
+            self.db.rollback()
+            for _ in range(100):
+                replay = self.db.get(AgentTask, draft_id)
+                if replay is not None and replay.game_instance_id == self.scope.game_instance_id:
+                    return replay
+                self.db.rollback()
+                sleep(0.01)
+            raise PlayError(
+                "GOAL_DRAFT_CONFIRMATION_CONFLICT",
+                "The Goal Draft could not be confirmed concurrently",
+            ) from exc
         return task
 
     def acknowledge_action(self, *, expected_pacing_version: int) -> AgentTask:
@@ -493,11 +696,12 @@ class PlayOrchestrator:
                     replan_reason=replan_reason,
                     trigger_step_id=failed_step.id,
                 )
-                plan = self.agent.plan(
-                    task,
-                    reason=replan_reason,
-                    planning_continuity=planning_continuity,
-                )
+                with plan_operation(self.plan_total_timeout_seconds):
+                    plan = self.agent.plan(
+                        task,
+                        reason=replan_reason,
+                        planning_continuity=planning_continuity,
+                    )
             except GenericProviderError as exc:
                 self._persist_provider_failure(
                     task,
@@ -611,9 +815,11 @@ class PlayOrchestrator:
         if step is not None:
             step.status = AgentStepStatus.FAILED
             step.failure_code = "PLAYER_REJECTED"
+            self.agent.retire_failed_plan_suffix(task, step)
         replan_started = perf_counter()
         try:
-            plan = self.agent.plan(task, reason="PLAYER_REJECTED")
+            with plan_operation(self.plan_total_timeout_seconds):
+                plan = self.agent.plan(task, reason="PLAYER_REJECTED")
         except GenericProviderError as exc:
             self._persist_provider_failure(
                 task,
@@ -717,7 +923,8 @@ class PlayOrchestrator:
         if self.agent.evaluate(task).completed:
             self.agent.execute_next(task)
             return
-        self.agent.plan(task, reason="PLAN_EXHAUSTED")
+        with plan_operation(self.plan_total_timeout_seconds):
+            self.agent.plan(task, reason="PLAN_EXHAUSTED")
 
     def _next_action_step(self, task: AgentTask) -> AgentStep | None:
         plan = self._active_plan_for_task(task)

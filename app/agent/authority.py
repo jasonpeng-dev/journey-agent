@@ -47,6 +47,8 @@ def evaluate_authority(
     actor: GameInstanceActor,
     action: ActionDefinitionV2,
     parameters: ActionParameters,
+    *,
+    target_key: str | None = None,
 ) -> GenericAuthorityDecision:
     try:
         parameters = normalize_action_parameters(action, parameters)
@@ -60,13 +62,11 @@ def evaluate_authority(
     required = {capability.value for capability in action.allowed_actor_capabilities}
     if not required.issubset(actor_capabilities):
         return _deny("ACTOR_CAPABILITY_MISSING", required=sorted(required))
-    if (
-        action.required_actor_role_key is not None
-        and actor.role_key != action.required_actor_role_key
-    ):
+    required_actor_role = action.required_actor_role_for_target(target_key)
+    if required_actor_role is not None and actor.role_key != required_actor_role:
         return _deny(
             "ACTOR_ROLE_MISSING",
-            required_role=action.required_actor_role_key,
+            required_role=required_actor_role,
         )
 
     try:

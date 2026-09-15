@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService, GenericGoalResolution
@@ -27,7 +28,7 @@ from app.infrastructure.db.models import (
 )
 from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.services.game_instances import GameInstanceService
-from app.services.generic_game import GenericGameService
+from app.services.generic_game import GenericGameError, GenericGameService
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioService
@@ -42,9 +43,6 @@ class _KnowledgeReplanProvider:
     def __init__(self) -> None:
         self.plan_requests: list[PlanRequest] = []
 
-    def select_objectives(self, _request: object) -> object:
-        raise AssertionError("The regression uses an exact ObjectiveScope")
-
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
         dependencies = request.planner_input.known_world.unknown_dependencies
@@ -55,6 +53,9 @@ class _KnowledgeReplanProvider:
                 item for item in dependencies if item.get("dimension") == "OBJECTIVE_FACT_KNOWLEDGE"
             )
             return PlanProposal(
+                segment_goal="acquire the unresolved facility state",
+                goal_link="supports the frozen communication objective",
+                continuation_intent="continue source discovery after new Knowledge",
                 stop_reason="INFORMATION_BOUNDARY",
                 boundary_dependency_id=str(objective_dependency["dependency_id"]),
                 steps=(
@@ -73,6 +74,9 @@ class _KnowledgeReplanProvider:
                 and item.get("resource_key") == "communication_equipment"
             )
             return PlanProposal(
+                segment_goal="acquire the unresolved source state",
+                goal_link="supports the active communication resource dependency",
+                continuation_intent="continue source transport after new Knowledge",
                 stop_reason="INFORMATION_BOUNDARY",
                 boundary_dependency_id=str(resource_dependency["dependency_id"]),
                 steps=(
@@ -91,6 +95,9 @@ class _KnowledgeReplanProvider:
             and item.get("destination_region") == "central_district"
         )
         return PlanProposal(
+            segment_goal="reach and survey the relevant source region",
+            goal_link="advances the active communication resource dependency",
+            continuation_intent="continue the transport and repair mainline",
             stop_reason="INFORMATION_BOUNDARY",
             boundary_dependency_id=str(resource_dependency["dependency_id"]),
             steps=(
@@ -117,6 +124,7 @@ def _definition_with_pool(
     quantity: int,
     public_facility_keys: tuple[str, ...] = (),
     hidden_facility_keys: tuple[str, ...] = (),
+    blocked_transport_keys: tuple[str, ...] = (),
 ) -> ScenarioDefinitionV2:
     document = deepcopy(V2_0.model_dump(mode="json"))
     document["metadata"]["key"] = key
@@ -128,6 +136,9 @@ def _definition_with_pool(
             node["initial_visibility"] = "KNOWN"
         if node["key"] in hidden_facility_keys:
             node["initial_visibility"] = "HIDDEN"
+        if node["key"] in blocked_transport_keys:
+            passable = next(fact for fact in node["facts"] if fact["key"] == "passable")
+            passable["initial_value"] = False
     document["initialization"]["resource_pools"].append(
         {
             "pool_key": pool_key,
@@ -253,7 +264,6 @@ def test_facility_identity_is_known_while_authored_facts_stay_hidden(session: Se
     assert inspected.outcome.failure is None
     assert {item.key for item in inspected.knowledge_changes} == {
         "central_hospital.operational",
-        "central_hospital.power_generation_capable",
         "central_hospital.power_supply",
     }
     region_knowledge = session.get(
@@ -449,18 +459,18 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
     )
 
 
-def test_repair_communications_reveals_target_region_facilities_not_resources(
+def test_repair_facility_communications_target_reveals_region_facilities_not_resources(
     session: Session,
 ) -> None:
     definition = _definition_with_pool(
-        "linjiang_v2_0_repair_communications",
+        "linjiang_v2_0_repair_facility_communications",
         pool_key="north_communication_test",
         resource_key="communication_equipment",
         region_key="north_industrial_district",
         quantity=10,
         hidden_facility_keys=("heavy_equipment_yard",),
     )
-    runtime, scope = _runtime(session, definition, "linjiang_v2_0_repair_communications")
+    runtime, scope = _runtime(session, definition, "linjiang_v2_0_repair_facility_communications")
     _set_actor(
         session,
         runtime.instance.id,
@@ -510,7 +520,7 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
 
     result = GenericGameService(session, scope).execute(
         actor_key="communications_repair_team_alpha",
-        action_key="repair_communications",
+        action_key="repair_facility",
         target_node_key="north_communication_relay",
         parameters={},
     )
@@ -545,6 +555,131 @@ def test_repair_communications_reveals_target_region_facilities_not_resources(
     assert hidden_pool.visibility == ResourcePoolVisibility.HIDDEN
 
 
+def test_unconstrained_facility_repair_has_no_role_cost_or_extra_effects(
+    session: Session,
+) -> None:
+    runtime, scope = _runtime(session, V2_0, "linjiang_v2_0_base_repair")
+    _set_actor(
+        session,
+        runtime.instance.id,
+        "industrial_repair_team_alpha",
+        "east_residential_district",
+    )
+    operational = _fact(session, runtime.instance.id, "east_telecom_station", "operational")
+    operational.truth_value = False
+    session.flush()
+
+    result = GenericGameService(session, scope).execute(
+        actor_key="industrial_repair_team_alpha",
+        action_key="repair_facility",
+        target_node_key="east_telecom_station",
+        parameters={},
+    )
+
+    assert result.outcome.failure is None
+    assert result.outcome.outcome_code == "FACILITY_REPAIRED"
+    assert result.outcome.resource_mutations == ()
+    assert result.outcome.actor_command_reachability_updates == ()
+    assert (
+        _fact(
+            session,
+            runtime.instance.id,
+            "east_telecom_station",
+            "operational",
+        ).truth_value
+        is True
+    )
+
+
+def test_repair_facility_rejects_region_even_if_it_has_repairable_interaction(
+    session: Session,
+) -> None:
+    document = deepcopy(V2_0.model_dump(mode="json"))
+    region = next(node for node in document["world"]["nodes"] if node["key"] == "central_district")
+    region["interaction_keys"].append("repairable")
+    definition = ScenarioDefinitionV2.model_validate(document)
+    runtime, scope = _runtime(session, definition, "linjiang_v2_0_region_repair_invalid")
+    _set_actor(
+        session,
+        runtime.instance.id,
+        "industrial_repair_team_alpha",
+        "central_district",
+    )
+
+    with pytest.raises(GenericGameError) as exc_info:
+        GenericGameService(session, scope).execute(
+            actor_key="industrial_repair_team_alpha",
+            action_key="repair_facility",
+            target_node_key="central_district",
+            parameters={},
+        )
+
+    assert exc_info.value.code == "ACTION_TARGET_INVALID"
+
+
+def test_legacy_repair_communications_snapshot_behavior_remains_executable(
+    session: Session,
+) -> None:
+    document = deepcopy(V2_0.model_dump(mode="json"))
+    repair = next(action for action in document["actions"] if action["key"] == "repair_facility")
+    repair["key"] = "repair_communications"
+    repair["behavior"] = "REPAIR_COMMUNICATIONS"
+    repair["required_actor_role_key"] = "communications_repair_team"
+    repair["target_actor_roles"] = []
+    repair["planning"]["target_terminal_effects"] = []
+    for actor in document["actors"]["actor_profiles"]:
+        actor["allowed_action_keys"] = [
+            "repair_communications" if key == "repair_facility" else key
+            for key in actor["allowed_action_keys"]
+        ]
+    document["rules"] = [
+        rule
+        for rule in document["rules"]
+            if rule.get("action_key") != "repair_facility"
+        or rule["key"] == "repair_facility_base_resolution"
+    ]
+    for rule in document["rules"]:
+        if rule.get("action_key") != "repair_facility":
+            continue
+        rule["action_key"] = "repair_communications"
+        rule["effects"] = [
+            effect
+            for effect in rule["effects"]
+            if effect["kind"] != "REVEAL_TARGET_REGION_FACILITY_FACTS"
+        ]
+    definition = ScenarioDefinitionV2.model_validate(document)
+    runtime, scope = _runtime(session, definition, "legacy_repair_communications_snapshot")
+    _set_actor(
+        session,
+        runtime.instance.id,
+        "communications_repair_team_alpha",
+        "central_district",
+    )
+    operational = _fact(session, runtime.instance.id, "central_hospital", "operational")
+    operational.truth_value = False
+    session.flush()
+
+    result = GenericGameService(session, scope).execute(
+        actor_key="communications_repair_team_alpha",
+        action_key="repair_communications",
+        target_node_key="central_hospital",
+        parameters={},
+    )
+
+    assert result.outcome.failure is None
+    assert result.outcome.outcome_code == "FACILITY_REPAIRED"
+    assert (
+        _fact(
+            session,
+            runtime.instance.id,
+            "central_hospital",
+            "operational",
+        ).truth_value
+        is True
+    )
+    assert any(item.kind == "FACT_REVEALED" for item in result.knowledge_changes)
+
+
 def test_route_attempts_reveal_truth_and_clear_requires_known_blocked(
     session: Session,
 ) -> None:
@@ -554,6 +689,7 @@ def test_route_attempts_reveal_truth_and_clear_requires_known_blocked(
         resource_key="municipal_repair_materials",
         region_key="central_district",
         quantity=10,
+        blocked_transport_keys=("central_river_tunnel",),
     )
     runtime, scope = _runtime(session, definition, "linjiang_v2_0_route_reveal")
     knowledge = session.get(

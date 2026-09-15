@@ -41,9 +41,11 @@ from app.scenarios.builtin import (
 )
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
+from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.player_projection import PlayerProjectionService, _task_explanation, _task_status
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.spatial_projection import SpatialDisplayProjector
+from tests.scenario_fixtures import predefined_goal_resolution
 
 
 def _runtime_task(
@@ -66,6 +68,7 @@ def _runtime_task(
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         goal,
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     return runtime, task
@@ -514,7 +517,7 @@ def test_plan_history_projects_display_outcome_duration_and_planned_resources(
         **cycle.planner_input,
         "target_bindings": [
             {
-                "action_key": "repair_industrial_facility",
+                "action_key": "repair_facility",
                 "target_key": "utility_service_depot",
                 "requirements": [
                     {
@@ -538,7 +541,7 @@ def test_plan_history_projects_display_outcome_duration_and_planned_resources(
         started_at=base,
         finished_at=base + timedelta(seconds=130),
         latency_ms=130_000,
-        proposal={"steps": [{"action_key": "repair_industrial_facility"}]},
+        proposal={"steps": [{"action_key": "repair_facility"}]},
     )
     session.add(attempt)
     session.flush()
@@ -549,7 +552,7 @@ def test_plan_history_projects_display_outcome_duration_and_planned_resources(
     step = _step(
         plan.id,
         1,
-        "repair_industrial_facility",
+        "repair_facility",
         "utility_service_depot",
         {},
     )
@@ -809,7 +812,7 @@ def test_relay_projection_uses_target_actor_plan_time_region_and_name(
         session,
         "player-projection-relay-subtitle",
         definition,
-        goal=definition.objectives[0].key,
+        goal=definition.objectives[0].name,
     )
     target_actor = session.get(
         GameInstanceActor,
@@ -885,10 +888,27 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     utility_node_state.visibility = Visibility.KNOWN
     projection = PlayerProjectionService(session)
     state = projection.game_state(GameInstanceId(runtime.instance.id))
+    scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
+    shared = SharedKnowledgeProjection(session, scope, definition)
+    shared_contracts = shared.target_knowledge_contracts()
     contracts = {
         (item.target_key, item.action_key): item for item in state.known_target_action_contracts
     }
-    assert ("utility_service_depot", "repair_industrial_facility") not in contracts
+    assert set(contracts) == {
+        (str(item["target_key"]), str(item["action_key"])) for item in shared_contracts
+    }
+    shared_roles = {
+        (str(item["action_key"]), str(item["target_key"]), str(item["required_actor_role_key"]))
+        for item in shared_contracts
+        if item.get("required_actor_role_key") is not None
+    }
+    projected_roles = {
+        (action.action_key, str(role["target_key"]), str(role["required_actor_role_key"]))
+        for action in state.known_action_requirements
+        for role in action.target_actor_roles
+    }
+    assert projected_roles == shared_roles
+    assert ("utility_service_depot", "repair_facility") not in contracts
     repair_profile = session.get(
         GameInstanceFactState,
         (runtime.instance.id, "utility_service_depot", "repair_profile"),
@@ -910,7 +930,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
         (item.target_key, item.action_key): item
         for item in known_state.known_target_action_contracts
     }
-    utility = known_contracts[("utility_service_depot", "repair_industrial_facility")]
+    utility = known_contracts[("utility_service_depot", "repair_facility")]
     assert utility.cost == {
         "general_engineering_parts": 5,
         "municipal_repair_materials": 20,
@@ -922,7 +942,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     repair_profile.visibility = Visibility.HIDDEN
     session.flush()
     hidden_state = projection.game_state(GameInstanceId(runtime.instance.id))
-    assert all(
-        item.target_key != "utility_service_depot"
+    assert not any(
+        item.target_key == "utility_service_depot" and item.action_key == "repair_facility"
         for item in hidden_state.known_target_action_contracts
     )

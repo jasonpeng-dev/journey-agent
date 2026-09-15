@@ -16,11 +16,17 @@ from sqlalchemy.orm import Session
 
 import app.agent.provider as provider_module
 from app.agent.generic import GenericAgentError, GenericAgentService, proposal_signature
-from app.agent.planning_context import PlanningContinuityBuilder, legal_candidate_id
+from app.agent.planning_context import PlanningContinuityBuilder
 from app.agent.provider import (
+    DynamicGoalActionRoutingRequest,
+    DynamicGoalCandidateReference,
+    DynamicGoalEntityGrounding,
+    DynamicGoalEntityGroundingRequest,
+    DynamicGoalFamilyRouting,
+    DynamicGoalFamilyRoutingRequest,
+    DynamicGoalInterpretation,
+    DynamicGoalInterpretationRequest,
     GenericProviderError,
-    GoalSelection,
-    GoalSelectionRequest,
     OpenAICompatibleGenericProvider,
     PlannerInput,
     PlanProposal,
@@ -30,7 +36,7 @@ from app.agent.provider import (
 from app.core.config import Settings
 from app.domain.enums import NodeStatus, WorldOperationStatus
 from app.domain.runtime_scope import GameInstanceId
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import ObjectiveRequirementKind, ScenarioDefinitionV2
 from app.infrastructure.db.models import (
     AgentPlan,
     AgentStep,
@@ -46,6 +52,8 @@ from app.scenarios.builtin import require_builtin_v2_version
 from app.services.composition import configured_play_orchestrator
 from app.services.game_instances import GameInstanceService
 from app.services.runtime_initialization import RuntimeInitializationService
+from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
+from tests.goal_confirmation_helpers import parse_and_confirm_api, submit_and_confirm
 from tests.scenario_fixtures import GENERIC_TEST, create_test_scenario
 
 
@@ -55,21 +63,72 @@ class RecordingProvider:
     def __init__(
         self,
         *,
-        selected: tuple[str, ...] = (),
         proposals: Iterable[tuple[PlanStepProposal, ...]] = (),
+        dynamic_interpretation: DynamicGoalInterpretation | None = None,
     ) -> None:
-        self.selected = selected
         self.proposals = deque(proposals)
-        self.goal_requests: list[GoalSelectionRequest] = []
+        self.dynamic_interpretation = dynamic_interpretation
+        self.dynamic_requests: list[DynamicGoalInterpretationRequest] = []
         self.plan_requests: list[PlanRequest] = []
 
-    def select_objectives(self, request: GoalSelectionRequest) -> GoalSelection:
-        self.goal_requests.append(request)
-        return GoalSelection(objective_keys=self.selected)
+    def ground_dynamic_goal_entities(
+        self, request: DynamicGoalEntityGroundingRequest
+    ) -> DynamicGoalEntityGrounding:
+        if self.dynamic_interpretation is not None and self.dynamic_interpretation.requirements:
+            refs: dict[tuple[str, str], DynamicGoalCandidateReference] = {}
+            for candidate in self.dynamic_interpretation.requirements:
+                if candidate.kind == ObjectiveRequirementKind.FACT:
+                    assert candidate.node_key is not None
+                    reference = DynamicGoalCandidateReference(
+                        ref_type="NODE", key=candidate.node_key
+                    )
+                    refs[(reference.ref_type, reference.key)] = reference
+                elif candidate.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
+                    assert candidate.region_key is not None and candidate.resource_key is not None
+                    for reference in (
+                        DynamicGoalCandidateReference(ref_type="REGION", key=candidate.region_key),
+                        DynamicGoalCandidateReference(
+                            ref_type="RESOURCE", key=candidate.resource_key
+                        ),
+                    ):
+                        refs[(reference.ref_type, reference.key)] = reference
+                elif candidate.derived_key is not None:
+                    reference = DynamicGoalCandidateReference(
+                        ref_type="DERIVED_STATE", key=candidate.derived_key
+                    )
+                    refs[(reference.ref_type, reference.key)] = reference
+            return DynamicGoalEntityGrounding(candidate_refs=tuple(refs.values()))
+        key = "patient_one" if "patient" in request.goal.casefold() else "triage_room"
+        return DynamicGoalEntityGrounding(
+            candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key=key),)
+        )
+
+    def interpret_dynamic_goal(
+        self,
+        request: DynamicGoalInterpretationRequest,
+    ) -> DynamicGoalInterpretation:
+        self.dynamic_requests.append(request)
+        return self.dynamic_interpretation or DynamicGoalInterpretation(status="UNSUPPORTED")
+
+    def decide_dynamic_goal_family(
+        self, _request: DynamicGoalFamilyRoutingRequest
+    ) -> DynamicGoalFamilyRouting:
+        return DynamicGoalFamilyRouting(family="STATE")
+
+    def route_dynamic_goal_action(self, _request: DynamicGoalActionRoutingRequest) -> object:
+        raise AssertionError("The provider wiring tests use state interpretation")
+
+    def ground_dynamic_goal_operation(self, _request: object) -> object:
+        raise AssertionError("The provider wiring tests use state interpretation")
 
     def propose_plan(self, request: PlanRequest) -> PlanProposal:
         self.plan_requests.append(request)
-        return PlanProposal(steps=self.proposals.popleft())
+        return PlanProposal(
+            segment_goal="advance the current objective",
+            goal_link="supports the frozen objective",
+            continuation_intent="continue the unfinished objective mainline",
+            steps=self.proposals.popleft(),
+        )
 
 
 class FailingPlanProvider(RecordingProvider):
@@ -148,7 +207,9 @@ def _step(
     parameters: dict[str, object] | None = None,
 ) -> PlanStepProposal:
     return PlanStepProposal(
-        candidate_id=legal_candidate_id(action_key, actor_key, target_key),
+        action_key=action_key,
+        actor_key=actor_key,
+        target_key=target_key,
         parameters=parameters or {},  # type: ignore[arg-type]
     )
 
@@ -161,13 +222,15 @@ def test_mock_composition_never_sends_model_http(
 
     monkeypatch.setattr(httpx, "post", fail_http)
     runtime, _scope = _runtime(session, GENERIC_TEST)
-    submission = configured_play_orchestrator(
+    orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("mock")
-    ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
+    )
+    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
-    assert submission.task is not None
+    assert submission.draft is not None
     assert submission.resolution.source == "DETERMINISTIC"
-    assert submission.task.planning_mode == "GENERIC"
+    task = orchestrator.confirm_goal_draft(submission.draft.id)
+    assert task.planning_mode == "GENERIC"
 
 
 def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
@@ -183,14 +246,14 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     )
     submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
-    assert submission.task is not None
-    assert provider.goal_requests == []
+    assert submission.draft is not None
+    task = orchestrator.confirm_goal_draft(submission.draft.id)
     assert provider.plan_requests == []
     original_propose_plan = provider.propose_plan
     observed_started_calls: list[dict[str, object]] = []
 
     def inspect_persistence_boundary(request: PlanRequest) -> PlanProposal:
-        persisted = session.get(AgentTask, submission.task.id)
+        persisted = session.get(AgentTask, task.id)
         assert persisted is not None
         calls = (persisted.objective_resolution_metadata or {}).get("provider_calls", [])
         observed_started_calls.append(dict(calls[-1]))
@@ -206,12 +269,12 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
         return original_propose_plan(request)
 
     monkeypatch.setattr(provider, "propose_plan", inspect_persistence_boundary)
-    _start_initial_plan(orchestrator, submission.task)
+    _start_initial_plan(orchestrator, task)
     assert len(provider.plan_requests) == 1
     assert observed_started_calls[0]["outcome"] == "RUNNING"
     assert observed_started_calls[0]["call_type"] == "INITIAL_PLAN"
-    assert submission.task.planning_mode == "PROVIDER"
-    calls = (submission.task.objective_resolution_metadata or {}).get("provider_calls", [])
+    assert task.planning_mode == "PROVIDER"
+    calls = (task.objective_resolution_metadata or {}).get("provider_calls", [])
     assert calls[-1]["outcome"] == "SUCCESS"
     assert calls[-1]["call_type"] == "INITIAL_PLAN"
     assert calls[-1]["started_at"]
@@ -220,10 +283,11 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     assert "planner_input" in calls[-1]["provider_payload"]
     assert calls[-1]["proposal_stop_reason"] == "OBJECTIVE_COMPLETION"
     assert calls[-1]["validator_violations"] == []
-    catalog = {item.action_key: item for item in provider.plan_requests[0].planning_action_catalog}
-    assert catalog["diagnose_patient"].currently_executable is True
-    assert catalog["treat_patient"].currently_executable is False
-    assert catalog["treat_patient"].known_blockers[0]["code"] == ("PUBLIC_PREREQUISITE_UNSATISFIED")
+    action_keys = {
+        item.action_key
+        for item in provider.plan_requests[0].planner_input.action_contracts
+    }
+    assert {"diagnose_patient", "treat_patient"} <= action_keys
 
 
 def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
@@ -243,9 +307,8 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-    assert submission.task is not None
-    checkpoint = orchestrator._ensure_checkpoint(submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    checkpoint = orchestrator._ensure_checkpoint(task)
 
     task = orchestrator.start_initial_planning(expected_pacing_version=checkpoint.version)
     assert orchestrator._ensure_checkpoint(task).phase == "BLOCKED"
@@ -271,7 +334,7 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
 ) -> None:
     provider = RecordingProvider(
         proposals=[
-            (PlanStepProposal(candidate_id="candidate_invented"),),
+            (_step("invented_action", "patient_one", "doctor_lee"),),
             _generic_plan(),
         ]
     )
@@ -282,8 +345,7 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
-    assert task is not None
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
 
     final_task = _start_initial_plan(orchestrator, task)
     assert final_task.status.value == "ACTIVE"
@@ -314,12 +376,18 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
     )
 
 
-def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
+def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime, _scope = _runtime(session)
+    dynamic_candidate = AdHocGoalRequirementCandidateV1(
+        kind=ObjectiveRequirementKind.FACT,
+        node_key="patient_one",
+        fact_key="stable",
+        accepted_values=(True,),
+    )
     provider = RecordingProvider(
-        selected=("stabilize_patient",),
+        dynamic_interpretation=DynamicGoalInterpretation(requirements=(dynamic_candidate,)),
         proposals=[_generic_plan()],
     )
     monkeypatch.setattr(
@@ -333,22 +401,25 @@ def test_fuzzy_goal_uses_provider_candidates_and_rejects_invented_objective(
         idempotency_key=str(uuid4()),
     )
 
-    assert accepted.task is not None
-    assert accepted.resolution.objective_keys == ("stabilize_patient",)
-    assert {item["key"] for item in provider.goal_requests[0].objective_candidates} == {
-        objective.key for objective in GENERIC_TEST.objectives
-    }
+    assert accepted.draft is not None
+    assert accepted.resolution.objective_keys == ()
+    assert accepted.resolution.dynamic_requirements == (dynamic_candidate,)
+    assert accepted.resolution.source == "AD_HOC_DYNAMIC"
+    assert len(provider.dynamic_requests) == 1
+    accepted_task = orchestrator.confirm_goal_draft(accepted.draft.id)
+    assert accepted_task.formal_goal_source_kind == "AD_HOC_DYNAMIC"
 
-    accepted.task.status = "SUCCEEDED"
-    invented = RecordingProvider(selected=("invented_objective",))
+    accepted_task.status = "SUCCEEDED"
+    invented = RecordingProvider()
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: invented
     )
     rejected = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     ).submit_goal("do something the scenario never defined", idempotency_key=str(uuid4()))
-    assert rejected.task is None
+    assert rejected.draft is None
     assert rejected.resolution.status == "UNSUPPORTED"
+    assert len(invented.dynamic_requests) == 1
 
 
 def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
@@ -371,17 +442,9 @@ def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
     agent = GenericAgentService(session, scope, provider=repeated)
     task = agent.create_task(runtime.session, "stabilize the patient")
     first = _generic_plan()[0]
-    diagnose = next(
-        item
-        for item in repeated.plan_requests[0].planning_action_catalog
-        if item.candidate_id == first.candidate_id
-    )
     treatment_step = _generic_plan()[1]
-    treatment = next(
-        item
-        for item in repeated.plan_requests[0].planning_action_catalog
-        if item.candidate_id == treatment_step.candidate_id
-    )
+    diagnose = first
+    treatment = treatment_step
     task.rejected_proposal_signatures = [
         proposal_signature(
             diagnose.actor_key,
@@ -405,7 +468,7 @@ def test_provider_plan_is_validated_and_rejected_constraint_is_authoritative(
 def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
+    unknown = (_step("invented_action", "patient_one", "doctor_lee"),)
     invalid_parameters = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
     provider = RecordingProvider(proposals=[unknown, invalid_parameters, _generic_plan()])
     monkeypatch.setattr(
@@ -415,10 +478,8 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-
-    assert submission.task is not None
-    _start_initial_plan(orchestrator, submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
     assert [item.call_type for item in provider.plan_requests] == [
         "INITIAL_PLAN",
         "REPAIR",
@@ -429,13 +490,13 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         for item in provider.plan_requests[1].repair_diagnostics
     ) == (
         {
-            "code": "UNKNOWN_CANDIDATE",
-            "failure_code": "UNKNOWN_CANDIDATE",
-            "dimension": "CANDIDATE_BINDING",
-            "candidate_id": "candidate_invented",
+            "code": "UNKNOWN_ACTION",
+            "failure_code": "UNKNOWN_ACTION",
+            "dimension": "ACTION_BINDING",
             "step_id": unknown[0].step_id,
-            "required": "KNOWN_CANDIDATE_OR_DIRECT_BINDING",
-            "actual": "candidate_invented",
+            "action_key": "invented_action",
+            "required": "KNOWN_ACTION_KEY",
+            "actual": "invented_action",
         },
     )
     assert provider.plan_requests[1].rejected_segment is not None
@@ -453,7 +514,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert parameter_diagnostic.validation_error
     assert len(provider.plan_requests[2].anti_regression_memory) == 1
     historical = provider.plan_requests[2].anti_regression_memory[0]
-    assert historical.code == "UNKNOWN_CANDIDATE"
+    assert historical.code == "UNKNOWN_ACTION"
     assert historical.step_id is None
     assert historical.first_seen_attempt == 0
     assert historical.last_seen_attempt == 0
@@ -464,7 +525,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
 
     cycle = session.scalar(
         select(PlanningCycle)
-        .where(PlanningCycle.task_id == submission.task.id)
+        .where(PlanningCycle.task_id == task.id)
         .order_by(PlanningCycle.created_at.desc())
     )
     assert cycle is not None and cycle.status == "ACCEPTED"
@@ -488,7 +549,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert (
         len(
             {
-                json.dumps(request.objective_scope, sort_keys=True)
+                json.dumps(request.planner_input.objective, sort_keys=True)
                 for request in provider.plan_requests
             }
         )
@@ -498,9 +559,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     assert provider.plan_requests[2].rejected_segment is not None
     assert (
         session.scalar(
-            select(func.count())
-            .select_from(AgentPlan)
-            .where(AgentPlan.task_id == submission.task.id)
+            select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == task.id)
         )
         == 1
     )
@@ -508,7 +567,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         session.scalar(
             select(func.count())
             .select_from(WorldOperation)
-            .where(WorldOperation.task_id == submission.task.id)
+            .where(WorldOperation.task_id == task.id)
         )
         == 0
     )
@@ -516,30 +575,28 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: rejected_provider
     )
-    submission.task.status = "SUCCEEDED"
-    rejected = configured_play_orchestrator(
+    task.status = "SUCCEEDED"
+    rejected_orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    ).submit_goal("diagnose the patient", idempotency_key=str(uuid4()))
-    assert rejected.task is not None
-    _start_initial_plan(
-        configured_play_orchestrator(
-            session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-        ),
-        rejected.task,
     )
-    assert rejected.task.status.value == "BLOCKED"
-    assert rejected.task.last_error_code == "MODEL_PLAN_REJECTED"
+    rejected_task = submit_and_confirm(rejected_orchestrator, "diagnose the patient")
+    _start_initial_plan(
+        rejected_orchestrator,
+        rejected_task,
+    )
+    assert rejected_task.status.value == "BLOCKED"
+    assert rejected_task.last_error_code == "MODEL_PLAN_REJECTED"
     assert len(rejected_provider.plan_requests) == 3
     assert rejected_provider.plan_requests[1].anti_regression_memory == ()
     rejected_cycle = session.scalar(
         select(PlanningCycle)
-        .where(PlanningCycle.task_id == rejected.task.id)
+        .where(PlanningCycle.task_id == rejected_task.id)
         .order_by(PlanningCycle.created_at.desc())
     )
     assert rejected_cycle is not None and rejected_cycle.status == "REJECTED"
     assert (
         session.scalar(
-            select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == rejected.task.id)
+            select(func.count()).select_from(AgentPlan).where(AgentPlan.task_id == rejected_task.id)
         )
         == 0
     )
@@ -547,7 +604,7 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
         session.scalar(
             select(func.count())
             .select_from(WorldOperation)
-            .where(WorldOperation.task_id == rejected.task.id)
+            .where(WorldOperation.task_id == rejected_task.id)
         )
         == 0
     )
@@ -557,7 +614,7 @@ def test_provider_repair_attempt_limit_comes_from_settings(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert Settings(_env_file=None).model_max_repair_attempts_per_cycle == 2
-    unknown = (PlanStepProposal(candidate_id="candidate_invented"),)
+    unknown = (_step("invented_action", "patient_one", "doctor_lee"),)
     provider = RecordingProvider(proposals=[unknown, unknown, unknown, unknown, _generic_plan()])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
@@ -570,10 +627,8 @@ def test_provider_repair_attempt_limit_comes_from_settings(
         session, GameInstanceId(runtime.instance.id), settings
     )
 
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-
-    assert submission.task is not None
-    _start_initial_plan(orchestrator, submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
     assert [request.call_type for request in provider.plan_requests] == [
         "INITIAL_PLAN",
         "REPAIR",
@@ -581,7 +636,7 @@ def test_provider_repair_attempt_limit_comes_from_settings(
         "REPAIR",
         "REPAIR",
     ]
-    assert submission.task.status.value == "ACTIVE"
+    assert task.status.value == "ACTIVE"
 
 
 def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
@@ -597,10 +652,8 @@ def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-
-    assert submission.task is not None
-    _start_initial_plan(orchestrator, submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
     assert [item.call_type for item in provider.plan_requests] == ["INITIAL_PLAN", "REPAIR"]
     diagnostic = provider.plan_requests[1].repair_diagnostics[0]
     assert diagnostic.code == "PLAN_ORDER_INVALID"
@@ -626,19 +679,14 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
     patient.visibility = "HIDDEN"
     session.flush()
 
-    submission = configured_play_orchestrator(
+    orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-    ).submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-
-    assert submission.task is not None
-    _start_initial_plan(
-        configured_play_orchestrator(
-            session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
-        ),
-        submission.task,
     )
-    assert submission.task.status.value == "BLOCKED"
-    assert submission.task.last_error_code == "UNREACHABLE_IN_CURRENT_STATE"
+
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
+    assert task.status.value == "BLOCKED"
+    assert task.last_error_code == "UNREACHABLE_IN_CURRENT_STATE"
     assert provider.plan_requests == []
 
 
@@ -654,9 +702,8 @@ def test_generic_composition_uses_the_same_provider_wiring(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
-    assert submission.task is not None
-    _start_initial_plan(orchestrator, submission.task)
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
+    _start_initial_plan(orchestrator, task)
     assert len(provider.plan_requests) == 1
 
 
@@ -688,14 +735,20 @@ def test_draft_sandbox_uses_same_provider_composition_without_formal_game_row(
 
 def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> None:
     settings = _settings("openai_compatible")
-    request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
+    request = PlanRequest(
+        call_type="INITIAL_PLAN",
+        planner_input=PlannerInput(
+            objective={"objective_keys": ["known"]},
+            known_world={"facts": {}},
+        ),
+    )
 
     def timeout(_request: httpx.Request) -> NoReturn:
         raise httpx.ReadTimeout("timed out")
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(timeout))
     with pytest.raises(GenericProviderError) as timed_out:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
     assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
     assert "not-a-real-key" not in str(timed_out.value)
     assert provider.last_call_metadata is not None
@@ -713,7 +766,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         ),
     )
     with pytest.raises(GenericProviderError) as malformed:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
     assert malformed.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
 
     provider = OpenAICompatibleGenericProvider(
@@ -727,7 +780,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         ),
     )
     with pytest.raises(GenericProviderError) as wrong_schema:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
     assert wrong_schema.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
 
     provider = OpenAICompatibleGenericProvider(
@@ -735,15 +788,229 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         transport=httpx.MockTransport(lambda request: httpx.Response(503, request=request)),
     )
     with pytest.raises(GenericProviderError) as http_error:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
     assert http_error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
 
 
-def test_provider_total_deadline_bounds_a_slow_sync_provider_call() -> None:
-    settings = _settings("openai_compatible").model_copy(
-        update={"model_timeout_seconds": 5, "model_total_timeout_seconds": 0.02}
+@pytest.mark.parametrize(
+    "invalid_content",
+    [
+        '{"goal":"leaked","status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}',
+        "not-json",
+        '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":null}]}',
+        '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}],"intent":{"intent_kind":"OPERATION","source":{"status":"UNRESOLVED","key":"public_node"}}}',
+        '{"status":"NEEDS_CLARIFICATION","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}',
+    ],
+)
+def test_grounding_wire_invalid_variants_return_recovery_evidence_to_stage_owner(
+    invalid_content: str,
+) -> None:
+    settings = _settings("openai_compatible")
+    calls: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        content = (
+            invalid_content
+            if len(calls) == 1
+            else '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}'
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    with pytest.raises(GenericProviderError) as caught:
+        provider.ground_dynamic_goal_entities(
+            DynamicGoalEntityGroundingRequest(
+                goal="repair the public road",
+                public_catalog={
+                    "references": [{"ref_type": "NODE", "key": "public_node"}],
+                },
+            )
+        )
+
+    assert caught.value.code in {
+        "MODEL_PROVIDER_RESPONSE_INVALID",
+        "PROVIDER_SCHEMA_INVALID",
+    }
+    assert len(calls) == 1
+    if invalid_content != "not-json":
+        assert caught.value.grounding_recovery_feedback
+
+
+def test_grounding_wire_valid_unresolved_variant_is_not_recovered() -> None:
+    settings = _settings("openai_compatible")
+    calls: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"status":"NEEDS_CLARIFICATION",'
+                                '"candidate_refs":[],"clarification_prompt":"Which road?"}'
+                            )
+                        }
+                    }
+                ]
+            },
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    result = provider.ground_dynamic_goal_entities(
+        DynamicGoalEntityGroundingRequest(
+            goal="repair an unclear road",
+            public_catalog={"references": []},
+        )
     )
-    request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
+
+    assert result.status == "NEEDS_CLARIFICATION"
+    assert result.candidate_refs == ()
+    assert len(calls) == 1
+
+
+def test_grounding_amount_object_returns_native_scalar_recovery_contract() -> None:
+    settings = _settings("openai_compatible")
+    calls: list[dict[str, object]] = []
+    candidate_refs = [
+        {"ref_type": "ACTION", "key": "transport_resource"},
+        {"ref_type": "REGION", "key": "region_a"},
+        {"ref_type": "REGION", "key": "region_b"},
+        {"ref_type": "RESOURCE", "key": "emergency_fuel"},
+    ]
+
+    def response_content(*, amount: object) -> str:
+        return json.dumps(
+            {
+                "status": "RESOLVED",
+                "candidate_refs": candidate_refs,
+                "intent": {
+                    "intent_kind": "OPERATION",
+                    "action": {
+                        "status": "GROUNDED",
+                        "ref_type": "ACTION",
+                        "key": "transport_resource",
+                    },
+                    "source": {
+                        "status": "GROUNDED",
+                        "ref_type": "REGION",
+                        "key": "region_a",
+                    },
+                    "target": {
+                        "status": "GROUNDED",
+                        "ref_type": "REGION",
+                        "key": "region_b",
+                    },
+                    "resource": {
+                        "status": "GROUNDED",
+                        "ref_type": "RESOURCE",
+                        "key": "emergency_fuel",
+                    },
+                    "amount": {"status": "GROUNDED", "value": amount},
+                },
+            }
+        )
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        content = (
+            response_content(amount={"value": 30})
+            if len(calls) == 1
+            else response_content(amount=30)
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    with pytest.raises(GenericProviderError) as caught:
+        provider.ground_dynamic_goal_entities(
+            DynamicGoalEntityGroundingRequest(
+                goal="move 30 fuel from region a to region b",
+                public_catalog={"references": candidate_refs},
+            )
+        )
+
+    assert len(calls) == 1
+    feedback = caught.value.grounding_recovery_feedback[0]
+    assert feedback["fix_only"] == ["intent.amount"]
+    assert feedback["expected_field_shape"] == {
+        "path": "intent.amount",
+        "example": {
+            "status": "GROUNDED",
+            "value": 30,
+            "surface": None,
+        },
+        "rule": "value must be a native JSON scalar, never an object or array",
+    }
+    assert {item["key"] for item in feedback["preserve"]} == {
+        "transport_resource",
+        "region_a",
+        "region_b",
+        "emergency_fuel",
+    }
+
+
+def test_grounding_recovery_feedback_preserves_only_public_canonical_identity() -> None:
+    settings = _settings("openai_compatible")
+    calls: list[dict[str, object]] = []
+
+    def complete(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content))
+        content = (
+            '{"goal":"leaked","status":"RESOLVED","candidate_refs":['
+            '{"ref_type":"NODE","key":"public_node"},'
+            '{"ref_type":"NODE","key":"invented_node"}]}'
+            if len(calls) == 1
+            else '{"status":"RESOLVED","candidate_refs":[{"ref_type":"NODE","key":"public_node"}]}'
+        )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=request,
+        )
+
+    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    with pytest.raises(GenericProviderError) as caught:
+        provider.ground_dynamic_goal_entities(
+            DynamicGoalEntityGroundingRequest(
+                goal="repair the public road",
+                public_catalog={
+                    "references": [{"ref_type": "NODE", "key": "public_node"}],
+                },
+            )
+        )
+    assert len(calls) == 1
+    feedback = caught.value.grounding_recovery_feedback[0]
+    assert feedback["preserve"] == [
+        {"path": "candidate_refs[0]", "ref_type": "NODE", "key": "public_node"}
+    ]
+    assert "candidate_refs[1]" not in feedback["preserve"]
+
+
+def test_plan_timeout_bounds_a_slow_sync_provider_call() -> None:
+    settings = _settings("openai_compatible").model_copy(
+        update={"plan_timeout_seconds": 0.02, "plan_total_timeout_seconds": None}
+    )
+    request = PlanRequest(
+        call_type="INITIAL_PLAN",
+        planner_input=PlannerInput(
+            objective={"objective_keys": ["known"]},
+            known_world={"facts": {}},
+        ),
+    )
 
     def slow_post(_request: httpx.Request) -> httpx.Response:
         sleep(0.15)
@@ -755,12 +1022,12 @@ def test_provider_total_deadline_bounds_a_slow_sync_provider_call() -> None:
 
     provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(slow_post))
     with pytest.raises(GenericProviderError) as timed_out:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
 
     assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
     assert provider.last_call_metadata is not None
     assert provider.last_call_metadata.outcome == "TIMEOUT"
-    assert provider.last_call_metadata.total_deadline_seconds == 0.02
+    assert provider.last_call_metadata.plan_timeout_seconds == 0.02
     assert provider.last_call_metadata.wall_clock_latency_ms is not None
     assert provider.last_call_metadata.wall_clock_latency_ms < 120
 
@@ -769,7 +1036,13 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _settings("openai_compatible")
-    request = GoalSelectionRequest(goal="unclear", objective_candidates=({"key": "known"},))
+    request = PlanRequest(
+        call_type="INITIAL_PLAN",
+        planner_input=PlannerInput(
+            objective={"objective_keys": ["known"]},
+            known_world={"facts": {}},
+        ),
+    )
     events: list[tuple[str, dict[str, object]]] = []
     monkeypatch.setattr(
         provider_module,
@@ -798,7 +1071,7 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     )
 
     with pytest.raises(GenericProviderError) as http_error:
-        provider.select_objectives(request)
+        provider.propose_plan(request)
 
     assert http_error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
     assert len(events) == 1
@@ -815,7 +1088,7 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     assert "upstream unavailable" in json.dumps(fields)
 
 
-def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
+def test_generic_planner_prompt_defines_local_and_risk_frontier_tie_breakers() -> None:
     settings = _settings("openai_compatible")
     system_prompts: list[str] = []
 
@@ -834,7 +1107,11 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
                     {
                         "message": {
                             "content": (
-                                '{"plan_summary":"complete","steps":['
+                                '{"plan_summary":"complete",'
+                                '"segment_goal":"advance the current objective",'
+                                '"goal_link":"supports the frozen objective",'
+                                '"continuation_intent":"continue the objective mainline",'
+                                '"steps":['
                                 '{"purpose":"known task step",'
                                 '"action_key":"known_action",'
                                 '"actor_key":"known_actor",'
@@ -857,8 +1134,6 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
         provider.propose_plan(
             PlanRequest(
                 call_type=call_type,
-                goal="known goal",
-                objective_keys=("known_objective",),
                 planner_input=planner_input,
             )
         )
@@ -868,6 +1143,71 @@ def test_generic_planner_prompt_requires_known_concrete_purpose() -> None:
         assert "concrete purpose supported by the current Knowledge and task state" in prompt
         assert "Do not add speculative or preventive corrective actions" in prompt
         assert "currently known failure, blockage, unmet prerequisite" in prompt
+        assert "Do not perform unrelated, speculative, preventive" in prompt
+        assert "completeness-driven" in prompt
+        assert "completeness scans" in prompt
+        assert "remote reconnaissance" in prompt
+        assert "remote detours solely for information" in prompt
+        assert (
+            "currently legal Action as merely convenient when it addresses an active "
+            "unresolved dependency" in prompt
+        )
+        assert "current locality" in prompt
+        assert "no additional Travel or meaningful Resource cost" in prompt
+        assert "deferring it would likely require returning to the same locality" in prompt
+        assert "equivalent Goal progress" in prompt
+        assert "avoiding unnecessary locality teardown, return Travel, or repeated setup" in prompt
+        assert "Apply the same preference before a risky frontier" in prompt
+        assert (
+            "attempt_policy MAY_ATTEMPT and Runtime failure could abort the current PlanSegment"
+            in prompt
+        )
+        assert "without changing real dependency order" in prompt
+        assert "prefer placing before it any already-legal work" in prompt
+        assert "does not depend on that MAY_ATTEMPT Action succeeding" in prompt
+        assert "later independent Steps are SKIPPED after a Runtime failure" in prompt
+        assert "do not move a success-dependent suffix earlier" in prompt
+        assert "current-region survey or Relay may precede a MAY_ATTEMPT Travel" in prompt
+        assert "destination-dependent inspect must remain after that Travel" in prompt
+        assert "planning heuristics and tie-breakers" in prompt
+        assert "not backend-mandated sequences" in prompt
+        assert (
+            "Do not front-load unrelated preparation merely because a risky Action exists" in prompt
+        )
+        assert "merely convenient work" not in prompt
+        assert "Do not treat every non-blocking Action as merely convenient" not in prompt
+        assert "consider batching" not in prompt
+        assert "near-term planning" not in prompt
+        assert "every active dependency immediately" in prompt
+        assert "survey before every departure" in prompt
+        assert "inspect every local target" in prompt
+        assert "eliminate every UNKNOWN state" in prompt
+        assert "always survey" not in prompt
+        assert "always inspect" not in prompt
+        assert "inspect everything" not in prompt
+        assert "Do not predict an observation result" in prompt
+        assert "same PlanSegment" in prompt
+        assert "Information Boundary" in prompt
+        assert "MAY_ATTEMPT is legal under uncertainty, not known safe" in prompt
+        assert "do not delay completion for optional Knowledge" in prompt
+        assert "planner_input.known_world.resource_source_hints" in prompt
+        assert "authored public discovery guidance only" in prompt
+        assert "active unresolved Resource need" in prompt
+        assert "not a source selection, source whitelist" in prompt
+        assert "Prefer already-known sufficient inventory first" in prompt
+        assert "never detour to a hinted Region" in prompt
+        assert "current Actor locality, public topology" in prompt
+        assert "known route/passability state" in prompt
+        assert "already completed surveys" in prompt
+        assert "Hints do not restrict the legal candidate catalog" in prompt
+        assert "do not require surveying a hinted Region before a legal MAY_ATTEMPT" in prompt
+        assert "Do not infer hidden quantities, availability, facilities" in prompt
+        for scenario_specific in (
+            "general_engineering_parts",
+            "north_industrial_district",
+            "south_waterfront_district",
+        ):
+            assert scenario_specific not in prompt
 
 
 def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
@@ -889,13 +1229,7 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
     game_id = str(response.json()["id"])
     before_operations = session.scalar(select(func.count()).select_from(WorldOperation))
 
-    response = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-
-    assert response.status_code == 200
-    task = response.json()["task"]
+    task = parse_and_confirm_api(client, game_id, "stabilize the patient")
     response = client.post(
         f"/api/v1/games/{game_id}/play/start-planning",
         json={"expected_pacing_version": task["pacing_version"]},
@@ -940,7 +1274,7 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
 def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    rejected = (PlanStepProposal(candidate_id="candidate_invented"),)
+    rejected = (_step("invented_action", "patient_one", "doctor_lee"),)
     provider = RecordingProvider(proposals=[rejected, rejected, rejected])
     monkeypatch.setattr(
         "app.services.composition.build_generic_provider", lambda _settings: provider
@@ -953,12 +1287,7 @@ def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
     )
     assert game.status_code == 201, game.text
     game_id = str(game.json()["id"])
-    goal = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-    assert goal.status_code == 200, goal.text
-    task = goal.json()["task"]
+    task = parse_and_confirm_api(client, game_id, "stabilize the patient")
 
     response = client.post(
         f"/api/v1/games/{game_id}/play/start-planning",
@@ -996,12 +1325,7 @@ def test_replan_provider_failure_persists_failure_and_action_history(
             "idempotency_key": str(uuid4()),
         },
     ).json()
-    goal = client.post(
-        f"/api/v1/games/{game['id']}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-    assert goal.status_code == 200, goal.text
-    task = goal.json()["task"]
+    task = parse_and_confirm_api(client, str(game["id"]), "stabilize the patient")
     start = client.post(
         f"/api/v1/games/{game['id']}/play/start-planning",
         json={"expected_pacing_version": task["pacing_version"]},
@@ -1061,8 +1385,7 @@ def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
-    assert task is not None
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)
     plan = session.scalar(
         select(AgentPlan).where(AgentPlan.task_id == task.id).order_by(AgentPlan.version.desc())
@@ -1134,8 +1457,7 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
     )
-    task = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4())).task
-    assert task is not None
+    task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)
     assert "planning_continuity" not in provider.plan_requests[0].provider_payload()
     builder = PlanningContinuityBuilder(session, orchestrator.scope)
@@ -1143,6 +1465,10 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     assert continuity is not None
     assert len(continuity.prior_plans) == 1
     assert continuity.latest_replan_trigger == "TEST_REPLAN"
+    prior_segment = continuity.prior_plans[0]
+    assert prior_segment.segment_goal == "advance the current objective"
+    assert prior_segment.goal_link == "supports the frozen objective"
+    assert prior_segment.continuation_intent == "continue the unfinished objective mainline"
 
     orchestrator.agent.plan(
         task,
@@ -1154,7 +1480,21 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     assert replan_requests[0].planning_continuity == replan_requests[1].planning_continuity
     assert replan_requests[0].planning_continuity is not None
     assert len(replan_requests[0].planning_continuity.prior_plans) == 1
+    assert replan_requests[0].planner_input is not None
+    previous_segment = replan_requests[0].planner_input.execution_context["previous_segment"]
+    assert isinstance(previous_segment, dict)
+    assert previous_segment["segment_goal"] == prior_segment.segment_goal
+    assert previous_segment["goal_link"] == prior_segment.goal_link
+    assert previous_segment["continuation_intent"] == prior_segment.continuation_intent
+    assert previous_segment["stop_reason"] == prior_segment.stop_reason
+    assert replan_requests[0].planner_input.execution_context["latest_replan_trigger"] == (
+        "TEST_REPLAN"
+    )
     assert replan_requests[1].planning_continuity is not None
+    assert replan_requests[1].planner_input is not None
+    assert replan_requests[1].planner_input.execution_context["previous_segment"] == (
+        previous_segment
+    )
     assert replan_requests[1].planning_continuity.prior_plans[0].steps[0].purpose
     repair_payload = replan_requests[1].provider_payload()
     assert "planning_continuity" in repair_payload

@@ -8,6 +8,7 @@ import {
   MissionRoadmap,
   MissionLogPanel,
   PlanHistory,
+  TaskGoalHeading,
   TaskTabs,
   Timeline,
   WaitingStatus,
@@ -21,7 +22,13 @@ import {
   segmentCompletionMessage,
   syncPlayStateCaches,
 } from "./playPresentation";
-import { taskExplanationLabel, uiLabel } from "./ui";
+import {
+  confirmGoalErrorText,
+  goalSubmissionErrorText,
+  taskExplanationLabel,
+  uiLabel,
+} from "./ui";
+import { publicFactIdentity } from "./knowledgePresentation";
 import type {
   PlayerGameState,
   PublicPlanStep,
@@ -215,11 +222,12 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText("中央应急救援物资（当前：20，要求：≥30）")).not.toBeInTheDocument();
     const detailsToggle = screen.getByRole("button");
     expect(detailsToggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("Objective summary")).toBeVisible();
-    fireEvent.click(screen.getByText("Objective summary"));
-    expect(screen.getByText("建立持续保障")).toBeVisible();
+    expect(screen.getByText("资源要求")).toBeVisible();
+    expect(screen.queryByText("Objective summary")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("资源要求"));
     expect(screen.getByText(/20.*30/)).toBeVisible();
-    expect(screen.getByText("Central District\uFF1ARelief Supplies\u50A8\u5907 20 / 30")).toBeVisible();
+    expect(screen.getByText("Central District · Relief Supplies ≥ 30")).toBeVisible();
+    expect(screen.getByText("20 / 30")).toHaveClass("warning");
     expect(detailsToggle).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(screen.getByText("收起详情"));
     expect(detailsToggle).toHaveAttribute("aria-expanded", "false");
@@ -256,9 +264,12 @@ describe("Formal Play player projections", () => {
     );
 
     fireEvent.click(screen.getByRole("button"));
-    expect(screen.getByText("Central District\uFF1AEmergency Relief Supplies\u50A8\u5907 0 / 30")).toBeVisible();
-    expect(screen.getByText("East Residential District\uFF1AEmergency Relief Supplies\u50A8\u5907 12 / 30")).toBeVisible();
-    expect(screen.getByText("Southeast Heights\uFF1AEmergency Relief Supplies\u50A8\u5907 30 / 30")).toBeVisible();
+    expect(screen.getByText("Central District · Emergency Relief Supplies ≥ 30")).toBeVisible();
+    expect(screen.getByText("East Residential District · Emergency Relief Supplies ≥ 30")).toBeVisible();
+    expect(screen.getByText("Southeast Heights · Emergency Relief Supplies ≥ 30")).toBeVisible();
+    expect(screen.getByText("0 / 30")).toHaveClass("warning");
+    expect(screen.getByText("12 / 30")).toHaveClass("warning");
+    expect(screen.getByText("30 / 30")).toHaveClass("success");
     expect(screen.queryByText("Generic reserve description")).not.toBeInTheDocument();
     expect(screen.queryByText(/central_district|east_residential|southeast_heights/)).not.toBeInTheDocument();
   });
@@ -285,7 +296,8 @@ describe("Formal Play player projections", () => {
     );
 
     fireEvent.click(screen.getByRole("button"));
-    expect(screen.getByText("建立持续人道物流能力")).toBeVisible();
+    expect(screen.getByText("City Distribution Center · 已知状态：可用")).toBeVisible();
+    expect(screen.getByText("未知")).toHaveClass("warning");
     expect(screen.queryByText("持续人道物流能力已建立。")).not.toBeInTheDocument();
   });
 
@@ -316,7 +328,450 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText("设施状态已恢复")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button"));
     expect(screen.getByText("设施状态已恢复")).toBeVisible();
-    expect(screen.getByText(/0.*30/)).toBeVisible();
+    expect(screen.getByText("相关区域 · 已知资源 ≥ 30")).toBeVisible();
+    expect(screen.getByText("未知")).toHaveClass("warning");
+  });
+
+  it("renders the player Goal once with its status badge in the same heading", () => {
+    const goal = "从南部滨水区运30个电力部件到东南高地区";
+    render(<TaskGoalHeading goal={goal} status="ACTIVE" />);
+
+    const heading = screen.getByTestId("task-goal-heading");
+    expect(within(heading).getByText(goal)).toBeVisible();
+    expect(within(heading).getByText("进行中")).toHaveClass("warning");
+    expect(heading.querySelectorAll("strong")).toHaveLength(1);
+    expect(heading.querySelectorAll(".console-pill")).toHaveLength(1);
+  });
+
+  it("renders a public Derived State status and reveals staged children only after projection", () => {
+    const root = {
+      key: "sustained_generation",
+      kind: "DERIVED_STATE" as const,
+      derived_key: "southeast_sustained_emergency_generation",
+      accepted_values: ["AVAILABLE"],
+      current_known_value: "UNAVAILABLE" as const,
+      knowledge_status: "KNOWN" as const,
+      description: "东南区域的持续应急发电保障能力状态。",
+    };
+    const { rerender } = render(
+      <MissionRoadmap
+        nodeNames={{ river_port: "临江港", south_fuel_terminal: "南部燃料终端" }}
+        regionNames={{ southeast_heights_district: "东南高地区" }}
+        resourceNames={{ emergency_fuel: "应急燃料" }}
+        stages={[{
+          key: "objective:generation",
+          name: "东南持续应急发电保障",
+          description: "公开目标",
+          status: "CURRENT",
+          objective_key: "generation",
+          requirements: [root],
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.queryByText("东南持续应急发电保障")).not.toBeInTheDocument();
+    expect(screen.getByText("综合状态要求")).toBeVisible();
+    expect(screen.getAllByRole("button")).toHaveLength(1);
+    expect(screen.queryByText("临江港恢复运行")).not.toBeInTheDocument();
+    expect(screen.queryByText("南部燃料终端恢复运行")).not.toBeInTheDocument();
+    expect(screen.queryByText(/应急燃料储备/)).not.toBeInTheDocument();
+
+    rerender(
+      <MissionRoadmap
+        nodeNames={{ river_port: "临江港", south_fuel_terminal: "南部燃料终端" }}
+        regionNames={{ southeast_heights_district: "东南高地区" }}
+        resourceNames={{ emergency_fuel: "应急燃料" }}
+        factValues={{ "river_port:operational": true, "south_fuel_terminal:operational": true }}
+        stages={[{
+          key: "objective:generation",
+          name: "东南持续应急发电保障",
+          description: "公开目标",
+          status: "CURRENT",
+          objective_key: "generation",
+          requirements: [
+            root,
+            {
+              key: "river-port-operational",
+              kind: "FACT",
+              node_key: "river_port",
+              fact_key: "operational",
+              accepted_values: [true],
+              description: "river port",
+            },
+            {
+              key: "south-terminal-operational",
+              kind: "FACT",
+              node_key: "south_fuel_terminal",
+              fact_key: "operational",
+              accepted_values: [true],
+              description: "south terminal",
+            },
+            {
+              key: "southeast-fuel-reserve",
+              kind: "RESOURCE_AT_LEAST",
+              region_key: "southeast_heights_district",
+              resource_key: "emergency_fuel",
+              minimum: 100,
+              current_known_available: 50,
+              knowledge_status: "KNOWN",
+              description: "fuel reserve",
+            },
+          ],
+        }]}
+      />,
+    );
+    expect(screen.getByText("临江港 · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("南部燃料终端 · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("东南高地区 · 应急燃料 ≥ 100")).toBeVisible();
+    expect(screen.getAllByText("已满足")).toHaveLength(2);
+    expect(screen.getByText("50 / 100")).toHaveClass("warning");
+    expect(screen.queryByText("river_port")).not.toBeInTheDocument();
+    expect(screen.queryByText("south_fuel_terminal")).not.toBeInTheDocument();
+  });
+
+  it("groups target-bound action resources by target and keeps unrelated rows global", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[{ key: "repair_parts", name: "维修材料", value: 0, reserved_value: 0 }]}
+        publicResourceNames={{ fuel: "应急燃料" }}
+        visibleNodes={[
+          { key: "test_region", name: "测试区域", accessible: true, node_type_key: "region", region_key: "test_region", region_name: "测试区域" },
+          {
+            key: "synthetic_facility",
+            name: "测试发电设施",
+            accessible: true,
+            node_type_key: "facility",
+            region_key: "test_region",
+            region_name: "测试区域",
+          },
+        ]}
+        actors={[]}
+        knownFacts={[]}
+        knownActionRequirements={[
+          {
+            action_key: "start_power",
+            action_name: "启动发电",
+            known_preconditions: [{
+              node_key: "synthetic_facility",
+              fact_key: "operational",
+              selector: "EXPLICIT",
+              current_value: false,
+            }],
+            resource_requirements: [
+              { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 2 },
+              { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 2 },
+              { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 4 },
+              { resource_key: "fuel", scope: { kind: "CURRENT_TARGET_REGION" }, minimum: 2 },
+            ],
+          },
+          {
+            action_key: "clear_route",
+            action_name: "清理通道",
+            known_preconditions: [],
+            resource_requirements: [{
+              resource_key: "repair_parts",
+              scope: { kind: "ACTOR_CURRENT_REGION" },
+              minimum: 3,
+            }],
+          },
+        ]}
+        knownTargetActionContracts={[{
+          target_key: "synthetic_facility",
+          action_key: "start_power",
+          action_name: "启动发电",
+          resource_requirements: [
+            { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 2 },
+            { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 4 },
+            { resource_key: "fuel", scope: { kind: "CURRENT_TARGET_REGION" }, minimum: 2 },
+          ],
+        }]}
+      />,
+    );
+
+    const locations = within(screen.getByTestId("knowledge-accordion-locations"));
+    fireEvent.click(locations.getByRole("button"));
+    fireEvent.click(locations.getByText("测试区域"));
+    const facility = screen.getByTestId("facility-card-synthetic_facility");
+    fireEvent.click(facility.querySelector("summary")!);
+
+    expect(facility).toHaveTextContent("启动发电：应急燃料 ×2、应急燃料 ×4、应急燃料 ×2");
+    expect(facility).not.toHaveTextContent("已知资源");
+    const globalRequirements = screen.getByTestId("known-action-requirements");
+    expect(globalRequirements).toHaveTextContent("清理通道：维修材料 ×3");
+    expect(globalRequirements).not.toHaveTextContent("启动发电");
+    expect(globalRequirements).not.toHaveTextContent("应急燃料");
+  });
+
+  it("uses the prerequisite facility identity and expected value in target-bound action text", () => {
+    render(
+      <KnownWorldAccordions
+        resources={[]}
+        visibleNodes={[
+          { key: "test_region", name: "测试区域", accessible: true, node_type_key: "region", region_key: "test_region", region_name: "测试区域" },
+          {
+            key: "target_facility",
+            name: "待修设施",
+            accessible: true,
+            node_type_key: "facility",
+            region_key: "test_region",
+            region_name: "测试区域",
+          },
+          {
+            key: "river_port",
+            name: "临江港",
+            accessible: true,
+            node_type_key: "facility",
+            region_key: "test_region",
+            region_name: "测试区域",
+          },
+        ]}
+        actors={[]}
+        knownFacts={[
+          {
+            node_key: "target_facility",
+            fact_key: "operational",
+            name: "运行状态",
+            value: false,
+            node_name: "待修设施",
+            node_type_key: "facility",
+            region_key: "test_region",
+            region_name: "测试区域",
+          },
+          {
+            node_key: "river_port",
+            fact_key: "operational",
+            name: "运行状态",
+            value: true,
+            node_name: "临江港",
+            node_type_key: "facility",
+            region_key: "test_region",
+            region_name: "测试区域",
+          },
+        ]}
+        knownTargetActionContracts={[{
+          target_key: "target_facility",
+          action_key: "repair_target_facility",
+          action_name: "修复设施",
+          required_actor_role_name: "Prerequisite Repair Team",
+          special_requirements: [{
+            node_key: "river_port",
+            fact_key: "operational",
+            operator: "EQ",
+            value: true,
+          }],
+        }]}
+      />,
+    );
+
+    const locations = within(screen.getByTestId("knowledge-accordion-locations"));
+    fireEvent.click(locations.getByRole("button"));
+    fireEvent.click(locations.getByText("测试区域"));
+    const facility = screen.getByTestId("facility-card-target_facility");
+    fireEvent.click(facility.querySelector("summary")!);
+
+    expect(facility).toHaveTextContent("前置条件：临江港恢复运行");
+    expect(facility).toHaveTextContent("执行队伍：Prerequisite Repair Team");
+    expect(facility).not.toHaveTextContent("前置条件：运行状态");
+    expect(facility).not.toHaveTextContent("前置条件：已知状态");
+  });
+
+  it("renders synthetic FACT roadmap state in player language", () => {
+    const factIdentity = publicFactIdentity("synthetic_facility", "generating");
+    const requirement = {
+      key: "synthetic-generating",
+      kind: "FACT" as const,
+      node_key: "synthetic_facility",
+      fact_key: "generating",
+      accepted_values: [true],
+      description: "Synthetic Facility: generating reaches the requested state.",
+    };
+    const stage = {
+      key: "objective:synthetic",
+      name: "建立持续发电保障",
+      description: "公开目标",
+      status: "CURRENT" as const,
+      objective_key: "synthetic",
+      requirements: [requirement],
+    };
+    const view = render(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "测试发电设施" }}
+        factNames={{ [factIdentity]: "发电状态" }}
+        factValues={{ [factIdentity]: false }}
+        stages={[stage]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("测试发电设施 · 发电状态：是")).toBeVisible();
+    expect(screen.getByText("未满足")).toHaveClass("warning");
+    expect(screen.queryByText(/reaches the requested state|accepted_values|fact_key/)).not.toBeInTheDocument();
+
+    view.rerender(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "测试发电设施" }}
+        factNames={{ [factIdentity]: "发电状态" }}
+        factValues={{ [factIdentity]: true }}
+        stages={[stage]}
+      />,
+    );
+    expect(screen.getByText("测试发电设施 · 发电状态：是")).toBeVisible();
+    expect(screen.getByText("已满足")).toHaveClass("success");
+  });
+
+  it("keeps FACT wording fixed while exposing unknown, unmet, and satisfied status", () => {
+    const requirement: MissionRoadmapStage["requirements"][number] = {
+      key: "synthetic-operational",
+      kind: "FACT",
+      node_key: "synthetic_facility",
+      fact_key: "operational",
+      accepted_values: [true],
+      description: "Internal description must not be rendered",
+    };
+    const stage: MissionRoadmapStage = {
+      key: "objective:fact-status",
+      name: "Synthetic objective",
+      description: "Public objective",
+      status: "CURRENT",
+      objective_key: "fact-status",
+      requirements: [requirement],
+    };
+    const view = render(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "Synthetic Facility" }}
+        factNames={{ [publicFactIdentity("synthetic_facility", "operational")]: "运行状态" }}
+        stages={[stage]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Synthetic Facility · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("未知")).toHaveClass("warning");
+
+    view.rerender(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "Synthetic Facility" }}
+        factNames={{ [publicFactIdentity("synthetic_facility", "operational")]: "运行状态" }}
+        factValues={{ [publicFactIdentity("synthetic_facility", "operational")]: false }}
+        stages={[stage]}
+      />,
+    );
+    expect(screen.getByText("Synthetic Facility · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("未满足")).toHaveClass("warning");
+
+    view.rerender(
+      <MissionRoadmap
+        nodeNames={{ synthetic_facility: "Synthetic Facility" }}
+        factNames={{ [publicFactIdentity("synthetic_facility", "operational")]: "运行状态" }}
+        factValues={{ [publicFactIdentity("synthetic_facility", "operational")]: true }}
+        stages={[stage]}
+      />,
+    );
+    expect(screen.getByText("Synthetic Facility · 运行状态：运行中")).toBeVisible();
+    expect(screen.getByText("已满足")).toHaveClass("success");
+    expect(screen.queryByText("Internal description must not be rendered")).not.toBeInTheDocument();
+  });
+
+  it("renders a public ACTION_COMPLETED requirement as a complete operation summary", () => {
+    render(
+      <MissionRoadmap
+        regionNames={{ source_region: "Source Region", target_region: "Target Region" }}
+        resourceNames={{ cargo_alpha: "Cargo Alpha" }}
+        stages={[{
+          key: "objective:operation",
+          name: "Complete operation",
+          description: "Public objective",
+          status: "CURRENT",
+          objective_key: "operation",
+          requirements: [{
+            key: "transport-operation",
+            kind: "ACTION_COMPLETED",
+            description: "Complete: Transport Resource: Target Region",
+            action_key: "transport_resource",
+            action_name: "Transport Resource",
+            actor_key: null,
+            actor_name: null,
+            target_key: "target_region",
+            target_name: "Target Region",
+            binding_constraints: [{ role: "source_region", value: "source_region" }],
+            parameter_constraints: {
+              resources: [{ resource_key: "cargo_alpha", amount: 30 }],
+            },
+            operation_status: "PENDING",
+          }],
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Transport Resource")).toBeVisible();
+    expect(screen.getByText("Source Region")).toBeVisible();
+    expect(screen.getByText("Target Region")).toBeVisible();
+    expect(screen.getByText("Cargo Alpha")).toBeVisible();
+    expect(screen.getByText("30")).toBeVisible();
+    expect(screen.queryByText("Complete: Transport Resource: Target Region")).not.toBeInTheDocument();
+    expect(screen.queryByText(/transport_resource|source_region|UNSPECIFIED/)).not.toBeInTheDocument();
+  });
+
+  it("omits unfrozen action fields and keeps explicit actor in schema order", () => {
+    render(
+      <MissionRoadmap
+        regionNames={{ target_region: "Target Region" }}
+        resourceNames={{ cargo_alpha: "Cargo Alpha" }}
+        stages={[{
+          key: "objective:operation-optional",
+          name: "Optional operation fields",
+          description: "Public objective",
+          status: "CURRENT",
+          objective_key: "operation-optional",
+          requirements: [{
+            key: "transport-operation-optional",
+            kind: "ACTION_COMPLETED",
+            description: "Internal operation description",
+            action_key: "transport_resource",
+            action_name: "Transport Resource",
+            actor_key: "logistics_team",
+            actor_name: "Logistics Team",
+            target_key: "target_region",
+            target_name: "Target Region",
+            parameter_constraints: {
+              resource_key: "cargo_alpha",
+              amount: 30,
+            },
+          }],
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+    const lines = Array.from(screen.getByRole("list").querySelectorAll(".mission-roadmap-action-row"))
+      .map((line) => line.textContent);
+    expect(lines).toEqual([
+      "操作Transport Resource",
+      "目标Target Region",
+      "资源Cargo Alpha",
+      "数量30",
+      "执行者Logistics Team",
+    ]);
+    expect(screen.queryByText(/起点：|未指定|Internal operation description/)).not.toBeInTheDocument();
+  });
+
+  it("renders backend Goal feedback verbatim", () => {
+    const feedback = "后端给出的玩家安全反馈：请明确目标地点。";
+    render(
+      <GoalComposer
+        goal="transport supplies"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        feedback={feedback}
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("goal-submission-feedback")).toHaveTextContent(feedback);
   });
 
   it("keeps objective details closed when the task identity changes", () => {
@@ -587,10 +1042,10 @@ describe("Formal Play player projections", () => {
     );
     expect(screen.getByTestId("goal-composer")).toBeVisible();
     expect(screen.getByText("当前 · 下达目标")).toBeVisible();
-    expect(screen.queryByText("选择任务", { selector: "label" })).not.toBeInTheDocument();
+    expect(screen.queryByText("自定义目标", { selector: "label" })).not.toBeInTheDocument();
     expect(screen.queryByText(/智能体只会选择当前精确版本/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("自定义目标")).toHaveValue("打开北部贸易路线");
-    fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
+    expect(screen.getByLabelText("目标内容")).toHaveValue("打开北部贸易路线");
+    fireEvent.click(screen.getByRole("button", { name: "解析目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 
@@ -693,7 +1148,7 @@ describe("Formal Play player projections", () => {
     ).toBe("收到，继续规划任务");
   });
 
-  it("uses Scenario Objective names in the preset Goal Composer and keeps custom input separate", () => {
+  it("uses suggested Goal text to fill the editable composer", () => {
     const onGoalChange = vi.fn();
     const onSubmit = vi.fn();
     render(
@@ -703,28 +1158,27 @@ describe("Formal Play player projections", () => {
         resolving={false}
         startedAt={null}
         busy={false}
-        objectivesLoaded
-        objectives={[
-          { key: "restore_power", name: "恢复东部应急供电网络" },
-        ]}
+        presetsLoaded
+        goalPresets={["恢复东部应急供电网络"]}
         onGoalChange={onGoalChange}
         onSubmit={onSubmit}
       />,
     );
 
-    expect(screen.getByRole("combobox", { name: "选择任务" })).toBeVisible();
-    expect(screen.queryByLabelText("自定义目标")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole("combobox", { name: "选择任务" }), {
-      target: { value: "restore_power" },
+    const presetSelect = screen.getByRole("combobox", { name: "选择快捷目标" });
+    expect(presetSelect).toBeVisible();
+    expect(screen.getByLabelText("目标内容")).toBeVisible();
+    fireEvent.change(presetSelect, {
+      target: { value: "恢复东部应急供电网络" },
     });
     expect(onGoalChange).toHaveBeenLastCalledWith("恢复东部应急供电网络");
-    fireEvent.click(screen.getByRole("button", { name: "开始目标" }));
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-
-    fireEvent.change(screen.getByRole("combobox", { name: "选择任务" }), {
-      target: { value: "__custom_goal__" },
+    expect(screen.getByLabelText("目标内容")).toHaveValue("恢复东部应急供电网络");
+    fireEvent.change(screen.getByLabelText("目标内容"), {
+      target: { value: "优先恢复东部应急供电网络" },
     });
-    expect(screen.getByLabelText("自定义目标")).toBeVisible();
+    expect(onGoalChange).toHaveBeenLastCalledWith("优先恢复东部应急供电网络");
+    fireEvent.click(screen.getByRole("button", { name: "解析目标" }));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the composer and its timer visible while Goal Resolution runs", () => {
@@ -742,10 +1196,139 @@ describe("Formal Play player projections", () => {
       />,
     );
     expect(screen.getByTestId("goal-composer")).toBeVisible();
-    expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("Agent 正在接收任务");
+    expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("Agent 正在理解目标");
     act(() => vi.advanceTimersByTime(1250));
     expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("1s");
     vi.useRealTimers();
+  });
+
+  it("renders Goal submission feedback below the composer", () => {
+    render(
+      <GoalComposer
+        goal="repair the corridor"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        feedback="friendly goal failure"
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("goal-submission-feedback")).toHaveTextContent(
+      "friendly goal failure",
+    );
+    expect(screen.getByTestId("goal-composer")).toContainElement(
+      screen.getByTestId("goal-submission-feedback"),
+    );
+  });
+
+  it("keeps READY A confirmable while the textarea is edited to B", () => {
+    const onGoalChange = vi.fn();
+    const onConfirm = vi.fn();
+    const draft = {
+      draft_id: "draft-a",
+      submitted_goal: "Goal A",
+      presentation_text: "已解析目标：Goal A。",
+      status: "READY" as const,
+      created_at: "2026-09-11T00:00:00Z",
+    };
+    const view = render(
+      <GoalComposer
+        goal="Goal A"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        readyDraft={draft}
+        onGoalChange={onGoalChange}
+        onSubmit={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("目标内容"), { target: { value: "Goal B" } });
+    expect(onGoalChange).toHaveBeenCalledWith("Goal B");
+    view.rerender(
+      <GoalComposer
+        goal="Goal B"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        readyDraft={draft}
+        onGoalChange={onGoalChange}
+        onSubmit={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+    expect(screen.getByText(draft.presentation_text)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "确认目标" }));
+    expect(onConfirm).toHaveBeenCalledWith("draft-a");
+  });
+
+  it("removes the old Confirm action as soon as a new Parse starts", () => {
+    render(
+      <GoalComposer
+        goal="Goal B"
+        pendingGoal="Goal B"
+        resolving
+        startedAt={Date.now()}
+        busy
+        readyDraft={null}
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "确认目标" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("goal-resolving-status")).toHaveTextContent("Agent 正在理解目标");
+  });
+
+  it("restores a READY preview supplied by the authoritative projection", () => {
+    render(
+      <GoalComposer
+        goal="Goal A"
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        readyDraft={{
+          draft_id: "restored-draft",
+          submitted_goal: "Goal A",
+          presentation_text: "已解析目标：Goal A。",
+          status: "READY",
+          created_at: "2026-09-11T00:00:00Z",
+        }}
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("goal-confirmation-feedback")).toHaveTextContent(
+      "已解析目标：Goal A。",
+    );
+    expect(screen.getByRole("button", { name: "确认目标" })).toBeEnabled();
+  });
+
+  it("maps internal Goal errors to player-safe feedback", () => {
+    const message = goalSubmissionErrorText({ code: "MODEL_PROVIDER_RESPONSE_INVALID" });
+    expect(message).toBe("目标解析暂时失败，请重新解析。");
+    expect(message).not.toContain("MODEL_PROVIDER_RESPONSE_INVALID");
+    expect(goalSubmissionErrorText({ code: "MODEL_PROVIDER_TIMEOUT" })).toBe(message);
+  });
+
+  it("maps confirm lifecycle and integrity errors without exposing internal codes", () => {
+    expect(confirmGoalErrorText({ code: "GOAL_DRAFT_SUPERSEDED" })).toBe(
+      "这个目标确认已失效，请重新解析目标。",
+    );
+    expect(confirmGoalErrorText({ code: "AGENT_TASK_ALREADY_ACTIVE" })).toBe(
+      "当前已有进行中的任务，暂时无法确认新的目标。",
+    );
+    const safe = confirmGoalErrorText({ code: "FORMAL_GOAL_CONTRACT_HASH_MISMATCH" });
+    expect(safe).toBe("目标确认暂时失败，请重新尝试。");
+    expect(safe).not.toContain("FORMAL_GOAL_CONTRACT_HASH_MISMATCH");
   });
 
   it("renders Knowledge sections with dynamic counts and controlled defaults", () => {
@@ -1332,22 +1915,65 @@ describe("Formal Play player projections", () => {
     expect(screen.queryByText("当前参与者")).not.toBeInTheDocument();
   });
 
-  it("默认以紧凑模式展示最新方案，并允许循环查看冻结历史", () => {
+  it("短方案只在折叠与完整展开之间切换", () => {
     render(<PlanHistory task={task} />);
     expect(document.querySelectorAll(".plan-history-card")).toHaveLength(2);
-    expect(screen.getByText("乙 · 新行动")).toBeVisible();
+    expect(screen.getByText("乙 · 新行动", { selector: ".plan-history-steps strong" })).toBeVisible();
     expect(screen.queryByText("甲 · 旧行动", { selector: ".plan-history-steps strong" })).not.toBeInTheDocument();
     const latestToggle = screen.getByRole("button", { name: /执行方案 2 · 执行中/ });
     expect(latestToggle).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(latestToggle);
     expect(latestToggle).toHaveTextContent("收起");
-    expect(latestToggle).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(latestToggle);
     expect(latestToggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("乙 · 新行动")).not.toBeInTheDocument();
+    expect(latestToggle).toHaveTextContent("展开");
+    fireEvent.click(latestToggle);
+    expect(latestToggle).toHaveAttribute("aria-expanded", "true");
+    expect(latestToggle).toHaveTextContent("收起");
+    expect(screen.getByText("乙 · 新行动")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /执行方案 1 · 已调整/ }));
     expect(screen.getByText("甲 · 旧行动", { selector: ".plan-history-steps strong" })).toBeVisible();
     expect(screen.getByText("甲 · 取消行动").closest("li")).toHaveClass("cancelled");
+  });
+
+  it("五步方案不创建 compact scroll preview", () => {
+    const steps: PublicTask["plan_history"][number]["steps"] = Array.from(
+      { length: 5 },
+      (_, index) => ({
+        id: `step-${index + 1}`,
+        sequence: index + 1,
+        action_name: `step-${index + 1}`,
+        assigned_actor_name: "甲",
+        status: "COMPLETED" as const,
+        result_summary: null,
+        location: null,
+      }),
+    );
+    render(
+      <PlanHistory
+        task={{
+          ...task,
+          plan_history: [{
+            ...task.plan_history[0],
+            id: "five-step-plan",
+            ordinal: 1,
+            status: "COMPLETED",
+            completed_steps: 5,
+            total_steps: 5,
+            steps,
+          }],
+        }}
+      />,
+    );
+    expect(screen.getByText("甲 · step-1")).toBeVisible();
+    expect(document.querySelector(".plan-history-step-viewport")).toBeNull();
+    const toggle = screen.getByRole("button", { name: /执行方案 1 · 目标完成/ });
+    fireEvent.click(toggle);
+    expect(toggle).toHaveTextContent("展开");
+    expect(screen.queryByText("甲 · step-1")).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveTextContent("收起");
+    expect(screen.getByText("甲 · step-5")).toBeVisible();
   });
 
   it("用玩家状态、规划次数和资源信息展示三档方案卡", () => {
@@ -1374,13 +2000,13 @@ describe("Formal Play player projections", () => {
         resource_usage: index === 5
           ? [
               { resource_key: "municipal", resource_name: "市政维修材料", amount: 10 },
-              { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+              { resource_key: "general", resource_name: "通用维修部件", amount: 5 },
               { resource_key: "electrical", resource_name: "电力维修部件", amount: 2 },
             ]
           : index === 4
             ? [
-                { resource_key: "water", resource_name: "水务系统部件", amount: 15 },
-                { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+                { resource_key: "water", resource_name: "水务维修部件", amount: 15 },
+                { resource_key: "general", resource_name: "通用维修部件", amount: 5 },
               ]
           : [],
         resource_usage_kind: index === 5 ? "TRANSPORT" as const : index === 4 ? "CONSUME" as const : null,
@@ -1407,8 +2033,8 @@ describe("Formal Play player projections", () => {
     expect(within(card).queryByText("2m 10s")).not.toBeInTheDocument();
     expect(within(card).queryByText("2 次尝试")).not.toBeInTheDocument();
     expect(card).toHaveTextContent("展开全部");
-    expect(screen.getByText("运输：市政维修材料 ×10 · 通用工程部件 ×5 · 电力维修部件 ×2")).toBeVisible();
-    expect(screen.getByText(/消耗：水务系统部件 ×15 · 通用工程部件 ×5/)).toBeVisible();
+    expect(screen.getByText("运输：市政维修材料 ×10 · 通用维修部件 ×5 · 电力维修部件 ×2")).toBeVisible();
+    expect(screen.getByText(/消耗：水务维修部件 ×15 · 通用维修部件 ×5/)).toBeVisible();
 
     fireEvent.click(card);
     expect(card).toHaveTextContent("收起");
@@ -1476,7 +2102,7 @@ describe("Formal Play player projections", () => {
             location: { kind: "ROUTE", summary: "西部物流区 → 中央城区", detail: "旧资源文字 ×10" },
             resource_usage: [
               { resource_key: "municipal", resource_name: "市政维修材料", amount: 10 },
-              { resource_key: "general", resource_name: "通用工程部件", amount: 5 },
+              { resource_key: "general", resource_name: "通用维修部件", amount: 5 },
             ],
             resource_usage_kind: "TRANSPORT",
           }],
@@ -1484,7 +2110,7 @@ describe("Formal Play player projections", () => {
       />,
     );
     expect(screen.getByText("运输资源 · 西部物流区 → 中央城区")).toBeVisible();
-    expect(screen.getByText("资源已运输 · 市政维修材料 ×10 · 通用工程部件 ×5")).toBeVisible();
+    expect(screen.getByText("资源已运输 · 市政维修材料 ×10 · 通用维修部件 ×5")).toBeVisible();
     expect(screen.queryByText(/旧资源文字/)).not.toBeInTheDocument();
     expect(screen.queryByText("行动已完成")).not.toBeInTheDocument();
   });
@@ -1660,6 +2286,104 @@ describe("Formal Play player projections", () => {
     expect(within(cycleCard).queryByText("模型：成功")).not.toBeInTheDocument();
     expect(within(cycleCard).queryByText("Validator：通过")).not.toBeInTheDocument();
     expect(screen.getByTestId("planning-attempt-cycle-initial-0")).toBeVisible();
+  });
+
+  it("uses the linked accepted AgentPlan ordinal for an initial plan headline", () => {
+    const cycle = planningCycle(
+      "cycle-initial-ordinal",
+      "INITIAL",
+      "ACCEPTED",
+      [planningAttempt("INITIAL_PLAN", "ACCEPTED")],
+    );
+    const acceptedPlan = {
+      ...task.plan_history[0],
+      id: "plan-4",
+      ordinal: 4,
+      planning_cycle_id: cycle.id,
+    };
+    render(
+      <Timeline
+        task={{
+          ...task,
+          plan_history: [acceptedPlan],
+          timeline: [planEvent("plan:plan-4:created", "PLAN_CREATED", 999, cycle.id)],
+          planning_process: [cycle],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Agent 已完成计划 · 执行方案 4")).toBeVisible();
+  });
+
+  it("uses the linked accepted AgentPlan ordinal for a replan headline", () => {
+    const cycle = planningCycle(
+      "cycle-replan-ordinal",
+      "REPLAN",
+      "ACCEPTED",
+      [planningAttempt("REPLAN", "ACCEPTED")],
+    );
+    const acceptedPlan = {
+      ...task.plan_history[0],
+      id: "plan-7",
+      ordinal: 7,
+      planning_cycle_id: cycle.id,
+    };
+    render(
+      <Timeline
+        task={{
+          ...task,
+          plan_history: [acceptedPlan],
+          timeline: [planEvent("plan:plan-7", "PLAN_UPDATED", 999, cycle.id)],
+          planning_process: [cycle],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Agent 已重新规划 · 执行方案 7")).toBeVisible();
+  });
+
+  it("keeps a replan headline unnumbered when no accepted AgentPlan is linked", () => {
+    const cycle = planningCycle(
+      "cycle-replan-without-plan",
+      "REPLAN",
+      "ACCEPTED",
+      [planningAttempt("REPLAN", "ACCEPTED")],
+    );
+    render(
+      <Timeline
+        task={{
+          ...task,
+          plan_history: [],
+          timeline: [planEvent("planning-cycle:without-plan", "PLAN_UPDATED", 999, cycle.id)],
+          planning_process: [cycle],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Agent 已重新规划", { exact: true })).toBeVisible();
+    expect(screen.queryByText(/Agent 已重新规划 · 执行方案/)).not.toBeInTheDocument();
+  });
+
+  it("does not invent a plan ordinal for a rejected planning cycle", () => {
+    const cycle = planningCycle(
+      "cycle-replan-rejected",
+      "REPLAN",
+      "ERROR",
+      [planningAttempt("REPLAN", "REJECTED")],
+    );
+    render(
+      <Timeline
+        task={{
+          ...task,
+          plan_history: [{ ...task.plan_history[0], ordinal: 7, planning_cycle_id: "other-cycle" }],
+          timeline: [planEvent("planning-cycle:rejected", "PLAN_UPDATED", 999, cycle.id)],
+          planning_process: [cycle],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Agent 未能完成计划")).toBeVisible();
+    expect(screen.queryByText(/执行方案 7/)).not.toBeInTheDocument();
   });
 
   it("按顺序展示重新规划和修复规划的全部 attempts", () => {
@@ -2322,6 +3046,7 @@ describe("Formal Play player projections", () => {
         resources={[
           { key: "general_engineering_parts", name: "General Engineering Parts", value: 5, reserved_value: 0 },
           { key: "municipal_repair_materials", name: "Municipal Repair Materials", value: 20, reserved_value: 0 },
+          { key: "emergency_fuel", name: "应急燃料", value: 50, reserved_value: 0 },
         ]}
         visibleNodes={[
           { key: "east", name: "East Region", accessible: true, node_type_key: "region", region_key: "east", region_name: "East Region" },
@@ -2352,6 +3077,26 @@ describe("Formal Play player projections", () => {
             ],
           },
           { key: "unknown_facility", name: "Unknown Facility", accessible: true, node_type_key: "facility", region_key: "north", region_name: "North Region" },
+          {
+            key: "survey_only_facility",
+            name: "Surveyed Facility",
+            accessible: true,
+            node_type_key: "facility",
+            region_key: "north",
+            region_name: "North Region",
+            associated_known_resources: [{
+              resource_key: "emergency_fuel",
+              resource_name: "应急燃料",
+              quantity: 50,
+              availability: "UNAVAILABLE",
+              availability_requirement: {
+                node_key: "survey_only_facility",
+                fact_key: "operational",
+                value: true,
+              },
+              availability_requirement_status: "KNOWN",
+            }],
+          },
           { key: "emergency_generator", name: "Emergency Generator", accessible: true, node_type_key: "facility", region_key: "north", region_name: "North Region" },
         ]}
         actors={[]}
@@ -2360,9 +3105,7 @@ describe("Formal Play player projections", () => {
           { node_key: "east_distribution_station", fact_key: "power_supply", name: "Power supply", value: "UNAVAILABLE", node_name: "East Substation", node_type_key: "facility", region_key: "east", region_name: "East Region" },
           { node_key: "utility_service_depot", fact_key: "operational", name: "Operational", value: false, node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
           { node_key: "utility_service_depot", fact_key: "power_supply", name: "Power supply", value: "UNAVAILABLE", node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
-          { node_key: "utility_service_depot", fact_key: "power_generation_capable", name: "Power generation capable", value: false, node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
           { node_key: "utility_service_depot", fact_key: "heavy_engineering_support", name: "Heavy engineering support", value: "UNAVAILABLE", node_name: "Utility Service Depot", node_type_key: "facility", region_key: "north", region_name: "North Region" },
-          { node_key: "emergency_generator", fact_key: "power_generation_capable", name: "Power generation capable", value: true, node_name: "Emergency Generator", node_type_key: "facility", region_key: "north", region_name: "North Region" },
         ]}
         knownRelations={[
           {
@@ -2374,6 +3117,25 @@ describe("Formal Play player projections", () => {
             target_node_name: "East Community Hospital",
           },
         ]}
+        knownActionRequirements={[{
+          action_key: "generate_power",
+          action_name: "启动燃料应急发电",
+          known_preconditions: [],
+          resource_requirements: [{
+            resource_key: "emergency_fuel",
+            scope: { kind: "CURRENT_TARGET_REGION" },
+            minimum: 50,
+          }],
+        }, {
+          action_key: "repair_industrial_facility",
+          action_name: "Legacy facility repair label",
+          known_preconditions: [],
+          resource_requirements: [{
+            resource_key: "general_engineering_parts",
+            scope: { target_key: "utility_service_depot", kind: "CURRENT_TARGET_REGION" },
+            minimum: 5,
+          }],
+        }]}
         knownTargetActionContracts={[
           {
             target_key: "utility_service_depot",
@@ -2381,7 +3143,23 @@ describe("Formal Play player projections", () => {
             action_name: "Repair industrial facility",
             required_actor_role_name: "Industrial Repair Team",
             cost: { general_engineering_parts: 5, municipal_repair_materials: 20 },
+            resource_requirements: [
+              { resource_key: "general_engineering_parts", scope: { kind: "CURRENT_TARGET_REGION", target_key: "utility_service_depot" }, minimum: 5 },
+              { resource_key: "electrical_repair_parts", scope: { kind: "CURRENT_TARGET_REGION", target_key: "utility_service_depot" }, minimum: 15 },
+            ],
             effects: [{ type: "FACT_MUTATION", target: "target_key", fact_key: "operational", value: true }],
+          },
+          {
+            target_key: "unknown_facility",
+            action_key: "repair_facility",
+            action_name: "修复设施",
+            required_actor_role_name: "Hidden Repair Team",
+          },
+          {
+            target_key: "survey_only_facility",
+            action_key: "repair_facility",
+            action_name: "修复设施",
+            required_actor_role_name: "Survey-only Repair Team",
           },
         ]}
       />,
@@ -2407,12 +3185,16 @@ describe("Formal Play player projections", () => {
     expect(utilitySummary).not.toHaveTextContent("+");
     expect(window.location.href).toBe(locationBefore);
     expect(screen.getByTestId("knowledge-accordion-locations")).toBeInTheDocument();
-    expect(utility).toHaveTextContent("通用工程部件");
+    const actionRequirements = screen.getByTestId("known-action-requirements");
+    expect(actionRequirements).toHaveTextContent("启动燃料应急发电：应急燃料 ×50");
+    expect(actionRequirements).not.toHaveTextContent("通用维修部件 ×5");
+    expect(utility).toHaveTextContent("通用维修部件");
     expect(utility).toHaveTextContent("×5");
     expect(utility).toHaveTextContent("×20");
-    expect(utility).toHaveTextContent("修复需求：通用工程部件 ×5、市政维修材料 ×20");
+    expect(utility).toHaveTextContent("修复需求：通用维修部件 ×5、市政维修材料 ×20");
+    expect(utility).toHaveTextContent("电力维修部件 ×15");
     expect(utility).toHaveTextContent("执行队伍：Industrial Repair Team");
-    expect(utility).toHaveTextContent("关联资源：通用工程部件 ×50，暂不可用，解锁条件：Utility Service Depot恢复运行");
+    expect(utility).toHaveTextContent("关联资源：通用维修部件 ×50，暂不可用，解锁条件：Utility Service Depot恢复运行");
     expect(utility).toHaveTextContent("重型工程支援：不可用");
     expect(utility).not.toHaveTextContent("修复效果：");
     expect(utility).not.toHaveTextContent("修复后设备正常");
@@ -2424,9 +3206,17 @@ describe("Formal Play player projections", () => {
     expect(unknownSummary.querySelector(".knowledge-facility-toggle")).toHaveTextContent("+");
     fireEvent.click(unknownSummary);
     expect(unknownFacility).toHaveAttribute("open");
+    expect(unknownFacility).not.toHaveTextContent("修复需求：修复设施");
+    expect(unknownFacility).not.toHaveTextContent("执行队伍：Hidden Repair Team");
+    expect(unknownFacility).toHaveTextContent("暂无更多已知信息");
     expect(screen.getByTestId("knowledge-accordion-locations")).toBeInTheDocument();
     fireEvent.click(unknownSummary);
     expect(unknownFacility).not.toHaveAttribute("open");
+    const surveyOnlyFacility = screen.getByTestId("facility-card-survey_only_facility");
+    fireEvent.click(surveyOnlyFacility.querySelector("summary")!);
+    expect(surveyOnlyFacility).toHaveTextContent("关联资源：应急燃料 ×50，暂不可用，解锁条件：Surveyed Facility恢复运行");
+    expect(surveyOnlyFacility).not.toHaveTextContent("执行队伍：Survey-only Repair Team");
+    expect(surveyOnlyFacility).not.toHaveTextContent("暂无更多已知信息");
     fireEvent.click(screen.getByText("East Region"));
     const substation = screen.getByTestId("facility-card-east_distribution_station");
     const substationSummary = substation.querySelector("summary")!;
@@ -2439,7 +3229,8 @@ describe("Formal Play player projections", () => {
     expect(substation).not.toHaveTextContent("发电能力：");
     const generator = screen.getByTestId("facility-card-emergency_generator");
     fireEvent.click(generator.querySelector("summary")!);
-    expect(generator).toHaveTextContent("发电能力：已具备");
+    expect(generator).toHaveTextContent("暂无更多已知信息");
+    expect(generator).not.toHaveTextContent("发电能力");
     expect(screen.queryByTestId("knowledge-accordion-facts")).not.toBeInTheDocument();
     expect(screen.queryByTestId("knowledge-accordion-relations")).not.toBeInTheDocument();
   });
@@ -2454,6 +3245,11 @@ describe("Formal Play player projections", () => {
           { key: "blocked_route", name: "Blocked Corridor", accessible: true, node_type_key: "transport", region_key: "north", region_name: "North Region", endpoint_region_names: ["North Region", "East Region"] },
         ]}
         actors={[]}
+        knownTargetActionContracts={[{
+          target_key: "unknown_route",
+          action_key: "clear_transport",
+          action_name: "清理交通通道",
+        }]}
         knownFacts={[
           { node_key: "open_route", fact_key: "passable", name: "Passability", value: true, node_name: "Open Corridor", node_type_key: "transport", region_key: "north", region_name: "North Region" },
           { node_key: "blocked_route", fact_key: "passable", name: "Passability", value: false, node_name: "Blocked Corridor", node_type_key: "transport", region_key: "north", region_name: "North Region" },
@@ -2469,6 +3265,8 @@ describe("Formal Play player projections", () => {
     expect(unknown).toHaveTextContent("待探索");
     expect(open).toHaveTextContent("可通行");
     expect(blocked).toHaveTextContent("待修复");
+    expect(unknown).not.toHaveTextContent("清理交通通道：清理交通通道");
+    expect(unknown.querySelector(".knowledge-node-details")).toBeNull();
     expect(unknown.querySelector("summary")).toBeNull();
     expect(open.querySelector("summary")).toBeNull();
     expect(blocked.querySelector("summary")).toBeNull();

@@ -53,7 +53,7 @@ class PublicGameStatus(StrEnum):
 
 
 class GoalSubmissionStatus(StrEnum):
-    ACCEPTED = "ACCEPTED"
+    READY_FOR_CONFIRMATION = "READY_FOR_CONFIRMATION"
     NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
     UNSUPPORTED = "UNSUPPORTED"
 
@@ -429,13 +429,43 @@ class PublicPlanningCycleResponse(ApiModel):
     attempts: list[PublicPlanningAttemptResponse] = Field(default_factory=list)
 
 
+class PublicGoalRequirementResponse(ApiModel):
+    """Player-visible typed projection of one Formal Goal obligation."""
+
+    identity: str
+    key: str
+    kind: Literal["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE", "ACTION_COMPLETED"]
+    description: str
+    node_key: str | None = None
+    fact_key: str | None = None
+    accepted_values: list[str | int | bool] = Field(default_factory=list)
+    region_key: str | None = None
+    resource_key: str | None = None
+    minimum: int | None = None
+    derived_key: str | None = None
+    current_known_value: str | int | bool | None = None
+    current_known_available: int | None = None
+    knowledge_status: Literal["KNOWN", "KNOWN_ZERO", "UNKNOWN"] | None = None
+    action_key: str | None = None
+    action_name: str | None = None
+    actor_key: str | None = None
+    actor_name: str | None = None
+    target_key: str | None = None
+    target_name: str | None = None
+    binding_constraints: list[dict[str, object]] = Field(default_factory=list)
+    parameter_constraints: dict[str, object] | None = None
+    match_mode: Literal["ONE_SUCCESSFUL_INVOCATION"] | None = None
+    boundary: Literal["TASK_OWNED_OPERATION"] | None = None
+    operation_status: Literal["PENDING", "COMPLETED"] | None = None
+
+
 class MissionRoadmapStageResponse(ApiModel):
     key: str
     name: str
     description: str
     status: MissionRoadmapStageStatus
     objective_key: str | None = None
-    requirements: list[dict[str, Any]] = Field(default_factory=list)
+    requirements: list[PublicGoalRequirementResponse] = Field(default_factory=list)
 
 
 class MissionRoadmapResponse(ApiModel):
@@ -505,6 +535,8 @@ class PublicTaskResponse(ApiModel):
     status: PublicTaskStatus
     execution_phase: PublicExecutionPhase
     pacing_version: int = Field(ge=1)
+    goal_source_kind: Literal["PREDEFINED", "PARAMETERIZED", "AD_HOC_DYNAMIC"] = "PREDEFINED"
+    goal_requirements: list[PublicGoalRequirementResponse] = Field(default_factory=list)
     objective_names: list[str]
     roadmap: MissionRoadmapResponse
     plan: PublicPlanResponse | None = None
@@ -522,6 +554,7 @@ class PublicTaskSummaryResponse(ApiModel):
     id: UUID
     sequence: int = Field(ge=1)
     goal: str
+    goal_source_kind: Literal["PREDEFINED", "PARAMETERIZED", "AD_HOC_DYNAMIC"] = "PREDEFINED"
     objective_names: list[str]
     status: PublicTaskStatus
     execution_phase: PublicExecutionPhase
@@ -529,19 +562,26 @@ class PublicTaskSummaryResponse(ApiModel):
     completed_at: datetime | None = None
 
 
+class PublicResolvedGoalDraftResponse(ApiModel):
+    draft_id: UUID
+    submitted_goal: str
+    presentation_text: str
+    status: Literal["READY"] = "READY"
+    created_at: datetime
+
+
 class GoalSubmissionResponse(ApiModel):
+    resolution_id: UUID
+    submitted_goal: str
     status: GoalSubmissionStatus
-    task: PublicTaskResponse | None = None
-    clarification_prompt: str | None = None
-    candidate_objective_names: list[str] = Field(default_factory=list)
-    explanation: str | None = None
+    presentation_text: str
+    draft_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_result(self) -> GoalSubmissionResponse:
-        if self.status == GoalSubmissionStatus.ACCEPTED and self.task is None:
-            raise ValueError("ACCEPTED goal submission requires a Task")
-        if self.status != GoalSubmissionStatus.ACCEPTED and self.task is not None:
-            raise ValueError("Unaccepted goal submission cannot expose a Task")
+        ready = self.status == GoalSubmissionStatus.READY_FOR_CONFIRMATION
+        if ready != (self.draft_id is not None):
+            raise ValueError("Only READY_FOR_CONFIRMATION may expose a Goal Draft")
         return self
 
 
@@ -584,8 +624,10 @@ class PublicActionRequirementResponse(ApiModel):
     action_name: str
     required_actor_role_key: str | None = None
     required_actor_role_name: str | None = None
+    target_actor_roles: list[dict[str, Any]] = Field(default_factory=list)
     source_relation_type_key: str | None = None
     known_preconditions: list[dict[str, Any]] = Field(default_factory=list)
+    resource_requirements: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PublicTargetActionContractResponse(ApiModel):
@@ -596,6 +638,7 @@ class PublicTargetActionContractResponse(ApiModel):
     required_actor_role_name: str | None = None
     source_relation_type_key: str | None = None
     cost: dict[str, int] = Field(default_factory=dict)
+    resource_requirements: list[dict[str, Any]] = Field(default_factory=list)
     special_requirements: list[dict[str, Any]] = Field(default_factory=list)
     effects: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -637,6 +680,7 @@ class PlayerGameStateResponse(ApiModel):
     resource_intelligence: dict[str, Any] = Field(default_factory=dict)
     actors: list[PublicActorResponse] = Field(default_factory=list)
     current_task: PublicTaskResponse | None
+    current_goal_draft: PublicResolvedGoalDraftResponse | None = None
     task_history: list[PublicTaskSummaryResponse] = Field(default_factory=list)
     pending_approval_id: UUID | None = None
 
@@ -667,6 +711,7 @@ class DeveloperGameSnapshotResponse(ApiModel):
     rule_outcomes: list[dict[str, Any]]
     decisions: list[dict[str, Any]]
     memory: list[dict[str, Any]]
+    goal_resolution_attempts: list[dict[str, Any]] = Field(default_factory=list)
     history: list[dict[str, Any]]
 
 
@@ -696,6 +741,8 @@ __all__ = [
     "GoalSubmissionRequest",
     "GoalSubmissionResponse",
     "GoalSubmissionStatus",
+    "MissionRoadmapResponse",
+    "MissionRoadmapStageResponse",
     "NewGameRequest",
     "ObjectLocator",
     "PlayerGameStateResponse",
@@ -705,8 +752,10 @@ __all__ = [
     "PublicActionRequirementResponse",
     "PublicExecutionPhase",
     "PublicGameStatus",
+    "PublicGoalRequirementResponse",
     "PublicPlanResponse",
     "PublicPlanStepResponse",
+    "PublicResolvedGoalDraftResponse",
     "PublicStepStatus",
     "PublicTaskResponse",
     "PublicTaskStatus",

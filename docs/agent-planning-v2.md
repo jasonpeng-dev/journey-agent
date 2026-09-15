@@ -1,18 +1,28 @@
 # Agent Planning V2
 
-This is the canonical detailed description of the current Journey Agent
-planning, validation, execution, Knowledge, repair, replan, and continuity
-architecture. It describes the generic production path that is implemented by
-the repository. Scenario data supplies content; it does not add
+This is the canonical detailed description of Journey Agent's planning,
+validation, execution, Knowledge, repair, replan, and continuity architecture.
+It describes the generic production path implemented by the repository.
+Scenario data supplies content; it does not add
 scenario-specific control flow.
+
+The product-facing Goal and task-compilation contract is maintained in
+[Custom Goals and Task Compilation](custom-goals.md); this document defines
+the detailed planning and validation boundary after resolution.
 
 ## 1. Overview
 
-The current end-to-end lifecycle is:
+The end-to-end lifecycle is:
 
     Natural-language Goal
-      -> Goal Resolver
-      -> frozen ObjectiveScope on AgentTask
+      -> World Goal State catalog or authored semantic routing
+      -> legacy authored Objective routing for catalog-disabled/old Versions
+      -> deterministic public Entity Grounding when needed
+      -> bounded semantic Entity Grounding when deterministic grounding is not unique
+      -> focused public ontology
+      -> Dynamic Goal Interpretation
+      -> deterministic exact-Version candidate validation
+      -> frozen FormalGoalContractV1 on AgentTask
       -> bounded Dependency Closure
       -> canonical PlannerInput V2
       -> LLM Provider or deterministic provider substitute
@@ -27,6 +37,12 @@ The current end-to-end lifecycle is:
       -> Player acknowledgement
       -> REPLAN when required
       -> objective verification
+
+In a catalog-enabled Version, exact public World Goal State metadata resolves
+to a typed `AD_HOC_DYNAMIC` requirement. In catalog-disabled or older
+immutable Versions, an explicit authored Objective key, canonical name, alias,
+or example takes the `PREDEFINED` path. An unmatched Goal never falls back to
+selecting the nearest authored Objective.
 
 The runtime is generic because the same source code interprets every
 published ScenarioVersion through the declarative ScenarioDefinitionV2 and
@@ -72,7 +88,8 @@ The LLM Planner chooses, from the canonical input:
 
 The Planner may compose multiple supporting Actions and multiple Actors when
 the public state and Action contracts require a causal chain. It may repeat
-an Action, including one-hop Travel, when that is part of its own plan.
+an Action, including a one-hop movement Action, when that is part of its own
+plan.
 
 ### 2.3 Backend and Validator responsibilities
 
@@ -82,26 +99,54 @@ judges the submitted PlanSegment and explains known contradictions.
 
 The Validator and runtime do not become a second Planner. They do not perform
 pathfinding, choose a route, choose an Actor, choose a Resource source,
-insert prerequisites, insert Travel or Relay, invent recovery Actions, or
+insert prerequisites, insert movement or communication steps, invent recovery Actions, or
 return recovery recommendations. A blocked decision that requires multi-step
 planning remains the Planner's responsibility.
 
-## 3. Goal Resolution and frozen ObjectiveScope
+## 3. Goal Resolution and frozen Formal Goal
 
-The Goal Resolver first matches the submitted natural-language goal against
-the exact published Version's Objective keys, names, aliases, and examples.
-If configured fallback is enabled, a provider may select only among the
-exact objective candidates supplied by the resolver. It cannot invent an
-Objective.
+The Goal Resolver first matches the submitted natural-language Goal against
+the exact published Version's Objective keys, canonical names, explicit
+aliases, and examples. Only a unique explicit match enters the `PREDEFINED`
+source; an ambiguous authored match requires clarification. An unmatched Goal
+does not invoke the legacy Objective-selection model and is never converted
+into the nearest authored Objective. It enters the Dynamic path when the
+configured Dynamic provider capability is available.
+
+Dynamic resolution performs deterministic public entity or unique public
+topology grounding first. If the wording clearly refers to a public entity
+but deterministic grounding is not unique, bounded semantic Entity Grounding
+may return only public candidate keys, clarification, or unsupported. The
+backend validates returned keys against the exact ScenarioVersion, builds a
+focused public ontology, and only then calls Dynamic Goal Interpretation.
+Grounding answers which public entity the player named; interpretation answers
+which supported terminal Goal state is requested. Neither stage plans Actions.
+
+In a catalog-enabled Version, public Goal metadata can resolve directly to a
+typed dynamic requirement; other text can use bounded public grounding and
+interpretation. Catalog-disabled or older immutable Versions may retain their
+authored Objective compatibility route. These choices are Version-scoped and
+do not change the generic planning contract.
 
 An accepted goal creates an AgentTask with:
 
 * the exact ScenarioVersion reference;
-* a non-empty frozen ObjectiveScope;
-* an ObjectiveScope hash and catalog/version metadata;
-* objective completion requirements from the ScenarioVersion.
+* a frozen `FormalGoalContractV1` and canonical contract hash;
+* exact ScenarioVersion/content-hash proof and compiler metadata;
+* typed completion requirements from the contract.
 
-INITIAL planning, REPAIR, and REPLAN all remain inside that frozen scope.
+For a `PREDEFINED` source, the Task also retains the authored ObjectiveScope
+compatibility fields used by existing planning helpers. For an
+`AD_HOC_DYNAMIC` source, those authored scope fields are empty; the legacy
+non-null scope hash stores only the Formal Goal hash as a compatibility
+fingerprint. In both cases the Formal Goal contract, not ObjectiveScope, is
+the completion authority.
+
+INITIAL planning, REPAIR, and REPLAN all remain inside that frozen contract
+and its exact ScenarioVersion. A newly revealed public requirement or planning
+dependency changes the projection available to the current cycle, not the
+contract itself. `ObjectiveScope` is only a predefined/legacy compatibility
+projection; it is not the primary authority for Dynamic Goals.
 Neither the model nor the backend may add sibling objectives, broaden the
 scope, or replace a completion requirement with a model-declared one.
 Completion is determined by the formal Scenario completion requirements and
@@ -109,11 +154,15 @@ projected deterministic effects, not by a free-form model assertion.
 
 ### 3.1 Objective requirement kinds and gated publication
 
-The current objective evaluator supports both `FACT` and
-`RESOURCE_AT_LEAST` completion requirements. A `RESOURCE_AT_LEAST`
-requirement names a Resource, a Region, and a minimum quantity. Truth
-evaluation aggregates the actual free quantity in matching Runtime Resource
-Pools that are `AVAILABLE`; reserved quantity is excluded.
+The objective evaluator supports `FACT`, `RESOURCE_AT_LEAST`, and
+`DERIVED_STATE` completion requirements. A `RESOURCE_AT_LEAST` requirement
+names a Resource, a Region, and a minimum quantity. A `DERIVED_STATE`
+requirement names a public authored capability and its typed target value.
+Derived State definitions may depend on Facts, resource thresholds, and other
+Derived States; the evaluator computes them as a validated dependency graph
+and never accepts a direct provider mutation. Truth evaluation aggregates the
+actual free quantity in matching Runtime Resource Pools that are `AVAILABLE`;
+reserved quantity is excluded.
 
 Public planning and player projections apply a stricter Knowledge boundary.
 They aggregate only currently Known Resource Knowledge. A hidden Pool,
@@ -123,16 +172,112 @@ inventory with no matching Pool can represent known zero.
 
 A completion requirement may have a `knowledge_gate` containing
 `node_key`, `fact_key`, and `accepted_values`. The requirement already belongs
-to the frozen ObjectiveScope when the AgentTask is created, but it enters the
-public Agent/Player projection only after that gate is Known and satisfied.
-This reveal does not broaden ObjectiveScope, create a later Objective, or
+to the frozen Formal Goal contract when the AgentTask is created, but it enters
+the public Agent/Player projection only after that gate is Known and satisfied.
+This reveal does not broaden the frozen Formal Goal, create a later Objective, or
 delegate completion to the Provider. The deterministic evaluator remains the
 completion authority.
+
+A Scenario may expose any number of goal-addressable Derived States. A
+single real-world condition remains a `FACT`; a capability with multiple
+authored dependencies may be a `DERIVED_STATE`. A Derived State is a computed
+capability with independent semantic identity, not a mandatory wrapper around
+one Fact.
+
+Derived State is compute-on-read. The Truth evaluator reads complete
+authoritative Runtime state; the Knowledge evaluator reads only the public
+projection. No Action or Rule directly sets a Derived State, no Derived row is
+persisted, and recomputation does not create a runtime revision. Checkpoint and
+Fork therefore materialize Base Runtime/Knowledge state and recompute Derived
+values from the exact ScenarioVersion.
+
+### 3.2 Dynamic Goal boundary
+
+`AD_HOC_DYNAMIC` compilation reuses the same typed requirement and evaluator
+path. The interpreter receives a focused public ontology made from currently
+public entity identities, goal-addressable Fact schemas, public Regions,
+public Resource types, and public goal-addressable Derived State schemas. It
+may return `FACT`, `RESOURCE_AT_LEAST`, or `DERIVED_STATE` candidate
+semantics, with implicit `AND`; the backend validates every key, typed value,
+Region, Resource, and Derived State against the exact Version and assigns the
+canonical identity. Dynamic candidates cannot carry authored Objective keys,
+descriptions, prerequisites, `knowledge_gate` fields, Derived State
+dependencies, or hidden completion semantics. A goal-addressable Fact or
+Derived State schema may be exposed even when its current value is Knowledge
+`UNKNOWN`; its Truth value and dependency details are not included in the
+interpreter payload.
+
+The interpreter payload is a public ontology projection. It excludes current
+Truth values, hidden Facts, Actions, authored Objective definitions, planning
+catalogs, hidden requirement metadata, and non-public Derived State
+dependencies. A broad or ambiguous Goal must be clarified or rejected; the
+interpreter cannot silently supplement it with Scenario-authored hidden
+obligations. Hidden completion requirements remain an authored `PREDEFINED`
+capability, or require a future deterministic template source outside the
+current V1.
+
+Dynamic provider-format or transient failures use bounded retry, reusing the
+validated grounding and focused ontology for interpretation retries.
+`NEEDS_CLARIFICATION` is not retried until a random resolution is obtained.
+Provider/internal error codes are developer diagnostics, not Player wording;
+Goal submission feedback is rendered in the Goal input area.
+
+An authored Knowledge-producing Action may reveal previously gated
+dependencies. The resulting public Knowledge can change the Closure and
+Planner projection and trigger REPLAN without editing the frozen Goal or
+expanding the Formal Goal contract.
+
+### 3.3 Provider profiles
+
+Provider request settings are selected by purpose through two independent
+profiles:
+
+* `FAST_SEMANTIC` handles `DYNAMIC_GOAL_GROUNDING` and
+  `DYNAMIC_GOAL_INTERPRETATION`. Its model comes from `SEMANTIC_MODEL`, with
+  fallback to `MODEL_NAME`; thinking is forcibly disabled and its fast output
+  budget is fixed by code.
+* `PLANNING_REASONING` handles `INITIAL`, `REPAIR`, and `REPLAN`. Its model,
+  thinking, reasoning effort, and output token budget come from `MODEL_NAME`,
+  `MODEL_THINKING_MODE`, `MODEL_REASONING_EFFORT`, and
+  `MODEL_MAX_OUTPUT_TOKENS`.
+
+Planning configuration does not flow into semantic calls. The two profiles
+may use different models without changing Goal resolution or Planner logic.
+
+### 3.4 Goal Required and explicit player constraints
+
+`ActionDefinitionV2.goal_required_slots` is the data-driven boundary for
+which slots the player must identify in the Goal. It is not the same as an
+Action invocation's execution-parameter requiredness:
+
+| Boundary | Owner | Meaning |
+| --- | --- | --- |
+| Goal-required slot | Resolver / Player | Missing information means the requested WHAT is still unknown. |
+| Execution-required parameter | Planner / Validator | The eventual Action call must contain a legal value. |
+| Omitted optional slot | Planner | The Planner may choose a legal value from the canonical contract. |
+
+Missing Goal-required information returns `NEEDS_CLARIFICATION` before the
+Planner is called. An omitted optional slot is represented as
+`NOT_SPECIFIED` (or an equivalent absent field) and is never filled by
+topology lookup in the Resolver. If the player explicitly supplies an Actor,
+source, Resource, amount, Target, or other parameter constraint, the
+canonical resolver freezes it in the Formal Goal. INITIAL, REPAIR, and REPLAN
+may not substitute or broaden that constraint.
+
+For example, an Action can require a Target in the Goal while leaving its
+source `NOT_SPECIFIED`; Planner then chooses a legal source through authored
+relations. An explicit source is frozen and a missing source-to-Target
+relation is a deterministic conflict, not permission for Planner to choose a
+replacement. Target-only Actions similarly leave Actor choice to Planner
+unless the player names one. An Action that requires a source, Resource,
+amount, and destination freezes those slots while leaving route and other HOW
+decisions to Planner.
 
 ## 4. Dependency Closure
 
 Dependency Closure is bounded relevance filtering for the current frozen
-ObjectiveScope. It starts from objective requirements and public producer
+Formal Goal contract. For predefined Tasks it may consume the equivalent
+ObjectiveScope compatibility projection. It starts from objective requirements and public producer
 semantics, then performs bounded fixed-point expansion to retain the public
 Actors, Actions, Targets, Resources, Knowledge dependencies, and transport
 context that the Planner may need.
@@ -156,6 +301,14 @@ Action-level deterministic effects and sparse target-specific bindings are
 both valid public producers. A producer is retained only when its public
 contract matches the dependency's effect, fact, value, and target semantics.
 Target-specific rules are not expanded into a Cartesian catalogue.
+
+Authored target identity and producer identity may remain relevant when the
+current target Fact is hidden. In that case Closure carries a typed
+`UNKNOWN` dependency or requirement; it never serializes the hidden current
+value. Target bindings retain compatible roles, resources, and effects for the
+Planner to choose among. Closure itself still only collects and expands
+relevance: it does not choose an Actor, source, route, ordering, or fixed
+supporting plan.
 
 ## 5. Canonical PlannerInput V2
 
@@ -211,13 +364,13 @@ no row remains UNKNOWN. Reserved quantity is not available quantity.
 
 Resource Knowledge contract:
 
-* survey_resources can expose the identity, quantity, availability, and static
-  unlock requirement of a discovered Resource Pool;
-* survey_resources does not directly expose hidden Facility Truth referenced by
-  an unlock requirement;
-* inspect reveals the corresponding Target or Facility facts, but does not
-  also discover an undiscovered Resource Pool;
-* survey and inspect order must not change the final legal Knowledge state;
+* a resource-survey Action can expose the identity, quantity, availability,
+  and static unlock requirement of a discovered Resource Pool;
+* a resource-survey Action does not directly expose hidden Facility Truth
+  referenced by an unlock requirement;
+* an inspection Action reveals the corresponding Target or Facility facts, but
+  does not also discover an undiscovered Resource Pool;
+* survey and inspection order must not change the final legal Knowledge state;
 * Agent and Player use the same Knowledge permission boundary;
 * the Agent reads relevant Known Knowledge through canonical structured
   PlannerInput; hidden Truth is never included in PlannerInput.
@@ -236,26 +389,26 @@ binding projections used by the runtime. PlanningContextV1 has been removed.
 The planning-context-only provider_payload branch has also been removed.
 PlannerInput V2 is the canonical provider payload authority. candidate_id
 remains supported as a compatibility response field and is resolved against
-the current catalog and binding; it is not a second planning authority.
+the active catalog and binding; it is not a second planning authority.
 
 For REPLAN, planning_continuity is an additional historical sibling field.
 It is not part of the canonical PlannerInput and never overrides it.
 
 ## 6. Planner reasoning guidance
 
-The current planning prompt asks the Planner to reason from the terminal
+The planning prompt asks the Planner to reason from the terminal
 Objective completion requirement backwards through public prerequisites. The
 Planner must identify public executor, locality, Resource, Target, parameter,
 command-reachability, and precondition requirements and compose legal
 supporting Actions itself.
 
-The current implementation has implicit backward prerequisite reasoning. It
-does not persist a formal working-goal, milestone, or goal-dependency-graph
-object. Those are future design possibilities, not current runtime fields.
+The runtime has implicit backward prerequisite reasoning. It
+does not persist a formal WorkingGoal, Milestone, Goal AST, or goal-dependency
+graph object. Those are future design possibilities, not runtime fields.
 
-The backend will not insert prerequisites, Travel, Relay, transport, recovery
-Actions, or routes. When they are required, the Planner must include them in
-the returned PlanSegment.
+The backend will not insert prerequisites, movement, communication, transfer,
+recovery Actions, or routes. When they are required, the Planner must include
+them in the returned PlanSegment.
 
 ## 7. PlanSegment contract
 
@@ -298,8 +451,10 @@ because the final Action was attempted.
 Use this only when a genuinely blocking UNKNOWN dependency prevents the next
 legal choice of Target, Resource source, parameter, or public precondition.
 The segment must include a legal Knowledge-acquisition Action that matches
-that dependency as its final step. boundary_dependency_id must identify the
-same UNKNOWN dependency.
+that dependency before the first Action whose legality, binding, or choice
+would consume its unresolved result. Independent currently legal Actions may
+follow the acquisition in the same segment. `boundary_dependency_id` must
+identify the same UNKNOWN dependency.
 
 MAY_ATTEMPT transport or route uncertainty is not an information boundary.
 General complexity, lack of confidence, or inability to think of a causal
@@ -379,14 +534,14 @@ The REPAIR payload contains:
 * same-cycle anti_regression_memory;
 * frozen planning_continuity when this is a REPLAN cycle.
 
-Current repair limits are configuration/runtime bounds. The exact value is
+Repair limits are configuration/runtime bounds. The exact value is
 recorded by provider audit metadata and is not a scenario rule.
 
 Anti-regression memory contains only earlier Validator-proven contradiction
 evidence from this planning cycle. It is historical evidence, not an active
 violation and not a recovery plan. It must not contain recommended Action,
 Actor, Target, source, route, next step, or an old complete plan. The new
-proposal is validated again from current canonical PlannerInput and projected
+proposal is validated again from the canonical PlannerInput and projected
 state.
 
 Rejected attempts are persisted as PlanningAttempt audit rows. They do not
@@ -431,84 +586,85 @@ Runtime failure is distinct from Planner/Validator rejection. A hidden route
 failure discovered during execution is a Runtime outcome that may add public
 Knowledge and become a later REPLAN reason.
 
-## 13. Current Action semantics
+## 13. Generic Action semantics
 
-### Travel
+Supported Action semantic contracts are declarative and generic. The Planner
+selects an Action and supplies its bindings; the backend does not invent a
+route, prerequisite, or recovery sequence.
 
-Travel is one hop:
+### Movement
 
-* source is the projected executing Actor Region;
-* target is the destination Region;
-* the Actor location changes;
+A one-hop movement Action has these semantics:
+
+* the source is the projected executing Actor Region;
+* the Target is the destination Region;
+* the Actor location changes on success;
 * Resources do not move;
-* an UNKNOWN route may be attempted;
+* an UNKNOWN route may be attempted; and
 * a hidden block may fail at Runtime and reveal public route Knowledge.
 
-Multiple Travel steps may be composed by the Planner. The backend does not
+Multiple movement steps may be composed by the Planner. The backend does not
 perform pathfinding or insert a route.
 
-### transport_resource
+### Resource transfer
 
-transport_resource is the Region-to-Region Resource transfer Action:
+A Region-to-Region Resource transfer Action has these semantics:
 
-* source is the projected executing Actor Region;
-* target is the destination Region;
-* canonical parameters contain a non-empty `resources` cargo list whose
-  entries have a unique Resource key and positive integer amount;
-* legacy single-cargo `resource_key` and `amount` input is normalized to that
-  canonical list;
-* all requested cargo is consumed from Known, visible, `AVAILABLE`,
-  unreserved source-Pool quantity and added to the destination only when the
-  one-hop Action resolves successfully;
+* the source is the projected executing Actor Region and the Target is the
+  destination Region;
+* canonical parameters contain a non-empty cargo list with unique Resource
+  identities and positive integer amounts;
+* a legacy single-item form may be normalized to that canonical list;
+* requested cargo is consumed from Known, visible, `AVAILABLE`, unreserved
+  source-Pool quantity and added to the destination only after successful
+  one-hop resolution;
 * multi-Resource cargo is atomic: a blocked route, unknown/insufficient
-  source, or invalid entry moves neither cargo nor Actor;
-* on success, the executing Actor location also changes to the destination
-  Region, and sequential validation uses that projected location for the next
-  step.
+  source, or invalid entry moves neither cargo nor Actor; and
+* on success, the executing Actor location changes to the destination and
+  sequential validation uses that projected location for the next step.
 
-The deterministic destination inflow is Known without implying that the
+The deterministic destination inflow becomes Known without implying that the
 destination Region's hidden base inventory has been surveyed.
 
-### relay_message
+### Command communication
 
 The executor must satisfy the Action's command-reachability contract. A
-relay can connect a target Actor when the public locality and interaction
-requirements are met. The Validator projects the target's reachability for
-later steps.
+communication Action can connect a target Actor when public locality and
+interaction requirements are met. The Validator projects the target's
+reachability for later steps.
 
 ### Knowledge acquisition domains
 
-The Knowledge effects described here change public visibility, not their
-underlying Truth values; an Action's selected declarative Rule may separately
-mutate Truth. The current generic domains are deliberately separate:
+Knowledge effects change public visibility, not underlying Truth; an Action's
+selected declarative Rule may separately mutate Truth. The generic domains are
+deliberately separate:
 
-* `survey_resources` reveals Region Resource Knowledge and discoverable Pool
-  metadata; it does not reveal hidden Facility Truth;
-* `inspect` reveals the selected Facility or Transport target's non-Resource
-  facts; it does not survey the Region inventory;
-* successful `repair_communications` derives the target Region through the
-  generic locality contract and `located_in` relations, then reveals that
-  Region's eligible Facility Facts and their current Runtime values. Facility
-  Node identity remains governed by authored Node visibility.
+* a resource-survey Action reveals Region Resource Knowledge and discoverable
+  Pool metadata, but not hidden Facility Truth;
+* an inspection Action reveals the selected Facility or Transport target's
+  non-Resource facts, but does not survey the Region inventory; and
+* a communication-recovery Action may use generic locality and `located_in`
+  relations to reveal eligible Facility Facts and their current Runtime
+  values. Facility Node identity remains governed by authored Node visibility.
 
 Communication recovery reads current Runtime Truth when Fact visibility is
 changed; it does not replay initial cached values or reveal Facility identity.
 Agent and Player share the same public Knowledge boundary, and communication
-recovery does not reveal Region Resource inventory. Linjiang is one data-defined
-instance of this generic behavior, not a Runtime scenario-key branch or a
-hard-coded Region reveal table.
+recovery does not reveal Region Resource inventory.
 
-A Knowledge-acquisition step must match the declared dependency. When it is
-the final step of an `INFORMATION_BOUNDARY` segment, the lifecycle pauses for
-execution and Player acknowledgement before REPLAN. The existence of a
+A Knowledge-acquisition step must match the declared dependency. An
+`INFORMATION_BOUNDARY` segment may contain independent legal Actions after
+that acquisition, but it must end before the first Action that consumes the
+unresolved observation result. The lifecycle pauses at that segment boundary
+for execution and Player acknowledgement before REPLAN. The existence of a
 Knowledge-producing Action alone does not make a segment an information
 boundary.
 
-### clear_transport and repair Actions
+### Target-conditioned Actions
 
-clear_transport and repair Actions use the current generic ActionContract,
-TargetBinding, locality, resource, and Rule semantics. Their meaning is not
-hard-coded to Linjiang or any other Scenario.
+Target-conditioned clearing, repair, and other Actions use the same generic
+ActionContract, TargetBinding, locality, Resource, and Rule semantics. Their
+meaning comes from Scenario data rather than a scenario-key branch.
 
 ## 14. Truth and Knowledge projection
 
@@ -546,8 +702,8 @@ REPLAN occurs after Runtime execution when:
 * a formal segment is exhausted while the Objective is still incomplete.
 
 Formal PLAY requires the player acknowledgement phase before it calls the
-next planning request. The new cycle rebuilds the current canonical
-PlannerInput from current public Knowledge. REPLAN is not REPAIR: REPAIR
+next planning request. The new cycle rebuilds the canonical PlannerInput from
+current public Knowledge. REPLAN is not REPAIR: REPAIR
 corrects a rejected proposal before execution, while REPLAN plans from a new
 runtime/Knowledge state.
 
@@ -556,7 +712,8 @@ public Knowledge. A successful Knowledge acquisition resets that consecutive
 budget, so an incomplete but still solvable Objective is not terminalized just
 because earlier information-boundary segments consumed the prior budget.
 
-The ObjectiveScope remains frozen. The new cycle may discard obsolete
+The frozen Formal Goal remains unchanged. For predefined Tasks, the equivalent
+ObjectiveScope compatibility projection also remains unchanged. The new cycle may discard obsolete
 Actions, Actors, Targets, sources, routes, and ordering.
 
 ## 16. Planning Continuity
@@ -604,6 +761,11 @@ the final blocked/completed state.
 If the Objective is complete, the Task enters COMPLETED and does not replan.
 If no valid plan can be produced within the configured bounds, the Task enters
 a terminal blocked/model-rejected state with the persisted error code.
+Player-visible Goal submission feedback uses the existing clarification or
+unsupported wording when available and maps internal provider/validation
+failures to short human-readable messages in the Goal input area. Internal
+codes are not written into the player's Goal text or exposed as player
+wording.
 
 ## 18. Observability
 
@@ -628,17 +790,17 @@ work:
 
 1. PlannerInput semantic compression: reduce repeated ActionContract and
    KnownWorld serialization without changing semantics or closure bounds.
-2. Explicit working goals and goal decomposition: introduce a separate
-   Objective -> Necessary Conditions -> Working Goals -> dependencies ->
-   PlanSegment model only after it is designed and implemented.
+2. Explicit WorkingGoal/Milestone decomposition: introduce a separate
+   projection or persisted entity only when a real runtime/UX requirement
+   needs child lifecycle, bounded progress, or user-addressable resumption.
 
-The current runtime uses implicit backward prerequisite reasoning. Working
-goals, milestones, and a persistent goal dependency graph are not current
-implementation features.
+The runtime uses implicit backward prerequisite reasoning. Working goals,
+milestones, and a persistent goal dependency graph are not part of the
+implementation.
 
 ## 20. Source map
 
-| Area | Current implementation |
+| Area | Implementation area |
 | --- | --- |
 | Provider models and prompt/payload | app/agent/provider.py |
 | Canonical PlannerInput construction | app/agent/planning_context.py |
@@ -646,7 +808,17 @@ implementation features.
 | Plan validation and repair loop | app/agent/generic.py |
 | Declarative Action/Rule execution | app/services/generic_game.py |
 | Shared public Knowledge projection | app/services/knowledge_projection.py |
+| Derived State evaluator | app/services/derived_state.py |
 | Formal PLAY orchestration | app/services/play.py |
 | Player-safe response projection | app/services/player_projection.py |
 | Player pacing checkpoint | app/services/player_pacing.py |
 | ScenarioDefinitionV2 | app/domain/scenario_v2.py |
+
+Documentation authority:
+
+| Document | Scope |
+| --- | --- |
+| [Custom Goals and Task Compilation](custom-goals.md) | Product Goal flow, Goal Required, explicit constraints, supporting dependencies, and WHAT/HOW ownership |
+| [Architecture](architecture.md) | High-level runtime and ownership boundaries |
+| [Scenario authoring](scenario-authoring.md) | Declarative authoring, validation, and publication |
+| [GameInstance lifecycle](game-lifecycle.md) | Exact-Version binding, Formal PLAY, Archive, Checkpoint, and Fork |

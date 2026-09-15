@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -23,6 +23,7 @@ from app.api.schemas.phase_d import (
     PublicExecutionPhase,
     PublicFactResponse,
     PublicGameStatus,
+    PublicGoalRequirementResponse,
     PublicKnowledgeChangeResponse,
     PublicNodeResponse,
     PublicPlanDisplayStatus,
@@ -37,6 +38,7 @@ from app.api.schemas.phase_d import (
     PublicPlanResponse,
     PublicPlanStepResponse,
     PublicRelationResponse,
+    PublicResolvedGoalDraftResponse,
     PublicResourceResponse,
     PublicResourceUsageKind,
     PublicResourceUsageResponse,
@@ -53,10 +55,12 @@ from app.domain.enums import (
     AgentStepStatus,
     AgentTaskStatus,
     DecisionStatus,
+    ResolvedGoalDraftStatus,
     ResourcePoolAvailability,
     StepExecutionType,
     WorldOperationStatus,
 )
+from app.domain.formal_goal import FormalGoalContract
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import (
     ActionBehavior,
@@ -72,16 +76,25 @@ from app.infrastructure.db.models import (
     GameInstance,
     GameInstanceActor,
     GameInstanceResourceState,
+    GoalResolutionAttempt,
     PlanningAttempt,
     PlanningCycle,
     PlayerExecutionCheckpoint,
+    ResolvedGoalDraft,
     Scenario,
     ScenarioVersion,
     WorldOperation,
 )
 from app.scenarios.versions import ScenarioVersionRepository
+from app.services.derived_state import evaluate_derived_states
+from app.services.formal_goal import (
+    FormalGoalCompletionEvaluator,
+    load_formal_goal_for_draft,
+    load_formal_goal_for_task,
+)
 from app.services.game_instances import GameInstanceError, GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
+from app.services.goal_presentation import present_resolved_goal
 from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.mission_roadmap import MissionRoadmap, MissionRoadmapProjector
 from app.services.player_action_report import format_player_knowledge_changes
@@ -128,8 +141,13 @@ class PlayerProjectionService:
         visible_node_keys = {item.node_key for item in visible_nodes}
         known_facts = knowledge_projection.known_fact_rows()
         known_relations = knowledge_projection.known_relations()
-        known_action_requirements = knowledge_projection.known_action_requirements()
-        known_target_action_contracts = knowledge_projection.known_target_action_contracts()
+        target_knowledge_contracts = knowledge_projection.target_knowledge_contracts()
+        known_action_requirements = knowledge_projection.known_action_requirements(
+            target_contracts=target_knowledge_contracts,
+        )
+        known_target_action_contracts = knowledge_projection.known_target_action_contracts(
+            target_contracts=target_knowledge_contracts,
+        )
         node_projections: dict[str, SpatialNodeProjection] = {}
         for item in visible_nodes:
             projection = spatial.node(item.node_key)
@@ -166,6 +184,26 @@ class PlayerProjectionService:
             (item for item in reversed(task_rows) if item.status in _PUBLIC_ACTIVE_TASKS),
             None,
         )
+        ready_draft = self.db.scalar(
+            select(ResolvedGoalDraft)
+            .where(
+                ResolvedGoalDraft.game_instance_id == game.id,
+                ResolvedGoalDraft.status == ResolvedGoalDraftStatus.READY,
+            )
+            .order_by(ResolvedGoalDraft.created_at.desc(), ResolvedGoalDraft.id.desc())
+        )
+        ready_attempt = (
+            self.db.get(GoalResolutionAttempt, ready_draft.resolution_attempt_id)
+            if ready_draft is not None
+            else None
+        )
+        ready_formal_goal = (
+            load_formal_goal_for_draft(self.db, scope, ready_draft)
+            if ready_draft is not None
+            else None
+        )
+        if ready_draft is not None:
+            assert ready_formal_goal is not None
         if selected_task_id is None:
             # The active Task is the player-facing default.  A terminal Task
             # can only be the fallback when the Instance has no active work.
@@ -348,6 +386,23 @@ class PlayerProjectionService:
                 if task is not None
                 else None
             ),
+            current_goal_draft=(
+                PublicResolvedGoalDraftResponse(
+                    draft_id=ready_draft.id,
+                    submitted_goal=ready_draft.original_goal_text,
+                    presentation_text=(
+                        ready_attempt.presentation_text
+                        if ready_attempt is not None and ready_attempt.presentation_text
+                        else present_resolved_goal(
+                            cast(FormalGoalContract, ready_formal_goal),
+                            definition,
+                        )
+                    ),
+                    created_at=ready_draft.created_at,
+                )
+                if ready_draft is not None
+                else None
+            ),
             task_history=[
                 self._task_summary(
                     item,
@@ -441,6 +496,8 @@ class PlayerProjectionService:
             id=task.id,
             sequence=sequence,
             goal=task.goal_description,
+            goal_source_kind=task.formal_goal_source_kind
+            or ("PREDEFINED" if task.objective_scope_keys else "AD_HOC_DYNAMIC"),
             objective_names=[
                 objective_names_by_key[key]
                 for key in task.objective_scope_keys or ()
@@ -595,12 +652,42 @@ class PlayerProjectionService:
             else None
         )
         objective_names = {item.key: item.name for item in definition.objectives}
-        roadmap = MissionRoadmapProjector().project(
+        task_scope = GameInstanceService(self.db).load(GameInstanceId(task.game_instance_id))
+        formal_goal = load_formal_goal_for_task(self.db, task_scope, task)
+        derived_evaluation = (
+            evaluate_derived_states(self.db, task_scope, definition)
+            if definition.derived_states
+            else None
+        )
+        completion_evaluation = FormalGoalCompletionEvaluator(
+            self.db,
+            task_scope,
+        ).evaluate(
+            formal_goal,
+            definition=definition,
+            task=task,
+        )
+        operation_status_by_identity = {
+            item.identity: item.satisfied
+            for item in completion_evaluation.requirements
+            if item.kind == "OPERATION"
+        }
+        roadmap = MissionRoadmapProjector().project_formal_goal(
             definition,
-            tuple(task.objective_scope_keys or ()),
+            formal_goal,
             known_facts,
             known_resources,
+            derived_evaluation.knowledge_values if derived_evaluation is not None else None,
+            goal_description=task.goal_description,
+            operation_status_by_identity=operation_status_by_identity,
         )
+        formal_requirement_ids = {item.identity for item in formal_goal.completion_requirements}
+        goal_requirements = [
+            requirement
+            for stage in roadmap.stages
+            for requirement in stage.requirements
+            if requirement.get("identity") in formal_requirement_ids
+        ]
         current_step = _next_tool_step(latest, steps_by_plan)
         if checkpoint is not None and checkpoint.last_action_step_id is not None:
             last_action_step = self.db.get(AgentStep, checkpoint.last_action_step_id)
@@ -613,6 +700,8 @@ class PlayerProjectionService:
             status=_task_status(task.status, task.last_error_code),
             execution_phase=PublicExecutionPhase(phase.value),
             pacing_version=checkpoint.version if checkpoint is not None else 1,
+            goal_source_kind=formal_goal.source_kind.value,
+            goal_requirements=[PublicGoalRequirementResponse(**item) for item in goal_requirements],
             objective_names=[
                 objective_names[key]
                 for key in task.objective_scope_keys or ()
@@ -626,7 +715,9 @@ class PlayerProjectionService:
                         description=stage.description,
                         status=stage.status.value,
                         objective_key=stage.objective_key,
-                        requirements=list(stage.requirements),
+                        requirements=[
+                            PublicGoalRequirementResponse(**item) for item in stage.requirements
+                        ],
                     )
                     for stage in roadmap.stages
                 ]

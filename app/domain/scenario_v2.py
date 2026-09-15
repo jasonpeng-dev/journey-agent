@@ -117,9 +117,61 @@ class ActionParameterType(StrEnum):
     BOOLEAN = "BOOLEAN"
 
 
+class ActionSemanticReferenceType(StrEnum):
+    """Public identity domain for an Action Goal slot.
+
+    Runtime scalar types and Goal identity types are deliberately separate:
+    a Resource key is transported as a string at execution time, while Goal
+    resolution must constrain it to a public Resource identity.
+    """
+
+    NODE = "NODE"
+    REGION = "REGION"
+    FACILITY = "FACILITY"
+    RESOURCE = "RESOURCE"
+    ACTOR = "ACTOR"
+
+
+class PublicReferenceTypeV2(StrEnum):
+    """Canonical identity domains exposed by Goal Resolver public catalogs."""
+
+    NODE = "NODE"
+    REGION = "REGION"
+    RESOURCE = "RESOURCE"
+    DERIVED_STATE = "DERIVED_STATE"
+    ACTION = "ACTION"
+    ACTOR = "ACTOR"
+
+
+class PublicReferenceV2(FrozenDefinitionModel):
+    """One author-approved natural-language term for a canonical identity."""
+
+    term: StrictStr = Field(min_length=1, max_length=160)
+    ref_type: PublicReferenceTypeV2
+    ref_key: StableKey
+
+    @model_validator(mode="after")
+    def validate_term(self) -> PublicReferenceV2:
+        if self.term != self.term.strip():
+            raise ValueError("Public reference term must not have surrounding whitespace")
+        return self
+
+
+class ActionOperationBindingSource(StrEnum):
+    EXPLICIT = "EXPLICIT"
+    EXECUTION_START_ACTOR_REGION = "EXECUTION_START_ACTOR_REGION"
+
+
 class RulePhase(StrEnum):
     PREFLIGHT = "PREFLIGHT"
     RESOLVE = "RESOLVE"
+
+
+class RuleTrigger(StrEnum):
+    """The generic event source that makes a Rule eligible for evaluation."""
+
+    ACTION = "ACTION"
+    STATE = "STATE"
 
 
 class ComparisonOperator(StrEnum):
@@ -181,6 +233,15 @@ class EffectKind(StrEnum):
     SET_REGION_RESOURCE_VISIBILITY = "SET_REGION_RESOURCE_VISIBILITY"
     SET_RESOURCE_POOL_VISIBILITY = "SET_RESOURCE_POOL_VISIBILITY"
     SET_RESOURCE_POOL_AVAILABILITY = "SET_RESOURCE_POOL_AVAILABILITY"
+    REVEAL_TARGET_REGION_FACILITY_FACTS = "REVEAL_TARGET_REGION_FACILITY_FACTS"
+
+
+class DerivedDependencyKind(StrEnum):
+    """Closed dependency vocabulary for a computed World State."""
+
+    FACT = "FACT"
+    RESOURCE_AT_LEAST = "RESOURCE_AT_LEAST"
+    DERIVED_STATE = "DERIVED_STATE"
 
 
 class ResourceInitialStateV2(FrozenDefinitionModel):
@@ -329,6 +390,15 @@ class FactDefinitionV2(FrozenDefinitionModel):
     value_type: FactValueType
     initial_value: StrictScalar
     initial_visibility: Visibility
+    # This is an authored semantic boundary, not runtime Knowledge.  A Fact
+    # may be goal-addressable even while its current Truth remains hidden.
+    goal_addressable: bool = Field(default=False, exclude_if=lambda value: not value)
+    goal_aliases: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    goal_examples: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    goal_target_values: tuple[StrictScalar, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     allowed_values: tuple[StrictScalar, ...] = ()
 
     @model_validator(mode="after")
@@ -351,6 +421,24 @@ class FactDefinitionV2(FrozenDefinitionModel):
             type(value) is not type(self.initial_value) for value in self.allowed_values
         ):
             raise ValueError("ENUM values must share one scalar type")
+        normalized_aliases = [alias.strip().casefold() for alias in self.goal_aliases]
+        normalized_examples = [example.strip().casefold() for example in self.goal_examples]
+        if any(not alias for alias in (*normalized_aliases, *normalized_examples)):
+            raise ValueError("Fact goal aliases/examples cannot be blank")
+        _require_unique(
+            (*normalized_aliases, *normalized_examples),
+            "Fact goal aliases/examples",
+        )
+        if not self.goal_addressable and (
+            self.goal_aliases or self.goal_examples or self.goal_target_values
+        ):
+            raise ValueError("Only goal-addressable Facts may declare Goal metadata")
+        _validate_typed_values(
+            self.value_type,
+            self.allowed_values,
+            self.goal_target_values,
+            "Fact goal target value",
+        )
         return self
 
 
@@ -508,6 +596,10 @@ class ActionParameterV2(FrozenDefinitionModel):
     maximum: int | None = None
     allowed_values: tuple[StrictScalar, ...] = ()
     default: StrictScalar | None = None
+    semantic_reference_type: ActionSemanticReferenceType | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_parameter(self) -> ActionParameterV2:
@@ -527,6 +619,11 @@ class ActionParameterV2(FrozenDefinitionModel):
             raise ValueError("allowed_values are valid only for ENUM Action parameters")
         if self.default is not None:
             _validate_parameter_value(self, self.default, field="default")
+        if (
+            self.semantic_reference_type is not None
+            and self.value_type != ActionParameterType.STRING
+        ):
+            raise ValueError("Semantic reference Action parameters must use STRING values")
         if self.required and self.default is not None:
             raise ValueError("A required Action parameter cannot define a default")
         return self
@@ -551,8 +648,167 @@ class ObjectiveRequirementKnowledgeGateV2(FrozenDefinitionModel):
     accepted_values: tuple[StrictScalar, ...] = Field(min_length=1)
 
 
+def knowledge_gate_is_revealed(
+    gate: ObjectiveRequirementKnowledgeGateV2 | None,
+    known_value: object | None,
+) -> bool:
+    """Return whether a public Knowledge gate permits its dependent semantics."""
+
+    return gate is None or known_value in gate.accepted_values
+
+
+class DerivedStateDependencyV2(FrozenDefinitionModel):
+    """One deterministic, typed input to a computed World State.
+
+    Dependency definitions are Scenario authoring metadata.  They may carry a
+    Knowledge gate so the evaluator can keep a public Derived value UNKNOWN
+    until a gameplay discovery occurs, but the gate is never part of the
+    public Goal State Catalog.
+    """
+
+    kind: DerivedDependencyKind
+    node_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    fact_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    accepted_values: tuple[StrictScalar, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    region_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    resource_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    minimum: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    derived_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
+    knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_dependency_shape(self) -> DerivedStateDependencyV2:
+        if self.kind == DerivedDependencyKind.FACT:
+            if self.node_key is None or self.fact_key is None or not self.accepted_values:
+                raise ValueError("FACT Derived dependency needs node/fact/accepted_values")
+            if (
+                self.region_key is not None
+                or self.resource_key is not None
+                or self.minimum is not None
+            ):
+                raise ValueError("FACT Derived dependency cannot declare Resource fields")
+            if self.derived_key is not None:
+                raise ValueError("FACT Derived dependency cannot declare derived_key")
+        elif self.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+            if self.region_key is None or self.resource_key is None or self.minimum is None:
+                raise ValueError(
+                    "RESOURCE_AT_LEAST Derived dependency needs region/resource/minimum"
+                )
+            if self.node_key is not None or self.fact_key is not None or self.accepted_values:
+                raise ValueError("RESOURCE_AT_LEAST Derived dependency cannot declare Fact fields")
+            if self.derived_key is not None:
+                raise ValueError("RESOURCE_AT_LEAST Derived dependency cannot declare derived_key")
+        elif self.kind == DerivedDependencyKind.DERIVED_STATE:
+            if self.derived_key is None or not self.accepted_values:
+                raise ValueError("DERIVED_STATE dependency needs derived_key/accepted_values")
+            if (
+                self.node_key is not None
+                or self.fact_key is not None
+                or self.region_key is not None
+            ):
+                raise ValueError("DERIVED_STATE dependency cannot declare Base state fields")
+            if self.resource_key is not None or self.minimum is not None:
+                raise ValueError("DERIVED_STATE dependency cannot declare Resource fields")
+        else:
+            raise ValueError("Unsupported Derived dependency kind")
+        return self
+
+
+# Short aliases keep the domain vocabulary discoverable to callers while the
+# V2 suffix remains consistent with the existing Scenario definitions.
+DerivedDependencyV2 = DerivedStateDependencyV2
+
+
+class DerivedStateDefinitionV2(FrozenDefinitionModel):
+    """Immutable definition of a computed World Goal State/Capability."""
+
+    key: StableKey
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    value_type: FactValueType
+    available_value: StrictScalar
+    unavailable_value: StrictScalar
+    allowed_values: tuple[StrictScalar, ...] = ()
+    goal_addressable: bool = Field(default=False, exclude_if=lambda value: not value)
+    goal_aliases: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    goal_examples: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    dependencies: tuple[DerivedStateDependencyV2, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_value_domain(self) -> DerivedStateDefinitionV2:
+        if self.available_value == self.unavailable_value:
+            raise ValueError("Derived available and unavailable values must differ")
+        if self.value_type == FactValueType.BOOLEAN:
+            valid = type(self.available_value) is bool and type(self.unavailable_value) is bool
+        elif self.value_type == FactValueType.INTEGER:
+            valid = all(
+                type(value) is int for value in (self.available_value, self.unavailable_value)
+            )
+        elif self.value_type == FactValueType.STRING:
+            valid = all(
+                type(value) is str for value in (self.available_value, self.unavailable_value)
+            )
+        else:
+            valid = bool(self.allowed_values) and all(
+                value in self.allowed_values
+                for value in (self.available_value, self.unavailable_value)
+            )
+        if not valid:
+            raise ValueError("Derived state values do not match value_type")
+        if self.value_type != FactValueType.ENUM and self.allowed_values:
+            raise ValueError("allowed_values are valid only for ENUM Derived states")
+        if len(set(self.allowed_values)) != len(self.allowed_values):
+            raise ValueError("Derived state allowed_values must be unique")
+        normalized_aliases = [alias.strip().casefold() for alias in self.goal_aliases]
+        normalized_examples = [example.strip().casefold() for example in self.goal_examples]
+        if any(not alias for alias in (*normalized_aliases, *normalized_examples)):
+            raise ValueError("Derived State goal aliases/examples cannot be blank")
+        _require_unique(normalized_aliases, "Derived State goal aliases")
+        _require_unique(normalized_examples, "Derived State goal examples")
+        identities = tuple(self._dependency_identity(item) for item in self.dependencies)
+        if len(set(identities)) != len(identities):
+            raise ValueError("Derived state dependencies must be unique")
+        return self
+
+    @staticmethod
+    def _dependency_identity(dependency: DerivedStateDependencyV2) -> tuple[object, ...]:
+        return (
+            dependency.kind,
+            dependency.node_key,
+            dependency.fact_key,
+            dependency.accepted_values,
+            dependency.region_key,
+            dependency.resource_key,
+            dependency.minimum,
+            dependency.derived_key,
+            dependency.knowledge_gate,
+        )
+
+    @property
+    def target_value(self) -> StrictScalar:
+        """The typed value representing a satisfied Derived state."""
+
+        return self.available_value
+
+    @property
+    def non_target_value(self) -> StrictScalar:
+        return self.unavailable_value
+
+
+class ActionTargetFactEffectV2(FrozenDefinitionModel):
+    """A deterministic Fact mutation relative to the invocation target."""
+
+    fact_key: StableKey
+    value: StrictScalar
+
+
 class ActionPlanningProjectionV2(FrozenDefinitionModel):
     terminal_effects: tuple[FactReferenceV2, ...] = ()
+    target_terminal_effects: tuple[ActionTargetFactEffectV2, ...] = ()
     supporting_effects: tuple[FactReferenceV2, ...] = ()
     success_outcome_codes: tuple[SymbolicCode, ...] = ()
     wait_success_outcome_codes: tuple[SymbolicCode, ...] = ()
@@ -560,6 +816,50 @@ class ActionPlanningProjectionV2(FrozenDefinitionModel):
     knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @model_validator(mode="after")
+    def validate_target_effects(self) -> ActionPlanningProjectionV2:
+        _require_unique(
+            (effect.fact_key for effect in self.target_terminal_effects),
+            "Action target-relative planning Fact effects",
+        )
+        return self
+
+    def terminal_effects_for_target(self, target_key: StableKey) -> tuple[FactReferenceV2, ...]:
+        """Resolve static and current-target terminal effects for one invocation."""
+
+        return (
+            *self.terminal_effects,
+            *(
+                FactReferenceV2(node_key=target_key, fact_key=effect.fact_key)
+                for effect in self.target_terminal_effects
+            ),
+        )
+
+
+class ActionOperationBindingV2(FrozenDefinitionModel):
+    """One author-declared Goal-visible invocation binding role."""
+
+    role: StableKey
+    value_type: ActionSemanticReferenceType
+    source: ActionOperationBindingSource = ActionOperationBindingSource.EXPLICIT
+    description: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_binding_source(self) -> ActionOperationBindingV2:
+        if (
+            self.source == ActionOperationBindingSource.EXECUTION_START_ACTOR_REGION
+            and self.value_type != ActionSemanticReferenceType.REGION
+        ):
+            raise ValueError("Execution-start Actor Region bindings must be REGION-valued")
+        return self
+
+
+class ActionTargetActorRoleV2(FrozenDefinitionModel):
+    """A target-specific executor Role requirement for one Action."""
+
+    target_key: StableKey
+    required_actor_role_key: StableKey
 
 
 class ActionDefinitionV2(FrozenDefinitionModel):
@@ -587,6 +887,53 @@ class ActionDefinitionV2(FrozenDefinitionModel):
         default=ActionTargetKind.NODE,
         exclude_if=lambda value: value == ActionTargetKind.NODE,
     )
+    target_semantic_reference_type: ActionSemanticReferenceType | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    target_node_type_keys: tuple[StableKey, ...] = ()
+    target_actor_roles: tuple[ActionTargetActorRoleV2, ...] = ()
+    operation_bindings: tuple[ActionOperationBindingV2, ...] = ()
+    goal_required_slots: tuple[StableKey, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    def required_actor_role_for_target(self, target_key: str | None) -> StableKey | None:
+        """Resolve the exact executor Role, preserving the Action-level fallback."""
+
+        if target_key is not None:
+            match = next(
+                (item for item in self.target_actor_roles if item.target_key == target_key),
+                None,
+            )
+            if match is not None:
+                return match.required_actor_role_key
+        return self.required_actor_role_key
+
+    def relation_source_slot(self) -> tuple[str, StableKey] | None:
+        """Return the one typed invocation slot backing a relation source."""
+
+        if self.source_relation_type_key is None:
+            return None
+        reference_types = {
+            ActionSemanticReferenceType.NODE,
+            ActionSemanticReferenceType.REGION,
+            ActionSemanticReferenceType.FACILITY,
+        }
+        candidates = (
+            *(
+                ("binding", item.role)
+                for item in self.operation_bindings
+                if item.value_type in reference_types
+            ),
+            *(
+                ("parameter", item.key)
+                for item in self.parameters
+                if item.semantic_reference_type in reference_types
+            ),
+        )
+        return candidates[0] if len(candidates) == 1 else None
 
     @model_validator(mode="after")
     def validate_action(self) -> ActionDefinitionV2:
@@ -596,6 +943,45 @@ class ActionDefinitionV2(FrozenDefinitionModel):
             "Action allowed actor capabilities",
         )
         _require_unique((item.code for item in self.expected_outcomes), "Action outcome codes")
+        _require_unique(self.target_node_type_keys, "Action target Node types")
+        _require_unique(
+            (item.target_key for item in self.target_actor_roles),
+            "Action target-specific Actor Roles",
+        )
+        _require_unique((item.role for item in self.operation_bindings), "Action binding roles")
+        _require_unique(self.goal_required_slots, "Action Goal required slots")
+        invocation_slot_keys = {
+            "actor",
+            "target",
+            *(item.role for item in self.operation_bindings),
+            *(item.key for item in self.parameters),
+        }
+        unknown_goal_required_slots = set(self.goal_required_slots).difference(invocation_slot_keys)
+        if unknown_goal_required_slots:
+            unknown = ", ".join(sorted(unknown_goal_required_slots))
+            raise ValueError(
+                f"Action Goal required slots must reference invocation slots: {unknown}"
+            )
+        if self.target_kind != ActionTargetKind.NODE and self.target_node_type_keys:
+            raise ValueError("Only NODE-target Actions may constrain target Node types")
+        if self.target_kind != ActionTargetKind.NODE and self.target_actor_roles:
+            raise ValueError("Only NODE-target Actions may declare target-specific Actor Roles")
+        if (
+            self.target_kind == ActionTargetKind.NODE
+            and self.target_semantic_reference_type
+            not in {
+                None,
+                ActionSemanticReferenceType.NODE,
+                ActionSemanticReferenceType.REGION,
+                ActionSemanticReferenceType.FACILITY,
+            }
+        ):
+            raise ValueError("NODE-target Actions require a Node semantic target type")
+        if (
+            self.target_kind == ActionTargetKind.ACTOR
+            and self.target_semantic_reference_type not in {None, ActionSemanticReferenceType.ACTOR}
+        ):
+            raise ValueError("ACTOR-target Actions require an ACTOR semantic target type")
         if not self.allowed_actor_capabilities:
             raise ValueError("An Action needs at least one allowed actor capability")
         if not self.expected_outcomes:
@@ -855,7 +1241,14 @@ class EffectV2(FrozenDefinitionModel):
 class RuleDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     phase: RulePhase
-    action_key: StableKey
+    action_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    trigger: RuleTrigger = Field(
+        default=RuleTrigger.ACTION,
+        exclude_if=lambda value: value == RuleTrigger.ACTION,
+    )
     priority: int
     condition: ConditionV2 | None = None
     effects: tuple[EffectV2, ...] = Field(min_length=1)
@@ -867,10 +1260,18 @@ class RuleDefinitionV2(FrozenDefinitionModel):
             for effect in self.effects
             if effect.kind in {EffectKind.EMIT_OUTCOME, EffectKind.EMIT_FAILURE}
         ]
+        if self.trigger == RuleTrigger.ACTION and self.action_key is None:
+            raise ValueError("ACTION Rules require action_key")
+        if self.trigger == RuleTrigger.STATE and self.action_key is not None:
+            raise ValueError("STATE Rules must not declare action_key")
+        if self.trigger == RuleTrigger.STATE and self.phase != RulePhase.RESOLVE:
+            raise ValueError("STATE Rules must use the RESOLVE phase")
+        if self.trigger == RuleTrigger.STATE and terminals:
+            raise ValueError("STATE Rules may not emit Action outcomes or failures")
         if self.phase == RulePhase.PREFLIGHT:
             if any(effect.kind != EffectKind.EMIT_FAILURE for effect in self.effects):
                 raise ValueError("PREFLIGHT rules may only emit a deterministic failure")
-        elif len(terminals) != 1:
+        elif self.trigger == RuleTrigger.ACTION and len(terminals) != 1:
             raise ValueError("A RESOLVE rule requires exactly one outcome or failure Effect")
         return self
 
@@ -878,6 +1279,7 @@ class RuleDefinitionV2(FrozenDefinitionModel):
 class ObjectiveRequirementKind(StrEnum):
     FACT = "FACT"
     RESOURCE_AT_LEAST = "RESOURCE_AT_LEAST"
+    DERIVED_STATE = "DERIVED_STATE"
 
 
 class ObjectiveRequirementV2(FrozenDefinitionModel):
@@ -894,6 +1296,7 @@ class ObjectiveRequirementV2(FrozenDefinitionModel):
     region_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
     resource_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
     minimum: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+    derived_key: StableKey | None = Field(default=None, exclude_if=lambda value: value is None)
     knowledge_gate: ObjectiveRequirementKnowledgeGateV2 | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -908,13 +1311,29 @@ class ObjectiveRequirementV2(FrozenDefinitionModel):
                 self.region_key is not None
                 or self.resource_key is not None
                 or self.minimum is not None
+                or self.derived_key is not None
             ):
                 raise ValueError("FACT Objective requirement cannot declare resource fields")
-        else:
+        elif self.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
             if self.region_key is None or self.resource_key is None or self.minimum is None:
                 raise ValueError("RESOURCE_AT_LEAST needs region/resource/minimum")
             if self.node_key is not None or self.fact_key is not None or self.accepted_values:
                 raise ValueError("RESOURCE_AT_LEAST cannot declare Fact fields")
+            if self.derived_key is not None:
+                raise ValueError("RESOURCE_AT_LEAST cannot declare derived_key")
+        elif self.kind == ObjectiveRequirementKind.DERIVED_STATE:
+            if self.derived_key is None or not self.accepted_values:
+                raise ValueError("DERIVED_STATE needs derived_key/accepted_values")
+            if (
+                self.node_key is not None
+                or self.fact_key is not None
+                or self.region_key is not None
+                or self.resource_key is not None
+                or self.minimum is not None
+            ):
+                raise ValueError("DERIVED_STATE cannot declare Base Fact or Resource fields")
+        else:
+            raise ValueError("Unsupported Objective requirement kind")
         return self
 
     @property
@@ -923,6 +1342,12 @@ class ObjectiveRequirementV2(FrozenDefinitionModel):
             return None
         assert self.node_key is not None and self.fact_key is not None
         return self.node_key, self.fact_key
+
+    @property
+    def derived_ref(self) -> str | None:
+        if self.kind != ObjectiveRequirementKind.DERIVED_STATE:
+            return None
+        return self.derived_key
 
 
 class ObjectivePrerequisiteV2(FrozenDefinitionModel):
@@ -967,11 +1392,64 @@ class ObjectiveDefinitionV2(FrozenDefinitionModel):
 class GoalResolutionV2(FrozenDefinitionModel):
     allow_llm_fallback: bool = True
     clarification_prompt: str = Field(min_length=1, max_length=2000)
+    # When enabled, current authored Objective rows are compatibility
+    # metadata only; player text resolves through the public World Goal State
+    # catalog instead of the legacy Objective shortcut.
+    world_goal_state_catalog: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class RecoveryHintV2(FrozenDefinitionModel):
     failure_code: SymbolicCode
     hint: str = Field(min_length=1, max_length=2000)
+
+
+class ResourceSourceHintV2(FrozenDefinitionModel):
+    """Authored public background about where a Resource may be found.
+
+    This is discovery guidance only.  It is deliberately separate from
+    Resource Pool Truth: it carries no quantity, availability, facility, or
+    storage identity and does not constrain the legal source choices of an
+    Action.
+    """
+
+    resource_key: StableKey
+    primary_region_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    candidate_region_keys: tuple[StableKey, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def validate_regions(self) -> ResourceSourceHintV2:
+        if self.primary_region_key is None and not self.candidate_region_keys:
+            raise ValueError("Resource source hint needs a primary or candidate Region")
+        _require_unique(self.candidate_region_keys, "Resource source hint candidate Regions")
+        if (
+            self.primary_region_key is not None
+            and self.primary_region_key in self.candidate_region_keys
+        ):
+            raise ValueError("Resource source hint primary Region cannot be a candidate Region")
+        return self
+
+
+class PublicKnowledgeDefinitionV2(FrozenDefinitionModel):
+    """Static public discovery metadata authored in a ScenarioVersion."""
+
+    resource_source_hints: tuple[ResourceSourceHintV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def validate_resource_source_hints(self) -> PublicKnowledgeDefinitionV2:
+        _require_unique(
+            (item.resource_key for item in self.resource_source_hints),
+            "Public resource source hint Resource keys",
+        )
+        return self
 
 
 class PlanningDefinitionV2(FrozenDefinitionModel):
@@ -998,8 +1476,18 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     actions: tuple[ActionDefinitionV2, ...]
     rules: tuple[RuleDefinitionV2, ...]
     objectives: tuple[ObjectiveDefinitionV2, ...]
+    derived_states: tuple[DerivedStateDefinitionV2, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     goal_resolution: GoalResolutionV2
     planning: PlanningDefinitionV2 = Field(default_factory=PlanningDefinitionV2)
+    public_knowledge: PublicKnowledgeDefinitionV2 = Field(
+        default_factory=PublicKnowledgeDefinitionV2,
+        exclude_if=lambda value: not value.resource_source_hints,
+    )
+    public_references: tuple[PublicReferenceV2, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
     @property
     def objective_catalog_version(self) -> str:
@@ -1008,6 +1496,10 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     @property
     def objective_definitions(self):  # type: ignore[no-untyped-def]
         return MappingProxyType({objective.key: objective for objective in self.objectives})
+
+    @property
+    def derived_state_definitions(self):  # type: ignore[no-untyped-def]
+        return MappingProxyType({state.key: state for state in self.derived_states})
 
     @model_validator(mode="after")
     def validate_references(self) -> ScenarioDefinitionV2:
@@ -1179,6 +1671,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     _require_unique((item.key for item in definition.actions), "Action keys")
     _require_unique((item.key for item in definition.rules), "Rule keys")
     _require_unique((item.key for item in definition.objectives), "Objective keys")
+    _require_unique((item.key for item in definition.derived_states), "Derived State keys")
     _require_unique(
         (relation_identity(item) for item in world.relations),
         "World Relation identities",
@@ -1192,11 +1685,44 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     actors = {item.key: item for item in definition.actors.actor_profiles}
     actions = {item.key: item for item in definition.actions}
     objectives = {item.key: item for item in definition.objectives}
+    derived_states = {item.key: item for item in definition.derived_states}
+
+    for reference in definition.public_references:
+        if reference.ref_type == PublicReferenceTypeV2.REGION:
+            node = _require_key(nodes, reference.ref_key, "Public reference Region")
+            if (
+                not definition.metadata.locality.enabled
+                or node.node_type_key != definition.metadata.locality.region_node_type_key
+            ):
+                raise ValueError("Public reference REGION must target a Region Node")
+        elif reference.ref_type == PublicReferenceTypeV2.NODE:
+            node = _require_key(nodes, reference.ref_key, "Public reference Node")
+            if (
+                definition.metadata.locality.enabled
+                and node.node_type_key == definition.metadata.locality.region_node_type_key
+            ):
+                raise ValueError("Public reference NODE must not target a Region Node")
+        elif reference.ref_type == PublicReferenceTypeV2.RESOURCE:
+            _require_key(resources, reference.ref_key, "Public reference Resource")
+        elif reference.ref_type == PublicReferenceTypeV2.DERIVED_STATE:
+            state = _require_key(
+                derived_states, reference.ref_key, "Public reference Derived State"
+            )
+            if not state.goal_addressable:
+                raise ValueError(
+                    "Public reference DERIVED_STATE must target a goal-addressable State"
+                )
+        elif reference.ref_type == PublicReferenceTypeV2.ACTION:
+            _require_key(actions, reference.ref_key, "Public reference Action")
+        else:
+            _require_key(actors, reference.ref_key, "Public reference Actor")
 
     _validate_locality_contract(definition, nodes, node_types)
     _validate_resource_initial_states(definition, nodes)
     _validate_resource_pools(definition, nodes)
     _validate_region_resource_knowledge(definition, nodes)
+    _validate_public_knowledge(definition, nodes, resources)
+    _validate_derived_states(definition, nodes, resources, derived_states)
 
     _require_key(nodes, definition.initialization.start_node_key, "start Node")
     primary = _require_key(
@@ -1235,12 +1761,41 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 )
 
     for action in definition.actions:
+        for node_type_key in action.target_node_type_keys:
+            _require_key(
+                node_types,
+                node_type_key,
+                f"Action {action.key} target Node type",
+            )
         if action.required_actor_role_key is not None:
             _require_key(
                 roles,
                 action.required_actor_role_key,
                 f"Action {action.key} required Actor Role",
             )
+        for target_role in action.target_actor_roles:
+            target = _require_key(
+                nodes,
+                target_role.target_key,
+                f"Action {action.key} target-specific Actor Role target",
+            )
+            _require_key(
+                roles,
+                target_role.required_actor_role_key,
+                f"Action {action.key} target-specific required Actor Role",
+            )
+            if (
+                action.target_node_type_keys
+                and target.node_type_key not in action.target_node_type_keys
+            ):
+                raise ValueError(
+                    f"Action {action.key} target-specific Actor Role target "
+                    "has an invalid Node type"
+                )
+            if action.required_interaction_key not in target.interaction_keys:
+                raise ValueError(
+                    f"Action {action.key} target-specific Actor Role target lacks its Interaction"
+                )
         if (
             action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
         ) and not definition.metadata.locality.enabled:
@@ -1272,12 +1827,47 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
             *action.planning.supporting_effects,
         ):
             _require_fact(nodes, fact_ref.node_key, fact_ref.fact_key, "Action planning Effect")
+        if action.planning.target_terminal_effects:
+            if action.target_kind != ActionTargetKind.NODE:
+                raise ValueError(
+                    f"Action {action.key} target-relative planning Effects require a Node target"
+                )
+            eligible_targets = (
+                node
+                for node in nodes.values()
+                if (
+                    not action.target_node_type_keys
+                    or node.node_type_key in action.target_node_type_keys
+                )
+                and action.required_interaction_key in node.interaction_keys
+            )
+            for target in eligible_targets:
+                for target_effect in action.planning.target_terminal_effects:
+                    fact = _require_key(
+                        {fact.key: fact for fact in target.facts},
+                        target_effect.fact_key,
+                        f"Action {action.key} target-relative planning Effect on {target.key}",
+                    )
+                    _validate_typed_values(
+                        fact.value_type,
+                        fact.allowed_values,
+                        (target_effect.value,),
+                        f"Action {action.key} target-relative planning Effect value",
+                    )
         if action.planning.knowledge_gate is not None:
             _validate_gate(action.planning.knowledge_gate, nodes)
 
     for rule in definition.rules:
-        action = _require_key(actions, rule.action_key, f"Rule {rule.key} Action")
-        parameters = {parameter.key: parameter for parameter in action.parameters}
+        rule_action: ActionDefinitionV2 | None = (
+            _require_key(actions, rule.action_key, f"Rule {rule.key} Action")
+            if rule.action_key is not None
+            else None
+        )
+        parameters = (
+            {parameter.key: parameter for parameter in rule_action.parameters}
+            if rule_action is not None
+            else {}
+        )
         if rule.condition is not None:
             _validate_condition_refs(
                 rule.condition,
@@ -1286,6 +1876,8 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 parameters,
                 definition.metadata.locality,
             )
+            if rule.trigger == RuleTrigger.STATE:
+                _validate_state_trigger_condition(rule.condition)
         for effect in rule.effects:
             _validate_effect_refs(
                 effect,
@@ -1293,7 +1885,8 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 resources,
                 actors,
                 parameters,
-                action,
+                rule_action,
+                rule.trigger,
                 definition.metadata.locality,
                 {item.pool_key for item in definition.initialization.resource_pools},
                 relation_keys,
@@ -1304,12 +1897,20 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     for objective in definition.objectives:
         for requirement in objective.completion_requirements:
             _validate_objective_requirement(
-                requirement, nodes, resources, definition.metadata.locality
+                requirement,
+                nodes,
+                resources,
+                definition.metadata.locality,
+                derived_states,
             )
         for prerequisite in objective.prerequisites:
             for requirement in prerequisite.requirements:
                 _validate_objective_requirement(
-                    requirement, nodes, resources, definition.metadata.locality
+                    requirement,
+                    nodes,
+                    resources,
+                    definition.metadata.locality,
+                    derived_states,
                 )
         for key in objective.subsumes:
             if key == objective.key:
@@ -1370,17 +1971,42 @@ def _validate_condition_refs(
             _validate_parameter_value(parameter, condition.value, field="comparison value")
 
 
+def _validate_state_trigger_condition(condition: ConditionV2) -> None:
+    """Keep STATE rules independent from an Action invocation context."""
+
+    for child in condition.conditions:
+        _validate_state_trigger_condition(child)
+    if condition.condition is not None:
+        _validate_state_trigger_condition(condition.condition)
+    if condition.node is not None and condition.node.kind != NodeSelectorKind.EXPLICIT:
+        raise ValueError("STATE Rule conditions require explicit Node selectors")
+    if (
+        condition.resource_scope is not None
+        and condition.resource_scope.kind != ResourceScopeKind.EXPLICIT
+    ):
+        raise ValueError("STATE Rule conditions require explicit Resource scopes")
+
+
 def _validate_effect_refs(
     effect: EffectV2,
     nodes: dict[str, NodeDefinitionV2],
     resources: dict[str, ResourceDefinitionV2],
     actors: dict[str, ActorProfileV2],
     parameters: dict[str, ActionParameterV2],
-    action: ActionDefinitionV2,
+    action: ActionDefinitionV2 | None,
+    trigger: RuleTrigger,
     locality: LocalityContractV2,
     pool_keys: set[str],
     relation_keys: set[str],
 ) -> None:
+    if trigger == RuleTrigger.STATE:
+        if effect.node is not None and effect.node.kind != NodeSelectorKind.EXPLICIT:
+            raise ValueError("STATE Rule Effects require explicit Node selectors")
+        if (
+            effect.resource_scope is not None
+            and effect.resource_scope.kind != ResourceScopeKind.EXPLICIT
+        ):
+            raise ValueError("STATE Rule Effects require explicit Resource scopes")
     if effect.actor_key is not None:
         _require_key(actors, effect.actor_key, "Effect Actor")
     if effect.kind == EffectKind.SET_RELATION_VISIBILITY:
@@ -1417,6 +2043,8 @@ def _validate_effect_refs(
         if expression is not None and expression.parameter_key is not None:
             _require_key(parameters, expression.parameter_key, "Effect parameter")
     if effect.outcome_code is not None:
+        if action is None:
+            raise ValueError("STATE Rule Effects may not emit Action outcomes")
         _require_key(
             {outcome.code for outcome in action.expected_outcomes},
             effect.outcome_code,
@@ -1450,6 +2078,7 @@ def _validate_objective_requirement(
     nodes: dict[str, NodeDefinitionV2],
     resources: dict[str, ResourceDefinitionV2],
     locality: LocalityContractV2,
+    derived_states: dict[str, DerivedStateDefinitionV2],
 ) -> None:
     if requirement.kind == ObjectiveRequirementKind.RESOURCE_AT_LEAST:
         assert requirement.region_key is not None and requirement.resource_key is not None
@@ -1457,6 +2086,18 @@ def _validate_objective_requirement(
         if not locality.enabled or region.node_type_key != locality.region_node_type_key:
             raise ValueError("Objective resource requirement must reference a Region")
         _require_key(resources, requirement.resource_key, "Objective Resource")
+        if requirement.knowledge_gate is not None:
+            _validate_gate(requirement.knowledge_gate, nodes)
+        return
+    if requirement.kind == ObjectiveRequirementKind.DERIVED_STATE:
+        assert requirement.derived_key is not None
+        state = _require_key(derived_states, requirement.derived_key, "Objective Derived State")
+        _validate_typed_values(
+            state.value_type,
+            state.allowed_values,
+            requirement.accepted_values,
+            "Objective Derived State value",
+        )
         if requirement.knowledge_gate is not None:
             _validate_gate(requirement.knowledge_gate, nodes)
         return
@@ -1480,6 +2121,99 @@ def _validate_objective_requirement(
             raise ValueError("Objective value does not match BOOLEAN Fact")
     if requirement.knowledge_gate is not None:
         _validate_gate(requirement.knowledge_gate, nodes)
+
+
+def _validate_derived_states(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+    resources: dict[str, ResourceDefinitionV2],
+    derived_states: dict[str, DerivedStateDefinitionV2],
+) -> None:
+    """Validate the closed Derived dependency graph at publish/parse time."""
+
+    locality = definition.metadata.locality
+    for state in derived_states.values():
+        for dependency in state.dependencies:
+            if dependency.kind == DerivedDependencyKind.FACT:
+                assert dependency.node_key is not None and dependency.fact_key is not None
+                fact = _require_fact(
+                    nodes,
+                    dependency.node_key,
+                    dependency.fact_key,
+                    f"Derived State {state.key} dependency",
+                )
+                _validate_typed_values(
+                    fact.value_type,
+                    fact.allowed_values,
+                    dependency.accepted_values,
+                    f"Derived State {state.key} Fact dependency",
+                )
+            elif dependency.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
+                assert dependency.region_key is not None and dependency.resource_key is not None
+                region = _require_key(
+                    nodes,
+                    dependency.region_key,
+                    f"Derived State {state.key} resource dependency Region",
+                )
+                if not locality.enabled or region.node_type_key != locality.region_node_type_key:
+                    raise ValueError("Derived resource dependency must reference a Region")
+                _require_key(
+                    resources,
+                    dependency.resource_key,
+                    f"Derived State {state.key} resource dependency Resource",
+                )
+            elif dependency.kind == DerivedDependencyKind.DERIVED_STATE:
+                assert dependency.derived_key is not None
+                nested = _require_key(
+                    derived_states,
+                    dependency.derived_key,
+                    f"Derived State {state.key} dependency",
+                )
+                _validate_typed_values(
+                    nested.value_type,
+                    nested.allowed_values,
+                    dependency.accepted_values,
+                    f"Derived State {state.key} nested dependency",
+                )
+            if dependency.knowledge_gate is not None:
+                _validate_gate(dependency.knowledge_gate, nodes)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(key: str) -> None:
+        if key in visiting:
+            raise ValueError("Derived State dependency graph contains a cycle")
+        if key in visited:
+            return
+        visiting.add(key)
+        state = derived_states[key]
+        for dependency in state.dependencies:
+            if dependency.kind == DerivedDependencyKind.DERIVED_STATE:
+                assert dependency.derived_key is not None
+                visit(dependency.derived_key)
+        visiting.remove(key)
+        visited.add(key)
+
+    for key in sorted(derived_states):
+        visit(key)
+
+
+def _validate_typed_values(
+    value_type: FactValueType,
+    allowed_values: tuple[StrictScalar, ...],
+    values: tuple[StrictScalar, ...],
+    label: str,
+) -> None:
+    for value in values:
+        if value_type == FactValueType.STRING and type(value) is not str:
+            raise ValueError(f"{label} does not match STRING")
+        if value_type == FactValueType.INTEGER and type(value) is not int:
+            raise ValueError(f"{label} does not match INTEGER")
+        if value_type == FactValueType.BOOLEAN and type(value) is not bool:
+            raise ValueError(f"{label} does not match BOOLEAN")
+        if value_type == FactValueType.ENUM and value not in allowed_values:
+            raise ValueError(f"{label} is outside the ENUM domain")
 
 
 def _validate_gate(
@@ -1630,6 +2364,32 @@ def _validate_region_resource_knowledge(
             raise ValueError("Region Resource Knowledge must target a Region Node")
 
 
+def _validate_public_knowledge(
+    definition: ScenarioDefinitionV2,
+    nodes: dict[str, NodeDefinitionV2],
+    resources: dict[str, ResourceDefinitionV2],
+) -> None:
+    hints = definition.public_knowledge.resource_source_hints
+    if not hints:
+        return
+    locality = definition.metadata.locality
+    if not locality.enabled or not locality.scoped_resources:
+        raise ValueError("Resource source hints require locality.scoped_resources")
+    assert locality.region_node_type_key is not None
+    for hint in hints:
+        _require_key(resources, hint.resource_key, "Public Resource Source Hint Resource")
+        region_keys = (
+            *((hint.primary_region_key,) if hint.primary_region_key is not None else ()),
+            *hint.candidate_region_keys,
+        )
+        for region_key in region_keys:
+            region = _require_key(nodes, region_key, "Public Resource Source Hint Region")
+            if region.node_type_key != locality.region_node_type_key:
+                raise ValueError("Public Resource Source Hint must target a Region Node")
+            if region.initial_visibility != Visibility.KNOWN:
+                raise ValueError("Public Resource Source Hint Region must be publicly known")
+
+
 def _static_facility_region(definition: ScenarioDefinitionV2, facility_key: str) -> str | None:
     locality = definition.metadata.locality
     relation_key = locality.located_in_relation_type_key
@@ -1714,19 +2474,32 @@ __all__ = [
     "ActionDefinitionV2",
     "ActionExecutionMode",
     "ActionLocality",
+    "ActionOperationBindingSource",
+    "ActionOperationBindingV2",
     "ActionParameterType",
     "ActionParameters",
+    "ActionSemanticReferenceType",
     "ConditionKind",
+    "DerivedDependencyKind",
+    "DerivedDependencyV2",
+    "DerivedStateDefinitionV2",
+    "DerivedStateDependencyV2",
     "EffectKind",
     "EngineCapability",
     "LocalityContractV2",
+    "PublicKnowledgeDefinitionV2",
+    "PublicReferenceTypeV2",
+    "PublicReferenceV2",
     "RegionResourceKnowledgeInitialStateV2",
     "ResourceAvailabilityRequirementV2",
     "ResourceInitialStateV2",
     "ResourcePoolDefinitionV2",
     "ResourceScopeKind",
     "ResourceScopeV2",
+    "ResourceSourceHintV2",
     "RulePhase",
+    "RuleTrigger",
     "ScenarioDefinitionV2",
+    "knowledge_gate_is_revealed",
     "transport_resource_entries",
 ]

@@ -248,6 +248,42 @@ export function diagnosticMessage(code: string, fallback: string): string {
   return diagnosticLabels[code] ?? fallback;
 }
 
+export function goalSubmissionErrorText(
+  error: unknown,
+  fallback = "\u76ee\u6807\u89e3\u6790\u6682\u65f6\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u89e3\u6790\u3002",
+): string {
+  void error;
+  return fallback;
+}
+
+const confirmLifecycleMessages: Record<string, string> = {
+  GOAL_DRAFT_NOT_FOUND: "这个目标确认已失效，请重新解析目标。",
+  GOAL_DRAFT_SUPERSEDED: "这个目标确认已失效，请重新解析目标。",
+  AGENT_TASK_ALREADY_ACTIVE: "当前已有进行中的任务，暂时无法确认新的目标。",
+  GOAL_DRAFT_CONFIRMATION_CONFLICT: "目标确认发生冲突，请重新尝试。",
+};
+
+const confirmSystemCodes = new Set([
+  "GOAL_DRAFT_CONFIRMATION_INCOMPLETE",
+  "GENERIC_SESSION_SCOPE_INVALID",
+  "PLAY_SESSION_NOT_FOUND",
+  "INTERNAL_ERROR",
+  "REQUEST_FAILED",
+]);
+
+export function confirmGoalErrorText(
+  error: unknown,
+  fallback = "目标确认暂时失败，请重新尝试。",
+): string {
+  if (!error || typeof error !== "object") return fallback;
+  const code = "code" in error && typeof error.code === "string" ? error.code : null;
+  if (!code) return fallback;
+  const lifecycleMessage = confirmLifecycleMessages[code];
+  if (lifecycleMessage) return lifecycleMessage;
+  if (confirmSystemCodes.has(code) || code.startsWith("FORMAL_GOAL_")) return fallback;
+  return fallback;
+}
+
 export function errorText(error: unknown, fallback = "操作失败，请稍后重试。") {
   if (!error || typeof error !== "object") return fallback;
   const code = "code" in error && typeof error.code === "string" ? error.code : null;

@@ -1,0 +1,753 @@
+"""Durable, provider-safe diagnostics for Goal resolution."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.agent.generic import GenericGoalResolution
+from app.agent.provider import GenericModelProvider, provider_call_metadata
+from app.domain.enums import AgentTaskStatus, GameInstanceStatus, ResolvedGoalDraftStatus
+from app.infrastructure.db.models import (
+    AgentTask,
+    GameInstance,
+    GoalResolutionAttempt,
+    ResolvedGoalDraft,
+)
+
+
+class GoalResolutionAttemptConflict(ValueError):
+    pass
+
+
+_STALE_GOAL_RESOLUTION_GRACE_SECONDS = 5
+_GOAL_RESOLUTION_TIMEOUT_TEXT = "目标解析暂时失败，请重新解析。"  # noqa: RUF001
+
+
+def reserve_goal_resolution_attempt(
+    session_factory: Callable[[], Session],
+    *,
+    game_instance_id: UUID,
+    scenario_version_id: UUID,
+    goal: str,
+    idempotency_key: str,
+    stale_after_seconds: float = 20,
+) -> tuple[GoalResolutionAttempt, bool]:
+    """Reserve one Parse identity and durably supersede the prior READY Draft."""
+
+    with session_factory() as audit_db:
+        game = audit_db.scalar(
+            select(GameInstance).where(GameInstance.id == game_instance_id).with_for_update()
+        )
+        if game is None:
+            raise GoalResolutionAttemptConflict("GAME_INSTANCE_NOT_FOUND")
+        if game.status != GameInstanceStatus.ACTIVE:
+            raise GoalResolutionAttemptConflict("GAME_INSTANCE_READ_ONLY")
+        _reconcile_stale_goal_resolution_attempts_in_session(
+            audit_db,
+            game_instance_id=game_instance_id,
+            stale_after_seconds=stale_after_seconds,
+        )
+        existing = audit_db.scalar(
+            select(GoalResolutionAttempt).where(
+                GoalResolutionAttempt.game_instance_id == game_instance_id,
+                GoalResolutionAttempt.submission_idempotency_key == idempotency_key,
+            )
+        )
+        if existing is not None:
+            if existing.original_goal_text != goal:
+                raise GoalResolutionAttemptConflict("GOAL_IDEMPOTENCY_CONFLICT")
+            return existing, True
+        active_task = audit_db.scalar(
+            select(AgentTask.id).where(
+                AgentTask.game_instance_id == game_instance_id,
+                AgentTask.status.in_(
+                    (
+                        AgentTaskStatus.ACTIVE,
+                        AgentTaskStatus.REQUIRES_PLAYER_DECISION,
+                        AgentTaskStatus.WAITING_FOR_PLAYER_ACTION,
+                        AgentTaskStatus.WAITING_FOR_WORLD_EVENT,
+                    )
+                ),
+            )
+        )
+        if active_task is not None:
+            raise GoalResolutionAttemptConflict("AGENT_TASK_ALREADY_ACTIVE")
+        for draft in audit_db.scalars(
+            select(ResolvedGoalDraft).where(
+                ResolvedGoalDraft.game_instance_id == game_instance_id,
+                ResolvedGoalDraft.status == ResolvedGoalDraftStatus.READY,
+            )
+        ):
+            draft.status = ResolvedGoalDraftStatus.SUPERSEDED
+        row = GoalResolutionAttempt(
+            game_instance_id=game_instance_id,
+            scenario_version_id=scenario_version_id,
+            submission_idempotency_key=idempotency_key,
+            original_goal_text=goal,
+            normalized_goal_text=_normalize_goal(goal),
+            goal_hash=_goal_hash(goal),
+            resolution_status="IN_PROGRESS",
+            resolver_source="PENDING",
+            grounded_public_entity_keys=[],
+            resolution_candidate_keys=[],
+            interpretation_attempts=[],
+            recovery_used=False,
+            value_type_diagnostics=[],
+            provider_metadata={},
+            resolution_duration_ms=0,
+        )
+        audit_db.add(row)
+        audit_db.flush()
+        audit_db.commit()
+        return row, False
+
+
+def reconcile_stale_goal_resolution_attempts(
+    session_factory: Callable[[], Session],
+    *,
+    stale_after_seconds: float = 20,
+    game_instance_id: UUID | None = None,
+    now: datetime | None = None,
+) -> int:
+    """Terminalize audit rows that outlived the Goal operation budget.
+
+    This is deliberately an audit reconciliation path.  It never creates a
+    Draft or Task and it does not participate in gameplay state transitions.
+    """
+
+    with session_factory() as audit_db:
+        reconciled = _reconcile_stale_goal_resolution_attempts_in_session(
+            audit_db,
+            game_instance_id=game_instance_id,
+            stale_after_seconds=stale_after_seconds,
+            now=now,
+        )
+        if reconciled:
+            audit_db.commit()
+        return reconciled
+
+
+def _reconcile_stale_goal_resolution_attempts_in_session(
+    audit_db: Session,
+    *,
+    stale_after_seconds: float,
+    game_instance_id: UUID | None = None,
+    now: datetime | None = None,
+) -> int:
+    if stale_after_seconds <= 0:
+        raise ValueError("Goal resolution stale threshold must be positive")
+    current_time = now or datetime.now(UTC)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=UTC)
+    cutoff = current_time - timedelta(
+        seconds=stale_after_seconds + _STALE_GOAL_RESOLUTION_GRACE_SECONDS
+    )
+    statement = select(GoalResolutionAttempt).where(
+        GoalResolutionAttempt.resolution_status.in_(
+            ("IN_PROGRESS", "PENDING")
+        )
+    )
+    if game_instance_id is not None:
+        statement = statement.where(GoalResolutionAttempt.game_instance_id == game_instance_id)
+    rows = tuple(audit_db.scalars(statement))
+    reconciled = 0
+    for row in rows:
+        updated_at = row.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=UTC)
+        if updated_at >= cutoff:
+            continue
+        age_ms = max(0, round((current_time - updated_at).total_seconds() * 1000))
+        metadata = dict(row.provider_metadata or {})
+        metadata.update(
+            {
+                "outcome": "TIMEOUT",
+                "error_category": "GOAL_RESOLUTION_STALE",
+                "timeout_subtype": "GOAL_RESOLUTION_DEADLINE",
+                "goal_resolution_deadline_seconds": stale_after_seconds,
+                "stale_reconciled": True,
+            }
+        )
+        row.resolution_status = "ERROR"
+        row.resolver_source = "STALE_TIMEOUT"
+        row.rejection_code = "MODEL_PROVIDER_TIMEOUT"
+        row.provider_metadata = metadata
+        row.resolution_duration_ms = max(row.resolution_duration_ms or 0, age_ms)
+        row.presentation_text = _GOAL_RESOLUTION_TIMEOUT_TEXT
+        reconciled += 1
+    return reconciled
+
+
+_SAFE_PROVIDER_METADATA_KEYS = frozenset(
+    {
+        "provider",
+        "model",
+        "call_type",
+        "latency_ms",
+        "wall_clock_latency_ms",
+        "started_at",
+        "finished_at",
+        "request_started_at",
+        "request_send_completed_at",
+        "response_headers_received_at",
+        "first_response_byte_at",
+        "request_cancelled_at",
+        "response_bytes_received",
+        "timeout_subtype",
+        "outcome",
+        "error_category",
+        "context_bytes",
+        "request_size_bytes",
+        "prompt_tokens",
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+        "completion_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "final_content_bytes",
+        "finish_reason",
+        "thinking_mode",
+        "reasoning_effort",
+        "configured_output_token_limit",
+        "profile",
+        "http_timeout_seconds",
+        "plan_timeout_seconds",
+        "plan_total_timeout_seconds",
+        "goal_resolution_deadline_seconds",
+        "prompt_template_version",
+        "request_hash",
+        "public_catalog_hash",
+        "focused_ontology_hash",
+        "response_validation",
+        "rejection_code",
+    }
+)
+_SAFE_PROVIDER_SNAPSHOT_KEYS = frozenset({"debug_snapshot"})
+_SAFE_PROVIDER_CALL_KEYS = frozenset(
+    {
+        "call_sequence",
+        "logical_call_sequence",
+        "call_order",
+        "grounding_round",
+        "interpretation_attempt",
+        "recovery_attempt",
+        "request_hash",
+        "public_catalog_hash",
+        "focused_ontology_hash",
+        "prompt_template_version",
+        "debug_snapshot",
+        "candidate_refs",
+        "projection",
+        "response_status",
+        "response_validation",
+        "validation_result",
+        "accepted_requirements",
+    }
+)
+_SAFE_ATTEMPT_KEYS = frozenset(
+    {
+        "stage",
+        "attempt",
+        "source",
+        "status",
+        "validation",
+        "result",
+        "rejection_code",
+        "candidate_keys",
+        "candidate_refs",
+        "grounding_round",
+        "interpretation_attempt",
+        "validation_diagnostics",
+    }
+)
+_SAFE_VALUE_TYPES = frozenset({"STRING", "INTEGER", "BOOLEAN", "ENUM"})
+_SAFE_JSON_TYPES = frozenset({"string", "integer", "number", "boolean", "null", "array", "object"})
+_SAFE_SCHEMA_TYPES = frozenset(
+    {"string", "integer", "number", "boolean", "array", "object", "required", "literal"}
+)
+
+
+def persist_goal_resolution_attempt(
+    session_factory: Callable[[], Session],
+    *,
+    game_instance_id: UUID,
+    scenario_version_id: UUID,
+    goal: str,
+    resolution: GenericGoalResolution | None,
+    resolution_duration_ms: int,
+    provider: GenericModelProvider | None = None,
+    error_code: str | None = None,
+    provider_calls: Sequence[dict[str, object]] | None = None,
+    validation_diagnostics: Sequence[dict[str, object]] | None = None,
+    resolution_observation: dict[str, object] | None = None,
+    attempt_id: UUID | None = None,
+    submission_idempotency_key: str | None = None,
+    presentation_text: str | None = None,
+) -> GoalResolutionAttempt:
+    """Commit a redacted Goal resolution result in an independent transaction.
+
+    The caller must invoke this after the resolver's read-only phase and
+    before any Task transaction.  The session factory must be bound to the
+    same database Engine as the PLAY session, not to the PLAY session itself.
+    Its explicit commit is the durability boundary that makes unresolved
+    attempts survive the API rollback without committing Task work.
+    """
+
+    observation = (
+        resolution.provider_observation
+        if resolution is not None and isinstance(resolution.provider_observation, dict)
+        else dict(resolution_observation or {})
+    )
+    provider_metadata = _safe_provider_metadata(observation, provider)
+    provider_metadata_snapshot = provider_call_metadata(provider) if provider is not None else {}
+    safe_validation_diagnostics = _safe_provider_validation_diagnostics(
+        validation_diagnostics
+        if validation_diagnostics is not None
+        else observation.get("validation_diagnostics")
+        if observation.get("validation_diagnostics") is not None
+        else provider_metadata_snapshot.get("validation_diagnostics")
+    )
+    if safe_validation_diagnostics:
+        provider_metadata["validation_diagnostics"] = safe_validation_diagnostics
+    observed_provider_calls = observation.get("provider_calls")
+    safe_provider_calls = _safe_provider_calls(
+        observed_provider_calls if observed_provider_calls is not None else provider_calls
+    )
+    if safe_provider_calls:
+        provider_metadata["provider_calls"] = safe_provider_calls
+    safe_grounding = _safe_grounding_observation(observation.get("grounding"))
+    if safe_grounding:
+        provider_metadata["grounding"] = safe_grounding
+    grounding = observation.get("grounding")
+    grounding_map = grounding if isinstance(grounding, dict) else {}
+    attempts = _safe_attempts(observation.get("attempts"))
+    observed_attempt_count = _safe_int(observation.get("attempt_count"))
+    attempt_count = observed_attempt_count
+    if attempt_count is None and attempts:
+        attempt_count = len(attempts)
+    recovery_used = bool(
+        (attempt_count is not None and attempt_count > 1)
+        or any(_is_recovery_attempt(item) for item in attempts)
+        or any(_is_recovery_attempt(item) for item in safe_provider_calls)
+    )
+    raw_provider_purpose = _safe_text(
+        observation.get("call_type") or provider_metadata.get("call_type")
+    )
+    provider_purpose = (
+        _provider_purpose(raw_provider_purpose) if raw_provider_purpose is not None else None
+    )
+    provider_model = _safe_text(
+        observation.get("model")
+        or provider_metadata.get("model")
+        or (getattr(provider, "model_name", None) if provider is not None else None)
+    )
+    status = resolution.status if resolution is not None else "ERROR"
+    resolver_source = resolution.source if resolution is not None else "PROVIDER_ERROR"
+    rejection_code = error_code or _safe_text(observation.get("rejection_code"))
+    value_type_diagnostics = _safe_value_type_diagnostics(observation.get("value_type_diagnostics"))
+    with session_factory() as audit_db:
+        values: dict[str, object] = dict(
+            game_instance_id=game_instance_id,
+            scenario_version_id=scenario_version_id,
+            submission_idempotency_key=submission_idempotency_key,
+            original_goal_text=goal,
+            normalized_goal_text=_normalize_goal(goal),
+            goal_hash=_goal_hash(goal),
+            resolution_status=status,
+            resolver_source=resolver_source,
+            grounding_source=_safe_text(
+                grounding_map.get("source")
+                or (resolution.source if resolution is not None else None)
+            ),
+            grounded_public_entity_keys=_safe_string_list(grounding_map.get("entity_keys")),
+            resolution_candidate_keys=(
+                list(resolution.candidate_keys) if resolution is not None else []
+            ),
+            public_catalog_hash=_safe_hash(observation.get("catalog_hash")),
+            focused_ontology_hash=_safe_hash(observation.get("ontology_hash")),
+            interpretation_status=(
+                _safe_text(observation.get("status"))
+                if observation.get("stage") == "DYNAMIC_GOAL_INTERPRETATION"
+                or observation.get("call_type") == "DYNAMIC_GOAL"
+                else None
+            ),
+            attempt_count=attempt_count,
+            interpretation_attempts=attempts,
+            recovery_used=recovery_used,
+            backend_validation_result=_safe_text(observation.get("validation")),
+            rejection_code=rejection_code,
+            value_type_diagnostics=value_type_diagnostics,
+            provider_purpose=provider_purpose,
+            provider_model=provider_model,
+            provider_metadata=provider_metadata,
+            resolution_duration_ms=max(0, resolution_duration_ms),
+            presentation_text=presentation_text,
+        )
+        row = audit_db.get(GoalResolutionAttempt, attempt_id) if attempt_id is not None else None
+        if row is None:
+            row = GoalResolutionAttempt(**values)
+            audit_db.add(row)
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
+        audit_db.flush()
+        audit_db.commit()
+    return row
+
+
+def _goal_hash(goal: str) -> str:
+    return hashlib.sha256(_normalize_goal(goal).encode("utf-8")).hexdigest()
+
+
+def _normalize_goal(goal: str) -> str:
+    return " ".join(goal.casefold().replace("_", " ").split())
+
+
+def _safe_provider_metadata(
+    observation: dict[str, object], provider: GenericModelProvider | None
+) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    if provider is not None:
+        latest_metadata = provider_call_metadata(provider)
+        latest_metadata.pop("debug_snapshot", None)
+        metadata.update(latest_metadata)
+    metadata.update(
+        {key: value for key, value in observation.items() if key in _SAFE_PROVIDER_METADATA_KEYS}
+    )
+    result: dict[str, object] = {}
+    for key, value in metadata.items():
+        if key in _SAFE_PROVIDER_METADATA_KEYS and _is_safe_metadata_value(value):
+            result[key] = value
+        elif key in _SAFE_PROVIDER_SNAPSHOT_KEYS:
+            snapshot = _safe_observation_snapshot(value)
+            if snapshot:
+                result[key] = snapshot
+    return result
+
+
+def _safe_provider_calls(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[dict[str, object]] = []
+    safe_keys = _SAFE_PROVIDER_METADATA_KEYS | _SAFE_PROVIDER_CALL_KEYS
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        item: dict[str, object] = {}
+        for key in safe_keys:
+            candidate = raw.get(key)
+            if key in {
+                "call_sequence",
+                "logical_call_sequence",
+                "call_order",
+                "grounding_round",
+                "interpretation_attempt",
+                "recovery_attempt",
+            }:
+                integer = _safe_int(candidate)
+                if integer is not None:
+                    item[key] = integer
+            elif key in _SAFE_PROVIDER_SNAPSHOT_KEYS:
+                snapshot = _safe_observation_snapshot(candidate)
+                if snapshot:
+                    item[key] = snapshot
+            elif key == "candidate_refs":
+                refs = _safe_candidate_refs(candidate)
+                if refs:
+                    item[key] = refs
+            elif key == "projection":
+                projection = _safe_projection(candidate)
+                if projection:
+                    item[key] = projection
+            elif key == "validation_result":
+                validation_result = _safe_observation_snapshot(candidate)
+                if validation_result:
+                    item[key] = validation_result
+            elif key == "accepted_requirements":
+                accepted_requirements = _safe_observation_snapshot(candidate)
+                if accepted_requirements:
+                    item[key] = accepted_requirements
+            elif key in _SAFE_PROVIDER_METADATA_KEYS and _is_safe_metadata_value(candidate):
+                item[key] = candidate
+        call_diagnostics = _safe_provider_validation_diagnostics(raw.get("validation_diagnostics"))
+        if call_diagnostics:
+            item["validation_diagnostics"] = call_diagnostics
+        call_type = item.get("call_type")
+        if isinstance(call_type, str):
+            item["purpose"] = _provider_purpose(call_type)
+        if not item:
+            continue
+        item["call_order"] = len(result) + 1
+        result.append(item)
+    return result
+
+
+def _safe_provider_validation_diagnostics(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[dict[str, str]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        diagnostic: dict[str, str] = {}
+        error_type = raw.get("validation_error_type")
+        if isinstance(error_type, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", error_type):
+            diagnostic["validation_error_type"] = error_type
+        field_path = raw.get("field_path")
+        if isinstance(field_path, str) and re.fullmatch(r"[A-Za-z0-9_.<>\[\]-]{1,160}", field_path):
+            diagnostic["field_path"] = field_path
+        expected = raw.get("expected_type")
+        if isinstance(expected, str) and expected in _SAFE_SCHEMA_TYPES:
+            diagnostic["expected_type"] = expected
+        actual = raw.get("actual_json_type")
+        if isinstance(actual, str) and actual in _SAFE_JSON_TYPES:
+            diagnostic["actual_json_type"] = actual
+        if diagnostic:
+            result.append(diagnostic)
+        if len(result) >= 20:
+            break
+    return result
+
+
+def _safe_observation_snapshot(value: object, *, depth: int = 0) -> object:
+    """Bound nested public Goal snapshots before writing the JSON audit row."""
+
+    if depth >= 8:
+        return {"json_type": _safe_json_type(value), "truncated": True}
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:4000]
+    if isinstance(value, (list, tuple)):
+        items = [_safe_observation_snapshot(item, depth=depth + 1) for item in value[:200]]
+        if len(value) > 200:
+            items.append({"truncated": True, "remaining": len(value) - 200})
+        return items
+    if isinstance(value, dict):
+        mapping: dict[str, object] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 200:
+                mapping["_truncated"] = True
+                break
+            if not isinstance(key, str):
+                continue
+            if key.casefold() in {
+                "authorization",
+                "chain_of_thought",
+                "content",
+                "credentials",
+                "headers",
+                "hidden_truth",
+                "messages",
+                "reasoning",
+                "secret",
+                "thinking",
+                "thought",
+                "token",
+            }:
+                continue
+            mapping[key[:160]] = _safe_observation_snapshot(item, depth=depth + 1)
+        return mapping
+    return {"json_type": _safe_json_type(value)}
+
+
+def _safe_json_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "unknown"
+
+
+def _provider_purpose(call_type: str) -> str:
+    if call_type == "DYNAMIC_GOAL":
+        return "DYNAMIC_GOAL_INTERPRETATION"
+    return call_type
+
+
+def _safe_attempts(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[dict[str, object]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        item: dict[str, object] = {}
+        for key in _SAFE_ATTEMPT_KEYS:
+            candidate = raw.get(key)
+            if key == "candidate_keys":
+                strings = _safe_string_list(candidate)
+                if strings:
+                    item[key] = strings
+            elif key == "candidate_refs":
+                refs = _safe_candidate_refs(candidate)
+                if refs:
+                    item[key] = refs
+            elif key == "attempt" or key in {"grounding_round", "interpretation_attempt"}:
+                integer = _safe_int(candidate)
+                if integer is not None:
+                    item[key] = integer
+            elif key == "validation_diagnostics":
+                diagnostics = _safe_provider_validation_diagnostics(candidate)
+                if diagnostics:
+                    item[key] = diagnostics
+            elif isinstance(candidate, str):
+                item[key] = candidate[:160]
+        if item:
+            result.append(item)
+    return result
+
+
+def _safe_candidate_refs(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[dict[str, str]] = []
+    allowed_types = {"NODE", "REGION", "RESOURCE", "DERIVED_STATE", "ACTION", "ACTOR"}
+    allowed_provenance = {
+        "EXACT_USER_MENTION",
+        "TOPOLOGY_ENRICHED",
+        "LLM_SUPPLEMENTED",
+        "OTHER",
+    }
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        ref_type = raw.get("ref_type")
+        key = raw.get("key")
+        if (
+            isinstance(ref_type, str)
+            and ref_type in allowed_types
+            and isinstance(key, str)
+            and key.strip()
+        ):
+            item = {"ref_type": ref_type, "key": key[:160]}
+            provenance = raw.get("provenance")
+            if isinstance(provenance, str) and provenance in allowed_provenance:
+                item["provenance"] = provenance
+            result.append(item)
+        if len(result) >= 50:
+            break
+    return result
+
+
+def _safe_grounding_observation(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, object] = {}
+    source = _safe_text(value.get("source"))
+    if source is not None:
+        result["source"] = source
+    candidate_refs = _safe_candidate_refs(value.get("candidate_refs"))
+    if candidate_refs:
+        result["candidate_refs"] = candidate_refs
+    for key in ("entity_keys", "scope_keys"):
+        strings = _safe_string_list(value.get(key))
+        if strings:
+            result[key] = strings
+    projection = value.get("projection")
+    if isinstance(projection, dict):
+        safe_projection = _safe_projection(projection)
+        if safe_projection:
+            result["projection"] = safe_projection
+    return result
+
+
+def _safe_projection(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, object] = {}
+    for key in (
+        "allowed_entity_keys",
+        "allowed_region_keys",
+        "allowed_resource_keys",
+        "allowed_derived_state_keys",
+        "allowed_fact_keys",
+    ):
+        strings = _safe_string_list(value.get(key))
+        if strings:
+            result[key] = strings
+    return result
+
+
+def _safe_value_type_diagnostics(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[dict[str, str]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        expected = raw.get("expected_value_type")
+        actual = raw.get("actual_candidate_json_type")
+        if (
+            isinstance(expected, str)
+            and expected in _SAFE_VALUE_TYPES
+            and isinstance(actual, str)
+            and actual in _SAFE_JSON_TYPES
+        ):
+            result.append(
+                {
+                    "expected_value_type": expected,
+                    "actual_candidate_json_type": actual,
+                }
+            )
+    return result
+
+
+def _safe_string_list(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item[:160] for item in value if isinstance(item, str) and item.strip()]
+
+
+def _safe_text(value: object) -> str | None:
+    return value[:160] if isinstance(value, str) and value else None
+
+
+def _safe_hash(value: object) -> str | None:
+    if isinstance(value, str) and len(value) == 64:
+        return value
+    return None
+
+
+def _safe_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _is_recovery_attempt(item: dict[str, object]) -> bool:
+    attempt = _safe_int(item.get("attempt"))
+    grounding_round = _safe_int(item.get("grounding_round"))
+    interpretation_attempt = _safe_int(item.get("interpretation_attempt"))
+    recovery_attempt = _safe_int(item.get("recovery_attempt"))
+    return (
+        (attempt is not None and attempt > 1)
+        or (grounding_round is not None and grounding_round > 1)
+        or (interpretation_attempt is not None and interpretation_attempt > 1)
+        or (recovery_attempt is not None and recovery_attempt > 0)
+    )
+
+
+def _is_safe_metadata_value(value: object) -> bool:
+    return isinstance(value, (str, int, float, bool)) or value is None
+
+
+__all__ = [
+    "persist_goal_resolution_attempt",
+    "reconcile_stale_goal_resolution_attempts",
+]

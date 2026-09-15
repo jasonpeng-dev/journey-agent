@@ -7,6 +7,7 @@ Planner.  It deliberately does not bind every Action to every Target.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 from app.domain.enums import CommandReachability
@@ -71,6 +72,8 @@ def action_planner_constraints(
     *,
     known_preconditions: tuple[dict[str, object], ...] = (),
     source_preconditions: tuple[dict[str, object], ...] = (),
+    resource_requirements: tuple[dict[str, object], ...] = (),
+    target_role_requirements: tuple[dict[str, object], ...] | None = None,
 ) -> dict[str, object]:
     """Build the generic Action-level constraint contract.
 
@@ -85,11 +88,30 @@ def action_planner_constraints(
     }
     if action.required_actor_role_key is not None:
         executor["required_role_key"] = action.required_actor_role_key
+    visible_target_roles = (
+        tuple(
+            {
+                "target_key": item.target_key,
+                "required_role_key": item.required_actor_role_key,
+            }
+            for item in action.target_actor_roles
+        )
+        if target_role_requirements is None
+        else target_role_requirements
+    )
+    if visible_target_roles:
+        executor["target_role_requirements"] = [
+            dict(item) for item in visible_target_roles
+        ]
 
     target: dict[str, object] = {
         "kind": action.target_kind.value,
         "required_interaction_key": action.required_interaction_key,
     }
+    if action.target_semantic_reference_type is not None:
+        target["semantic_reference_type"] = action.target_semantic_reference_type.value
+    if action.target_node_type_keys:
+        target["node_type_keys"] = list(action.target_node_type_keys)
     if action.behavior == ActionBehavior.RELAY_MESSAGE:
         target["command_reachability"] = CommandReachability.DISCONNECTED.value
 
@@ -201,7 +223,182 @@ def action_planner_constraints(
         contract["source_preconditions"] = [dict(item) for item in source_preconditions]
     if known_preconditions:
         contract["known_preconditions"] = [dict(item) for item in known_preconditions]
+    if resource_requirements:
+        contract["resource_requirements"] = [dict(item) for item in resource_requirements]
     return contract
+
+
+def planner_resource_requirements(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    *,
+    known_resources: Mapping[str, object] | None = None,
+    known_resource_knowledge: Mapping[str, object] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Project generic minimum Resource requirements from public Rules.
+
+    A PREFLIGHT ``RESOURCE_COMPARE`` is a public Action requirement when its
+    failure predicate says that the available amount is below a minimum.
+    This helper is deliberately independent of any Action behavior name, so
+    repair, generation, treatment, and future Actions share one contract.
+    Target-qualified Rules stay on ``PlannerTargetBinding``; callers that
+    need those rows use :func:`planner_resource_requirement_from_condition`
+    while iterating the already matched target.
+    """
+
+    result: dict[tuple[str, str], dict[str, object]] = {}
+    for rule in definition.rules:
+        if rule.action_key != action.key or rule.phase != RulePhase.PREFLIGHT:
+            continue
+        if _has_current_target_condition(rule.condition):
+            continue
+        for condition, positive in _condition_leaves_with_polarity(rule.condition):
+            if not positive:
+                continue
+            requirement = planner_resource_requirement_from_condition(
+                condition,
+                known_resources=known_resources,
+                known_resource_knowledge=known_resource_knowledge,
+            )
+            if requirement is None:
+                continue
+            resource_key = str(requirement["resource_key"])
+            scope = requirement.get("scope")
+            scope_key = json_scope_identity(scope)
+            identity = (resource_key, scope_key)
+            previous = result.get(identity)
+            minimum = requirement.get("minimum")
+            previous_minimum = previous.get("minimum") if previous is not None else None
+            if not isinstance(minimum, int) or isinstance(minimum, bool):
+                continue
+            if (
+                previous is None
+                or not isinstance(previous_minimum, int)
+                or minimum > previous_minimum
+            ):
+                result[identity] = requirement
+    return tuple(result[key] for key in sorted(result, key=lambda item: (item[0], item[1])))
+
+
+def planner_resource_requirement_from_condition(
+    condition: Any,
+    *,
+    target_key: str | None = None,
+    known_resources: Mapping[str, object] | None = None,
+    known_resource_knowledge: Mapping[str, object] | None = None,
+) -> dict[str, object] | None:
+    """Convert one positive minimum ``RESOURCE_COMPARE`` to public JSON."""
+
+    if (
+        condition is None
+        or condition.kind != ConditionKind.RESOURCE_COMPARE
+        or condition.resource_key is None
+        or condition.operator is None
+        or type(condition.value) is not int
+        or condition.operator.value not in {"LT", "LTE"}
+    ):
+        return None
+    minimum = int(condition.value) + (1 if condition.operator.value == "LTE" else 0)
+    if minimum <= 0:
+        return None
+    scope = (
+        condition.resource_scope.model_dump(mode="json")
+        if condition.resource_scope is not None
+        else {}
+    )
+    if target_key is not None and scope.get("kind") == "CURRENT_TARGET_REGION":
+        scope["target_key"] = target_key
+    result: dict[str, object] = {
+        "resource_key": condition.resource_key,
+        "scope": scope,
+        "minimum": minimum,
+    }
+    known_status, known_available = _known_resource_scope_state(
+        condition.resource_key,
+        scope,
+        known_resources=known_resources,
+        known_resource_knowledge=known_resource_knowledge,
+    )
+    if known_status is not None:
+        result["known_status"] = known_status
+    if known_available is not None:
+        result["known_available"] = known_available
+    return result
+
+
+def json_scope_identity(scope: object) -> str:
+    """Return a stable identity for deduplicating a JSON Resource scope."""
+
+    if not isinstance(scope, dict):
+        return ""
+    kind = scope.get("kind")
+    node_key = scope.get("node_key")
+    target_key = scope.get("target_key")
+    return ":".join(str(item) for item in (kind or "", node_key or "", target_key or ""))
+
+
+def _known_resource_scope_state(
+    resource_key: str,
+    scope: dict[str, object],
+    *,
+    known_resources: Mapping[str, object] | None,
+    known_resource_knowledge: Mapping[str, object] | None,
+) -> tuple[str | None, int | None]:
+    """Return public status/amount for an explicitly identified scope only."""
+
+    if known_resources is None:
+        return None, None
+    raw_resource = known_resources.get(resource_key)
+    if not isinstance(raw_resource, dict):
+        return None, None
+    scope_kind = scope.get("kind")
+    if scope_kind == "EXPLICIT":
+        scope_key = scope.get("node_key")
+    elif scope_kind == "GLOBAL":
+        scope_key = "global"
+    else:
+        # Actor and target scopes are resolved only after the Planner chooses
+        # the Actor/Target.  Do not claim that an aggregate is a known local
+        # amount for those symbolic scopes.
+        return None, None
+    scopes = raw_resource.get("scopes")
+    entry = scopes.get(scope_key) if isinstance(scopes, dict) else None
+    region_knowledge = (
+        known_resource_knowledge.get(str(scope_key))
+        if isinstance(known_resource_knowledge, Mapping) and scope_key is not None
+        else None
+    )
+    if isinstance(entry, dict):
+        entry_status = entry.get("knowledge_status")
+        if entry_status == "UNKNOWN":
+            return "UNKNOWN", None
+        if entry_status in {"KNOWN", "KNOWN_ZERO"}:
+            amount = entry.get("known_available")
+            return (
+                "KNOWN",
+                amount if isinstance(amount, int) and not isinstance(amount, bool) else 0,
+            )
+        if isinstance(region_knowledge, dict):
+            visibility = region_knowledge.get("resource_inventory_visibility")
+            survey_completed = region_knowledge.get("resource_survey_completed")
+            if visibility == "VISIBLE" and survey_completed is True:
+                amount = entry.get("known_available")
+                return (
+                    "KNOWN",
+                    amount if isinstance(amount, int) and not isinstance(amount, bool) else 0,
+                )
+        return "UNKNOWN", None
+    if isinstance(region_knowledge, dict):
+        visibility = region_knowledge.get("resource_inventory_visibility")
+        survey_completed = region_knowledge.get("resource_survey_completed")
+        if visibility == "VISIBLE" and survey_completed is True:
+            return "KNOWN", 0
+        return "UNKNOWN", None
+    if scope_key == "global":
+        amount = raw_resource.get("known_available")
+        if isinstance(amount, int) and not isinstance(amount, bool):
+            return "KNOWN", max(0, amount)
+    return None, None
 
 
 def planner_known_preconditions(
@@ -293,6 +490,16 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
 
     behavior = action.behavior
     effects: list[dict[str, object]] = []
+    effects.extend(
+        {
+            "type": "FACT_MUTATION",
+            "target": "target_key",
+            "fact_key": fact_key,
+            "value": effect.value,
+        }
+        for effect in action.planning.target_terminal_effects
+        for fact_key in (effect.fact_key,)
+    )
     if behavior == ActionBehavior.TRAVEL:
         effects.extend(
             [
@@ -432,6 +639,87 @@ def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]
     return _deduplicate(effects)
 
 
+def action_goal_terminal_effects(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+    target_key: str | None,
+) -> tuple[tuple[str, str, StrictScalar | None], ...]:
+    """Project only canonical terminal Fact mutations for one Action target.
+
+    This is a Goal-facing projection, not a runtime simulator.  It combines
+    authored static/target planning effects, generic behavior-level planner
+    effects, and direct current-target ``SET_FACT`` resolve rules.  Knowledge,
+    resource, location, and other supporting effects are intentionally ignored
+    so an operation can be treated as a STATE only when one explicit terminal
+    Fact is actually authored.
+    """
+
+    effects: list[tuple[str, str, StrictScalar | None]] = []
+    effects.extend(
+        (item.node_key, item.fact_key, None) for item in action.planning.terminal_effects
+    )
+    if target_key is not None:
+        effects.extend(
+            (target_key, item.fact_key, item.value)
+            for item in action.planning.target_terminal_effects
+        )
+
+    # Behavior-owned effects (for example SUPPLY_POWER's power_supply=AVAILABLE)
+    # are already expressed through the generic planner projection.  Do not
+    # special-case any Action key here.
+    if target_key is not None:
+        for effect in action_planner_effects(action):
+            if (
+                effect.get("type") == "FACT_MUTATION"
+                and effect.get("target") == "target_key"
+                and isinstance(effect.get("fact_key"), str)
+                and type(effect.get("value")) in {str, int, bool}
+            ):
+                effects.append(
+                    (
+                        target_key,
+                        cast(str, effect["fact_key"]),
+                        cast(StrictScalar, effect["value"]),
+                    )
+                )
+
+        # Resolve rules may encode an operation's terminal state directly on
+        # CURRENT_TARGET (CLEAR_TRANSPORT is one example).  Only literal
+        # SET_FACT effects qualify; parameter-derived values are not
+        # deterministic Goal terminal values.
+        for rule in definition.rules:
+            if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
+                continue
+            for item in rule.effects:
+                if (
+                    item.kind != EffectKind.SET_FACT
+                    or item.node is None
+                    or item.node.kind != NodeSelectorKind.CURRENT_TARGET
+                ):
+                    continue
+                projection = declarative_effect(item)
+                if projection is None or not isinstance(projection.get("fact_key"), str):
+                    continue
+                value = projection.get("value")
+                if type(value) in {str, int, bool}:
+                    effects.append(
+                        (
+                            target_key,
+                            cast(str, projection["fact_key"]),
+                            cast(StrictScalar, value),
+                        )
+                    )
+
+    unique: list[tuple[str, str, StrictScalar | None]] = []
+    seen: set[tuple[str, str, StrictScalar | None]] = set()
+    for terminal in effects:
+        if terminal in seen:
+            continue
+        seen.add(terminal)
+        unique.append(terminal)
+    return tuple(unique)
+
+
 def planner_target_contracts(
     definition: ScenarioDefinitionV2,
     action: ActionDefinitionV2,
@@ -440,19 +728,74 @@ def planner_target_contracts(
     known_facts: dict[tuple[str, str], StrictScalar],
     known_relation_keys: set[str] | None = None,
     known_pool_keys: set[str] | None = None,
+    allowed_target_keys: set[str] | None = None,
+    include_authored_hidden_target_effects: bool = False,
 ) -> dict[str, dict[str, object]]:
-    """Return only known target-specific deterministic effect differences."""
+    """Return target-specific deterministic effects safe for Planner use.
+
+    The default remains the sparse, player-facing compatibility projection.
+    The canonical Planner may opt into authored target identities/effects when
+    the current Truth value is hidden; the emitted effect is still the desired
+    authored mutation, never the hidden current value.
+    """
 
     known_relation_keys = known_relation_keys or set()
     known_pool_keys = known_pool_keys or set()
     effects_by_target: dict[str, list[dict[str, object]]] = {}
+    eligible_targets = {
+        node.key
+        for node in definition.world.nodes
+        if node.key in known_node_keys
+        and action.required_interaction_key in node.interaction_keys
+        and (not action.target_node_type_keys or node.node_type_key in action.target_node_type_keys)
+        and (allowed_target_keys is None or node.key in allowed_target_keys)
+    }
+    for target_key in eligible_targets:
+        effects_by_target[target_key] = [
+            {
+                "type": "FACT_MUTATION",
+                "target": "target_key",
+                "fact_key": fact_key,
+                "value": effect.value,
+            }
+            for effect in action.planning.target_terminal_effects
+            for fact_key in (effect.fact_key,)
+        ]
+    if include_authored_hidden_target_effects:
+        # ``terminal_effects`` carries authored target identities for some
+        # actions (notably heavy-support deployment), while the behavior-level
+        # contract carries the generic target-relative effect.  Join those
+        # two declarations without consulting current Truth or naming an
+        # Action/target special case.
+        generic_target_effects = [
+            effect
+            for effect in action_planner_effects(action)
+            if (
+                effect.get("type") == "FACT_MUTATION"
+                and effect.get("target") in {"target_key", "target_node"}
+                and isinstance(effect.get("fact_key"), str)
+            )
+        ]
+        for reference in action.planning.terminal_effects:
+            target_key = reference.node_key
+            if target_key not in eligible_targets:
+                continue
+            for effect in generic_target_effects:
+                if effect.get("fact_key") != reference.fact_key:
+                    continue
+                effects_by_target.setdefault(target_key, []).append(dict(effect))
     for rule in definition.rules:
         if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
             continue
         if not _has_current_target_condition(rule.condition):
             continue
-        for target_key in known_node_keys:
-            if not _condition_matches_target(rule.condition, target_key, known_facts):
+        for target_key in eligible_targets:
+            if not _condition_matches_target(
+                rule.condition,
+                target_key,
+                known_facts,
+                allow_authored_identity=include_authored_hidden_target_effects,
+            ):
                 continue
             effects = [
                 projection
@@ -466,6 +809,7 @@ def planner_target_contracts(
                     known_pool_keys=known_pool_keys,
                     known_facts=known_facts,
                     target_key=target_key,
+                    allow_hidden_target_effects=include_authored_hidden_target_effects,
                 )
             ]
             if effects:
@@ -502,6 +846,12 @@ def declarative_effect(effect: EffectV2) -> dict[str, object] | None:
             "type": "KNOWLEDGE_REVEAL" if kind == EffectKind.REVEAL_FACT else "KNOWLEDGE_HIDE",
             "target": _selector_name(effect.node),
             "fact_key": effect.fact_key,
+        }
+    if kind == EffectKind.REVEAL_TARGET_REGION_FACILITY_FACTS:
+        return {
+            "type": "KNOWLEDGE_REVEAL",
+            "target": "TARGET_REGION_FACILITIES",
+            "scope": "NON_RESOURCE_FACILITY_INFORMATION",
         }
     if kind in {
         EffectKind.ADJUST_RESOURCE,
@@ -617,7 +967,10 @@ def _effect_is_knowledge_safe(
     known_pool_keys: set[str],
     known_facts: dict[tuple[str, str], StrictScalar],
     target_key: str | None = None,
+    allow_hidden_target_effects: bool = False,
 ) -> bool:
+    if effect.kind == EffectKind.REVEAL_TARGET_REGION_FACILITY_FACTS:
+        return target_key is not None and target_key in known_node_keys
     if effect.node is not None and effect.node.kind == NodeSelectorKind.EXPLICIT:
         return effect.node.node_key in known_node_keys
     if projection.get("type") == "RELATION_KNOWLEDGE":
@@ -641,6 +994,8 @@ def _effect_is_knowledge_safe(
             node_key = effect.node.node_key
             return node_key is not None and (node_key, fact_key) in known_facts
         if target_key is not None:
+            if allow_hidden_target_effects and target_key in known_node_keys:
+                return True
             return (target_key, fact_key) in known_facts
         return any(item_fact_key == fact_key for _, item_fact_key in known_facts)
     return True
@@ -678,6 +1033,26 @@ def _condition_leaves(condition: Any) -> tuple[Any, ...]:
     if condition.kind == ConditionKind.NOT:
         return _condition_leaves(condition.condition)
     return (condition,)
+
+
+def _condition_leaves_with_polarity(
+    condition: Any,
+    *,
+    positive: bool = True,
+) -> tuple[tuple[Any, bool], ...]:
+    if condition is None:
+        return ()
+    if condition.kind in {ConditionKind.ALL, ConditionKind.ANY}:
+        leaves: list[tuple[Any, bool]] = []
+        for item in condition.conditions:
+            leaves.extend(_condition_leaves_with_polarity(item, positive=positive))
+        return tuple(leaves)
+    if condition.kind == ConditionKind.NOT:
+        return _condition_leaves_with_polarity(
+            condition.condition,
+            positive=not positive,
+        )
+    return ((condition, positive),)
 
 
 def _source_condition_projection(condition: Any) -> dict[str, object] | None:
@@ -750,28 +1125,51 @@ def _condition_matches_target(
     condition: Any,
     target_key: str,
     known_facts: dict[tuple[str, str], StrictScalar],
+    *,
+    allow_authored_identity: bool = False,
 ) -> bool:
     if condition is None:
         return True
     if condition.kind == ConditionKind.ALL:
         return all(
-            _condition_matches_target(item, target_key, known_facts)
+            _condition_matches_target(
+                item,
+                target_key,
+                known_facts,
+                allow_authored_identity=allow_authored_identity,
+            )
             for item in condition.conditions
         )
     if condition.kind == ConditionKind.ANY:
         return any(
-            _condition_matches_target(item, target_key, known_facts)
+            _condition_matches_target(
+                item,
+                target_key,
+                known_facts,
+                allow_authored_identity=allow_authored_identity,
+            )
             for item in condition.conditions
         )
     if condition.kind == ConditionKind.NOT:
-        return not _condition_matches_target(condition.condition, target_key, known_facts)
+        return not _condition_matches_target(
+            condition.condition,
+            target_key,
+            known_facts,
+            allow_authored_identity=allow_authored_identity,
+        )
     if condition.node is None or condition.node.kind != NodeSelectorKind.CURRENT_TARGET:
         return True
     if condition.fact_key is None:
         return False
-    current = known_facts.get((target_key, condition.fact_key))
-    if current is None:
+    fact_identity = (target_key, condition.fact_key)
+    if fact_identity not in known_facts:
+        if allow_authored_identity:
+            if condition.kind == ConditionKind.FACT_EQUALS:
+                return bool(condition.value == target_key)
+            if condition.kind == ConditionKind.FACT_IN:
+                return bool(target_key in condition.values)
         return False
+    current = known_facts[fact_identity]
     if condition.kind == ConditionKind.FACT_EQUALS:
         return bool(current == condition.value)
     if condition.kind == ConditionKind.FACT_NOT_EQUALS:

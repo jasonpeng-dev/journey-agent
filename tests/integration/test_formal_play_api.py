@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.domain.enums import NodeStatus
 from app.infrastructure.db.models import GameInstanceNodeState
 from app.scenarios.builtin import require_builtin_v2_version
+from tests.goal_confirmation_helpers import parse_and_confirm_api
 from tests.scenario_fixtures import GENERIC_TEST
 
 
@@ -81,12 +82,7 @@ def test_generic_play_stops_at_briefing_and_ack_runs_one_action_cycle(
     client: TestClient, session: Session
 ) -> None:
     game_id = _new_game(client, session)
-    goal = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    )
-    assert goal.status_code == 200, goal.text
-    task = goal.json()["task"]
+    task = parse_and_confirm_api(client, game_id, "stabilize the patient")
     assert task["status"] == "ACTIVE"
     assert task["execution_phase"] == "AWAITING_PLAN_START"
     assert task["briefing"] is None
@@ -106,10 +102,7 @@ def test_generic_scenario_uses_same_stepwise_play_and_game_remains_active(
     client: TestClient, session: Session
 ) -> None:
     game_id = _new_game(client, session)
-    first = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    ).json()["task"]
+    first = parse_and_confirm_api(client, game_id, "stabilize the patient")
     completed, action_results = _drive_task(client, game_id, first)
 
     assert completed["status"] == "COMPLETED"
@@ -125,17 +118,11 @@ def test_play_state_exposes_task_history_and_scopes_selected_task(
     client: TestClient, session: Session
 ) -> None:
     game_id = _new_game(client, session)
-    first = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "diagnose the patient", "idempotency_key": str(uuid4())},
-    ).json()["task"]
+    first = parse_and_confirm_api(client, game_id, "diagnose the patient")
     first, _ = _drive_task(client, game_id, first)
     assert first["status"] == "COMPLETED"
 
-    second = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    ).json()["task"]
+    second = parse_and_confirm_api(client, game_id, "stabilize the patient")
     latest = client.get(f"/api/v1/games/{game_id}/play")
     assert latest.status_code == 200
     latest_state = latest.json()
@@ -165,10 +152,7 @@ def test_play_state_exposes_task_history_and_scopes_selected_task(
 
 def test_pacing_version_and_phase_are_server_enforced(client: TestClient, session: Session) -> None:
     game_id = _new_game(client, session)
-    task = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    ).json()["task"]
+    task = parse_and_confirm_api(client, game_id, "stabilize the patient")
     wrong_phase = client.post(
         f"/api/v1/games/{game_id}/play/acknowledge-debrief",
         json={"expected_pacing_version": task["pacing_version"]},
@@ -195,10 +179,7 @@ def test_truly_unreachable_generic_goal_stops_reliably(
     assert patient is not None
     patient.status = NodeStatus.LOCKED
     session.flush()
-    task = client.post(
-        f"/api/v1/games/{game_id}/goals",
-        json={"goal": "stabilize the patient", "idempotency_key": str(uuid4())},
-    ).json()["task"]
+    task = parse_and_confirm_api(client, game_id, "stabilize the patient")
     assert task["status"] == "ACTIVE"
     task = _start_planning(client, game_id, task)
     assert task["status"] == "UNREACHABLE_IN_CURRENT_STATE"

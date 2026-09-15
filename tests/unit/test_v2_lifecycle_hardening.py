@@ -17,6 +17,7 @@ from app.scenarios.persistence import ScenarioDefinitionRepository
 from app.scenarios.serialization import scenario_content_hash
 from app.scenarios.versions import ScenarioVersionError, ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
+from app.services.game_lifecycle import GameLifecycleError, GameLifecycleService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
 from tests.unit.test_scenario_definition_v2 import _contract_scenario_document
@@ -97,6 +98,12 @@ def test_exact_version_loader_fails_closed_for_corrupt_metadata(
     with pytest.raises(ScenarioVersionError) as caught:
         ScenarioVersionRepository(session).load(version.id)
     assert caught.value.code == code
+    with pytest.raises(GameLifecycleError) as blocked:
+        GameLifecycleService(session).create(
+            scenario_version_id=version.id,
+            idempotency_key=f"corrupt-version-{code}",
+        )
+    assert blocked.value.code == "LEGACY_SCENARIO_VERSION_READ_ONLY"
 
 
 def test_noncanonical_snapshot_and_published_mutation_are_rejected(session: Session) -> None:

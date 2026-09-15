@@ -15,11 +15,10 @@ from app.agent.dependency_closure import (
 from app.agent.generic import (
     GenericAgentError,
     GenericAgentService,
-    PlanningActionCatalogBuilder,
     _ProjectedRegionResourceKnowledge,
     _ProjectedResourcePool,
 )
-from app.agent.planning_context import PlanningContextBuilder, objective_context
+from app.agent.planning_context import PlanningContextBuilder
 from app.agent.provider import (
     PlannerActionContract,
     PlannerInput,
@@ -53,7 +52,7 @@ from app.services.player_projection import PlayerProjectionService
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.runtime_recovery import RuntimeRecoveryService
 from app.services.scenarios import ScenarioService
-from tests.scenario_fixtures import LINJIANG_V2_TEST
+from tests.scenario_fixtures import LINJIANG_V2_TEST, predefined_goal_resolution
 
 LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0 = LINJIANG_V2_TEST
 
@@ -347,6 +346,7 @@ def test_hidden_pool_is_absent_from_shared_planner_and_player_safe_projection(
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         "restore central communications",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     objective = definition.objectives[0]
@@ -443,6 +443,7 @@ def test_fresh_linjiang_hides_authored_unsurveyed_inventory_from_all_projections
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         "restore central communications",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     planner_input = PlanningContextBuilder(session, scope).build_v2(
@@ -564,6 +565,7 @@ def test_hidden_truth_pool_presence_cannot_change_public_resource_knowledge(
         task = GenericAgentService(session, scope).create_task(
             runtime.session,
             "restore central communications",
+            resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
             initialize_plan=False,
         )
         closure = PlanningContextBuilder(session, scope).build_v2_closure(
@@ -994,7 +996,7 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
     associated = nodes_by_key["utility_service_depot"].associated_known_resources
     assert len(associated) == 1
     assert associated[0]["resource_key"] == "general_engineering_parts"
-    assert associated[0]["resource_name"] == "通用工程部件"
+    assert associated[0]["resource_name"] == "通用维修部件"
     assert associated[0]["facility_name"] == "市政工程维修基地"
     assert associated[0]["quantity"] == 100
     assert associated[0]["availability"] == "UNAVAILABLE"
@@ -1249,7 +1251,7 @@ def test_repair_adjust_resource_aggregates_multiple_visible_available_pools(
 
     result = GenericGameService(session, scope).execute(
         actor_key="electrical_repair_team_alpha",
-        action_key="repair_electrical",
+        action_key="repair_facility",
         target_node_key="east_distribution_station",
         parameters={},
     )
@@ -1350,6 +1352,7 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         "restore central communications",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     context = PlanningContextBuilder(session, scope).build(
@@ -1360,7 +1363,7 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
     )
     context_json = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
     assert "north_power_substation" in context_json
-    assert "known_value" not in context_json
+    assert '"known_value":' not in context_json
 
 
 def test_region_visibility_effect_does_not_complete_survey_or_reveal_hidden_pools(
@@ -1466,10 +1469,10 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
     task = service.create_task(
         runtime.session,
         "restore central communications",
+        resolved_goal=predefined_goal_resolution("restore_central_communication_capability"),
         initialize_plan=False,
     )
     objective = definition.objectives[0]
-    known_refs = PlanningActionCatalogBuilder(session, scope).known_fact_refs()
     builder = PlanningContextBuilder(session, scope)
 
     for call_type, reason in (
@@ -1491,17 +1494,12 @@ def test_planning_guidance_is_present_for_initial_replan_and_repair_contexts(
         )
         request = PlanRequest(
             call_type=call_type,
-            goal=task.goal_description,
-            objective_scope=objective_context(
-                (objective,),
-                known_fact_refs=known_refs,
-            ),
             planner_input=planner_input,
         )
         assert context.goal["objectives"][0]["planning_guidance"] == (
             "Prefer known reachable Regions and preserve enough parts for repair."
         )
-        assert request.objective_scope[0]["planning_guidance"] == (
+        assert request.planner_input.objective["objectives"][0]["planning_guidance"] == (
             "Prefer known reachable Regions and preserve enough parts for repair."
         )
         assert (
@@ -1742,6 +1740,29 @@ def test_unknown_region_without_projected_inflow_remains_unknown() -> None:
         _consume(validator, "middle_region", 10, {}, knowledge, {})
 
     assert error.value.code == "RESOURCE_INVENTORY_UNKNOWN"
+
+
+def test_unknown_global_source_is_not_reported_as_known_zero() -> None:
+    validator = _projected_resource_validator()
+
+    with pytest.raises(GenericAgentError) as error:
+        validator._consume_projected_resource(
+            None,
+            "synthetic_resource",
+            10,
+            {},
+            {},
+        )
+
+    assert error.value.code == "RESOURCE_SOURCE_UNKNOWN"
+    assert error.value.details == {
+        "dimension": "RESOURCE_SOURCE",
+        "resource_key": "synthetic_resource",
+        "scope_region": None,
+        "required_amount": 10,
+        "required": "KNOWN_PUBLIC_SOURCE",
+        "actual": "UNKNOWN",
+    }
 
 
 def test_projected_inflow_does_not_reveal_unknown_inventory() -> None:
@@ -2149,7 +2170,7 @@ def test_runtime_transport_inflow_supports_local_rule_resource_consumption(
 
     repaired = game.execute(
         actor_key="water_repair_team_alpha",
-        action_key="repair_water_facility",
+        action_key="repair_facility",
         target_node_key="south_pump_station",
         parameters={},
     )
