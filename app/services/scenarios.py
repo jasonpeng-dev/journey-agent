@@ -17,6 +17,7 @@ from app.scenarios.authoring import (
     DraftAuthoringError,
     ReferenceEdge,
     delete_object,
+    locator_for_path,
     reference_index,
     rename_key,
 )
@@ -30,10 +31,11 @@ from app.scenarios.versions import ScenarioVersionError, ScenarioVersionReposito
 
 
 class ScenarioLifecycleError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details = details or {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,7 +321,11 @@ class ScenarioService:
                 new_key=new_key,
             )
         except DraftAuthoringError as exc:
-            raise ScenarioLifecycleError(exc.code, exc.message) from exc
+            raise ScenarioLifecycleError(
+                exc.code,
+                exc.message,
+                details=_authoring_error_details(exc),
+            ) from exc
         return self.replace_draft(
             scenario_id,
             expected_revision=expected_revision,
@@ -342,7 +348,11 @@ class ScenarioService:
                 object_key=object_key,
             )
         except DraftAuthoringError as exc:
-            raise ScenarioLifecycleError(exc.code, exc.message) from exc
+            raise ScenarioLifecycleError(
+                exc.code,
+                exc.message,
+                details=_authoring_error_details(exc),
+            ) from exc
         return self.replace_draft(
             scenario_id,
             expected_revision=expected_revision,
@@ -382,7 +392,9 @@ class ScenarioService:
     def _validate_record(self, draft: ScenarioDraft) -> ScenarioValidationResult:
         result = self.validator.validate(draft.definition_document)
         draft.validation_status = "PASSED" if result.passed else "FAILED"
-        draft.validation_errors = [_issue_payload(issue) for issue in result.issues]
+        draft.validation_errors = [
+            _issue_payload(issue, draft.definition_document) for issue in result.issues
+        ]
         draft.content_hash = (
             scenario_content_hash(draft.definition_document) if result.passed else None
         )
@@ -418,12 +430,42 @@ class ScenarioService:
             )
 
 
-def _issue_payload(issue: ScenarioValidationIssue) -> dict[str, str]:
-    return {
+def _issue_payload(issue: ScenarioValidationIssue, document: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "code": issue.code,
         "path": issue.path,
         "message": issue.message,
         "severity": issue.severity,
+    }
+    locator = locator_for_path(document, issue.path)
+    if locator is not None:
+        payload["locator"] = {
+            "object_kind": locator.object_kind,
+            "object_key": locator.object_key,
+            "field_path": locator.field_path,
+        }
+    return payload
+
+
+def _authoring_error_details(error: DraftAuthoringError) -> dict[str, Any]:
+    if not error.references:
+        return {}
+    return {
+        "references": [
+            {
+                "source": {
+                    "object_kind": edge.source.object_kind,
+                    "object_key": edge.source.object_key,
+                    "field_path": edge.source.field_path,
+                },
+                "target": {
+                    "object_kind": edge.target.object_kind,
+                    "object_key": edge.target.object_key,
+                    "field_path": edge.target.field_path,
+                },
+            }
+            for edge in error.references
+        ]
     }
 
 

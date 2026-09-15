@@ -45,7 +45,9 @@ function keyName(value: JsonObject, key: string, fallback = key): Option {
   return { key, name: typeof value.name === "string" && value.name.trim() ? value.name : fallback };
 }
 
-function referenceOptions(document: JsonObject, domain: ReferenceDomain): Option[] {
+// This pure helper is exported for registry/picker tests; it has no React state.
+// eslint-disable-next-line react-refresh/only-export-components
+export function referenceOptions(document: JsonObject, domain: ReferenceDomain): Option[] {
   const objects = (kind: EntityKind) => sectionObjects(document, entityRegistry[kind].section).filter((item) => item.kind === kind).map((item) => ({ key: item.key, name: item.name }));
   if (domain === "fact") {
     const nodes = sectionObjects(document, "world").filter((item) => item.kind === "node");

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { referenceOptions } from "./components/TypedEditor";
 import { nodeSemanticView, replaceObject, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
 import { entityRegistry, factInitialValueMetadata } from "./editor-registry";
 import { addObject, defaultArrayItem } from "./templates";
@@ -59,5 +60,10 @@ describe("editor draft helpers", () => {
     const changed = replaceObject(original, "world", node.key, { ...node.value, name: "Renamed" });
     expect(changed.world).toMatchObject({ nodes: [{ key: "clinic", name: "Renamed", custom_engine_field: { keep: true } }] });
     expect(changed.extra_root).toEqual({ keep: true });
+  });
+
+  it("reference pickers display names but return stable keys", () => {
+    const pickerDocument = { world: { node_types: [], nodes: [{ key: "central", name: "Central Node" }] } };
+    expect(referenceOptions(pickerDocument, "node")).toEqual([{ key: "central", name: "Central Node" }]);
   });
 });

@@ -43,6 +43,7 @@ from app.core.errors import AppError
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.infrastructure.db.session import get_db
+from app.scenarios.authoring import locator_for_path
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from app.scenarios.validation import ScenarioValidationIssue
 from app.services.draft_sandbox import DraftSandboxService
@@ -165,7 +166,7 @@ def validate_draft(
         )
         draft = service.get_draft(scenario_id)
         db.commit()
-        issues = [_validation_issue(item) for item in result.issues]
+        issues = [_validation_issue(item, draft.definition_document) for item in result.issues]
         structural = result.definition is not None
         runnable = structural
         playable = result.passed
@@ -420,7 +421,7 @@ def _draft_write(
         return _draft_response(draft)
     except ScenarioLifecycleError as exc:
         db.rollback()
-        _raise_http(exc)
+        _raise_http(exc, details=exc.details)
 
 
 def _scenario_summary(db: Session, scenario: Scenario) -> ScenarioSummaryResponse:
@@ -468,6 +469,7 @@ def _draft_response(draft: ScenarioDraft) -> DraftResponse:
                 code=item["code"],
                 path=item["path"],
                 message=item["message"],
+                locator=item.get("locator"),
             )
             for item in draft.validation_errors
         ],
@@ -488,12 +490,26 @@ def _version_summary(version: ScenarioVersion) -> ScenarioVersionSummaryResponse
     )
 
 
-def _validation_issue(issue: ScenarioValidationIssue) -> ValidationIssueResponse:
+def _validation_issue(
+    issue: ScenarioValidationIssue,
+    document: dict[str, Any] | None = None,
+) -> ValidationIssueResponse:
+    resolved = locator_for_path(document, issue.path) if document is not None else None
+    locator = (
+        {
+            "object_kind": resolved.object_kind,
+            "object_key": resolved.object_key,
+            "field_path": resolved.field_path,
+        }
+        if resolved is not None
+        else None
+    )
     return ValidationIssueResponse(
         severity=ValidationSeverity(issue.severity),
         code=issue.code,
         path=issue.path,
         message=issue.message,
+        locator=locator,
     )
 
 

@@ -314,6 +314,12 @@ def test_warning_does_not_block_publish_but_missing_playability_does(
     assert validation.status_code == 200
     assert validation.json()["publish_ready"] is True
     assert any(issue["severity"] == "WARNING" for issue in validation.json()["issues"])
+    warning = next(issue for issue in validation.json()["issues"] if issue["severity"] == "WARNING")
+    assert warning["locator"] == {
+        "object_kind": "action",
+        "object_key": "unused_action",
+        "field_path": None,
+    }
     published = client.post(
         f"/api/v1/scenarios/{scenario_id}/draft/publish",
         json={

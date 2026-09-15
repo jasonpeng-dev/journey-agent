@@ -16,7 +16,7 @@ export type Draft = {
   revision: number;
   definition_document: Record<string, unknown>;
   validation_status: string;
-  validation_issues: Array<{ severity: string; code: string; path: string; message: string }>;
+  validation_issues: Array<{ severity: string; code: string; path: string; message: string; locator?: Locator | null }>;
   content_hash: string | null;
   base_scenario_version_id: string | null;
   updated_at: string;
@@ -28,7 +28,7 @@ export type ReferenceIndex = { scenario_id: string; revision: number; references
 
 export type ValidationResult = {
   scenario_id: string; revision: number; content_hash: string | null; publish_ready: boolean;
-  issues: Array<{ severity: "ERROR" | "WARNING"; code: string; path: string; message: string }>;
+  issues: Array<{ severity: "ERROR" | "WARNING"; code: string; path: string; message: string; locator?: Locator | null }>;
   readiness: Array<{ level: string; passed: boolean; issue_codes: string[] }>;
 };
 
