@@ -156,6 +156,15 @@ export function sectionObjects(document: JsonObject, section: string): DraftObje
   return definition.entityKinds.flatMap((kind) => objectsAt(document, kind));
 }
 
+export function filterDraftObjects(objects: DraftObject[], search: string, kind = "all"): DraftObject[] {
+  const query = search.trim().toLocaleLowerCase();
+  return objects.filter((item) => {
+    if (kind !== "all" && item.kind !== kind) return false;
+    if (!query) return true;
+    return [item.name, item.key, item.kind].some((value) => value.toLocaleLowerCase().includes(query));
+  });
+}
+
 export function objectByKindAndKey(document: JsonObject, kind: EntityKind, key: string): DraftObject | null {
   return objectsAt(document, kind).find((item) => item.key === key) ?? null;
 }

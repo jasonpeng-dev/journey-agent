@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { referenceOptions } from "./components/editor/ReferencePicker";
-import { nodeSemanticView, replaceObject, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
+import { filterDraftObjects, nodeSemanticView, replaceObject, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
 import { entityRegistry, factInitialValueMetadata } from "./editor-registry";
 import { addObject, defaultArrayItem } from "./templates";
 
@@ -65,5 +65,13 @@ describe("editor draft helpers", () => {
   it("reference pickers display names but return stable keys", () => {
     const pickerDocument = { world: { node_types: [], nodes: [{ key: "central", name: "Central Node" }] } };
     expect(referenceOptions(pickerDocument, "node")).toEqual([{ key: "central", name: "Central Node" }]);
+  });
+
+  it("filters object lists by display name, stable key, and semantic kind", () => {
+    const objects = sectionObjects({ world: { nodes: [{ key: "central", name: "Central Hospital", node_type_key: "facility" }, { key: "south_bridge", name: "South Bridge", node_type_key: "transport" }] } }, "world");
+    expect(filterDraftObjects(objects, "hospital").map((item) => item.key)).toEqual(["central"]);
+    expect(filterDraftObjects(objects, "south_bridge").map((item) => item.key)).toEqual(["south_bridge"]);
+    expect(filterDraftObjects(objects, "", "node")).toHaveLength(2);
+    expect(filterDraftObjects(objects, "", "relation")).toHaveLength(0);
   });
 });

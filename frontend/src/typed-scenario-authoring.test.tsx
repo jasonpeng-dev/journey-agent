@@ -34,6 +34,14 @@ function EntityHarness({ initial }: { initial: DraftObject }) {
   return <TypedEntityEditor entity={current} document={document} onChange={(value) => setCurrent({ ...current, value })} />;
 }
 
+function expandNestedCards() {
+  for (let pass = 0; pass < 5; pass += 1) {
+    const collapsed = Array.from(window.document.querySelectorAll<HTMLButtonElement>(".nested-card-toggle")).filter((button) => button.getAttribute("aria-expanded") === "false");
+    if (collapsed.length === 0) return;
+    collapsed.forEach((button) => fireEvent.click(button));
+  }
+}
+
 describe("typed ScenarioDefinition v2 authoring", () => {
   it("edits Condition and Effect AST variants through typed controls", () => {
     render(<EntityHarness initial={entity("rule", {
@@ -45,6 +53,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       condition: { kind: "FACT_EQUALS", node: { kind: "CURRENT_TARGET" }, fact_key: "operational", value: true },
       effects: [{ kind: "SET_FACT", node: { kind: "CURRENT_TARGET" }, fact_key: "operational", value: { source: "LITERAL", literal: true } }],
     })} />);
+    expandNestedCards();
 
     fireEvent.change(screen.getByLabelText("条件类型"), { target: { value: "RESOURCE_COMPARE" } });
     expect(screen.getByLabelText("资源")).toBeInTheDocument();
@@ -78,6 +87,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       authority_policy: { autonomous_limits: [{ parameter_key: "count", maximum: 1 }] },
       unknown_extension: { keep: true },
     })} document={document} onChange={onChange} />);
+    expandNestedCards();
 
     expect(screen.getByLabelText("允许的能力")).toBeInTheDocument();
     expect(screen.getAllByDisplayValue("SUCCESS")).toHaveLength(2);
@@ -99,6 +109,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       prerequisites: [{ key: "precondition", description: "Precondition", requirements: [{ key: "pre_req", kind: "FACT", node_key: "target", fact_key: "operational", accepted_values: [true], description: "Known requirement" }] }],
       subsumes: [],
     })} />);
+    expandNestedCards();
     expect(screen.getByDisplayValue("pre_req")).toBeInTheDocument();
     expect(screen.getByText("Requirements")).toBeInTheDocument();
 
@@ -111,6 +122,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       unavailable_value: false,
       dependencies: [{ kind: "FACT", node_key: "target", fact_key: "operational", accepted_values: [true], knowledge_gate: { node_key: "target", fact_key: "operational", accepted_values: [true] } }],
     })} />);
+    expandNestedCards();
     expect(screen.getByLabelText("依赖类型")).toHaveValue("FACT");
     expect(screen.getByText("知识门槛")).toBeInTheDocument();
   });
@@ -123,6 +135,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       resource_pools: [{ pool_key: "fuel_pool", resource_key: "fuel", region_key: "target", facility_key: null, quantity: 5, reserved_value: 0, visibility: "HIDDEN", availability: "UNAVAILABLE", survey_discoverable: true, availability_requirement: { node_key: "target", fact_key: "operational", value: true } }],
       region_resource_knowledge: [],
     }} document={document} onChange={vi.fn()} />);
+    expandNestedCards();
     expect(screen.getByLabelText("要求值")).toBeChecked();
     expect(screen.queryByText("可接受值")).not.toBeInTheDocument();
 
@@ -134,6 +147,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expect(screen.getByLabelText("澄清提示")).toHaveValue("Clarify");
     cleanup();
     render(<TypedEditor section="public-knowledge" value={{ resource_source_hints: [{ resource_key: "fuel", primary_region_key: "target", candidate_region_keys: [] }] }} document={document} onChange={vi.fn()} />);
+    expandNestedCards();
     expect(screen.getByLabelText("资源")).toHaveValue("fuel");
   });
 });
