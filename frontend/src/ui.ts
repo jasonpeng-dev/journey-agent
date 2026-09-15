@@ -86,6 +86,12 @@ const labels: Record<string, string> = {
 };
 
 export const sectionLabels: Record<string, string> = {
+  interactions: "交互",
+  "derived-states": "派生状态",
+  initialization: "初始化",
+  "goal-resolution": "目标解析",
+  "public-knowledge": "公共知识",
+  "public-references": "公共引用",
   overview: "概览",
   world: "世界",
   actors: "角色与参与者",
@@ -98,6 +104,9 @@ export const sectionLabels: Record<string, string> = {
 };
 
 export const kindLabels: Record<string, string> = {
+  relation: "关系",
+  derived_state: "派生状态",
+  public_reference: "公共引用",
   node_type: "节点类型",
   node: "节点",
   resource: "资源",

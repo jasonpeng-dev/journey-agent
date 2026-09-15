@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { replaceObject, sectionObjects, updateObjectName } from "./editor";
+import { nodeSemanticView, replaceObject, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
+import { entityRegistry, factInitialValueMetadata } from "./editor-registry";
 import { addObject, defaultArrayItem } from "./templates";
 
 describe("editor draft helpers", () => {
@@ -27,5 +28,36 @@ describe("editor draft helpers", () => {
     expect(defaultArrayItem("conditions")).toMatchObject({ kind: "FACT_EQUALS" });
     expect(defaultArrayItem("effects")).toMatchObject({ kind: "EMIT_OUTCOME" });
     expect(defaultArrayItem("completion_requirements")).toMatchObject({ node_key: "node", fact_key: "fact" });
+  });
+
+  it("registers every V2 authoring section without adding semantic collections", () => {
+    expect(sectionRegistry.map((item) => item.id)).toEqual([...sections]);
+    expect(sectionRegistry.find((item) => item.id === "world")?.entityKinds).toEqual(["node_type", "node", "relation", "resource"]);
+    expect(sectionRegistry.some((item) => item.id === "world" && item.rootPath?.includes("regions"))).toBe(false);
+    expect(entityRegistry.node.collectionPath).toEqual(["world", "nodes"]);
+  });
+
+  it("keeps Region, Facility, and Transport as Node semantic views", () => {
+    const viewDocument = { metadata: { locality: { region_node_type_key: "region", facility_node_type_key: "facility", transport_node_type_key: "transport" } }, world: { nodes: [
+      { key: "r", name: "R", node_type_key: "region" }, { key: "f", name: "F", node_type_key: "facility" }, { key: "t", name: "T", node_type_key: "transport" },
+    ] } };
+    expect(nodeSemanticView(viewDocument, "regions").map((item) => item.key)).toEqual(["r"]);
+    expect(nodeSemanticView(viewDocument, "facilities").map((item) => item.key)).toEqual(["f"]);
+    expect(nodeSemanticView(viewDocument, "transports").map((item) => item.key)).toEqual(["t"]);
+  });
+
+  it("selects a typed initial value editor for every Fact value type", () => {
+    expect(factInitialValueMetadata("BOOLEAN").type).toBe("boolean");
+    expect(factInitialValueMetadata("INTEGER").type).toBe("integer");
+    expect(factInitialValueMetadata("STRING").type).toBe("text");
+    expect(factInitialValueMetadata("ENUM", ["A", "B"]).enum).toEqual(["A", "B"]);
+  });
+
+  it("round-trips an edited typed field while preserving unhandled fields", () => {
+    const original = { world: { nodes: [{ key: "clinic", name: "Clinic", node_type_key: "facility", custom_engine_field: { keep: true } }] }, extra_root: { keep: true } };
+    const node = sectionObjects(original, "world")[0];
+    const changed = replaceObject(original, "world", node.key, { ...node.value, name: "Renamed" });
+    expect(changed.world).toMatchObject({ nodes: [{ key: "clinic", name: "Renamed", custom_engine_field: { keep: true } }] });
+    expect(changed.extra_root).toEqual({ keep: true });
   });
 });
