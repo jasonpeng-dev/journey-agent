@@ -476,6 +476,16 @@ describe("Formal Play player projections", () => {
             }],
           },
         ]}
+        knownTargetActionContracts={[{
+          target_key: "synthetic_facility",
+          action_key: "start_power",
+          action_name: "启动发电",
+          resource_requirements: [
+            { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 2 },
+            { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 4 },
+            { resource_key: "fuel", scope: { kind: "CURRENT_TARGET_REGION" }, minimum: 2 },
+          ],
+        }]}
       />,
     );
 
@@ -543,6 +553,7 @@ describe("Formal Play player projections", () => {
           target_key: "target_facility",
           action_key: "repair_target_facility",
           action_name: "修复设施",
+          required_actor_role_name: "Prerequisite Repair Team",
           special_requirements: [{
             node_key: "river_port",
             fact_key: "operational",
@@ -560,6 +571,7 @@ describe("Formal Play player projections", () => {
     fireEvent.click(facility.querySelector("summary")!);
 
     expect(facility).toHaveTextContent("前置条件：临江港恢复运行");
+    expect(facility).toHaveTextContent("执行队伍：Prerequisite Repair Team");
     expect(facility).not.toHaveTextContent("前置条件：运行状态");
     expect(facility).not.toHaveTextContent("前置条件：已知状态");
   });
@@ -3065,6 +3077,26 @@ describe("Formal Play player projections", () => {
             ],
           },
           { key: "unknown_facility", name: "Unknown Facility", accessible: true, node_type_key: "facility", region_key: "north", region_name: "North Region" },
+          {
+            key: "survey_only_facility",
+            name: "Surveyed Facility",
+            accessible: true,
+            node_type_key: "facility",
+            region_key: "north",
+            region_name: "North Region",
+            associated_known_resources: [{
+              resource_key: "emergency_fuel",
+              resource_name: "应急燃料",
+              quantity: 50,
+              availability: "UNAVAILABLE",
+              availability_requirement: {
+                node_key: "survey_only_facility",
+                fact_key: "operational",
+                value: true,
+              },
+              availability_requirement_status: "KNOWN",
+            }],
+          },
           { key: "emergency_generator", name: "Emergency Generator", accessible: true, node_type_key: "facility", region_key: "north", region_name: "North Region" },
         ]}
         actors={[]}
@@ -3119,6 +3151,18 @@ describe("Formal Play player projections", () => {
             ],
             effects: [{ type: "FACT_MUTATION", target: "target_key", fact_key: "operational", value: true }],
           },
+          {
+            target_key: "unknown_facility",
+            action_key: "repair_facility",
+            action_name: "修复设施",
+            required_actor_role_name: "Hidden Repair Team",
+          },
+          {
+            target_key: "survey_only_facility",
+            action_key: "repair_facility",
+            action_name: "修复设施",
+            required_actor_role_name: "Survey-only Repair Team",
+          },
         ]}
       />,
     );
@@ -3164,9 +3208,17 @@ describe("Formal Play player projections", () => {
     expect(unknownSummary.querySelector(".knowledge-facility-toggle")).toHaveTextContent("+");
     fireEvent.click(unknownSummary);
     expect(unknownFacility).toHaveAttribute("open");
+    expect(unknownFacility).not.toHaveTextContent("修复需求：修复设施");
+    expect(unknownFacility).not.toHaveTextContent("执行队伍：Hidden Repair Team");
+    expect(unknownFacility).toHaveTextContent("暂无更多已知信息");
     expect(screen.getByTestId("knowledge-accordion-locations")).toBeInTheDocument();
     fireEvent.click(unknownSummary);
     expect(unknownFacility).not.toHaveAttribute("open");
+    const surveyOnlyFacility = screen.getByTestId("facility-card-survey_only_facility");
+    fireEvent.click(surveyOnlyFacility.querySelector("summary")!);
+    expect(surveyOnlyFacility).toHaveTextContent("关联资源：应急燃料 ×50，暂不可用，解锁条件：Surveyed Facility恢复运行");
+    expect(surveyOnlyFacility).not.toHaveTextContent("执行队伍：Survey-only Repair Team");
+    expect(surveyOnlyFacility).not.toHaveTextContent("暂无更多已知信息");
     fireEvent.click(screen.getByText("East Region"));
     const substation = screen.getByTestId("facility-card-east_distribution_station");
     const substationSummary = substation.querySelector("summary")!;
@@ -3194,6 +3246,11 @@ describe("Formal Play player projections", () => {
           { key: "blocked_route", name: "Blocked Corridor", accessible: true, node_type_key: "transport", region_key: "north", region_name: "North Region", endpoint_region_names: ["North Region", "East Region"] },
         ]}
         actors={[]}
+        knownTargetActionContracts={[{
+          target_key: "unknown_route",
+          action_key: "clear_transport",
+          action_name: "清理交通通道",
+        }]}
         knownFacts={[
           { node_key: "open_route", fact_key: "passable", name: "Passability", value: true, node_name: "Open Corridor", node_type_key: "transport", region_key: "north", region_name: "North Region" },
           { node_key: "blocked_route", fact_key: "passable", name: "Passability", value: false, node_name: "Blocked Corridor", node_type_key: "transport", region_key: "north", region_name: "North Region" },
@@ -3209,6 +3266,8 @@ describe("Formal Play player projections", () => {
     expect(unknown).toHaveTextContent("待探索");
     expect(open).toHaveTextContent("可通行");
     expect(blocked).toHaveTextContent("待修复");
+    expect(unknown).not.toHaveTextContent("清理交通通道：清理交通通道");
+    expect(unknown.querySelector(".knowledge-node-details")).toBeNull();
     expect(unknown.querySelector("summary")).toBeNull();
     expect(open.querySelector("summary")).toBeNull();
     expect(blocked.querySelector("summary")).toBeNull();

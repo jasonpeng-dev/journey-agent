@@ -31,6 +31,7 @@ from app.domain.scenario_v2 import (
     ActionParameters,
     ActionTargetKind,
     EffectKind,
+    RelationDefinitionV2,
     ScenarioDefinitionV2,
     StrictScalar,
     normalize_action_parameters,
@@ -64,6 +65,7 @@ from app.engine.rules import (
     RuleRegionResourceKnowledgeState,
     RuleRelationKnowledgeState,
     RuleResourcePoolState,
+    merge_rule_outcomes,
 )
 from app.infrastructure.db.models import (
     GameInstance,
@@ -102,6 +104,15 @@ class PlayerKnowledgeChange:
     key: str
     name: str
     value: StrictScalar | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _KnowledgeDelta:
+    fact_keys: frozenset[tuple[str, str]] = frozenset()
+    node_keys: frozenset[str] = frozenset()
+    pools: tuple[RuleResourcePoolState, ...] = ()
+    relations: tuple[RelationDefinitionV2, ...] = ()
+    region_changes: tuple[PlayerKnowledgeChange, ...] = ()
 
 
 class GenericGameService:
@@ -278,7 +289,7 @@ class GenericGameService:
             if item.visibility == Visibility.KNOWN
             and state.nodes[item.node_key].visibility != Visibility.KNOWN
         }
-        newly_known_pools = tuple(
+        newly_known_pools = list(
             pool
             for pool in state.resource_pools.values()
             if pool.visibility == ResourcePoolVisibility.HIDDEN
@@ -288,7 +299,7 @@ class GenericGameService:
                 for update in outcome.resource_pool_visibility_updates
             )
         )
-        newly_known_relations = tuple(
+        newly_known_relations = list(
             relation
             for relation in definition.world.relations
             if any(
@@ -348,6 +359,27 @@ class GenericGameService:
                 resource_survey_completed=survey_mutation.completed,
             )
         self._apply(definition, actor_key, outcome)
+        state_trigger_outcomes: list[GenericRuleOutcome] = []
+        fired_state_trigger_keys: set[str] = set()
+        while True:
+            trigger_state = self._locked_state(definition, lock=False)
+            candidates = engine.evaluate_state_triggers(
+                trigger_state,
+                exclude_rule_keys=fired_state_trigger_keys,
+            )
+            if not candidates:
+                break
+            trigger_outcome = candidates[0]
+            trigger_delta = self._knowledge_delta(trigger_outcome, trigger_state, definition)
+            newly_known_facts.update(trigger_delta.fact_keys)
+            newly_known_nodes.update(trigger_delta.node_keys)
+            newly_known_pools.extend(trigger_delta.pools)
+            newly_known_relations.extend(trigger_delta.relations)
+            region_resource_knowledge_changes.extend(trigger_delta.region_changes)
+            self._apply(definition, actor_key, trigger_outcome)
+            state_trigger_outcomes.append(trigger_outcome)
+            fired_state_trigger_keys.add(trigger_outcome.selected_rule_key)
+        outcome = merge_rule_outcomes((outcome, *state_trigger_outcomes))
         instance = self._instance()
         instance.runtime_revision += 1
         self.db.flush()
@@ -1237,6 +1269,103 @@ class GenericGameService:
                 )
                 for row in actors
             },
+        )
+
+    def _knowledge_delta(
+        self,
+        outcome: GenericRuleOutcome,
+        state: DeclarativeRuleState,
+        definition: ScenarioDefinitionV2,
+    ) -> _KnowledgeDelta:
+        """Calculate public Knowledge transitions before applying an outcome."""
+
+        facts = frozenset(
+            (item.node_key, item.fact_key)
+            for item in outcome.fact_visibility_updates
+            if item.visibility == Visibility.KNOWN
+            and state.facts[(item.node_key, item.fact_key)].visibility != Visibility.KNOWN
+        )
+        nodes = frozenset(
+            item.node_key
+            for item in outcome.node_visibility_updates
+            if item.visibility == Visibility.KNOWN
+            and state.nodes[item.node_key].visibility != Visibility.KNOWN
+        )
+        pools = tuple(
+            pool
+            for pool in state.resource_pools.values()
+            if pool.visibility == ResourcePoolVisibility.HIDDEN
+            and any(
+                update.pool_key == pool.pool_key
+                and update.visibility == ResourcePoolVisibility.VISIBLE
+                for update in outcome.resource_pool_visibility_updates
+            )
+        )
+        relations = tuple(
+            relation
+            for relation in definition.world.relations
+            if any(
+                update.relation_key == relation_identity(relation)
+                and update.visibility == RelationVisibility.VISIBLE
+                for update in outcome.relation_visibility_updates
+            )
+            and state.relation_knowledge.get(
+                relation_identity(relation),
+                RuleRelationKnowledgeState(RelationVisibility.VISIBLE),
+            ).visibility
+            != RelationVisibility.VISIBLE
+        )
+        # Region inventory knowledge is persisted separately from ordinary
+        # Fact/Node/Relation visibility, so retain an explicit transition.
+        region_changes: list[PlayerKnowledgeChange] = []
+        projected_region_knowledge = {
+            region_key: knowledge
+            for region_key, knowledge in state.region_resource_knowledge.items()
+        }
+        for mutation in outcome.region_resource_visibility_updates:
+            previous = projected_region_knowledge.get(mutation.region_key)
+            if (
+                previous is None
+                or previous.resource_inventory_visibility == mutation.visibility
+            ):
+                continue
+            region_changes.append(
+                PlayerKnowledgeChange(
+                    kind="RESOURCE_INVENTORY_REVEALED",
+                    key=f"{mutation.region_key}.resource_inventory_visibility",
+                    name="Resource inventory visibility",
+                    value=mutation.visibility.value,
+                )
+            )
+            projected_region_knowledge[mutation.region_key] = replace(
+                previous,
+                resource_inventory_visibility=mutation.visibility,
+            )
+        for survey_mutation in outcome.region_resource_survey_updates:
+            previous = projected_region_knowledge.get(survey_mutation.region_key)
+            if (
+                previous is None
+                or previous.resource_survey_completed == survey_mutation.completed
+            ):
+                continue
+            region_changes.append(
+                PlayerKnowledgeChange(
+                    kind="RESOURCE_SURVEY_COMPLETED",
+                    key=f"{survey_mutation.region_key}.resource_survey_completed",
+                    name="Resource survey completed",
+                    value=survey_mutation.completed,
+                )
+            )
+            projected_region_knowledge[survey_mutation.region_key] = replace(
+                previous,
+                resource_survey_completed=survey_mutation.completed,
+            )
+        return _KnowledgeDelta(
+            fact_keys=facts,
+            node_keys=nodes,
+            pools=pools,
+            relations=relations,
+            region_changes=tuple(region_changes),
         )
 
     def _apply(

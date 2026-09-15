@@ -1652,6 +1652,32 @@ def build_dependency_closure(
         while queue:
             process_dependency(*queue.popleft())
 
+        # Preserve a uniquely public, target-specific contract whenever its
+        # Action enters the closure. This is especially important for a
+        # target-owned resource requirement: the Action contract must not be
+        # re-expanded as a global requirement merely because the target was
+        # not itself a Fact producer.
+        for action_key in tuple(sorted(selected_actions)):
+            candidate_bindings = [
+                (binding_key, binding)
+                for binding_key, binding in bindings.items()
+                if binding_key[0] == action_key
+                and (
+                    binding.requirements
+                    or binding.resource_requirements
+                    or binding.deterministic_effects
+                )
+            ]
+            if len(candidate_bindings) != 1:
+                continue
+            binding_key, _binding = candidate_bindings[0]
+            select_binding(
+                binding_key,
+                (f"action:{action_key}", "unique_public_target_contract"),
+                action_key,
+                demand_group=repr(("UNIQUE_TARGET_CONTRACT", action_key)),
+            )
+
         for binding_key in tuple(selected_bindings):
             relevant_nodes.add(binding_key[1])
             if binding_key[1] in actor_states:

@@ -629,10 +629,10 @@ class PlanningContext(ProviderModel):
         payload = self.model_dump(mode="json")
         current_knowledge = payload.get("current_knowledge")
         if isinstance(current_knowledge, dict):
-            # Builder-internal authored requirement metadata is consumed while
-            # constructing canonical PlannerInput; it is not part of the
-            # player/provider compatibility payload.
-            current_knowledge.pop("_planner_action_requirements", None)
+            # The canonical PlannerInput has already consumed this safe
+            # adapter from SharedKnowledgeProjection.  Avoid duplicating it
+            # in the compatibility payload; it is not a second authority.
+            current_knowledge.pop("known_target_action_requirements", None)
         if not payload.get("previous_execution_context"):
             payload.pop("previous_execution_context", None)
         return payload

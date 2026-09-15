@@ -73,6 +73,7 @@ def action_planner_constraints(
     known_preconditions: tuple[dict[str, object], ...] = (),
     source_preconditions: tuple[dict[str, object], ...] = (),
     resource_requirements: tuple[dict[str, object], ...] = (),
+    target_role_requirements: tuple[dict[str, object], ...] | None = None,
 ) -> dict[str, object]:
     """Build the generic Action-level constraint contract.
 
@@ -87,13 +88,20 @@ def action_planner_constraints(
     }
     if action.required_actor_role_key is not None:
         executor["required_role_key"] = action.required_actor_role_key
-    if action.target_actor_roles:
-        executor["target_role_requirements"] = [
+    visible_target_roles = (
+        tuple(
             {
                 "target_key": item.target_key,
                 "required_role_key": item.required_actor_role_key,
             }
             for item in action.target_actor_roles
+        )
+        if target_role_requirements is None
+        else target_role_requirements
+    )
+    if visible_target_roles:
+        executor["target_role_requirements"] = [
+            dict(item) for item in visible_target_roles
         ]
 
     target: dict[str, object] = {
@@ -720,6 +728,7 @@ def planner_target_contracts(
     known_facts: dict[tuple[str, str], StrictScalar],
     known_relation_keys: set[str] | None = None,
     known_pool_keys: set[str] | None = None,
+    allowed_target_keys: set[str] | None = None,
     include_authored_hidden_target_effects: bool = False,
 ) -> dict[str, dict[str, object]]:
     """Return target-specific deterministic effects safe for Planner use.
@@ -739,6 +748,7 @@ def planner_target_contracts(
         if node.key in known_node_keys
         and action.required_interaction_key in node.interaction_keys
         and (not action.target_node_type_keys or node.node_type_key in action.target_node_type_keys)
+        and (allowed_target_keys is None or node.key in allowed_target_keys)
     }
     for target_key in eligible_targets:
         effects_by_target[target_key] = [

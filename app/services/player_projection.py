@@ -141,8 +141,13 @@ class PlayerProjectionService:
         visible_node_keys = {item.node_key for item in visible_nodes}
         known_facts = knowledge_projection.known_fact_rows()
         known_relations = knowledge_projection.known_relations()
-        known_action_requirements = knowledge_projection.known_action_requirements()
-        known_target_action_contracts = knowledge_projection.known_target_action_contracts()
+        target_knowledge_contracts = knowledge_projection.target_knowledge_contracts()
+        known_action_requirements = knowledge_projection.known_action_requirements(
+            target_contracts=target_knowledge_contracts,
+        )
+        known_target_action_contracts = knowledge_projection.known_target_action_contracts(
+            target_contracts=target_knowledge_contracts,
+        )
         node_projections: dict[str, SpatialNodeProjection] = {}
         for item in visible_nodes:
             projection = spatial.node(item.node_key)

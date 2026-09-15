@@ -98,6 +98,7 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
         )
     resolve_action_keys = {
         rule.action_key for rule in definition.rules if rule.phase.value == "RESOLVE"
+        and rule.action_key is not None
     }
     objective_facts: set[tuple[str, str]] = set()
     objective_resources: set[tuple[str, str]] = set()
@@ -170,7 +171,11 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
         ):
             continue
         for rule in definition.rules:
-            if rule.action_key != action.key or rule.phase.value != "RESOLVE":
+            if (
+                rule.action_key != action.key
+                or rule.phase.value != "RESOLVE"
+                or rule.trigger.value != "ACTION"
+            ):
                 continue
             for effect in rule.effects:
                 if effect.kind.value != "ADJUST_RESOURCE":

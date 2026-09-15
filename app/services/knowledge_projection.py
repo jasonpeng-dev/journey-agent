@@ -11,6 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.agent.planner_contract import (
+    json_scope_identity,
     planner_resource_requirement_from_condition,
     planner_resource_requirements,
     planner_target_contracts,
@@ -90,6 +91,11 @@ class SharedKnowledgeProjection:
         self.definition = definition
         self._region_states: dict[str, RegionResourceKnowledgeView] | None = None
         self._visible_pools: tuple[KnownResourcePoolView, ...] | None = None
+        self._target_knowledge_contracts_cache: tuple[dict[str, Any], ...] | None = None
+        self._target_owned_resource_requirement_keys: set[tuple[str, str]] = set()
+        self._global_resource_requirements_cache: dict[
+            str, tuple[dict[str, Any], ...]
+        ] | None = None
         self._static_pool_requirements: dict[tuple[str, str | None, str], dict[str, Any]] = {}
         for pool in resource_pool_initial_states(definition):
             requirement = pool.availability_requirement
@@ -191,36 +197,64 @@ class SharedKnowledgeProjection:
             )
         )
 
-    def known_action_requirements(self) -> tuple[dict[str, Any], ...]:
+    def known_action_requirements(
+        self,
+        *,
+        target_contracts: tuple[dict[str, Any], ...] | None = None,
+    ) -> tuple[dict[str, Any], ...]:
         """Expose action requirements that are already supported by Knowledge.
 
         Static role/relation contracts are public Scenario metadata.  Dynamic
         Fact requirements are included only for Facts whose current visibility
         is KNOWN; hidden Facts and their values are omitted entirely.  The same
-        projection is consumed by both PlanningContext and Player API.
+        projection is consumed by both PlanningContext and Player API.  Target
+        roles are copied only from the shared target contract projection; the
+        authored ``target_actor_roles`` mapping is never a second visibility
+        authority here.
         """
 
         known_nodes = {row.node_key for row in self.known_node_rows()}
         known_facts = {
             (row.node_key, row.fact_key): row.truth_value for row in self.known_fact_rows()
         }
-        resource_projection = self.planner_resources()
-        known_resources = resource_projection.get("resources", {})
-        known_resource_knowledge = resource_projection.get("regions", {})
         role_names = {role.key: role.name for role in self.definition.actors.roles}
+        target_contracts = (
+            self.target_knowledge_contracts()
+            if target_contracts is None
+            else target_contracts
+        )
+        global_resource_requirements = self.global_action_resource_requirements(
+            target_contracts=target_contracts,
+        )
+        target_roles_by_action: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for contract in target_contracts:
+            role_key = contract.get("required_actor_role_key")
+            target_key = contract.get("target_key")
+            action_key = contract.get("action_key")
+            if not (
+                isinstance(action_key, str)
+                and isinstance(target_key, str)
+                and isinstance(role_key, str)
+            ):
+                continue
+            target_roles_by_action[action_key].append(
+                {
+                    "target_key": target_key,
+                    "required_actor_role_key": role_key,
+                    "required_actor_role_name": contract.get(
+                        "required_actor_role_name",
+                        role_names.get(role_key, role_key),
+                    ),
+                }
+            )
+        for action_roles in target_roles_by_action.values():
+            action_roles.sort(key=lambda item: str(item["target_key"]))
         result: list[dict[str, Any]] = []
         for action in sorted(self.definition.actions, key=lambda item: item.key):
-            resource_requirements = planner_resource_requirements(
-                self.definition,
-                action,
-                known_resources=known_resources if isinstance(known_resources, dict) else None,
-                known_resource_knowledge=known_resource_knowledge
-                if isinstance(known_resource_knowledge, dict)
-                else None,
-            )
+            resource_requirements = global_resource_requirements.get(action.key, ())
             if not (
                 action.required_actor_role_key is not None
-                or action.target_actor_roles
+                or target_roles_by_action.get(action.key)
                 or action.source_relation_type_key is not None
                 or action.behavior
                 in {
@@ -240,18 +274,8 @@ class SharedKnowledgeProjection:
                     action.required_actor_role_key,
                     action.required_actor_role_key,
                 )
-            if action.target_actor_roles:
-                entry["target_actor_roles"] = [
-                    {
-                        "target_key": item.target_key,
-                        "required_actor_role_key": item.required_actor_role_key,
-                        "required_actor_role_name": role_names.get(
-                            item.required_actor_role_key,
-                            item.required_actor_role_key,
-                        ),
-                    }
-                    for item in action.target_actor_roles
-                ]
+            if target_roles_by_action.get(action.key):
+                entry["target_actor_roles"] = target_roles_by_action[action.key]
             if action.source_relation_type_key is not None:
                 entry["source_relation_type_key"] = action.source_relation_type_key
             known_preconditions: list[dict[str, Any]] = []
@@ -292,27 +316,71 @@ class SharedKnowledgeProjection:
             result.append(entry)
         return tuple(result)
 
-    def planner_action_requirements(
+    def global_action_resource_requirements(
         self,
         *,
-        include_authored_hidden_target_requirements: bool = False,
-    ) -> tuple[dict[str, Any], ...]:
-        """Return a sparse, target-oriented Planner requirement projection.
+        target_contracts: tuple[dict[str, Any], ...] | None = None,
+    ) -> dict[str, tuple[dict[str, Any], ...]]:
+        """Return Action-level resource requirements not owned by one target.
 
-        ``known_action_requirements`` is also consumed by the Player API and
-        intentionally keeps its action-oriented compatibility shape.  The
-        provider does not need that shape's repeated per-known-node Fact
-        cards, though.  This projection keeps only target-specific repair
-        contracts that can be derived from Knowledge-safe PREFLIGHT rules:
-        role, resource costs, and known Fact prerequisites.
-
-        Hidden current Fact values are never emitted.  The canonical Planner
-        projection may still retain a target's authored prerequisite identity
-        (with ``knowledge_status=UNKNOWN``) when the target can be identified
-        from immutable Scenario metadata.  The player-facing compatibility
-        projection keeps the historical sparse behavior unless the caller opts
-        into this Planner-only authored requirement view.
+        A requirement is moved to a target contract only when the shared
+        projection can prove both a unique public target and a matching
+        explicit target Region. Ambiguous or actor-scoped requirements remain
+        Action-global.
         """
+
+        if target_contracts is None and self._global_resource_requirements_cache is not None:
+            return self._global_resource_requirements_cache
+        resource_projection = self.planner_resources()
+        known_resources = resource_projection.get("resources", {})
+        known_resource_knowledge = resource_projection.get("regions", {})
+        owned_keys = self._target_owned_resource_requirement_keys
+        result: dict[str, tuple[dict[str, Any], ...]] = {}
+        for action in sorted(self.definition.actions, key=lambda item: item.key):
+            requirements = planner_resource_requirements(
+                self.definition,
+                action,
+                known_resources=known_resources if isinstance(known_resources, dict) else None,
+                known_resource_knowledge=(
+                    known_resource_knowledge
+                    if isinstance(known_resource_knowledge, dict)
+                    else None
+                ),
+            )
+            remaining = tuple(
+                item
+                for item in requirements
+                if (
+                    str(item.get("resource_key", "")),
+                    json_scope_identity(item.get("scope")),
+                )
+                not in owned_keys
+            )
+            if remaining:
+                result[action.key] = remaining
+        if target_contracts is None:
+            self._global_resource_requirements_cache = result
+        return result
+
+    def target_knowledge_contracts(self) -> tuple[dict[str, Any], ...]:
+        """Return the single Knowledge-safe target contract projection.
+
+        Target-specific roles, costs, special prerequisites, applicability and
+        deterministic target effects all originate here.  A target-qualified
+        PREFLIGHT selector is a visibility gate: authored identity is not a
+        substitute for a KNOWN current Fact.  Actions without such a selector
+        use only public node/action eligibility (known node, interaction and
+        node type).  Resource-pool survey knowledge stays on its independent
+        resource channel and is consumed by the same target contracts through
+        ``planner_resources``.
+
+        The returned shape is intentionally close to
+        ``PublicTargetActionContractResponse`` so Player and Planner adapters
+        can use different DTOs without re-deciding visibility.
+        """
+
+        if self._target_knowledge_contracts_cache is not None:
+            return self._target_knowledge_contracts_cache
 
         known_nodes = {row.node_key for row in self.known_node_rows()}
         known_facts = {
@@ -321,57 +389,96 @@ class SharedKnowledgeProjection:
         resource_projection = self.planner_resources()
         known_resources = resource_projection.get("resources", {})
         known_resource_knowledge = resource_projection.get("regions", {})
-        by_target: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-
-        for action in sorted(self.definition.actions, key=lambda item: item.key):
-            for target_role in action.target_actor_roles:
-                if target_role.target_key not in known_nodes:
+        known_relation_keys = {
+            str(item["relation_key"])
+            for item in self.known_relations()
+            if item.get("relation_key") is not None
+        }
+        known_pool_keys = {item.pool_key for item in self.visible_resource_pools()}
+        role_names = {role.key: role.name for role in self.definition.actors.roles}
+        self._target_owned_resource_requirement_keys.clear()
+        selector_rules_by_action: dict[
+            str,
+            list[tuple[tuple[tuple[ConditionV2, bool], ...], tuple[ConditionV2, ...]]],
+        ] = defaultdict(list)
+        for rule in self.definition.rules:
+            if rule.phase.value != "PREFLIGHT":
+                continue
+            leaves = self._condition_leaves_with_polarity(rule.condition)
+            selector_conditions = tuple(
+                condition
+                for condition, positive in leaves
+                if positive
+                and condition.node is not None
+                and condition.node.kind == NodeSelectorKind.CURRENT_TARGET
+                and condition.kind in {ConditionKind.FACT_EQUALS, ConditionKind.FACT_IN}
+            )
+            if selector_conditions:
+                if rule.action_key is None:
                     continue
-                by_target[target_role.target_key][action.key] = {
-                    "action_key": action.key,
-                    "required_actor_role_key": target_role.required_actor_role_key,
-                }
-            for rule in self.definition.rules:
-                if rule.action_key != action.key or rule.phase.value != "PREFLIGHT":
-                    continue
-                leaves = self._condition_leaves_with_polarity(rule.condition)
-                selector_conditions = tuple(
-                    condition
-                    for condition, positive in leaves
-                    if positive
-                    and condition.node is not None
-                    and condition.node.kind == NodeSelectorKind.CURRENT_TARGET
-                    and condition.kind in {ConditionKind.FACT_EQUALS, ConditionKind.FACT_IN}
+                selector_rules_by_action[rule.action_key].append(
+                    (leaves, selector_conditions)
                 )
-                if not selector_conditions:
-                    continue
-                selector_ids = {id(condition) for condition in selector_conditions}
-                for target_key in sorted(known_nodes):
-                    if not all(
+
+        result: list[dict[str, Any]] = []
+        for action in sorted(self.definition.actions, key=lambda item: item.key):
+            action_resource_requirements = planner_resource_requirements(
+                self.definition,
+                action,
+                known_resources=known_resources if isinstance(known_resources, dict) else None,
+                known_resource_knowledge=(
+                    known_resource_knowledge
+                    if isinstance(known_resource_knowledge, dict)
+                    else None
+                ),
+            )
+            target_role_by_key = {
+                item.target_key: item.required_actor_role_key
+                for item in action.target_actor_roles
+            }
+            eligible_targets = tuple(
+                sorted(
+                    node.key
+                    for node in self.definition.world.nodes
+                    if node.key in known_nodes
+                    and action.required_interaction_key in node.interaction_keys
+                    and (
+                        not action.target_node_type_keys
+                        or node.node_type_key in action.target_node_type_keys
+                    )
+                )
+            )
+            selector_rules = selector_rules_by_action.get(action.key, [])
+            unique_target_key = eligible_targets[0] if len(eligible_targets) == 1 else None
+            for target_key in eligible_targets:
+                matched_rules = [
+                    (leaves, selector_conditions)
+                    for leaves, selector_conditions in selector_rules
+                    if all(
                         self._target_selector_matches(
                             condition,
                             target_key,
                             known_facts,
-                            allow_authored_identity=(include_authored_hidden_target_requirements),
+                            allow_authored_identity=False,
                         )
                         for condition in selector_conditions
-                    ):
-                        continue
-                    requirement = by_target[target_key].setdefault(
-                        action.key,
-                        {
-                            "action_key": action.key,
-                            **(
-                                {
-                                    "required_actor_role_key": (
-                                        action.required_actor_role_for_target(target_key)
-                                    )
-                                }
-                                if action.required_actor_role_for_target(target_key) is not None
-                                else {}
-                            ),
-                        },
                     )
+                ]
+                if selector_rules and not matched_rules:
+                    # A target-specific authored identity is not enough to
+                    # make a hidden target contract player/planner-visible.
+                    continue
+
+                requirement: dict[str, Any] = {"action_key": action.key}
+                # A target contract carries only a target-specific role.  A
+                # global action role is already represented once on the
+                # action contract and is not repeated for every target.
+                required_actor_role = target_role_by_key.get(target_key)
+                if required_actor_role is not None:
+                    requirement["required_actor_role_key"] = required_actor_role
+
+                for leaves, selector_conditions in matched_rules:
+                    selector_ids = {id(condition) for condition in selector_conditions}
                     for condition, positive in leaves:
                         if id(condition) in selector_ids:
                             continue
@@ -386,15 +493,19 @@ class SharedKnowledgeProjection:
                             resource_requirement = planner_resource_requirement_from_condition(
                                 condition,
                                 target_key=target_key,
-                                known_resources=known_resources
-                                if isinstance(known_resources, dict)
-                                else None,
-                                known_resource_knowledge=known_resource_knowledge
-                                if isinstance(known_resource_knowledge, dict)
-                                else None,
+                                known_resources=(
+                                    known_resources if isinstance(known_resources, dict) else None
+                                ),
+                                known_resource_knowledge=(
+                                    known_resource_knowledge
+                                    if isinstance(known_resource_knowledge, dict)
+                                    else None
+                                ),
                             )
                             if resource_requirement is not None:
-                                requirements = requirement.setdefault("resource_requirements", [])
+                                requirements = requirement.setdefault(
+                                    "resource_requirements", []
+                                )
                                 assert isinstance(requirements, list)
                                 if resource_requirement not in requirements:
                                     requirements.append(resource_requirement)
@@ -404,7 +515,7 @@ class SharedKnowledgeProjection:
                             positive=positive,
                             target_key=target_key,
                             known_facts=known_facts,
-                            include_unknown=(include_authored_hidden_target_requirements),
+                            include_unknown=False,
                         )
                         if special is not None:
                             special_requirements = requirement.setdefault(
@@ -414,89 +525,69 @@ class SharedKnowledgeProjection:
                             if special not in special_requirements:
                                 special_requirements.append(special)
 
-        result: list[dict[str, Any]] = []
-        for target_key in sorted(by_target):
-            requirements = [
-                requirement
-                for _action_key, requirement in sorted(by_target[target_key].items())
-                if len(requirement) > 1
-            ]
-            if requirements:
-                result.append(
-                    {
-                        "target_key": target_key,
-                        "requirements": requirements,
-                    }
-                )
-        return tuple(result)
+                if target_key == unique_target_key:
+                    for resource_requirement in action_resource_requirements:
+                        if not self._resource_requirement_is_target_owned(
+                            resource_requirement,
+                            target_key=target_key,
+                        ):
+                            continue
+                        resource_requirements = requirement.setdefault(
+                            "resource_requirements", []
+                        )
+                        assert isinstance(resource_requirements, list)
+                        if resource_requirement not in resource_requirements:
+                            resource_requirements.append(dict(resource_requirement))
+                        cost = requirement.setdefault("cost", {})
+                        assert isinstance(cost, dict)
+                        resource_key = str(resource_requirement["resource_key"])
+                        minimum = resource_requirement.get("minimum")
+                        if isinstance(minimum, int) and minimum > int(cost.get(resource_key, 0)):
+                            cost[resource_key] = minimum
+                        self._target_owned_resource_requirement_keys.add(
+                            (
+                                resource_key,
+                                json_scope_identity(resource_requirement.get("scope")),
+                            )
+                        )
 
-    def known_target_action_contracts(self) -> tuple[dict[str, Any], ...]:
-        """Expose known target contracts for player-facing facility details.
+                # The target has passed the shared Knowledge gate above.  Only
+                # now may the generic planner helper join deterministic target
+                # effect metadata for this one authorized target.
+                effect_contract = planner_target_contracts(
+                    self.definition,
+                    action,
+                    known_node_keys=known_nodes,
+                    known_facts=known_facts,
+                    known_relation_keys=known_relation_keys,
+                    known_pool_keys=known_pool_keys,
+                    allowed_target_keys={target_key},
+                    include_authored_hidden_target_effects=True,
+                ).get(target_key, {})
+                effects = effect_contract.get("effects")
+                if isinstance(effects, list) and effects:
+                    requirement["effects"] = [dict(item) for item in effects]
 
-        This is a read-only projection of the same Knowledge-safe target
-        requirements/effects consumed by the Planner.  A target is included
-        only when its selector and the required target Facts are known; no
-        Scenario Truth is used to fill in a missing contract.
-        """
-
-        known_nodes = {row.node_key for row in self.known_node_rows()}
-        known_facts = {
-            (row.node_key, row.fact_key): row.truth_value for row in self.known_fact_rows()
-        }
-        known_relation_keys = {
-            str(item["relation_key"])
-            for item in self.known_relations()
-            if item.get("relation_key") is not None
-        }
-        known_pool_keys = {item.pool_key for item in self.visible_resource_pools()}
-        role_names = {role.key: role.name for role in self.definition.actors.roles}
-        actions = {action.key: action for action in self.definition.actions}
-        requirements_by_target = self.planner_action_requirements()
-        effects_by_action = {
-            action.key: planner_target_contracts(
-                self.definition,
-                action,
-                known_node_keys=known_nodes,
-                known_facts=known_facts,
-                known_relation_keys=known_relation_keys,
-                known_pool_keys=known_pool_keys,
-            )
-            for action in self.definition.actions
-        }
-
-        requirements_by_key = {
-            str(target["target_key"]): list(target["requirements"])
-            for target in requirements_by_target
-        }
-        target_keys = set(requirements_by_key)
-        for action_effects in effects_by_action.values():
-            target_keys.update(action_effects)
-
-        result: list[dict[str, Any]] = []
-        for target_key in sorted(target_keys):
-            requirements_for_target = {
-                str(item["action_key"]): item for item in requirements_by_key.get(target_key, [])
-            }
-            action_keys = set(requirements_for_target)
-            action_keys.update(
-                action_key
-                for action_key, action_effects in effects_by_action.items()
-                if target_key in action_effects
-            )
-            for action_key in sorted(action_keys):
-                raw_requirement = requirements_for_target.get(
-                    action_key,
-                    {"action_key": action_key},
-                )
-                action = actions.get(action_key)
-                if action is None:
+                # A bare target applicability marker is useful to the Planner
+                # only when it carries a target binding/effect.  Do not send
+                # empty inspect/travel markers to the Player DTO.
+                if not any(
+                    requirement.get(key)
+                    for key in (
+                        "required_actor_role_key",
+                        "cost",
+                        "resource_requirements",
+                        "special_requirements",
+                        "effects",
+                    )
+                ):
                     continue
+
                 entry: dict[str, Any] = {
                     "target_key": target_key,
-                    "action_key": action_key,
+                    "action_key": action.key,
                     "action_name": action.name,
                 }
-                required_actor_role = action.required_actor_role_for_target(target_key)
                 if required_actor_role is not None:
                     entry["required_actor_role_key"] = required_actor_role
                     entry["required_actor_role_name"] = role_names.get(
@@ -505,15 +596,107 @@ class SharedKnowledgeProjection:
                     )
                 if action.source_relation_type_key is not None:
                     entry["source_relation_type_key"] = action.source_relation_type_key
-                for key in ("cost", "resource_requirements", "special_requirements"):
-                    value = raw_requirement.get(key)
+                for key in (
+                    "cost",
+                    "resource_requirements",
+                    "special_requirements",
+                    "effects",
+                ):
+                    value = requirement.get(key)
                     if value:
                         entry[key] = value
-                effects = effects_by_action.get(action_key, {}).get(target_key, {}).get("effects")
-                if effects:
-                    entry["effects"] = effects
                 result.append(entry)
-        return tuple(result)
+
+        self._target_knowledge_contracts_cache = tuple(result)
+        return self._target_knowledge_contracts_cache
+
+    def _resource_requirement_is_target_owned(
+        self,
+        requirement: dict[str, Any],
+        *,
+        target_key: str,
+    ) -> bool:
+        scope = requirement.get("scope")
+        if not isinstance(scope, dict) or scope.get("kind") != "EXPLICIT":
+            return False
+        target_region = self._static_region_for_node(target_key)
+        return target_region is not None and scope.get("node_key") == target_region
+
+    def _static_region_for_node(self, node_key: str) -> str | None:
+        locality = self.definition.metadata.locality
+        if locality.region_node_type_key is None:
+            return None
+        node = self.definition.world.node(node_key)
+        if node is None:
+            return None
+        if node.node_type_key == locality.region_node_type_key:
+            return node_key
+        relation_type = locality.located_in_relation_type_key
+        if relation_type is None:
+            return None
+        regions = tuple(
+            relation.target_node_key
+            for relation in self.definition.world.relations
+            if (
+                relation.source_node_key == node_key
+                and relation.relation_type_key == relation_type
+            )
+        )
+        return regions[0] if len(regions) == 1 else None
+
+    def planner_action_requirements(
+        self,
+        *,
+        include_authored_hidden_target_requirements: bool = False,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return target requirements derived from the shared target projection.
+
+        This is a Planner-shaped adapter only.  It contains no independent
+        visibility logic and never enriches a target from authored hidden
+        Scenario rules.  The keyword is retained for call-site compatibility;
+        both values intentionally produce the same Knowledge-safe projection.
+        """
+
+        # Do not reintroduce the former Planner-only authored enrichment mode.
+        _ = include_authored_hidden_target_requirements
+        by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for contract in self.target_knowledge_contracts():
+            target_key = contract.get("target_key")
+            action_key = contract.get("action_key")
+            if not isinstance(target_key, str) or not isinstance(action_key, str):
+                continue
+            requirement: dict[str, Any] = {"action_key": action_key}
+            for key in (
+                "required_actor_role_key",
+                "cost",
+                "resource_requirements",
+                "special_requirements",
+            ):
+                value = contract.get(key)
+                if value:
+                    requirement[key] = value
+            by_target[target_key].append(requirement)
+        return tuple(
+            {
+                "target_key": target_key,
+                "requirements": sorted(
+                    requirements,
+                    key=lambda item: str(item.get("action_key", "")),
+                ),
+            }
+            for target_key, requirements in sorted(by_target.items())
+            if requirements
+        )
+
+    def known_target_action_contracts(
+        self,
+        *,
+        target_contracts: tuple[dict[str, Any], ...] | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        """Expose the shared target projection in the Player DTO shape."""
+
+        source = self.target_knowledge_contracts() if target_contracts is None else target_contracts
+        return tuple(dict(item) for item in source)
 
     @staticmethod
     def _condition_leaves(condition: ConditionV2 | None) -> tuple[ConditionV2, ...]:

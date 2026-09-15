@@ -639,11 +639,11 @@ def test_legacy_repair_communications_snapshot_behavior_remains_executable(
     document["rules"] = [
         rule
         for rule in document["rules"]
-        if rule["action_key"] != "repair_facility"
+            if rule.get("action_key") != "repair_facility"
         or rule["key"] == "repair_facility_base_resolution"
     ]
     for rule in document["rules"]:
-        if rule["action_key"] != "repair_facility":
+        if rule.get("action_key") != "repair_facility":
             continue
         rule["action_key"] = "repair_communications"
         rule["effects"] = [

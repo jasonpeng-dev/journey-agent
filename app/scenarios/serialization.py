@@ -159,7 +159,8 @@ def _canonical_v2_payload(
 
     normalized["rules"].sort(
         key=lambda item: (
-            item["action_key"],
+            item.get("action_key") or "",
+            item.get("trigger") or "ACTION",
             item["phase"],
             -item["priority"],
             item["key"],

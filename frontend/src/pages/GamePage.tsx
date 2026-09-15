@@ -1418,30 +1418,11 @@ export function KnownWorldAccordions({
     (relation) => !assignedRelationKeys.has(relationDisplayKey(relation)),
   );
   const fallbackFactGroups = groupFactsByRegion(fallbackFacts);
-  const targetBoundActionContracts = knownActionRequirements.flatMap((action) => {
-    const targetKey = targetKeyForPublicActionRequirement(action, visibleNodes);
-    if (!targetKey) return [];
-    const resourceRequirements = uniquePublicResourceRequirements(
-      action.action_key,
-      action.resource_requirements,
-      targetKey,
-    );
-    return resourceRequirements.length > 0
-      ? [{
-          target_key: targetKey,
-          action_key: action.action_key,
-          action_name: action.action_name,
-          required_actor_role_key: action.required_actor_role_key,
-          required_actor_role_name: action.required_actor_role_name,
-          source_relation_type_key: action.source_relation_type_key,
-          resource_requirements: resourceRequirements,
-        } satisfies PublicTargetActionContract]
-      : [];
-  });
-  const targetActionContracts = mergeTargetActionContracts([
-    ...knownTargetActionContracts,
-    ...targetBoundActionContracts,
-  ]);
+  // Target-specific applicability and permissions are already filtered by
+  // SharedKnowledgeProjection on the backend.  The Player renderer only
+  // formats the DTO; it must not synthesize a second target contract from
+  // action-level requirements.
+  const targetActionContracts = mergeTargetActionContracts(knownTargetActionContracts);
   const contractsByTarget = new Map<string, PublicTargetActionContract[]>();
   targetActionContracts.forEach((contract) => {
     const contracts = contractsByTarget.get(contract.target_key) ?? [];
@@ -1624,13 +1605,7 @@ export function KnownWorldAccordions({
                   const additionalFacts = nodeFacts.filter((fact) => !facilityMetadataFacts.has(fact.fact_key));
                   const associatedResources = (node.associated_known_resources ?? [])
                     .filter((resource) => resource.availability !== "AVAILABLE");
-                  const hasFacilityDetails = targetContracts.length > 0
-                    || associatedResources.length > 0
-                    || hasPowerOutputRelation
-                    || hasGenerationSemantics
-                    || additionalFacts.length > 0
-                    || nodeRelations.length > 0;
-                  const targetActionRequirementRows = targetContracts.map((contract) => {
+                  const targetActionRequirementRows = targetContracts.flatMap((contract) => {
                     const typedRequirements = uniquePublicResourceRequirements(
                       contract.action_key,
                       contract.resource_requirements,
@@ -1697,12 +1672,19 @@ export function KnownWorldAccordions({
                         return text ? [`前置条件：${text}`] : [];
                       }),
                     ];
+                    if (parts.length === 0) return [];
                     return {
                       key: node.key + ":requirement:" + contract.action_key,
+                      actionKey: contract.action_key,
                       label: contract.action_key.startsWith("repair_") ? "修复需求：" : `${contract.action_name}：`,
-                      value: parts.length > 0 ? parts.join("、") : contract.action_name,
+                      value: parts.join("、"),
                     };
                   });
+                  const displayableRepairActionKeys = new Set(
+                    targetActionRequirementRows
+                      .filter((row) => row.actionKey.startsWith("repair_"))
+                      .map((row) => row.actionKey),
+                  );
                   const renderTargetActionRequirementRows = () => targetActionRequirementRows.map((row) => (
                     <div className="knowledge-facility-attribute" key={row.key}>
                       <span className="knowledge-facility-attribute-label">{row.label}</span>
@@ -1712,10 +1694,20 @@ export function KnownWorldAccordions({
                   const repairTeamNames = [
                     ...new Set(
                       targetContracts
+                        .filter(
+                          (contract) => contract.action_key.startsWith("repair_")
+                            && displayableRepairActionKeys.has(contract.action_key),
+                        )
                         .map((contract) => contract.required_actor_role_name)
                         .filter((name): name is string => typeof name === "string" && name.length > 0),
                     ),
                   ];
+                  const hasFacilityDetails = targetActionRequirementRows.length > 0
+                    || associatedResources.length > 0
+                    || hasPowerOutputRelation
+                    || hasGenerationSemantics
+                    || additionalFacts.length > 0
+                    || nodeRelations.length > 0;
                   const associatedResourceText = associatedResources
                     .map((resource) => {
                       const resourceKey = typeof resource.resource_key === "string" ? resource.resource_key : "";
@@ -1763,11 +1755,6 @@ export function KnownWorldAccordions({
                           </span>
                           <span className="knowledge-transport-column-spacer" aria-hidden="true" />
                         </div>
-                        {targetActionRequirementRows.length > 0 && (
-                          <div className="knowledge-node-details">
-                            {renderTargetActionRequirementRows()}
-                          </div>
-                        )}
                       </div>
                     );
                   }

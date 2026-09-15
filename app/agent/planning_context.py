@@ -23,9 +23,7 @@ from app.agent.planner_contract import (
     actor_execution_state,
     declarative_action_effects,
     planner_known_preconditions,
-    planner_resource_requirements,
     planner_source_preconditions,
-    planner_target_contracts,
 )
 from app.agent.provider import (
     ContinuityPlan,
@@ -298,14 +296,10 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
                 )
 
     current = context.current_knowledge
-    # ``known_action_requirements`` is the public/player compatibility view.
-    # The builder may carry a richer Planner-only authored requirement view in
-    # this private context slot so hidden current Truth never leaks through
-    # ``PlanningContext.compact_dump``.
-    raw_requirements = current.get(
-        "_planner_action_requirements",
-        current.get("known_action_requirements", []),
-    )
+    # This is the Planner-shaped adapter of the same shared target Knowledge
+    # projection used by the Player API.  There is deliberately no private
+    # authored-hidden fallback here.
+    raw_requirements = current.get("known_target_action_requirements", [])
     if isinstance(raw_requirements, list):
         for target in raw_requirements:
             if not isinstance(target, dict) or not isinstance(target.get("target_key"), str):
@@ -668,9 +662,10 @@ class PlanningContextBuilder:
         known_refs = legacy.known_fact_refs()
         known_world = legacy.known_world(definition)
         knowledge_projection = SharedKnowledgeProjection(self.db, self.scope, definition)
-        public_action_requirements = knowledge_projection.planner_action_requirements()
-        planner_action_requirements = knowledge_projection.planner_action_requirements(
-            include_authored_hidden_target_requirements=True
+        target_knowledge_contracts = knowledge_projection.target_knowledge_contracts()
+        target_action_requirements = knowledge_projection.planner_action_requirements()
+        global_action_resource_requirements = (
+            knowledge_projection.global_action_resource_requirements()
         )
         known_pool_keys = {item.pool_key for item in knowledge_projection.visible_resource_pools()}
         known_derived = _public_derived_knowledge(
@@ -698,7 +693,7 @@ class PlanningContextBuilder:
             relevant_action_keys,
             known_refs,
             known_world,
-            planner_action_requirements,
+            target_knowledge_contracts,
             known_pool_keys,
             {
                 action.key: planner_known_preconditions(
@@ -713,6 +708,7 @@ class PlanningContextBuilder:
                 )
                 for action in definition.actions
             },
+            global_action_resource_requirements,
         )
         relevant_actors = self._actors(definition, relevant_action_keys)
         return PlanningContext(
@@ -728,8 +724,11 @@ class PlanningContextBuilder:
             current_knowledge={
                 **known_world,
                 "derived_states": known_derived,
-                "known_action_requirements": list(public_action_requirements),
-                "_planner_action_requirements": list(planner_action_requirements),
+                # Keep this historical context key target-oriented for the
+                # Planner compatibility view.  Player's action-oriented DTO
+                # is produced separately by PlayerProjectionService.
+                "known_action_requirements": list(target_action_requirements),
+                "known_target_action_requirements": list(target_action_requirements),
                 "observations": self._observations(task),
             },
             relevant_actions=tuple(relevant_actions),
@@ -751,8 +750,8 @@ class PlanningContextBuilder:
                     "UNKNOWN is not equivalent to false, zero, or unavailable.",
                     "Do not consume or transport resources whose availability is not known.",
                     (
-                        "Target-specific known requirements are in current_knowledge."
-                        "known_action_requirements; target_contracts adds target effects."
+                        "Target-specific known requirements are in the shared target Knowledge "
+                        "projection and its known_target_action_requirements adapter."
                     ),
                     (
                         "Use planner_constraints, planner_effects, and target_contracts "
@@ -1030,9 +1029,10 @@ class PlanningContextBuilder:
         action_keys: set[str],
         known_refs: set[tuple[str, str]],
         known_world: dict[str, object],
-        planner_action_requirements: tuple[dict[str, object], ...],
+        target_knowledge_contracts: tuple[dict[str, object], ...],
         known_pool_keys: set[str],
         known_preconditions_by_action: dict[str, tuple[dict[str, object], ...]],
+        global_action_resource_requirements: dict[str, tuple[dict[str, object], ...]],
     ) -> list[dict[str, object]]:
         known_facts = _known_world_facts(known_world)
         objective_refs = _objective_refs(
@@ -1057,24 +1057,27 @@ class PlanningContextBuilder:
             for item in relation_rows
             if isinstance(item, dict) and isinstance(item.get("relation_key"), str)
         }
-        raw_known_resources = known_world.get("resources")
-        known_resources = (
-            cast(dict[str, object], raw_known_resources)
-            if isinstance(raw_known_resources, dict)
-            else None
-        )
-        raw_resource_knowledge = known_world.get("region_resource_knowledge")
-        known_resource_knowledge = (
-            cast(dict[str, object], raw_resource_knowledge)
-            if isinstance(raw_resource_knowledge, dict)
-            else None
-        )
+        target_contracts_by_action: dict[str, list[dict[str, object]]] = {}
+        for contract in target_knowledge_contracts:
+            action_key = contract.get("action_key")
+            if isinstance(action_key, str):
+                target_contracts_by_action.setdefault(action_key, []).append(contract)
         result: list[dict[str, object]] = []
         for action in sorted(definition.actions, key=lambda item: item.key):
             if action.key not in action_keys:
                 continue
             if not _action_planning_is_public(action, known_facts):
                 continue
+            safe_target_contracts = target_contracts_by_action.get(action.key, [])
+            safe_target_roles = tuple(
+                {
+                    "target_key": contract["target_key"],
+                    "required_role_key": contract["required_actor_role_key"],
+                }
+                for contract in safe_target_contracts
+                if isinstance(contract.get("target_key"), str)
+                and isinstance(contract.get("required_actor_role_key"), str)
+            )
             terminal = [
                 item.model_dump(mode="json")
                 for item in action.planning.terminal_effects
@@ -1129,16 +1132,8 @@ class PlanningContextBuilder:
                         else {}
                     ),
                     **(
-                        {
-                            "target_actor_roles": [
-                                {
-                                    "target_key": item.target_key,
-                                    "required_actor_role_key": item.required_actor_role_key,
-                                }
-                                for item in action.target_actor_roles
-                            ]
-                        }
-                        if action.target_actor_roles
+                        {"target_actor_roles": [dict(item) for item in safe_target_roles]}
+                        if safe_target_roles
                         else {}
                     ),
                     "static_authority": action.authority_policy.model_dump(mode="json"),
@@ -1151,12 +1146,10 @@ class PlanningContextBuilder:
                     action,
                     known_preconditions=known_preconditions_by_action.get(action.key, ()),
                     source_preconditions=planner_source_preconditions(definition, action),
-                    resource_requirements=planner_resource_requirements(
-                        definition,
-                        action,
-                        known_resources=known_resources,
-                        known_resource_knowledge=known_resource_knowledge,
+                    resource_requirements=global_action_resource_requirements.get(
+                        action.key, ()
                     ),
+                    target_role_requirements=safe_target_roles,
                 ),
             }
             planner_effects = action_planner_effects(action)
@@ -1177,15 +1170,19 @@ class PlanningContextBuilder:
             )
             if planner_effects:
                 action_context["planner_effects"] = planner_effects
-            target_contracts = planner_target_contracts(
-                definition,
-                action,
-                known_node_keys=known_node_keys,
-                known_facts=known_fact_values,
-                known_relation_keys=known_relation_keys,
-                known_pool_keys=known_pool_keys,
-                include_authored_hidden_target_effects=True,
-            )
+            target_contracts = {
+                str(contract["target_key"]): {
+                    "effects": [
+                        dict(effect)
+                        for effect in cast(list[object], contract.get("effects", []))
+                        if isinstance(effect, dict)
+                    ]
+                }
+                for contract in safe_target_contracts
+                if isinstance(contract.get("target_key"), str)
+                and isinstance(contract.get("effects"), list)
+                and contract.get("effects")
+            }
             if target_contracts:
                 action_context["target_contracts"] = target_contracts
             hints = list(action.planning.hints)

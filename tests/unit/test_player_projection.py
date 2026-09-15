@@ -41,6 +41,7 @@ from app.scenarios.builtin import (
 )
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
+from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.player_projection import PlayerProjectionService, _task_explanation, _task_status
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.spatial_projection import SpatialDisplayProjector
@@ -887,12 +888,27 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     utility_node_state.visibility = Visibility.KNOWN
     projection = PlayerProjectionService(session)
     state = projection.game_state(GameInstanceId(runtime.instance.id))
+    scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
+    shared = SharedKnowledgeProjection(session, scope, definition)
+    shared_contracts = shared.target_knowledge_contracts()
     contracts = {
         (item.target_key, item.action_key): item for item in state.known_target_action_contracts
     }
-    base_contract = contracts[("utility_service_depot", "repair_facility")]
-    assert base_contract.required_actor_role_key == "industrial_repair_team"
-    assert base_contract.cost == {}
+    assert set(contracts) == {
+        (str(item["target_key"]), str(item["action_key"])) for item in shared_contracts
+    }
+    shared_roles = {
+        (str(item["action_key"]), str(item["target_key"]), str(item["required_actor_role_key"]))
+        for item in shared_contracts
+        if item.get("required_actor_role_key") is not None
+    }
+    projected_roles = {
+        (action.action_key, str(role["target_key"]), str(role["required_actor_role_key"]))
+        for action in state.known_action_requirements
+        for role in action.target_actor_roles
+    }
+    assert projected_roles == shared_roles
+    assert ("utility_service_depot", "repair_facility") not in contracts
     repair_profile = session.get(
         GameInstanceFactState,
         (runtime.instance.id, "utility_service_depot", "repair_profile"),
@@ -926,10 +942,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     repair_profile.visibility = Visibility.HIDDEN
     session.flush()
     hidden_state = projection.game_state(GameInstanceId(runtime.instance.id))
-    hidden_contract = next(
-        item
+    assert not any(
+        item.target_key == "utility_service_depot" and item.action_key == "repair_facility"
         for item in hidden_state.known_target_action_contracts
-        if item.target_key == "utility_service_depot" and item.action_key == "repair_facility"
     )
-    assert hidden_contract.required_actor_role_key == "industrial_repair_team"
-    assert hidden_contract.cost == {}

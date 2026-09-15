@@ -167,7 +167,7 @@ def _v2_0_runtime(
 def test_linjiang_action_descriptions_are_semantic_only_authoring_text() -> None:
     expected = {
         "clear_transport": "恢复受损交通通道的通行能力。",
-        "deploy_heavy_engineering_support": "在设施或交通通道目标上部署重型工程支援。",
+        "deploy_heavy_engineering_support": "在设施目标上部署重型工程支援。",
         "inspect": "调查设施或交通通道的状态。",
         "relay_message": "向目标行动人员传递命令或信息。",
         "repair_facility": "修复指定设施并恢复其运行状态。",
@@ -323,7 +323,7 @@ def test_linjiang_v2_0_planning_context_uses_sparse_target_requirements(
     )
     requirements = {
         item["target_key"]: {entry["action_key"]: entry for entry in item["requirements"]}
-        for item in context.current_knowledge["known_action_requirements"]
+        for item in context.current_knowledge["known_target_action_requirements"]
     }
 
     central_repair = requirements["central_telecom_hub"]["repair_facility"]
@@ -494,7 +494,7 @@ def test_linjiang_v2_0_planner_action_contract_is_generic_and_knowledge_safe(
     water_target = water["target_contracts"]["water_treatment_plant"]
     known_requirements = {
         item["target_key"]: {entry["action_key"]: entry for entry in item["requirements"]}
-        for item in context.current_knowledge["known_action_requirements"]
+        for item in context.current_knowledge["known_target_action_requirements"]
     }
     assert any(
         requirement.get("fact_key") == "heavy_engineering_support_ready"
@@ -571,14 +571,19 @@ def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
     fact.visibility = Visibility.HIDDEN
     session.flush()
 
-    sparse = SharedKnowledgeProjection(session, scope, definition).planner_action_requirements()
+    projection = SharedKnowledgeProjection(session, scope, definition)
+    sparse = projection.planner_action_requirements()
+    assert projection.planner_action_requirements(
+        include_authored_hidden_target_requirements=True
+    ) == sparse
     water = next(item for item in sparse if item["target_key"] == "water_treatment_plant")
-    assert water["requirements"] == [
-        {
-            "action_key": "repair_facility",
-            "required_actor_role_key": "water_repair_team",
-        }
-    ]
+    assert not any(
+        item["action_key"] == "repair_facility" for item in water["requirements"]
+    )
+    assert all(
+        "knowledge_status" not in json.dumps(item, ensure_ascii=False)
+        for item in water["requirements"]
+    )
 
 
 def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
@@ -611,6 +616,16 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
         replan_reason=None,
     )
     planner_input = closure.planner_input
+    shared_contract_keys = {
+        (str(item["action_key"]), str(item["target_key"]))
+        for item in SharedKnowledgeProjection(
+            session, scope, definition
+        ).target_knowledge_contracts()
+    }
+    assert all(
+        (item.action_key, item.target_key) in shared_contract_keys
+        for item in planner_input.target_bindings
+    )
     payload = planner_input.model_dump(mode="json")
     serialized = json.dumps(payload, ensure_ascii=False)
     formal_goal = load_formal_goal_for_task(session, scope, task)
@@ -648,6 +663,12 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     )
     assert set(repair_contract["executor_requirements"]["required_capabilities"]).issubset(
         communications["capabilities"]
+    )
+    assert all(
+        ("repair_facility", item["target_key"]) in shared_contract_keys
+        for item in repair_contract["executor_requirements"].get(
+            "target_role_requirements", []
+        )
     )
     assert "repair_facility" in communications["allowed_action_keys"]
     assert "north_heavy_equipment_stock" not in serialized
@@ -2579,14 +2600,13 @@ def test_linjiang_v2_power_and_support_rules() -> None:
     assert "activate_water_resolution" not in {item.key for item in definition.rules}
 
 
-def test_linjiang_v2_heavy_support_is_target_local_for_all_three_targets() -> None:
+def test_linjiang_v2_heavy_support_is_target_local_for_facility_targets() -> None:
     definition = LINJIANG_V2_TEST
     engine = DeclarativeRuleEngine(definition)
     deploy = next(
         item for item in definition.actions if item.key == "deploy_heavy_engineering_support"
     )
     assert {(item.node_key, item.fact_key) for item in deploy.planning.terminal_effects} == {
-        ("south_bridge", "heavy_engineering_support_ready"),
         ("water_treatment_plant", "heavy_engineering_support_ready"),
         ("rail_freight_yard", "heavy_engineering_support_ready"),
     }
@@ -2610,7 +2630,7 @@ def test_linjiang_v2_heavy_support_is_target_local_for_all_three_targets() -> No
     assert unavailable is not None and unavailable.failure is not None
     assert unavailable.failure.code == "HEAVY_SUPPORT_UNAVAILABLE"
 
-    for target_key in ("south_bridge", "water_treatment_plant", "rail_freight_yard"):
+    for target_key in ("water_treatment_plant", "rail_freight_yard"):
         deployed = engine.evaluate(
             _rule_state(
                 definition,
@@ -2639,27 +2659,15 @@ def test_linjiang_v2_heavy_support_is_target_local_for_all_three_targets() -> No
         actor_key="municipal_transport_team",
         actor_current_node_key="south_waterfront_district",
     )
-    south_blocked = engine.evaluate_preflight(
+    south_clear = engine.evaluate(
         _rule_state(
             definition,
             resources={("municipal_repair_materials", "south_waterfront_district"): 10},
         ),
         south_context,
     )
-    assert south_blocked is not None and south_blocked.failure is not None
-    assert south_blocked.failure.code == "HEAVY_ENGINEERING_SUPPORT_REQUIRED"
-    assert south_blocked.failure.message == "清理南港大桥前必须先部署重型工程支援。"
-
-    south_ready = engine.evaluate(
-        _rule_state(
-            definition,
-            resources={("municipal_repair_materials", "south_waterfront_district"): 10},
-            fact_overrides={("south_bridge", "heavy_engineering_support_ready"): True},
-        ),
-        south_context,
-    )
-    assert south_ready.failure is None
-    assert south_ready.outcome_code == "CLEARED"
+    assert south_clear.failure is None
+    assert south_clear.outcome_code == "CLEARED"
 
     rail_context = ActionRuleContext(
         action_key="repair_facility",
@@ -2721,12 +2729,11 @@ def test_linjiang_v2_heavy_support_is_target_local_for_all_three_targets() -> No
 @pytest.mark.parametrize(
     ("action_key", "target_key", "required_actor_key"),
     (
-        ("clear_transport", "south_bridge", "municipal_transport_team"),
         ("repair_facility", "water_treatment_plant", "water_repair_team_alpha"),
         ("repair_facility", "rail_freight_yard", "industrial_repair_team_alpha"),
     ),
 )
-def test_linjiang_v2_dependency_closure_preserves_heavy_support_chain(
+def test_linjiang_v2_dependency_closure_uses_revealed_facility_support_gate(
     session: Session,
     action_key: str,
     target_key: str,
@@ -2744,6 +2751,22 @@ def test_linjiang_v2_dependency_closure_preserves_heavy_support_chain(
         initialize_plan=False,
     )
     definition = agent._definition()
+    support_fact = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, target_key, "heavy_engineering_support_ready"),
+    )
+    assert support_fact is not None
+    repair_profile = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, target_key, "repair_profile"),
+    )
+    assert repair_profile is not None
+    repair_profile.visibility = Visibility.KNOWN
+    # The dependency is allowed to enter the shared projection only after its
+    # target-specific prerequisite has been revealed.  Hidden authored rules
+    # are intentionally not enough for Closure to invent this edge.
+    support_fact.visibility = Visibility.KNOWN
+    session.flush()
     context = PlanningContextBuilder(session, scope).build(
         definition,
         tuple(definition.objectives),
@@ -2769,7 +2792,6 @@ def test_linjiang_v2_dependency_closure_preserves_heavy_support_chain(
         if item.action_key == "deploy_heavy_engineering_support"
     }
     assert set(deploy_bindings) >= {
-        "south_bridge",
         "water_treatment_plant",
         "rail_freight_yard",
     }
@@ -2784,13 +2806,12 @@ def test_linjiang_v2_dependency_closure_preserves_heavy_support_chain(
         (item.action_key, item.target_key): item for item in closure.target_bindings
     }
     assert ("deploy_heavy_engineering_support", target_key) in selected_bindings
-    assert ("repair_facility", "heavy_equipment_yard") in selected_bindings
-    if action_key == "clear_transport":
-        assert ("clear_transport", target_key) in selected_bindings
-    else:
-        assert (action_key, target_key) in selected_bindings
+    # The target-specific support gate is consumed from the shared projection;
+    # Closure must not invent a separate authored repair target for it.
+    assert ("repair_facility", "heavy_equipment_yard") not in selected_bindings
+    assert (action_key, target_key) in selected_bindings
     assert required_actor_key in {item.actor_key for item in closure.actors}
-    assert f"{target_key}.heavy_engineering_support_ready" not in closure.known_world.facts
+    assert f"{target_key}.heavy_engineering_support_ready" in closure.known_world.facts
     assert "heavy_equipment_yard.heavy_engineering_support" not in closure.known_world.facts
     if target_key == "water_treatment_plant":
         water = selected_bindings[("repair_facility", target_key)]
@@ -2810,12 +2831,8 @@ def test_linjiang_v2_hidden_target_contracts_never_emit_current_truth() -> None:
         known_facts={},
         include_authored_hidden_target_effects=True,
     )
-    assert set(contracts) >= {
-        "south_bridge",
-        "water_treatment_plant",
-        "rail_freight_yard",
-    }
-    for target_key in ("south_bridge", "water_treatment_plant", "rail_freight_yard"):
+    assert set(contracts) >= {"water_treatment_plant", "rail_freight_yard"}
+    for target_key in ("water_treatment_plant", "rail_freight_yard"):
         assert contracts[target_key]["effects"] == [
             {
                 "type": "FACT_MUTATION",

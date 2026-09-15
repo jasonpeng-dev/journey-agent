@@ -265,13 +265,6 @@ world:
     - clearable
     - inspectable
     facts:
-    - key: heavy_engineering_support_required
-      name: 重型工程支援要求
-      description: 该目标是否需要先部署重型工程支援
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      allowed_values: []
     - key: passable
       name: 通行状态
       description: 该通道是否可通行。
@@ -863,13 +856,6 @@ world:
     - clearable
     - inspectable
     facts:
-    - key: heavy_engineering_support_required
-      name: 重型工程支援要求
-      description: 该目标是否需要先部署重型工程支援
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      allowed_values: []
     - key: passable
       name: 通行状态
       description: 该通道是否可通行。
@@ -1019,24 +1005,9 @@ world:
     initial_access: AVAILABLE
     initial_visibility: KNOWN
     interaction_keys:
-    - heavy_support_target
     - inspectable
     - clearable
     facts:
-    - key: heavy_engineering_support_required
-      name: 重型工程支援要求
-      description: 该目标是否需要先部署重型工程支援
-      value_type: BOOLEAN
-      initial_value: true
-      initial_visibility: KNOWN
-      allowed_values: []
-    - key: heavy_engineering_support_ready
-      name: 重型工程支援就绪
-      description: 重型工程支援就绪
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: HIDDEN
-      allowed_values: []
     - key: passable
       name: 通行状态
       description: 通行状态
@@ -1582,13 +1553,6 @@ world:
     - clearable
     - inspectable
     facts:
-    - key: heavy_engineering_support_required
-      name: 重型工程支援要求
-      description: 该目标是否需要先部署重型工程支援
-      value_type: BOOLEAN
-      initial_value: false
-      initial_visibility: KNOWN
-      allowed_values: []
     - key: passable
       name: 通行状态
       description: 通行状态
@@ -2120,7 +2084,7 @@ actions:
   - transport
 - key: deploy_heavy_engineering_support
   name: 部署重型工程支援
-  description: 在设施或交通通道目标上部署重型工程支援。
+  description: 在设施目标上部署重型工程支援。
   required_interaction_key: heavy_support_target
   execution_mode: IMMEDIATE
   parameters: []
@@ -2138,8 +2102,6 @@ actions:
     success: true
   planning:
     terminal_effects:
-    - node_key: south_bridge
-      fact_key: heavy_engineering_support_ready
     - node_key: water_treatment_plant
       fact_key: heavy_engineering_support_ready
     - node_key: rail_freight_yard
@@ -2502,8 +2464,6 @@ actions:
     terminal_effects:
     - node_key: southeast_fuel_emergency_power_plant
       fact_key: generating
-    - node_key: southeast_fuel_emergency_power_plant
-      fact_key: sustained_requirements_discovered
     supporting_effects: []
     success_outcome_codes:
     - POWER_GENERATED
@@ -2512,28 +2472,6 @@ actions:
   behavior: RULE
   locality: FACILITY_REGION
 rules:
-- key: clear_transport_south_bridge_heavy_support_required
-  phase: PREFLIGHT
-  action_key: clear_transport
-  priority: 951
-  condition:
-    kind: ALL
-    conditions:
-    - kind: FACT_EQUALS
-      node:
-        kind: CURRENT_TARGET
-      fact_key: heavy_engineering_support_required
-      value: true
-    - kind: FACT_NOT_EQUALS
-      node:
-        kind: CURRENT_TARGET
-      fact_key: heavy_engineering_support_ready
-      value: true
-  effects:
-  - kind: EMIT_FAILURE
-    failure_code: HEAVY_ENGINEERING_SUPPORT_REQUIRED
-    message: 清理南港大桥前必须先部署重型工程支援。
-    retryable: true
 - key: clear_transport_municipal_repair_materials_10_required
   phase: PREFLIGHT
   action_key: clear_transport
@@ -7688,6 +7626,28 @@ rules:
     value:
       source: LITERAL
       literal: true
+  - kind: EMIT_OUTCOME
+    outcome_code: POWER_GENERATED
+- key: sustained_generation_requirements_discovered
+  trigger: STATE
+  phase: RESOLVE
+  priority: 0
+  condition:
+    kind: ALL
+    conditions:
+    - kind: FACT_EQUALS
+      node:
+        kind: EXPLICIT
+        node_key: southeast_fuel_emergency_power_plant
+      fact_key: generating
+      value: true
+    - kind: FACT_EQUALS
+      node:
+        kind: EXPLICIT
+        node_key: southeast_fuel_emergency_power_plant
+      fact_key: sustained_requirements_discovered
+      value: false
+  effects:
   - kind: SET_FACT
     node:
       kind: EXPLICIT
@@ -7704,8 +7664,6 @@ rules:
   - kind: SET_RESOURCE_POOL_VISIBILITY
     pool_key: south_emergency_fuel
     visibility: VISIBLE
-  - kind: EMIT_OUTCOME
-    outcome_code: POWER_GENERATED
 - key: generate_requires_power_supply
   phase: PREFLIGHT
   action_key: generate_power

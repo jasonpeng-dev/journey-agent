@@ -167,6 +167,13 @@ class RulePhase(StrEnum):
     RESOLVE = "RESOLVE"
 
 
+class RuleTrigger(StrEnum):
+    """The generic event source that makes a Rule eligible for evaluation."""
+
+    ACTION = "ACTION"
+    STATE = "STATE"
+
+
 class ComparisonOperator(StrEnum):
     EQ = "EQ"
     NE = "NE"
@@ -1234,7 +1241,14 @@ class EffectV2(FrozenDefinitionModel):
 class RuleDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     phase: RulePhase
-    action_key: StableKey
+    action_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    trigger: RuleTrigger = Field(
+        default=RuleTrigger.ACTION,
+        exclude_if=lambda value: value == RuleTrigger.ACTION,
+    )
     priority: int
     condition: ConditionV2 | None = None
     effects: tuple[EffectV2, ...] = Field(min_length=1)
@@ -1246,10 +1260,18 @@ class RuleDefinitionV2(FrozenDefinitionModel):
             for effect in self.effects
             if effect.kind in {EffectKind.EMIT_OUTCOME, EffectKind.EMIT_FAILURE}
         ]
+        if self.trigger == RuleTrigger.ACTION and self.action_key is None:
+            raise ValueError("ACTION Rules require action_key")
+        if self.trigger == RuleTrigger.STATE and self.action_key is not None:
+            raise ValueError("STATE Rules must not declare action_key")
+        if self.trigger == RuleTrigger.STATE and self.phase != RulePhase.RESOLVE:
+            raise ValueError("STATE Rules must use the RESOLVE phase")
+        if self.trigger == RuleTrigger.STATE and terminals:
+            raise ValueError("STATE Rules may not emit Action outcomes or failures")
         if self.phase == RulePhase.PREFLIGHT:
             if any(effect.kind != EffectKind.EMIT_FAILURE for effect in self.effects):
                 raise ValueError("PREFLIGHT rules may only emit a deterministic failure")
-        elif len(terminals) != 1:
+        elif self.trigger == RuleTrigger.ACTION and len(terminals) != 1:
             raise ValueError("A RESOLVE rule requires exactly one outcome or failure Effect")
         return self
 
@@ -1836,8 +1858,16 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
             _validate_gate(action.planning.knowledge_gate, nodes)
 
     for rule in definition.rules:
-        action = _require_key(actions, rule.action_key, f"Rule {rule.key} Action")
-        parameters = {parameter.key: parameter for parameter in action.parameters}
+        rule_action: ActionDefinitionV2 | None = (
+            _require_key(actions, rule.action_key, f"Rule {rule.key} Action")
+            if rule.action_key is not None
+            else None
+        )
+        parameters = (
+            {parameter.key: parameter for parameter in rule_action.parameters}
+            if rule_action is not None
+            else {}
+        )
         if rule.condition is not None:
             _validate_condition_refs(
                 rule.condition,
@@ -1846,6 +1876,8 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 parameters,
                 definition.metadata.locality,
             )
+            if rule.trigger == RuleTrigger.STATE:
+                _validate_state_trigger_condition(rule.condition)
         for effect in rule.effects:
             _validate_effect_refs(
                 effect,
@@ -1853,7 +1885,8 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 resources,
                 actors,
                 parameters,
-                action,
+                rule_action,
+                rule.trigger,
                 definition.metadata.locality,
                 {item.pool_key for item in definition.initialization.resource_pools},
                 relation_keys,
@@ -1938,17 +1971,42 @@ def _validate_condition_refs(
             _validate_parameter_value(parameter, condition.value, field="comparison value")
 
 
+def _validate_state_trigger_condition(condition: ConditionV2) -> None:
+    """Keep STATE rules independent from an Action invocation context."""
+
+    for child in condition.conditions:
+        _validate_state_trigger_condition(child)
+    if condition.condition is not None:
+        _validate_state_trigger_condition(condition.condition)
+    if condition.node is not None and condition.node.kind != NodeSelectorKind.EXPLICIT:
+        raise ValueError("STATE Rule conditions require explicit Node selectors")
+    if (
+        condition.resource_scope is not None
+        and condition.resource_scope.kind != ResourceScopeKind.EXPLICIT
+    ):
+        raise ValueError("STATE Rule conditions require explicit Resource scopes")
+
+
 def _validate_effect_refs(
     effect: EffectV2,
     nodes: dict[str, NodeDefinitionV2],
     resources: dict[str, ResourceDefinitionV2],
     actors: dict[str, ActorProfileV2],
     parameters: dict[str, ActionParameterV2],
-    action: ActionDefinitionV2,
+    action: ActionDefinitionV2 | None,
+    trigger: RuleTrigger,
     locality: LocalityContractV2,
     pool_keys: set[str],
     relation_keys: set[str],
 ) -> None:
+    if trigger == RuleTrigger.STATE:
+        if effect.node is not None and effect.node.kind != NodeSelectorKind.EXPLICIT:
+            raise ValueError("STATE Rule Effects require explicit Node selectors")
+        if (
+            effect.resource_scope is not None
+            and effect.resource_scope.kind != ResourceScopeKind.EXPLICIT
+        ):
+            raise ValueError("STATE Rule Effects require explicit Resource scopes")
     if effect.actor_key is not None:
         _require_key(actors, effect.actor_key, "Effect Actor")
     if effect.kind == EffectKind.SET_RELATION_VISIBILITY:
@@ -1985,6 +2043,8 @@ def _validate_effect_refs(
         if expression is not None and expression.parameter_key is not None:
             _require_key(parameters, expression.parameter_key, "Effect parameter")
     if effect.outcome_code is not None:
+        if action is None:
+            raise ValueError("STATE Rule Effects may not emit Action outcomes")
         _require_key(
             {outcome.code for outcome in action.expected_outcomes},
             effect.outcome_code,
@@ -2438,6 +2498,7 @@ __all__ = [
     "ResourceScopeV2",
     "ResourceSourceHintV2",
     "RulePhase",
+    "RuleTrigger",
     "ScenarioDefinitionV2",
     "knowledge_gate_is_revealed",
     "transport_resource_entries",
