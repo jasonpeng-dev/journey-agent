@@ -16,15 +16,23 @@ export function ScenarioLibraryPage() {
       <div className="page-heading"><div><p className="eyebrow">人工测试</p><h1>完整测试模板</h1><p className="muted">选择一个已发布模板，创建独立游戏后即可开始测试。</p></div></div>
       {scenarios.isLoading && <p>正在加载场景……</p>}
       {scenarios.error && <p className="error">无法加载场景。</p>}
-      <div className="card-grid">
+      <div className="scenario-list" data-testid="scenario-library-list">
         {scenarios.data?.map((scenario) => (
-          <article className="scenario-card" key={scenario.id}>
-            <span className={`status ${scenario.status.toLowerCase()}`}>{uiLabel(scenario.status)}</span>
-            <h2><Link to={`/scenarios/${scenario.id}`}>{scenario.name}</Link></h2><code>{scenario.key}</code>
-            <p>已发布完整模板 · 当前草稿修订号：{scenario.draft_revision}</p>
-            <div className="game-card-actions">
-              <Link className="secondary-button" to={`/scenarios/${scenario.id}`}>查看场景</Link>
+          <article className="scenario-row" data-testid={`scenario-row-${scenario.id}`} key={scenario.id}>
+            <div className="scenario-row-info">
+              <div className="scenario-row-heading">
+                <h2><Link to={`/scenarios/${scenario.id}`}>{scenario.name}</Link></h2>
+                <span className={`status ${scenario.status.toLowerCase()}`}>{uiLabel(scenario.status)}</span>
+              </div>
+              <div className="scenario-row-meta">
+                <code>{scenario.key}</code>
+                {scenario.current_published_version_number !== null && <span>已发布版本 {scenario.current_published_version_number}</span>}
+                <span>当前草稿修订号：{scenario.draft_revision}</span>
+              </div>
+            </div>
+            <div className="scenario-row-actions">
               {scenario.current_published_version_id && <button className="primary-button" disabled={startTest.isPending} onClick={() => startTest.mutate(scenario.current_published_version_id!)}>{startTest.isPending ? "正在创建…" : "直接开始测试"}</button>}
+              <Link className="secondary-button" to={`/scenarios/${scenario.id}`}>查看场景</Link>
             </div>
           </article>
         ))}
