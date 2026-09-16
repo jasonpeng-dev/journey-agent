@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -18,10 +19,12 @@ from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
     AgentTaskStatus,
+    RelationVisibility,
     StepExecutionType,
     WorldOperationStatus,
 )
 from app.domain.runtime_scope import GameInstanceId
+from app.domain.scenario_v2 import relation_identity
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     AgentPlan,
@@ -29,6 +32,7 @@ from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
+    GameInstanceRelationKnowledge,
     PlanningAttempt,
     PlanningCycle,
     Player,
@@ -886,6 +890,18 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     )
     assert utility_node_state is not None
     utility_node_state.visibility = Visibility.KNOWN
+    warehouse_node_state = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "emergency_supply_warehouse"),
+    )
+    warehouse_fact_state = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "emergency_supply_warehouse", "external_relief_supply_ready"),
+    )
+    assert warehouse_node_state is not None
+    assert warehouse_fact_state is not None
+    warehouse_node_state.visibility = Visibility.KNOWN
+    warehouse_fact_state.visibility = Visibility.KNOWN
     projection = PlayerProjectionService(session)
     state = projection.game_state(GameInstanceId(runtime.instance.id))
     scope = GameInstanceService(session).load(GameInstanceId(runtime.instance.id))
@@ -893,6 +909,9 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     shared_contracts = shared.target_knowledge_contracts()
     contracts = {
         (item.target_key, item.action_key): item for item in state.known_target_action_contracts
+    }
+    producer_bindings = {
+        (item.target_key, item.action_key): item for item in state.known_producer_bindings
     }
     assert set(contracts) == {
         (str(item["target_key"]), str(item["action_key"])) for item in shared_contracts
@@ -909,6 +928,53 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     }
     assert projected_roles == shared_roles
     assert ("utility_service_depot", "repair_facility") not in contracts
+    external_relief = contracts[
+        ("emergency_supply_warehouse", "receive_external_relief_supplies")
+    ]
+    assert external_relief.action_name == "接收外部救援物资"
+    assert external_relief.effects == [
+        {
+            "type": "FACT_MUTATION",
+            "target": "target_key",
+            "fact_key": "external_relief_supply_ready",
+            "value": True,
+        }
+    ]
+    external_binding = producer_bindings[
+        ("emergency_supply_warehouse", "receive_external_relief_supplies")
+    ]
+    assert external_binding.binding_key == (
+        "receive_external_relief_supplies:emergency_supply_warehouse"
+    )
+    assert [
+        item.model_dump(mode="json", exclude_none=True)
+        for item in external_binding.outputs
+    ] == [
+        {
+            "semantic_key": "emergency_supply_warehouse.external_relief_supply_ready",
+            "target_key": "emergency_supply_warehouse",
+            "fact_key": "external_relief_supply_ready",
+            "desired_value": True,
+            "status": "UNSATISFIED",
+        }
+    ]
+    assert "repair_profile" not in json.dumps(
+        external_binding.model_dump(mode="json"),
+        ensure_ascii=False,
+    )
+    assert "current_value" not in json.dumps(
+        external_relief.model_dump(mode="json"),
+        ensure_ascii=False,
+    )
+    planner_projection = shared.planner_action_requirements()
+    external_planner_requirement = next(
+        requirement
+        for target in planner_projection
+        if target["target_key"] == "emergency_supply_warehouse"
+        for requirement in target["requirements"]
+        if requirement["action_key"] == "receive_external_relief_supplies"
+    )
+    assert external_planner_requirement["effects"] == external_relief.effects
     repair_profile = session.get(
         GameInstanceFactState,
         (runtime.instance.id, "utility_service_depot", "repair_profile"),
@@ -931,6 +997,12 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
         for item in known_state.known_target_action_contracts
     }
     utility = known_contracts[("utility_service_depot", "repair_facility")]
+    utility_binding = next(
+        item
+        for item in known_state.known_producer_bindings
+        if item.target_key == "utility_service_depot"
+        and item.action_key == "repair_facility"
+    )
     assert utility.cost == {
         "general_engineering_parts": 5,
         "municipal_repair_materials": 20,
@@ -939,6 +1011,11 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
         effect.get("fact_key") == "operational" and effect.get("value") is True
         for effect in utility.effects
     )
+    assert utility_binding.outputs[0].fact_key == "operational"
+    assert utility_binding.outputs[0].status == "UNSATISFIED"
+    assert {
+        item.kind for item in utility_binding.requirements
+    } >= {"RESOURCE", "ROLE"}
     repair_profile.visibility = Visibility.HIDDEN
     session.flush()
     hidden_state = projection.game_state(GameInstanceId(runtime.instance.id))
@@ -946,3 +1023,326 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
         item.target_key == "utility_service_depot" and item.action_key == "repair_facility"
         for item in hidden_state.known_target_action_contracts
     )
+    assert not any(
+        item.target_key == "utility_service_depot" and item.action_key == "repair_facility"
+        for item in hidden_state.known_producer_bindings
+    )
+
+
+def test_player_projection_scopes_linjiang_repair_producer_to_exact_target(
+    session: Session,
+) -> None:
+    definition = load_builtin_scenario("linjiang_infrastructure_recovery_v2_0.yaml")
+    version = require_builtin_v2_version(session, definition)
+    player = GameLifecycleService(session).platform_player()
+    runtime = RuntimeInitializationService(session).create(
+        player_id=player.id,
+        scenario_version_id=version.id,
+        creation_key="player-projection-repair-binding-scope",
+    )
+    warehouse = "emergency_supply_warehouse"
+    warehouse_node = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, warehouse),
+    )
+    assert warehouse_node is not None
+    warehouse_node.visibility = Visibility.KNOWN
+    for fact_key in ("repair_profile", "operational"):
+        fact = session.get(
+            GameInstanceFactState,
+            (runtime.instance.id, warehouse, fact_key),
+        )
+        assert fact is not None
+        fact.visibility = Visibility.KNOWN
+    session.flush()
+
+    state = PlayerProjectionService(session).game_state(GameInstanceId(runtime.instance.id))
+    binding = next(
+        item
+        for item in state.known_producer_bindings
+        if item.action_key == "repair_facility" and item.target_key == warehouse
+    )
+    assert [
+        (item.resource_key, item.minimum)
+        for item in binding.requirements
+        if item.kind == "RESOURCE"
+    ] == [("general_engineering_parts", 5)]
+    assert {
+        item.role_key for item in binding.requirements if item.kind == "ROLE"
+    } == {"industrial_repair_team"}
+    assert {
+        item.node_key for item in binding.requirements if item.kind == "FACT"
+    } <= {warehouse}
+    assert not any(item.kind == "SOURCE" for item in binding.requirements)
+
+
+def test_player_projection_groups_complete_known_source_requirements(session: Session) -> None:
+    definition = load_builtin_scenario("linjiang_infrastructure_recovery_v2_0.yaml")
+    version = require_builtin_v2_version(session, definition)
+    player = GameLifecycleService(session).platform_player()
+    runtime = RuntimeInitializationService(session).create(
+        player_id=player.id,
+        scenario_version_id=version.id,
+        creation_key="player-projection-source-requirements",
+    )
+    source_relations = [
+        relation
+        for relation in definition.world.relations
+        if relation.relation_type_key == "supplies_power_to"
+    ]
+    assert source_relations
+    source_node_keys = {relation.source_node_key for relation in source_relations}
+    endpoint_keys = {
+        endpoint
+        for relation in source_relations
+        for endpoint in (relation.source_node_key, relation.target_node_key)
+    }
+    for node_key in endpoint_keys:
+        node_state = session.get(GameInstanceNodeState, (runtime.instance.id, node_key))
+        assert node_state is not None
+        node_state.visibility = Visibility.KNOWN
+    for source_key in source_node_keys:
+        for fact_key in ("operational", "power_supply"):
+            fact_state = session.get(
+                GameInstanceFactState,
+                (runtime.instance.id, source_key, fact_key),
+            )
+            assert fact_state is not None
+            fact_state.visibility = Visibility.KNOWN
+    for relation in source_relations:
+        relation_state = session.get(
+            GameInstanceRelationKnowledge,
+            (runtime.instance.id, relation_identity(relation)),
+        )
+        assert relation_state is not None
+        relation_state.visibility = RelationVisibility.VISIBLE
+    session.flush()
+
+    projection = PlayerProjectionService(session)
+    state = projection.game_state(GameInstanceId(runtime.instance.id))
+    supply_power = next(
+        item for item in state.known_action_requirements if item.action_key == "supply_power"
+    )
+    source_sets = {
+        item.source_node_key: item for item in supply_power.source_requirements
+    }
+    assert source_sets
+    example_source = next(iter(sorted(source_node_keys)))
+    source_contract = source_sets[example_source]
+    assert source_contract.kind == "POWER_SOURCE_READINESS"
+    assert source_contract.status in {"SATISFIED", "UNSATISFIED"}
+    assert {
+        (condition.fact_key, condition.operator, condition.value)
+        for condition in source_contract.conditions
+    } == {
+        ("operational", "EQ", True),
+        ("power_supply", "EQ", "AVAILABLE"),
+    }
+    assert all(
+        "current_value" not in condition.model_dump(mode="json")
+        for condition in source_contract.conditions
+    )
+
+    target_fact = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "east_community_hospital", "power_supply"),
+    )
+    assert target_fact is not None
+    target_fact.visibility = Visibility.KNOWN
+    session.flush()
+    producer_state = projection.game_state(GameInstanceId(runtime.instance.id))
+    target_binding = next(
+        item
+        for item in producer_state.known_producer_bindings
+        if item.action_key == "supply_power"
+        and item.target_key == "east_community_hospital"
+    )
+    assert not any(item.kind == "SOURCE" for item in target_binding.requirements)
+    assert not any(item.kind == "FACT" for item in target_binding.requirements)
+
+    for hidden_fact_keys in ({"operational"}, {"power_supply"}, {"operational", "power_supply"}):
+        for fact_key in ("operational", "power_supply"):
+            fact_state = session.get(
+                GameInstanceFactState,
+                (runtime.instance.id, example_source, fact_key),
+            )
+            assert fact_state is not None
+            fact_state.visibility = (
+                Visibility.HIDDEN if fact_key in hidden_fact_keys else Visibility.KNOWN
+            )
+        session.flush()
+        hidden_state = projection.game_state(GameInstanceId(runtime.instance.id))
+        hidden_supply_power = next(
+            item
+            for item in hidden_state.known_action_requirements
+            if item.action_key == "supply_power"
+        )
+        assert example_source not in {
+            item.source_node_key for item in hidden_supply_power.source_requirements
+        }
+
+
+def test_producer_bindings_keep_synthetic_target_and_source_scopes_separate() -> None:
+    projection = object.__new__(SharedKnowledgeProjection)
+    projection.definition = SimpleNamespace(
+        rules=(),
+        world=SimpleNamespace(resources=()),
+    )
+    projection.known_node_rows = lambda: ()
+    projection.known_fact_rows = lambda: tuple(
+        SimpleNamespace(node_key=node_key, fact_key=fact_key, truth_value=False)
+        for node_key, fact_key in (
+            ("unit_a", "calibrated"),
+            ("unit_a", "ready"),
+            ("unit_b", "calibrated"),
+            ("unit_b", "ready"),
+            ("unit_c", "calibrated"),
+            ("unit_c", "ready"),
+            ("reactor", "cooled"),
+        )
+    )
+    projection.visible_resource_pools = lambda: ()
+
+    def contract(target_key: str, resource_key: str, role_key: str) -> dict[str, object]:
+        return {
+            "target_key": target_key,
+            "action_key": "calibrate_system",
+            "action_name": "Calibrate system",
+            "required_actor_role_key": role_key,
+            "required_actor_role_name": role_key,
+            "resource_requirements": [
+                {
+                    "resource_key": resource_key,
+                    "minimum": 1,
+                    "scope": {"kind": "ACTOR_CURRENT_REGION"},
+                }
+            ],
+            "special_requirements": [
+                {
+                    "node_key": target_key,
+                    "fact_key": "ready",
+                    "operator": "EQ",
+                    "value": True,
+                }
+            ],
+            "effects": [
+                {
+                    "type": "FACT_MUTATION",
+                    "target": "target_key",
+                    "fact_key": "calibrated",
+                    "value": True,
+                }
+            ],
+        }
+
+    calibrate_action = {
+        "action_key": "calibrate_system",
+        "action_name": "Calibrate system",
+        "required_actor_role_key": "global_operator",
+        "required_actor_role_name": "Global operator",
+        "resource_requirements": [
+            {
+                "resource_key": "global_material",
+                "minimum": 2,
+                "scope": {"kind": "ACTOR_CURRENT_REGION"},
+            }
+        ],
+        "known_preconditions": [
+            {
+                "node_key": "unit_b",
+                "fact_key": "ready",
+                "failure_condition": {"kind": "FACT_EQUALS", "value": False},
+            },
+            {
+                "node_key": "unit_c",
+                "fact_key": "ready",
+                "failure_condition": {"kind": "FACT_EQUALS", "value": False},
+            },
+        ],
+    }
+    calibrate_bindings = projection.known_producer_bindings(
+        target_contracts=(
+            contract("unit_a", "a_material", "a_operator"),
+            contract("unit_b", "b_material", "b_operator"),
+            contract("unit_c", "c_material", "c_operator"),
+        ),
+        action_requirements=(calibrate_action,),
+    )
+    calibrate_by_target = {
+        item["target_key"]: item
+        for item in calibrate_bindings
+        if item["action_key"] == "calibrate_system"
+    }
+    assert set(calibrate_by_target) == {"unit_a", "unit_b", "unit_c"}
+    unit_a_requirements = calibrate_by_target["unit_a"]["requirements"]
+    assert {item["resource_key"] for item in unit_a_requirements if item["kind"] == "RESOURCE"} == {
+        "a_material",
+        "global_material",
+    }
+    assert {item["role_key"] for item in unit_a_requirements if item["kind"] == "ROLE"} == {
+        "a_operator",
+        "global_operator",
+    }
+    assert {
+        item["node_key"]
+        for item in unit_a_requirements
+        if item["kind"] == "FACT"
+    } == {"unit_a"}
+
+    route_action = {
+        "action_key": "route_coolant",
+        "action_name": "Route coolant",
+        "source_requirements": [
+            {
+                "source_node_key": "tank_alpha",
+                "source_binding_key": "tank_alpha",
+                "kind": "SOURCE_REQUIREMENTS",
+                "status": "UNSATISFIED",
+                "conditions": [{"fact_key": "operational", "operator": "EQ", "value": True}],
+            },
+            {
+                "source_node_key": "tank_beta",
+                "source_binding_key": "tank_beta",
+                "kind": "SOURCE_REQUIREMENTS",
+                "status": "SATISFIED",
+                "conditions": [{"fact_key": "operational", "operator": "EQ", "value": True}],
+            },
+        ],
+    }
+    route_contracts = tuple(
+        {
+            "target_key": "reactor",
+            "action_key": "route_coolant",
+            "action_name": "Route coolant",
+            "source_node_key": source_key,
+            "source_binding_key": source_key,
+            "effects": [
+                {
+                    "type": "FACT_MUTATION",
+                    "target": "target_key",
+                    "fact_key": "cooled",
+                    "value": True,
+                }
+            ],
+        }
+        for source_key in ("tank_alpha", "tank_beta")
+    )
+    route_bindings = projection.known_producer_bindings(
+        target_contracts=route_contracts,
+        action_requirements=(route_action,),
+    )
+    assert {item["binding_key"] for item in route_bindings} == {
+        "route_coolant:reactor:binding:tank_alpha",
+        "route_coolant:reactor:binding:tank_beta",
+    }
+    route_by_source = {item["source_node_key"]: item for item in route_bindings}
+    assert {
+        item["source_node_key"]
+        for item in route_by_source["tank_alpha"]["requirements"]
+        if item["kind"] == "SOURCE"
+    } == {"tank_alpha"}
+    assert {
+        item["source_node_key"]
+        for item in route_by_source["tank_beta"]["requirements"]
+        if item["kind"] == "SOURCE"
+    } == {"tank_beta"}

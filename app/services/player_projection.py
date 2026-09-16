@@ -37,6 +37,7 @@ from app.api.schemas.phase_d import (
     PublicPlanningCycleResponse,
     PublicPlanResponse,
     PublicPlanStepResponse,
+    PublicProducerBindingResponse,
     PublicRelationResponse,
     PublicResolvedGoalDraftResponse,
     PublicResourceResponse,
@@ -144,6 +145,10 @@ class PlayerProjectionService:
         target_knowledge_contracts = knowledge_projection.target_knowledge_contracts()
         known_action_requirements = knowledge_projection.known_action_requirements(
             target_contracts=target_knowledge_contracts,
+        )
+        known_producer_bindings = knowledge_projection.known_producer_bindings(
+            target_contracts=target_knowledge_contracts,
+            action_requirements=known_action_requirements,
         )
         known_target_action_contracts = knowledge_projection.known_target_action_contracts(
             target_contracts=target_knowledge_contracts,
@@ -333,6 +338,9 @@ class PlayerProjectionService:
             ],
             known_target_action_contracts=[
                 PublicTargetActionContractResponse(**item) for item in known_target_action_contracts
+            ],
+            known_producer_bindings=[
+                PublicProducerBindingResponse(**item) for item in known_producer_bindings
             ],
             resources=[
                 PublicResourceResponse(

@@ -9,7 +9,6 @@ import {
   factDisplayLabel,
   factDisplayValue,
   facilityStatusDisplayValue,
-  publicFactRequirementText,
   resourceDisplayName,
   resourceAvailabilityRequirementText,
   knownRelationDescription,
@@ -26,10 +25,10 @@ import type {
   PublicPlanDisplayStatus,
   PublicPlanningAttempt,
   PublicPlanningCycle,
-  PublicActionResourceRequirement,
   PublicResourceUsage,
   MissionRoadmapRequirement,
   MissionRoadmapStage,
+  PublicProducerBinding,
   PublicTargetActionContract,
   ResourceIntelligence,
   PublicTask,
@@ -54,6 +53,16 @@ import {
   syncPlayStateCaches,
   type ActivePlayOperation,
 } from "../playPresentation";
+import {
+  buildFacilityDetailRows,
+  buildFacilityResourceRows,
+  buildTargetActionRequirementRows,
+  mergeTargetActionContracts,
+  publicResourceRequirementIdentity,
+  publicResourceRequirementParts,
+  targetKeyForPublicActionRequirement,
+  uniquePublicResourceRequirements,
+} from "../playFacilityPresentation";
 import {
   actionLocationText,
   groupFactsByRegion,
@@ -188,125 +197,6 @@ function derivedStateDisplayValue(requirement: MissionRoadmapRequirement): strin
     return "不可用";
   }
   return String(requirement.current_known_value);
-}
-
-function publicResourceRequirementParts(
-  requirements: PublicActionResourceRequirement[] | undefined,
-  resourceName: (key: string) => string,
-): string[] {
-  return (requirements ?? []).flatMap((requirement) => (
-    typeof requirement.resource_key === "string" && typeof requirement.minimum === "number"
-      ? [`${resourceName(requirement.resource_key)} ×${String(requirement.minimum)}`]
-      : []
-  ));
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
-  }
-  if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? String(value);
-}
-
-function publicResourceRequirementIdentity(
-  actionKey: string,
-  requirement: PublicActionResourceRequirement,
-  targetKey?: string,
-): string {
-  const scope = requirement.scope ?? {};
-  const scopedTargetKey = typeof scope.target_key === "string" ? scope.target_key : undefined;
-  return canonicalJson({
-    action_key: actionKey,
-    target_key: scopedTargetKey ?? targetKey ?? null,
-    resource_key: requirement.resource_key,
-    scope,
-    minimum: requirement.minimum,
-  });
-}
-
-function uniquePublicResourceRequirements(
-  actionKey: string,
-  requirements: PublicActionResourceRequirement[] | undefined,
-  targetKey?: string,
-): PublicActionResourceRequirement[] {
-  const identities = new Set<string>();
-  return (requirements ?? []).filter((requirement) => {
-    if (typeof requirement.resource_key !== "string" || typeof requirement.minimum !== "number") {
-      return false;
-    }
-    const identity = publicResourceRequirementIdentity(actionKey, requirement, targetKey);
-    if (identities.has(identity)) return false;
-    identities.add(identity);
-    return true;
-  });
-}
-
-function targetKeyForPublicActionRequirement(
-  action: NonNullable<PlayerGameState["known_action_requirements"]>[number],
-  visibleNodes: PlayerGameState["visible_nodes"],
-): string | null {
-  const resourceRequirements = action.resource_requirements ?? [];
-  if (resourceRequirements.length === 0) return null;
-
-  const candidateKeys = new Set<string>();
-  resourceRequirements.forEach((requirement) => {
-    const scope = requirement.scope;
-    if (scope && typeof scope.target_key === "string") candidateKeys.add(scope.target_key);
-  });
-  action.known_preconditions.forEach((precondition) => {
-    if (precondition.selector === "EXPLICIT" && typeof precondition.node_key === "string") {
-      candidateKeys.add(precondition.node_key);
-    }
-  });
-  if (candidateKeys.size !== 1) return null;
-
-  const [targetKey] = candidateKeys;
-  const target = visibleNodes.find((node) => node.key === targetKey);
-  if (!target || !["facility", "transport"].includes(target.node_type_key ?? "")) return null;
-
-  const hasIncompatibleExplicitScope = resourceRequirements.some((requirement) => {
-    const scope = requirement.scope;
-    if (!scope || scope.kind !== "EXPLICIT" || typeof scope.node_key !== "string") return false;
-    return scope.node_key !== targetKey && scope.node_key !== target.region_key;
-  });
-  return hasIncompatibleExplicitScope ? null : targetKey;
-}
-
-function mergeTargetActionContracts(
-  contracts: PublicTargetActionContract[],
-): PublicTargetActionContract[] {
-  const merged = new Map<string, PublicTargetActionContract>();
-  contracts.forEach((contract) => {
-    const identity = canonicalJson({ action_key: contract.action_key, target_key: contract.target_key });
-    const current = merged.get(identity);
-    if (!current) {
-      merged.set(identity, {
-        ...contract,
-        resource_requirements: uniquePublicResourceRequirements(
-          contract.action_key,
-          contract.resource_requirements,
-          contract.target_key,
-        ),
-      });
-      return;
-    }
-    merged.set(identity, {
-      ...current,
-      resource_requirements: uniquePublicResourceRequirements(
-        contract.action_key,
-        [...(current.resource_requirements ?? []), ...(contract.resource_requirements ?? [])],
-        contract.target_key,
-      ),
-    });
-  });
-  return Array.from(merged.values());
 }
 
 const FACT_GOAL_LABELS: Record<string, string> = {
@@ -1309,6 +1199,7 @@ type KnownWorldAccordionsProps = {
   knownRelations?: NonNullable<PlayerGameState["known_relations"]>;
   knownActionRequirements?: NonNullable<PlayerGameState["known_action_requirements"]>;
   knownTargetActionContracts?: PublicTargetActionContract[];
+  knownProducerBindings?: PublicProducerBinding[];
   task?: PublicTask | null;
   resourceTask?: PublicTask | null;
 };
@@ -1323,6 +1214,7 @@ export function KnownWorldAccordions({
   knownRelations = [],
   knownActionRequirements = [],
   knownTargetActionContracts = [],
+  knownProducerBindings = [],
   task = null,
   resourceTask,
 }: KnownWorldAccordionsProps) {
@@ -1427,6 +1319,12 @@ export function KnownWorldAccordions({
     const contracts = contractsByTarget.get(contract.target_key) ?? [];
     contracts.push(contract);
     contractsByTarget.set(contract.target_key, contracts);
+  });
+  const producerBindingsByTarget = new Map<string, PublicProducerBinding[]>();
+  knownProducerBindings.forEach((binding) => {
+    const bindings = producerBindingsByTarget.get(binding.target_key) ?? [];
+    bindings.push(binding);
+    producerBindingsByTarget.set(binding.target_key, bindings);
   });
   const resourceNames = new Map<string, string>();
   const isPublicResourceName = (key: string, candidate: unknown): candidate is string =>
@@ -1541,9 +1439,6 @@ export function KnownWorldAccordions({
       ? "neutral"
       : "success";
   const targetContractsFor = (nodeKey: string) => contractsByTarget.get(nodeKey) ?? [];
-  const facilityMetadataFacts = new Set(["operational", "power_supply", "repair_profile"]);
-
-
   const renderKnownLocations = () => (
     <div className="console-region-groups">
       {locationGroups.map((group) => {
@@ -1591,150 +1486,50 @@ export function KnownWorldAccordions({
                   const powerFact = nodeFacts.find((fact) => fact.fact_key === "power_supply");
                   const operationalFact = nodeFacts.find((fact) => fact.fact_key === "operational");
                   const passabilityFact = nodeFacts.find((fact) => fact.fact_key === "passable");
-                  const hasPowerOutputRelation = nodeRelations.some(
-                    (relation) =>
-                      relation.source_node_key === node.key
-                      && relation.relation_type_key === "supplies_power_to",
-                  );
                   const targetContracts = targetContractsFor(node.key);
-                  const additionalFacts = nodeFacts.filter((fact) => !facilityMetadataFacts.has(fact.fact_key));
-                  const associatedResources = (node.associated_known_resources ?? [])
-                    .filter((resource) => resource.availability !== "AVAILABLE");
-                  const targetActionRequirementRows = targetContracts.flatMap((contract) => {
-                    const typedRequirements = uniquePublicResourceRequirements(
-                      contract.action_key,
-                      contract.resource_requirements,
-                      contract.target_key,
-                    );
-                    const representedTypedIdentities = new Set<string>();
-                    const resourceParts = Object.entries(contract.cost ?? {}).flatMap(
-                      ([resourceKey, amount]) => {
-                        // ``cost`` predates typed requirements and has no scope
-                        // field.  When its Action/resource/amount is represented
-                        // by a typed requirement, keep the typed row as the
-                        // canonical display and suppress only this legacy copy.
-                        const matchingRequirements = typedRequirements.filter(
-                          (requirement) =>
-                            requirement.resource_key === resourceKey
-                            && requirement.minimum === amount,
+                  const associatedResources = node.associated_known_resources ?? [];
+                  const facilityResourceRows = facility
+                    ? buildFacilityResourceRows(
+                      node.key,
+                      resourceIntelligence,
+                      associatedResources,
+                      resourceName,
+                      nodeDisplayName,
+                      (factNodeKey, factKey) => {
+                        const fact = factsByNode.get(factNodeKey)?.find(
+                          (candidate) => candidate.fact_key === factKey,
                         );
-                        if (matchingRequirements.length === 0) {
-                          return [`${resourceName(resourceKey)} ×${String(amount)}`];
-                        }
-                        return matchingRequirements.map((requirement) => {
-                          representedTypedIdentities.add(
-                            publicResourceRequirementIdentity(
-                              contract.action_key,
-                              requirement,
-                              contract.target_key,
-                            ),
-                          );
-                          return `${resourceName(requirement.resource_key)} ×${String(requirement.minimum)}`;
-                        });
+                        return fact ? factDisplayLabel(fact) : undefined;
                       },
-                    );
-                    const parts = [
-                      ...resourceParts,
-                      ...publicResourceRequirementParts(
-                        typedRequirements.filter(
-                          (requirement) => !representedTypedIdentities.has(
-                            publicResourceRequirementIdentity(
-                              contract.action_key,
-                              requirement,
-                              contract.target_key,
-                            ),
-                          ),
-                        ),
-                        resourceName,
-                      ),
-                      ...(contract.special_requirements ?? []).flatMap((requirement) => {
-                        const nodeKey = typeof requirement.node_key === "string"
-                          ? requirement.node_key
-                          : null;
-                        const factKey = typeof requirement.fact_key === "string"
-                          ? requirement.fact_key
-                          : null;
-                        if (!nodeKey || !factKey || !nodeByKey.has(nodeKey)) return [];
-                        const fact = factsByNode.get(nodeKey)?.find(
-                          (item) => item.fact_key === factKey,
-                        );
-                        if (!fact) return [];
-                        const text = publicFactRequirementText(
-                          requirement,
-                          fact,
-                          nodeDisplayName(nodeKey, nodeByKey.get(nodeKey)?.name),
-                        );
-                        return text ? [`前置条件：${text}`] : [];
-                      }),
-                    ];
-                    if (parts.length === 0) return [];
-                    return {
-                      key: node.key + ":requirement:" + contract.action_key,
-                      actionKey: contract.action_key,
-                      label: contract.action_key.startsWith("repair_") ? "修复需求：" : `${contract.action_name}：`,
-                      value: parts.join("、"),
-                    };
+                      producerBindingsByTarget.get(node.key) ?? [],
+                    )
+                    : [];
+                  const targetActionRequirementRows = buildTargetActionRequirementRows({
+                    contracts: targetContracts,
+                    knownFacts,
+                    visibleNodeKeys: new Set(visibleNodes.map((visibleNode) => visibleNode.key)),
+                    resourceName,
+                    nodeName: nodeDisplayName,
+                    nodeByKey,
                   });
-                  const displayableRepairActionKeys = new Set(
-                    targetActionRequirementRows
-                      .filter((row) => row.actionKey.startsWith("repair_"))
-                      .map((row) => row.actionKey),
-                  );
+                  const facilityDetailRows = facility
+                    ? buildFacilityDetailRows({
+                      nodeKey: node.key,
+                      knownFacts,
+                      knownRelations: nodeRelations,
+                      knownActionRequirements,
+                      producerBindings: producerBindingsByTarget.get(node.key) ?? [],
+                      facilityResourceRows,
+                      resourceName,
+                      resolveNodeName: nodeDisplayName,
+                    })
+                    : [];
                   const renderTargetActionRequirementRows = () => targetActionRequirementRows.map((row) => (
                     <div className="knowledge-facility-attribute" key={row.key}>
                       <span className="knowledge-facility-attribute-label">{row.label}</span>
                       <span className="knowledge-facility-attribute-value">{row.value}</span>
                     </div>
                   ));
-                  const repairTeamNames = [
-                    ...new Set(
-                      targetContracts
-                        .filter(
-                          (contract) => contract.action_key.startsWith("repair_")
-                            && displayableRepairActionKeys.has(contract.action_key),
-                        )
-                        .map((contract) => contract.required_actor_role_name)
-                        .filter((name): name is string => typeof name === "string" && name.length > 0),
-                    ),
-                  ];
-                  const hasFacilityDetails = targetActionRequirementRows.length > 0
-                    || associatedResources.length > 0
-                    || hasPowerOutputRelation
-                    || additionalFacts.length > 0
-                    || nodeRelations.length > 0;
-                  const associatedResourceText = associatedResources
-                    .map((resource) => {
-                      const resourceKey = typeof resource.resource_key === "string" ? resource.resource_key : "";
-                      const name = resourceName(
-                        resourceKey,
-                        typeof resource.resource_name === "string" ? resource.resource_name : undefined,
-                      );
-                      const quantity = resource.quantity !== null && resource.quantity !== undefined
-                        ? ` \u00d7${String(resource.quantity)}`
-                        : "";
-                      const availability = resource.availability === "UNAVAILABLE"
-                        ? "\u6682\u4e0d\u53ef\u7528"
-                        : resource.availability === "AVAILABLE"
-                          ? "\u53ef\u7528"
-                          : "";
-                      const requirement = resourceRequirementText(resource.availability_requirement);
-                      return [name + quantity, availability, requirement].filter(Boolean).join("\uff0c");
-                    })
-                    .join("\uff0c");
-                  const relationLabels = new Map<string, string[]>();
-                  nodeRelations.forEach((relation) => {
-                    const label = relation.relation_type_key === "supplies_power_to"
-                      ? "\u53ef\u4f9b\u7535"
-                      : knownRelationDescription(relation.relation_type_key);
-                    const targets = relationLabels.get(label) ?? [];
-                    targets.push(nodeDisplayName(relation.target_node_key, relation.target_node_name));
-                    relationLabels.set(label, targets);
-                  });
-                  const facilityRelationRows = Array.from(relationLabels.entries()).map(([label, targets], index) => ({
-                    key: node.key + ":relation:" + index,
-                    label,
-                    value: targets.join("\u3001"),
-                  }));
 
                   if (transport) {
                     return (
@@ -1787,43 +1582,17 @@ export function KnownWorldAccordions({
                           </span>
                         </summary>
                         <div className="knowledge-facility-details">
-                          {renderTargetActionRequirementRows()}
-                          {repairTeamNames.map((name) => (
-                            <div className="knowledge-facility-attribute" key={node.key + ":team:" + name}>
-                              <span className="knowledge-facility-attribute-label">{"执行队伍："}</span>
-                              <span className="knowledge-facility-attribute-value">{name}</span>
-                            </div>
-                          ))}
-                          {associatedResources.length > 0 && (
-                            <div className="knowledge-facility-attribute">
-                              <span className="knowledge-facility-attribute-label">{"关联资源："}</span>
-                              <span className="knowledge-facility-attribute-value">{associatedResourceText}</span>
-                            </div>
-                          )}
-                          {hasPowerOutputRelation && (
-                            <div className="knowledge-facility-attribute">
-                              <span className="knowledge-facility-attribute-label">{"送电能力："}</span>
-                              <span className="knowledge-facility-attribute-value">
-                                {operationalFact?.value === true
-                                && (powerFact?.value === "AVAILABLE" || powerFact?.value === true)
-                                  ? "已具备"
-                                  : "未具备"}
-                              </span>
-                            </div>
-                          )}
-                          {additionalFacts.map((fact) => (
-                            <div className="knowledge-facility-attribute" key={"facility-fact:" + factIdentity(fact)}>
-                              <span className="knowledge-facility-attribute-label">{factDisplayLabel(fact) + "："}</span>
-                              <span className="knowledge-facility-attribute-value">{factDisplayValue(fact)}</span>
-                            </div>
-                          ))}
-                          {facilityRelationRows.map((row) => (
-                            <div className="knowledge-facility-attribute" key={row.key}>
-                              <span className="knowledge-facility-attribute-label">{row.label + "："}</span>
-                              <span className="knowledge-facility-attribute-value">{row.value}</span>
-                            </div>
-                          ))}
-                          {!hasFacilityDetails && <div className="knowledge-empty-state">{"暂无更多已知信息"}</div>}
+                          {facilityDetailRows.length > 0
+                            ? facilityDetailRows.map((row) => (
+                              <div
+                                className={`knowledge-facility-attribute${row.kind === "DETAIL" ? "" : " knowledge-facility-helper"}`}
+                                key={row.key}
+                              >
+                                <span className="knowledge-facility-attribute-label">{row.label}</span>
+                                <span className="knowledge-facility-attribute-value">{row.value}</span>
+                              </div>
+                            ))
+                            : <div className="knowledge-empty-state">{"暂无更多已知信息"}</div>}
                         </div>
                       </details>
                     );
@@ -2684,6 +2453,7 @@ export function GamePage() {
             knownRelations={play.data.known_relations}
             knownActionRequirements={play.data.known_action_requirements}
             knownTargetActionContracts={play.data.known_target_action_contracts}
+            knownProducerBindings={play.data.known_producer_bindings}
             task={task}
             resourceTask={selectedTaskActive ? task : null}
           />

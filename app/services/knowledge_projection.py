@@ -14,6 +14,7 @@ from app.agent.planner_contract import (
     json_scope_identity,
     planner_resource_requirement_from_condition,
     planner_resource_requirements,
+    planner_source_requirement_predicates,
     planner_target_contracts,
 )
 from app.domain.enums import (
@@ -26,6 +27,7 @@ from app.domain.resources import is_runtime_known_inflow_pool, resource_pool_ini
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
+    ActionDefinitionV2,
     ConditionKind,
     ConditionV2,
     NodeSelectorKind,
@@ -226,6 +228,7 @@ class SharedKnowledgeProjection:
         global_resource_requirements = self.global_action_resource_requirements(
             target_contracts=target_contracts,
         )
+        known_relations = self.known_relations()
         target_roles_by_action: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for contract in target_contracts:
             role_key = contract.get("required_actor_role_key")
@@ -278,6 +281,14 @@ class SharedKnowledgeProjection:
                 entry["target_actor_roles"] = target_roles_by_action[action.key]
             if action.source_relation_type_key is not None:
                 entry["source_relation_type_key"] = action.source_relation_type_key
+                source_requirements = self._known_source_requirement_sets(
+                    action,
+                    known_nodes=known_nodes,
+                    known_facts=known_facts,
+                    known_relations=known_relations,
+                )
+                if source_requirements:
+                    entry["source_requirements"] = source_requirements
             known_preconditions: list[dict[str, Any]] = []
             for rule in self.definition.rules:
                 if rule.action_key != action.key or rule.phase.value != "PREFLIGHT":
@@ -315,6 +326,65 @@ class SharedKnowledgeProjection:
                 entry["resource_requirements"] = [dict(item) for item in resource_requirements]
             result.append(entry)
         return tuple(result)
+
+    def _known_source_requirement_sets(
+        self,
+        action: ActionDefinitionV2,
+        *,
+        known_nodes: set[str],
+        known_facts: dict[tuple[str, str], Any],
+        known_relations: tuple[dict[str, Any], ...],
+    ) -> list[dict[str, Any]]:
+        predicates = planner_source_requirement_predicates(self.definition, action)
+        if not predicates:
+            return []
+        source_node_keys = sorted(
+            {
+                str(relation["source_node_key"])
+                for relation in known_relations
+                if relation.get("relation_type_key") == action.source_relation_type_key
+                and isinstance(relation.get("source_node_key"), str)
+                and str(relation["source_node_key"]) in known_nodes
+            }
+        )
+        requirements: list[dict[str, Any]] = []
+        for source_node_key in source_node_keys:
+            current_values = {
+                str(predicate["fact_key"]): known_facts.get(
+                    (source_node_key, str(predicate["fact_key"]))
+                )
+                for predicate in predicates
+                if isinstance(predicate.get("fact_key"), str)
+            }
+            if (
+                len(current_values) != len(predicates)
+                or any(value is None for value in current_values.values())
+            ):
+                # An incomplete current source contract is UNKNOWN. Omit the
+                # entire group so Player cannot mistake it for not-ready or
+                # receive hidden prerequisite identity/value data.
+                continue
+            conditions = [dict(predicate) for predicate in predicates]
+            satisfied = all(
+                _source_predicate_is_satisfied(
+                    current_values[str(predicate["fact_key"])],
+                    predicate,
+                )
+                for predicate in predicates
+            )
+            requirements.append(
+                {
+                    "source_node_key": source_node_key,
+                    "kind": (
+                        "POWER_SOURCE_READINESS"
+                        if action.behavior == ActionBehavior.SUPPLY_POWER
+                        else "SOURCE_REQUIREMENTS"
+                    ),
+                    "status": "SATISFIED" if satisfied else "UNSATISFIED",
+                    "conditions": conditions,
+                }
+            )
+        return requirements
 
     def global_action_resource_requirements(
         self,
@@ -664,6 +734,7 @@ class SharedKnowledgeProjection:
                 "cost",
                 "resource_requirements",
                 "special_requirements",
+                "effects",
             ):
                 value = contract.get(key)
                 if value:
@@ -686,10 +757,621 @@ class SharedKnowledgeProjection:
         *,
         target_contracts: tuple[dict[str, Any], ...] | None = None,
     ) -> tuple[dict[str, Any], ...]:
-        """Expose the shared target projection in the Player DTO shape."""
+        """Expose the shared target projection in a Player-safe DTO shape.
+
+        Planner adapters continue to consume ``target_knowledge_contracts``
+        directly because they may need authored effect metadata.  The legacy
+        Player contract remains additive/compatible, but Fact identities are
+        filtered against the same current Knowledge projection so hidden
+        target effects cannot cross the API boundary.
+        """
 
         source = self.target_knowledge_contracts() if target_contracts is None else target_contracts
-        return tuple(dict(item) for item in source)
+        known_facts = {
+            (row.node_key, row.fact_key)
+            for row in self.known_fact_rows()
+        }
+        result: list[dict[str, Any]] = []
+        for item in source:
+            projected = dict(item)
+            target_key = projected.get("target_key")
+            safe_effects: list[dict[str, Any]] = []
+            if isinstance(target_key, str):
+                for effect in projected.get("effects", []):
+                    if not isinstance(effect, dict):
+                        continue
+                    if effect.get("type") != "FACT_MUTATION":
+                        continue
+                    effect_target = effect.get("target")
+                    resolved_target = (
+                        target_key
+                        if (
+                            effect_target == "target_key"
+                            or effect_target == "CURRENT_TARGET"
+                            or effect_target == target_key
+                        )
+                        else effect_target
+                    )
+                    fact_key = effect.get("fact_key")
+                    if (
+                        isinstance(resolved_target, str)
+                        and isinstance(fact_key, str)
+                        and (resolved_target, fact_key) in known_facts
+                    ):
+                        safe_effects.append(dict(effect))
+            if safe_effects:
+                projected["effects"] = safe_effects
+            else:
+                projected.pop("effects", None)
+            result.append(projected)
+        return tuple(result)
+
+    def known_producer_bindings(
+        self,
+        *,
+        target_contracts: tuple[dict[str, Any], ...] | None = None,
+        action_requirements: tuple[dict[str, Any], ...] | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        """Project player-safe producer bindings for Facility Presentation.
+
+        A binding is the shared semantic owner of one Action/target output and
+        all currently safe requirements needed by that Action.  Output Fact
+        identities are emitted only when the corresponding Fact is already
+        known; authored hidden effects are never copied into this Player DTO.
+        The frontend therefore consumes statuses and typed requirements rather
+        than evaluating Scenario predicates itself.
+        """
+
+        contracts = (
+            self.target_knowledge_contracts()
+            if target_contracts is None
+            else target_contracts
+        )
+        action_rows = (
+            self.known_action_requirements(target_contracts=contracts)
+            if action_requirements is None
+            else action_requirements
+        )
+        action_by_key = {
+            str(item["action_key"]): item
+            for item in action_rows
+            if isinstance(item, dict) and isinstance(item.get("action_key"), str)
+        }
+        known_nodes = {row.node_key for row in self.known_node_rows()}
+        known_facts = {
+            (row.node_key, row.fact_key): row.truth_value
+            for row in self.known_fact_rows()
+        }
+        bindings: list[dict[str, Any]] = []
+        for contract in sorted(
+            contracts,
+            key=lambda item: (str(item.get("target_key", "")), str(item.get("action_key", ""))),
+        ):
+            target_key = contract.get("target_key")
+            action_key = contract.get("action_key")
+            action_name = contract.get("action_name")
+            if not (
+                isinstance(target_key, str)
+                and isinstance(action_key, str)
+                and isinstance(action_name, str)
+            ):
+                continue
+            outputs: list[dict[str, Any]] = []
+            binding_source_node_key, source_binding_key = (
+                self._producer_binding_source_identity(contract)
+            )
+            for effect in contract.get("effects", []):
+                if not isinstance(effect, dict):
+                    continue
+                if effect.get("type") != "FACT_MUTATION":
+                    continue
+                effect_target = effect.get("target")
+                if not (
+                    effect_target == "target_key"
+                    or effect_target == "CURRENT_TARGET"
+                    or effect_target == target_key
+                ):
+                    continue
+                fact_key = effect.get("fact_key")
+                desired_value = effect.get("value")
+                if not isinstance(fact_key, str) or type(desired_value) not in {str, int, bool}:
+                    continue
+                identity = (target_key, fact_key)
+                if identity not in known_facts:
+                    # The effect identity itself may be authored and useful to
+                    # the Planner, but it is not player-safe presentation data.
+                    continue
+                output = {
+                    "semantic_key": f"{target_key}.{fact_key}",
+                    "target_key": target_key,
+                    "fact_key": fact_key,
+                    "desired_value": desired_value,
+                    "status": (
+                        "SATISFIED"
+                        if known_facts[identity] == desired_value
+                        else "UNSATISFIED"
+                    ),
+                }
+                if output not in outputs:
+                    outputs.append(output)
+            if not outputs:
+                continue
+
+            action_row = action_by_key.get(action_key, {})
+            requirements: list[dict[str, Any]] = []
+            requirement_keys: set[str] = set()
+
+            def add_requirement(
+                key: str,
+                value: dict[str, Any],
+                *,
+                _requirement_keys: set[str] = requirement_keys,
+                _requirements: list[dict[str, Any]] = requirements,
+            ) -> None:
+                if key in _requirement_keys:
+                    return
+                _requirement_keys.add(key)
+                _requirements.append({"key": key, **value})
+
+            resource_requirements: list[dict[str, Any]] = []
+            for source in (
+                contract.get("resource_requirements", []),
+                action_row.get("resource_requirements", []),
+            ):
+                if isinstance(source, list):
+                    for item in source:
+                        if not isinstance(item, dict):
+                            continue
+                        owner_target_key = item.get("owner_target_key")
+                        scoped_target_key = (
+                            item.get("scope", {}).get("target_key")
+                            if isinstance(item.get("scope"), dict)
+                            else None
+                        )
+                        if (
+                            isinstance(owner_target_key, str)
+                            and owner_target_key != target_key
+                        ) or (
+                            isinstance(scoped_target_key, str)
+                            and scoped_target_key != target_key
+                        ):
+                            continue
+                        owner_source_key = item.get("owner_source_key")
+                        if isinstance(owner_source_key, str) and (
+                            binding_source_node_key is None
+                            or owner_source_key != binding_source_node_key
+                        ):
+                            continue
+                        if isinstance(item.get("source_node_key"), str) and (
+                            binding_source_node_key is None
+                            or item["source_node_key"] != binding_source_node_key
+                        ):
+                            continue
+                        resource_requirements.append(item)
+            for resource in resource_requirements:
+                resource_key = resource.get("resource_key")
+                minimum = resource.get("minimum")
+                if not isinstance(resource_key, str) or not isinstance(minimum, int):
+                    continue
+                scope = resource.get("scope")
+                scope = scope if isinstance(scope, dict) else None
+                known_status = resource.get("known_status")
+                known_available = resource.get("known_available")
+                if known_status == "UNKNOWN":
+                    status = "UNKNOWN"
+                elif isinstance(known_available, int) and not isinstance(known_available, bool):
+                    status = "SATISFIED" if known_available >= minimum else "UNSATISFIED"
+                else:
+                    status = "UNKNOWN"
+                scope_identity = json_scope_identity(scope)
+                add_requirement(
+                    f"{action_key}:{target_key}:resource:{resource_key}:{scope_identity}:{minimum}",
+                    {
+                        "kind": "RESOURCE",
+                        "status": status,
+                        "resource_key": resource_key,
+                        "minimum": minimum,
+                        "scope": scope,
+                        **(
+                            {"known_status": known_status}
+                            if known_status in {"KNOWN", "KNOWN_ZERO", "UNKNOWN"}
+                            else {}
+                        ),
+                        **(
+                            {"known_available": known_available}
+                            if isinstance(known_available, int)
+                            and not isinstance(known_available, bool)
+                            else {}
+                        ),
+                    },
+                )
+            cost = contract.get("cost")
+            if isinstance(cost, dict):
+                for resource_key, amount in cost.items():
+                    if not isinstance(resource_key, str) or not isinstance(amount, int):
+                        continue
+                    # A raw authored cost is not by itself a Player-safe
+                    # resource identity.  Keep it only when the shared
+                    # projection already exposed the same resource through a
+                    # typed requirement (for example after resource survey).
+                    if not any(
+                        item.get("resource_key") == resource_key
+                        for item in resource_requirements
+                    ):
+                        continue
+                    if any(
+                        item.get("resource_key") == resource_key
+                        and item.get("minimum") == amount
+                        for item in resource_requirements
+                    ):
+                        continue
+                    add_requirement(
+                        f"{action_key}:{target_key}:resource:{resource_key}::{amount}",
+                        {
+                            "kind": "RESOURCE",
+                            "status": "UNKNOWN",
+                            "resource_key": resource_key,
+                            "minimum": amount,
+                        },
+                    )
+
+            role_values = [
+                (
+                    contract.get("required_actor_role_key"),
+                    contract.get("required_actor_role_name"),
+                ),
+                (
+                    action_row.get("required_actor_role_key"),
+                    action_row.get("required_actor_role_name"),
+                ),
+            ]
+            for role_key, role_name in role_values:
+                if not isinstance(role_key, str) and not isinstance(role_name, str):
+                    continue
+                role_identity = role_key if isinstance(role_key, str) else str(role_name)
+                add_requirement(
+                    f"{action_key}:{target_key}:role:{role_identity}",
+                    {
+                        "kind": "ROLE",
+                        **({"role_key": role_key} if isinstance(role_key, str) else {}),
+                        **({"display_name": role_name} if isinstance(role_name, str) else {}),
+                    },
+                )
+
+            for special in contract.get("special_requirements", []):
+                if not isinstance(special, dict):
+                    continue
+                self._add_known_fact_requirement(
+                    add_requirement,
+                    action_key=action_key,
+                    target_key=target_key,
+                    requirement=special,
+                    known_facts=known_facts,
+                )
+
+            for precondition in self._known_global_action_preconditions(
+                action_key,
+                known_nodes=known_nodes,
+                known_facts=known_facts,
+            ):
+                if not isinstance(precondition, dict):
+                    continue
+                node_key = precondition.get("node_key")
+                fact_key = precondition.get("fact_key")
+                failure = precondition.get("failure_condition")
+                if not isinstance(node_key, str) or not isinstance(fact_key, str):
+                    continue
+                if (node_key, fact_key) not in known_facts or not isinstance(failure, dict):
+                    continue
+                required = self._required_predicate_from_failure(failure)
+                if required is None:
+                    continue
+                requirement = {"node_key": node_key, "fact_key": fact_key, **required}
+                self._add_known_fact_requirement(
+                    add_requirement,
+                    action_key=action_key,
+                    target_key=target_key,
+                    requirement=requirement,
+                    known_facts=known_facts,
+                )
+
+            for source in action_row.get("source_requirements", []):
+                if not isinstance(source, dict):
+                    continue
+                # The action-level source list describes candidate sources,
+                # not the source of this target binding.  It is only safe to
+                # join one row when the canonical binding selected an exact
+                # source identity.
+                if binding_source_node_key is None:
+                    continue
+                candidate_source_node_key = source.get("source_node_key")
+                source_kind = source.get("kind")
+                candidate_source_binding_key = source.get("source_binding_key")
+                if not isinstance(candidate_source_binding_key, str):
+                    candidate_source_binding_key = source.get("binding_key")
+                if (
+                    not isinstance(candidate_source_node_key, str)
+                    or not isinstance(source_kind, str)
+                    or candidate_source_node_key != binding_source_node_key
+                    or (
+                        source_binding_key is not None
+                        and isinstance(candidate_source_binding_key, str)
+                        and candidate_source_binding_key != source_binding_key
+                    )
+                ):
+                    continue
+                add_requirement(
+                    f"{action_key}:{target_key}:source:{candidate_source_node_key}:{source_kind}",
+                    {
+                        "kind": "SOURCE",
+                        "status": source.get("status")
+                        if source.get("status") in {"SATISFIED", "UNSATISFIED"}
+                        else "UNKNOWN",
+                        "source_node_key": candidate_source_node_key,
+                        "source_kind": source_kind,
+                        "conditions": [
+                            dict(item)
+                            for item in source.get("conditions", [])
+                            if isinstance(item, dict)
+                        ],
+                    },
+                )
+
+            bindings.append(
+                {
+                    "binding_key": (
+                        f"{action_key}:{target_key}"
+                        + (
+                            f":binding:{source_binding_key}"
+                            if source_binding_key is not None
+                            else f":source:{binding_source_node_key}"
+                            if binding_source_node_key is not None
+                            else ""
+                        )
+                    ),
+                    "action_key": action_key,
+                    "action_name": action_name,
+                    "target_key": target_key,
+                    "producer_kind": "ACTION_PRODUCED_STATE",
+                    "outputs": outputs,
+                    "requirements": requirements,
+                    **(
+                        {"source_node_key": binding_source_node_key}
+                        if binding_source_node_key is not None
+                        else {}
+                    ),
+                    **(
+                        {"source_binding_key": source_binding_key}
+                        if source_binding_key is not None
+                        else {}
+                    ),
+                }
+            )
+
+        resource_names = {item.key: item.name for item in self.definition.world.resources}
+        pools_by_resource: dict[tuple[str, str], list[KnownResourcePoolView]] = defaultdict(list)
+        for pool in self.visible_resource_pools():
+            if pool.facility_key is None or pool.facility_key not in known_nodes:
+                continue
+            pools_by_resource[(pool.facility_key, pool.resource_key)].append(pool)
+        for (target_key, resource_key), pools in sorted(pools_by_resource.items()):
+            available = all(
+                pool.availability == ResourcePoolAvailability.AVAILABLE
+                for pool in pools
+            )
+            requirements: list[dict[str, Any]] = []
+            for pool in pools:
+                requirement = pool.availability_requirement
+                if not isinstance(requirement, dict):
+                    continue
+                node_key = requirement.get("node_key")
+                fact_key = requirement.get("fact_key")
+                expected = requirement.get("value")
+                if (
+                    not isinstance(node_key, str)
+                    or not isinstance(fact_key, str)
+                    or (node_key, fact_key) not in known_facts
+                    or type(expected) not in {str, int, bool}
+                ):
+                    continue
+                requirements.append(
+                    {
+                        "key": f"resource_availability:{target_key}:{resource_key}"
+                        f":fact:{node_key}:{fact_key}",
+                        "kind": "FACT",
+                        "status": (
+                            "SATISFIED"
+                            if known_facts[(node_key, fact_key)] == expected
+                            else "UNSATISFIED"
+                        ),
+                        "node_key": node_key,
+                        "fact_key": fact_key,
+                        "operator": "EQ",
+                        "value": expected,
+                    }
+                )
+                break
+            binding_key = f"resource_availability:{target_key}:{resource_key}"
+            bindings.append(
+                {
+                    "binding_key": binding_key,
+                    "action_key": f"resource_availability:{resource_key}",
+                    "action_name": resource_names.get(resource_key, resource_key),
+                    "target_key": target_key,
+                    "producer_kind": "RESOURCE_AVAILABILITY",
+                    "outputs": [{
+                        "semantic_key": f"{target_key}.{resource_key}.availability",
+                        "target_key": target_key,
+                        "resource_key": resource_key,
+                        "desired_value": "AVAILABLE",
+                        "status": "SATISFIED" if available else "UNSATISFIED",
+                    }],
+                    "requirements": requirements,
+                }
+            )
+        return tuple(bindings)
+
+    def _known_global_action_preconditions(
+        self,
+        action_key: str,
+        *,
+        known_nodes: set[str],
+        known_facts: dict[tuple[str, str], Any],
+    ) -> tuple[dict[str, Any], ...]:
+        """Return only preconditions owned by the Action as a whole.
+
+        ``known_action_requirements`` intentionally keeps a compatibility
+        aggregate for the action-oriented Player/Planner DTO.  A producer
+        binding cannot consume that aggregate: a condition that mentions a
+        current target, source, or related node describes selector
+        applicability and belongs to a narrower binding scope.  Only rules
+        made entirely of explicit-node predicates are action-global here.
+        Target-scoped predicates are already projected by the canonical
+        target contract's ``special_requirements``.
+        """
+
+        result: list[dict[str, Any]] = []
+        for rule in self.definition.rules:
+            if rule.action_key != action_key or rule.phase.value != "PREFLIGHT":
+                continue
+            leaves = self._condition_leaves(rule.condition)
+            if any(
+                condition.node is not None
+                and condition.node.kind != NodeSelectorKind.EXPLICIT
+                for condition in leaves
+            ):
+                # CURRENT_TARGET, ACTION_SOURCE, and RELATED predicates are
+                # selector/binding information, never global C requirements.
+                continue
+            for condition in leaves:
+                if condition.kind not in {
+                    ConditionKind.FACT_EQUALS,
+                    ConditionKind.FACT_NOT_EQUALS,
+                    ConditionKind.FACT_IN,
+                    ConditionKind.FACT_COMPARE,
+                }:
+                    continue
+                if condition.node is None or condition.fact_key is None:
+                    continue
+                node_keys = self._known_condition_nodes(
+                    condition.node.kind,
+                    condition.node.node_key,
+                    known_nodes,
+                )
+                for node_key in node_keys:
+                    if (node_key, condition.fact_key) not in known_facts:
+                        continue
+                    required = self._required_predicate_from_failure(
+                        self._condition_summary(condition)
+                    )
+                    if required is None:
+                        continue
+                    projection = {
+                        "node_key": node_key,
+                        "fact_key": condition.fact_key,
+                        "failure_condition": self._condition_summary(condition),
+                        **required,
+                    }
+                    if projection not in result:
+                        result.append(projection)
+        return tuple(result)
+
+    @staticmethod
+    def _producer_binding_source_identity(
+        contract: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        """Read an optional exact source identity from a canonical binding.
+
+        Current Linjiang target contracts are target-only, so they return
+        ``(None, None)``.  The additive fields let a future/source-parameter
+        binding carry one exact source without making the Player projection
+        aggregate all candidate source requirements.
+        """
+
+        source_node_key = contract.get("source_node_key")
+        if not isinstance(source_node_key, str):
+            source_node_key = contract.get("selected_source_node_key")
+        if not isinstance(source_node_key, str):
+            source_node_key = None
+        source_binding_key = contract.get("source_binding_key")
+        if not isinstance(source_binding_key, str):
+            source_binding_key = None
+        source_binding = contract.get("source_binding")
+        if isinstance(source_binding, dict):
+            if source_node_key is None:
+                candidate = source_binding.get("source_node_key")
+                if not isinstance(candidate, str):
+                    candidate = source_binding.get("node_key")
+                if isinstance(candidate, str):
+                    source_node_key = candidate
+            if source_binding_key is None:
+                candidate = source_binding.get("binding_key")
+                if isinstance(candidate, str):
+                    source_binding_key = candidate
+        return source_node_key, source_binding_key
+
+    @staticmethod
+    def _required_predicate_from_failure(
+        failure: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        kind = failure.get("kind")
+        if kind == "FACT_NOT_EQUALS":
+            return {"operator": "EQ", "value": failure.get("value")}
+        if kind == "FACT_EQUALS":
+            return {"operator": "NE", "value": failure.get("value")}
+        if kind == "FACT_IN":
+            return {"operator": "NOT_IN", "values": list(failure.get("values", []))}
+        if kind == "FACT_COMPARE" and isinstance(failure.get("operator"), str):
+            return {
+                "operator": f"NOT_{failure['operator']}",
+                "value": failure.get("value"),
+            }
+        return None
+
+    @staticmethod
+    def _add_known_fact_requirement(
+        add_requirement: Any,
+        *,
+        action_key: str,
+        target_key: str,
+        requirement: dict[str, Any],
+        known_facts: dict[tuple[str, str], Any],
+    ) -> None:
+        node_key = requirement.get("node_key")
+        fact_key = requirement.get("fact_key")
+        if not isinstance(node_key, str) or not isinstance(fact_key, str):
+            return
+        identity = (node_key, fact_key)
+        if identity not in known_facts:
+            return
+        operator = requirement.get("operator")
+        if not isinstance(operator, str):
+            return
+        values = requirement.get("values")
+        expected_values = values if isinstance(values, list) else []
+        expected = requirement.get("value")
+        predicate = {
+            "operator": operator,
+            "value": expected,
+            "values": expected_values,
+        }
+        status = _public_predicate_status(known_facts[identity], predicate)
+        requirement_key = (
+            f"{action_key}:{target_key}:fact:{node_key}:{fact_key}:"
+            f"{operator}:{expected!r}:{expected_values!r}"
+        )
+        add_requirement(
+            requirement_key,
+            {
+                "kind": "FACT",
+                "status": status,
+                "node_key": node_key,
+                "fact_key": fact_key,
+                "operator": operator,
+                **({"value": expected} if expected is not None else {}),
+                **({"values": expected_values} if expected_values else {}),
+            },
+        )
 
     @staticmethod
     def _condition_leaves(condition: ConditionV2 | None) -> tuple[ConditionV2, ...]:
@@ -1185,6 +1867,52 @@ def _enum_value(row: object, attribute: str, default: Any) -> Any:
         return type(default)(value)
     except (TypeError, ValueError):
         return default
+
+
+def _public_predicate_status(current: Any, predicate: dict[str, Any]) -> str:
+    """Evaluate a projected predicate without exposing a second UI authority."""
+
+    operator = predicate.get("operator")
+    if not isinstance(operator, str):
+        return "UNKNOWN"
+    if operator.startswith("NOT_"):
+        base = operator[4:]
+        base_result = _source_predicate_is_satisfied(
+            current,
+            {**predicate, "operator": base},
+        )
+        return "SATISFIED" if not base_result else "UNSATISFIED"
+    return "SATISFIED" if _source_predicate_is_satisfied(current, predicate) else "UNSATISFIED"
+
+
+def _source_predicate_is_satisfied(current: Any, predicate: dict[str, Any]) -> bool:
+    operator = predicate.get("operator")
+    if operator == "EQ":
+        return current == predicate.get("value")
+    if operator == "NE":
+        return current != predicate.get("value")
+    values = predicate.get("values")
+    if operator == "IN":
+        return isinstance(values, list) and current in values
+    if operator == "NOT_IN":
+        return isinstance(values, list) and current not in values
+    expected = predicate.get("value")
+    if (
+        isinstance(current, bool)
+        or isinstance(expected, bool)
+        or not isinstance(current, (int, float))
+        or not isinstance(expected, (int, float))
+    ):
+        return False
+    if operator == "GT":
+        return current > expected
+    if operator == "GTE":
+        return current >= expected
+    if operator == "LT":
+        return current < expected
+    if operator == "LTE":
+        return current <= expected
+    return False
 
 
 __all__ = [

@@ -447,7 +447,16 @@ describe("Formal Play player projections", () => {
           },
         ]}
         actors={[]}
-        knownFacts={[]}
+        knownFacts={[{
+          node_key: "synthetic_facility",
+          fact_key: "generating",
+          name: "Generating",
+          value: false,
+          node_name: "测试发电设施",
+          node_type_key: "facility",
+          region_key: "test_region",
+          region_name: "测试区域",
+        }]}
         knownActionRequirements={[
           {
             action_key: "start_power",
@@ -484,6 +493,25 @@ describe("Formal Play player projections", () => {
             { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 2 },
             { resource_key: "fuel", scope: { kind: "EXPLICIT", node_key: "test_region" }, minimum: 4 },
             { resource_key: "fuel", scope: { kind: "CURRENT_TARGET_REGION" }, minimum: 2 },
+          ],
+        }]}
+        knownProducerBindings={[{
+          binding_key: "start_power:synthetic_facility",
+          target_key: "synthetic_facility",
+          action_key: "start_power",
+          action_name: "启动发电",
+          producer_kind: "ACTION_PRODUCED_STATE",
+          outputs: [{
+            semantic_key: "synthetic_facility.generating",
+            target_key: "synthetic_facility",
+            fact_key: "generating",
+            desired_value: true,
+            status: "UNSATISFIED",
+          }],
+          requirements: [
+            { key: "start_power:fuel:2", kind: "RESOURCE", resource_key: "fuel", minimum: 2, status: "UNKNOWN" },
+            { key: "start_power:fuel:4", kind: "RESOURCE", resource_key: "fuel", minimum: 4, status: "UNKNOWN" },
+            { key: "start_power:fuel:target", kind: "RESOURCE", resource_key: "fuel", minimum: 2, status: "UNKNOWN" },
           ],
         }]}
       />,
@@ -561,6 +589,33 @@ describe("Formal Play player projections", () => {
             value: true,
           }],
         }]}
+        knownProducerBindings={[{
+          binding_key: "repair_target_facility:target_facility",
+          target_key: "target_facility",
+          action_key: "repair_target_facility",
+          action_name: "修复设施",
+          producer_kind: "ACTION_PRODUCED_STATE",
+          outputs: [{
+            semantic_key: "target_facility.operational",
+            target_key: "target_facility",
+            fact_key: "operational",
+            desired_value: true,
+            status: "UNSATISFIED",
+          }],
+          requirements: [{
+            key: "repair_target_facility:river-port",
+            kind: "FACT",
+            node_key: "river_port",
+            fact_key: "operational",
+            operator: "EQ",
+            value: true,
+            status: "SATISFIED",
+          }, {
+            key: "repair_target_facility:role",
+            kind: "ROLE",
+            display_name: "Prerequisite Repair Team",
+          }],
+        }]}
       />,
     );
 
@@ -570,8 +625,8 @@ describe("Formal Play player projections", () => {
     const facility = screen.getByTestId("facility-card-target_facility");
     fireEvent.click(facility.querySelector("summary")!);
 
-    expect(facility).toHaveTextContent("前置条件：临江港恢复运行");
-    expect(facility).toHaveTextContent("执行队伍：Prerequisite Repair Team");
+    expect(facility).toHaveTextContent("前置条件：临江港满足运行状态条件");
+    expect(facility).toHaveTextContent("所需队伍：Prerequisite Repair Team");
     expect(facility).not.toHaveTextContent("前置条件：运行状态");
     expect(facility).not.toHaveTextContent("前置条件：已知状态");
   });
@@ -3118,6 +3173,20 @@ describe("Formal Play player projections", () => {
           },
         ]}
         knownActionRequirements={[{
+          action_key: "supply_power",
+          action_name: "恢复供电",
+          source_relation_type_key: "supplies_power_to",
+          known_preconditions: [],
+          source_requirements: [{
+            source_node_key: "east_distribution_station",
+            kind: "POWER_SOURCE_READINESS",
+            status: "UNSATISFIED",
+            conditions: [
+              { fact_key: "operational", operator: "EQ", value: true },
+              { fact_key: "power_supply", operator: "EQ", value: "AVAILABLE" },
+            ],
+          }],
+        }, {
           action_key: "generate_power",
           action_name: "启动燃料应急发电",
           known_preconditions: [],
@@ -3162,6 +3231,48 @@ describe("Formal Play player projections", () => {
             required_actor_role_name: "Survey-only Repair Team",
           },
         ]}
+        knownProducerBindings={[{
+          binding_key: "repair_industrial_facility:utility_service_depot",
+          target_key: "utility_service_depot",
+          action_key: "repair_industrial_facility",
+          action_name: "Repair industrial facility",
+          producer_kind: "ACTION_PRODUCED_STATE",
+          outputs: [{
+            semantic_key: "utility_service_depot.operational",
+            target_key: "utility_service_depot",
+            fact_key: "operational",
+            desired_value: true,
+            status: "UNSATISFIED",
+          }],
+          requirements: [
+            {
+              key: "repair_industrial_facility:general_engineering_parts",
+              kind: "RESOURCE",
+              resource_key: "general_engineering_parts",
+              minimum: 5,
+              status: "UNKNOWN",
+            },
+            {
+              key: "repair_industrial_facility:municipal_repair_materials",
+              kind: "RESOURCE",
+              resource_key: "municipal_repair_materials",
+              minimum: 20,
+              status: "UNKNOWN",
+            },
+            {
+              key: "repair_industrial_facility:electrical_repair_parts",
+              kind: "RESOURCE",
+              resource_key: "electrical_repair_parts",
+              minimum: 15,
+              status: "UNKNOWN",
+            },
+            {
+              key: "repair_industrial_facility:role",
+              kind: "ROLE",
+              display_name: "Industrial Repair Team",
+            },
+          ],
+        }]}
       />,
     );
     fireEvent.click(within(screen.getByTestId("knowledge-accordion-locations")).getByRole("button"));
@@ -3191,10 +3302,11 @@ describe("Formal Play player projections", () => {
     expect(utility).toHaveTextContent("通用维修部件");
     expect(utility).toHaveTextContent("×5");
     expect(utility).toHaveTextContent("×20");
-    expect(utility).toHaveTextContent("修复需求：通用维修部件 ×5、市政维修材料 ×20");
+    expect(utility).toHaveTextContent("Repair industrial facility：通用维修部件 ×5、市政维修材料 ×20");
     expect(utility).toHaveTextContent("电力维修部件 ×15");
-    expect(utility).toHaveTextContent("执行队伍：Industrial Repair Team");
-    expect(utility).toHaveTextContent("关联资源：通用维修部件 ×50，暂不可用，解锁条件：Utility Service Depot恢复运行");
+    expect(utility).toHaveTextContent("所需队伍：Industrial Repair Team");
+    expect(utility).toHaveTextContent("通用维修部件：×50，暂不可用");
+    expect(utility).toHaveTextContent("解锁条件：Utility Service Depot满足运行状态条件");
     expect(utility).toHaveTextContent("重型工程支援：不可用");
     expect(utility).not.toHaveTextContent("修复效果：");
     expect(utility).not.toHaveTextContent("修复后设备正常");
@@ -3214,8 +3326,9 @@ describe("Formal Play player projections", () => {
     expect(unknownFacility).not.toHaveAttribute("open");
     const surveyOnlyFacility = screen.getByTestId("facility-card-survey_only_facility");
     fireEvent.click(surveyOnlyFacility.querySelector("summary")!);
-    expect(surveyOnlyFacility).toHaveTextContent("关联资源：应急燃料 ×50，暂不可用，解锁条件：Surveyed Facility恢复运行");
-    expect(surveyOnlyFacility).not.toHaveTextContent("执行队伍：Survey-only Repair Team");
+    expect(surveyOnlyFacility).toHaveTextContent("应急燃料：×50，暂不可用");
+    expect(surveyOnlyFacility).toHaveTextContent("解锁条件：Surveyed Facility满足解锁条件");
+    expect(surveyOnlyFacility).not.toHaveTextContent("所需队伍：Survey-only Repair Team");
     expect(surveyOnlyFacility).not.toHaveTextContent("暂无更多已知信息");
     fireEvent.click(screen.getByText("East Region"));
     const substation = screen.getByTestId("facility-card-east_distribution_station");
@@ -3225,6 +3338,7 @@ describe("Formal Play player projections", () => {
     fireEvent.click(substationSummary);
     expect(substationSummary.querySelector(".knowledge-facility-toggle")).toHaveTextContent("-");
     expect(substation).toHaveTextContent("送电能力：未具备");
+    expect(substation).toHaveTextContent("恢复条件：设施恢复正常运行并恢复供电");
     expect(substation).toHaveTextContent("可供电：East Community Hospital");
     expect(substation).not.toHaveTextContent("发电能力：");
     const generator = screen.getByTestId("facility-card-emergency_generator");

@@ -44,17 +44,12 @@ export function resourceAvailabilityRequirementText(
   targetName?: string | null,
 ): string | null {
   const subject = targetName?.trim() || '相关设施';
-  const factKey = requirement.fact_key;
-  const value = requirement.value;
-  if (factKey === 'operational') {
-    if (value === true) return subject + '恢复运行';
-    if (value === false) return subject + '停止运行';
-  }
-  if (factKey === 'power_supply') {
-    if (value === 'AVAILABLE' || value === true) return subject + '恢复供电';
-    if (value === 'UNAVAILABLE' || value === false) return subject + '满足供电条件';
-  }
-  return subject + '满足解锁条件';
+  const factLabel = typeof requirement.fact_label === 'string'
+    ? requirement.fact_label.trim()
+    : '';
+  return factLabel
+    ? `${subject}满足${factLabel}条件`
+    : subject + '满足解锁条件';
 }
 
 export type DisplayRequirementLine = {

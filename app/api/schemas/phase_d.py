@@ -668,8 +668,23 @@ class PublicActionRequirementResponse(ApiModel):
     required_actor_role_name: str | None = None
     target_actor_roles: list[dict[str, Any]] = Field(default_factory=list)
     source_relation_type_key: str | None = None
+    source_requirements: list[PublicSourceRequirementResponse] = Field(default_factory=list)
     known_preconditions: list[dict[str, Any]] = Field(default_factory=list)
     resource_requirements: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PublicSourceFactPredicateResponse(ApiModel):
+    fact_key: str
+    operator: Literal["EQ", "NE", "IN", "NOT_IN", "GT", "GTE", "LT", "LTE"]
+    value: Any | None = None
+    values: list[Any] = Field(default_factory=list)
+
+
+class PublicSourceRequirementResponse(ApiModel):
+    source_node_key: str
+    kind: Literal["SOURCE_REQUIREMENTS", "POWER_SOURCE_READINESS"]
+    status: Literal["SATISFIED", "UNSATISFIED"]
+    conditions: list[PublicSourceFactPredicateResponse] = Field(default_factory=list)
 
 
 class PublicTargetActionContractResponse(ApiModel):
@@ -679,10 +694,55 @@ class PublicTargetActionContractResponse(ApiModel):
     required_actor_role_key: str | None = None
     required_actor_role_name: str | None = None
     source_relation_type_key: str | None = None
+    source_node_key: str | None = None
+    source_binding_key: str | None = None
     cost: dict[str, int] = Field(default_factory=dict)
     resource_requirements: list[dict[str, Any]] = Field(default_factory=list)
     special_requirements: list[dict[str, Any]] = Field(default_factory=list)
     effects: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PublicProducerOutputResponse(ApiModel):
+    semantic_key: str
+    target_key: str
+    fact_key: str | None = None
+    resource_key: str | None = None
+    desired_value: Any | None = None
+    status: Literal["SATISFIED", "UNSATISFIED", "UNKNOWN"]
+
+
+class PublicProducerRequirementResponse(ApiModel):
+    key: str
+    kind: Literal["RESOURCE", "ROLE", "INTERACTION", "FACT", "STATE", "SOURCE", "SPECIAL"]
+    status: Literal["SATISFIED", "UNSATISFIED", "UNKNOWN"] | None = None
+    resource_key: str | None = None
+    minimum: int | None = None
+    scope: dict[str, Any] | None = None
+    known_status: Literal["KNOWN", "KNOWN_ZERO", "UNKNOWN"] | None = None
+    known_available: int | None = None
+    role_key: str | None = None
+    display_name: str | None = None
+    node_key: str | None = None
+    fact_key: str | None = None
+    operator: str | None = None
+    value: Any | None = None
+    values: list[Any] = Field(default_factory=list)
+    source_node_key: str | None = None
+    source_kind: str | None = None
+    conditions: list[dict[str, Any]] = Field(default_factory=list)
+    condition: dict[str, Any] | None = None
+
+
+class PublicProducerBindingResponse(ApiModel):
+    binding_key: str
+    action_key: str
+    action_name: str
+    target_key: str
+    source_node_key: str | None = None
+    source_binding_key: str | None = None
+    producer_kind: Literal["ACTION_PRODUCED_STATE", "CONDITION", "RESOURCE_AVAILABILITY"]
+    outputs: list[PublicProducerOutputResponse] = Field(default_factory=list)
+    requirements: list[PublicProducerRequirementResponse] = Field(default_factory=list)
 
 
 class PublicResourceResponse(ApiModel):
@@ -718,6 +778,7 @@ class PlayerGameStateResponse(ApiModel):
     known_target_action_contracts: list[PublicTargetActionContractResponse] = Field(
         default_factory=list
     )
+    known_producer_bindings: list[PublicProducerBindingResponse] = Field(default_factory=list)
     resources: list[PublicResourceResponse]
     resource_intelligence: dict[str, Any] = Field(default_factory=dict)
     actors: list[PublicActorResponse] = Field(default_factory=list)

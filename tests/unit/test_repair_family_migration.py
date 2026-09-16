@@ -7,6 +7,7 @@ from app.agent.planner_contract import (
     action_planner_constraints,
     action_planner_effects,
     planner_source_preconditions,
+    planner_source_requirement_predicates,
     planner_target_contracts,
 )
 from app.domain.action_invocation import canonical_action_invocation_contract
@@ -121,6 +122,17 @@ def test_linjiang_power_source_contract_has_one_authored_predicate() -> None:
     } == {
         ("FACT_NOT_EQUALS", "operational", True),
         ("FACT_NOT_EQUALS", "power_supply", "AVAILABLE"),
+    }
+    assert set(
+        (
+            predicate["fact_key"],
+            predicate["operator"],
+            predicate.get("value"),
+        )
+        for predicate in planner_source_requirement_predicates(definition, supply_action) or ()
+    ) == {
+        ("operational", "EQ", True),
+        ("power_supply", "EQ", "AVAILABLE"),
     }
 
 

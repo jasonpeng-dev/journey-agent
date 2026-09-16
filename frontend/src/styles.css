@@ -205,6 +205,8 @@ button:disabled, .editor-control:disabled { cursor: not-allowed; opacity: .55; }
 .knowledge-facility-attribute { display: flex; align-items: baseline; gap: 4px; min-width: 0; padding: 2px 0; color: var(--console-soft); font-size: 10px; line-height: 1.35; }
 .knowledge-facility-attribute-label { flex: 0 0 auto; font-weight: 700; }
 .knowledge-facility-attribute-value { min-width: 0; color: var(--console-soft); }
+.knowledge-facility-helper { padding-left: 12px; color: #9a8668; font-size: 9.5px; }
+.knowledge-facility-helper .knowledge-facility-attribute-label { font-weight: 650; }
 .knowledge-action-requirements { display: grid; gap: 3px; margin-bottom: 8px; padding: 8px 10px; border: 1px solid #e4eee9; border-radius: 8px; background: #f7fbf8; }
 .knowledge-action-requirements > strong { color: var(--console-jade); font-size: 11px; }
 .knowledge-region-facts { display: grid; margin-bottom: 8px; }
