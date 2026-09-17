@@ -69,61 +69,61 @@ const field = (path: string, type: FieldType, metadata: Omit<FieldMetadata, "pat
 
 export const entityRegistry: Record<EntityKind, EntityMetadata> = {
   node_type: {
-    kind: "node_type", section: "node-types", label: "Node type", collectionPath: ["world", "node_types"],
+    kind: "node_type", section: "node-types", label: "节点类型", collectionPath: ["world", "node_types"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
   },
   node: {
-    kind: "node", section: "world-entities", label: "Node", collectionPath: ["world", "nodes"],
+    kind: "node", section: "world-entities", label: "节点", collectionPath: ["world", "nodes"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("node_type_key", "reference", { referenceDomain: "node_type" }), field("initial_access", "enum", { enum: V2_ENUMS.access }), field("initial_visibility", "enum", { enum: V2_ENUMS.visibility }), field("interaction_keys", "multi-reference", { referenceDomain: "interaction" })],
     nested: ["facts"],
   },
   relation_type: {
-    kind: "relation_type", section: "relations", label: "Relation type", collectionPath: ["world", "relation_types"],
+    kind: "relation_type", section: "relations", label: "关系类型", collectionPath: ["world", "relation_types"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
   },
   relation: {
-    kind: "relation", section: "relations", label: "Relation", collectionPath: ["world", "relations"],
+    kind: "relation", section: "relations", label: "关系", collectionPath: ["world", "relations"],
     fields: [field("key", "text"), field("source_node_key", "reference", { referenceDomain: "node" }), field("relation_type_key", "reference", { referenceDomain: "relation_type" }), field("target_node_key", "reference", { referenceDomain: "node" }), field("initial_visibility", "enum", { enum: V2_ENUMS.relationVisibility })],
   },
   resource: {
-    kind: "resource", section: "resources", label: "Resource", collectionPath: ["world", "resources"],
+    kind: "resource", section: "resources", label: "资源", collectionPath: ["world", "resources"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("initial_value", "integer"), field("minimum", "integer"), field("maximum", "integer"), field("reservation_supported", "boolean"), field("unit", "text"), field("display_unit", "text")],
   },
   role: {
-    kind: "role", section: "roles", label: "Role", collectionPath: ["actors", "roles"],
+    kind: "role", section: "roles", label: "角色", collectionPath: ["actors", "roles"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("capabilities", "multi-enum", { enum: V2_ENUMS.capabilities })],
   },
   actor: {
-    kind: "actor", section: "actors", label: "Actor profile", collectionPath: ["actors", "actor_profiles"],
+    kind: "actor", section: "actors", label: "参与者档案", collectionPath: ["actors", "actor_profiles"],
     fields: [field("key", "text"), field("name", "text"), field("role_key", "reference", { referenceDomain: "role" }), field("persona", "textarea"), field("initial_node_key", "reference", { referenceDomain: "node" }), field("allowed_action_keys", "multi-reference", { referenceDomain: "action" }), field("command_reachability", "enum", { enum: ["ONLINE", "DISCONNECTED"] })],
     nested: ["doctrine", "authority_policy"],
   },
   interaction: {
-    kind: "interaction", section: "interactions", label: "Interaction", collectionPath: ["interactions"],
+    kind: "interaction", section: "interactions", label: "交互能力", collectionPath: ["interactions"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
   },
   action: {
-    kind: "action", section: "actions", label: "Action", collectionPath: ["actions"],
+    kind: "action", section: "actions", label: "行动", collectionPath: ["actions"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("required_interaction_key", "reference", { referenceDomain: "interaction" }), field("execution_mode", "enum", { enum: V2_ENUMS.executionMode }), field("behavior", "enum", { enum: V2_ENUMS.behavior }), field("locality", "enum", { enum: V2_ENUMS.locality }), field("target_kind", "enum", { enum: V2_ENUMS.targetKind }), field("target_node_type_keys", "multi-reference", { referenceDomain: "node_type" }), field("target_semantic_reference_type", "enum", { enum: V2_ENUMS.actionTargetReference }), field("required_actor_role_key", "reference", { referenceDomain: "role" }), field("allowed_actor_capabilities", "multi-enum", { enum: V2_ENUMS.capabilities }), field("source_relation_type_key", "reference", { referenceDomain: "relation_type" })],
     nested: ["parameters", "expected_outcomes", "planning", "target_actor_roles", "operation_bindings", "goal_required_slots", "authority_policy"],
   },
   rule: {
-    kind: "rule", section: "rules", label: "Rule", collectionPath: ["rules"],
+    kind: "rule", section: "rules", label: "规则", collectionPath: ["rules"],
     fields: [field("key", "text"), field("phase", "enum", { enum: V2_ENUMS.phase }), field("trigger", "enum", { enum: V2_ENUMS.trigger }), field("action_key", "reference", { referenceDomain: "action" }), field("priority", "integer")],
     nested: ["condition", "effects"],
   },
   objective: {
-    kind: "objective", section: "objectives", label: "Objective", collectionPath: ["objectives"],
+    kind: "objective", section: "objectives", label: "目标", collectionPath: ["objectives"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("goal_aliases", "text"), field("goal_examples", "text"), field("planning_guidance", "textarea")],
     nested: ["completion_requirements", "prerequisites", "subsumes"],
   },
   derived_state: {
-    kind: "derived_state", section: "derived-states", label: "Derived state", collectionPath: ["derived_states"],
+    kind: "derived_state", section: "derived-states", label: "派生状态", collectionPath: ["derived_states"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("value_type", "enum", { enum: V2_ENUMS.factType }), field("available_value", "text"), field("unavailable_value", "text")],
     nested: ["dependencies"],
   },
   public_reference: {
-    kind: "public_reference", section: "public-references", label: "Public reference", collectionPath: ["public_references"],
+    kind: "public_reference", section: "public-references", label: "公共引用", collectionPath: ["public_references"],
     fields: [field("term", "text"), field("ref_type", "enum", { enum: V2_ENUMS.publicReferenceType }), field("ref_key", "text")],
   },
 };

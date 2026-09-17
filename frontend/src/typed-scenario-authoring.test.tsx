@@ -59,7 +59,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     fireEvent.change(screen.getByLabelText("条件类型"), { target: { value: "RESOURCE_COMPARE" } });
     expect(screen.getByLabelText("资源")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("效果类型"), { target: { value: "REVEAL_TARGET_REGION_FACILITY_FACTS" } });
-    expect(screen.getByText(/effect has no additional fields/)).toBeInTheDocument();
+    expect(screen.getByText(/此效果没有额外字段/)).toBeInTheDocument();
 
     const effectKind = screen.getByLabelText("效果类型") as HTMLSelectElement;
     expect(Array.from(effectKind.options).map((option) => option.value)).toContain("SET_RESOURCE_POOL_AVAILABILITY");
@@ -112,7 +112,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     })} />);
     expandNestedCards();
     expect(screen.getByDisplayValue("pre_req")).toBeInTheDocument();
-    expect(screen.getByText("Requirements")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "完成要求" })).toBeInTheDocument();
 
     render(<EntityHarness initial={entity("derived_state", {
       key: "derived",
@@ -139,9 +139,9 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       parameters: [{ key: "amount", name: "Amount", value_type: "INTEGER", required: false }],
     })} document={document} onChange={onChange} />);
     expandNestedCards();
-    expect(screen.getByLabelText("Target node types")).toBeInTheDocument();
+    expect(screen.getByLabelText("目标节点类型")).toBeInTheDocument();
     expect(screen.getByLabelText("来源关系类型")).toHaveValue("contains");
-    expect(screen.getByLabelText("Default")).toBeInTheDocument();
+    expect(screen.getByLabelText("默认值")).toBeInTheDocument();
     expect(screen.getByLabelText("语义引用")).toBeInTheDocument();
 
     cleanup();
@@ -153,15 +153,15 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       value_labels: [],
       dependencies: [],
     })} />);
-    expect(screen.getByText("Value labels")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Add value label/ }));
-    expect(screen.getByLabelText("Display label")).toBeInTheDocument();
+    expect(screen.getByText("值标签")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /添加值标签/ }));
+    expect(screen.getByLabelText("显示标签")).toBeInTheDocument();
   });
 
   it("renders scenario locality as typed overview fields", () => {
     render(<TypedEditor section="overview" value={{ key: "scenario", name: "Scenario", description: "", locality: { enabled: true, scoped_resources: true, region_node_type_key: "facility", facility_node_type_key: "facility", transport_node_type_key: "facility", located_in_relation_type_key: "contains", transport_endpoint_relation_type_key: "contains" } }} document={document} onChange={vi.fn()} />);
-    expect(screen.getByLabelText("Region node type")).toHaveValue("facility");
-    expect(screen.getByLabelText("Located-in relation type")).toHaveValue("contains");
+    expect(screen.getByLabelText("区域节点类型")).toHaveValue("facility");
+    expect(screen.getByLabelText("归属关系类型")).toHaveValue("contains");
   });
 
   it("authors initialization availability requirements and root planning/goal/public sections", () => {

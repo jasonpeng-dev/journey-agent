@@ -1,4 +1,5 @@
 import type { JsonObject } from "../../editor";
+import { editorLabel } from "../../ui";
 import { BooleanControl, EnumSelect, NumberInput, TextInput } from "./FormPrimitives";
 
 type ValueLabelEditorProps = {
@@ -48,13 +49,13 @@ export function ValueLabelList({ value, valueType, allowedValues = [], path, onC
     onChange(labels.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: next } : item));
   };
   return <section className="nested-list value-label-list">
-    <div className="typed-array-heading"><h4>Value labels</h4><button type="button" className="small" onClick={() => onChange([...labels, { value: scalarDefault(type, allowed), label: "" }])}>＋ Add value label</button></div>
+    <div className="typed-array-heading"><h4>{editorLabel("Value labels")}</h4><button type="button" className="small" onClick={() => onChange([...labels, { value: scalarDefault(type, allowed), label: "" }])}>＋ {editorLabel("Add value label")}</button></div>
     {labels.map((item, index) => <article className="nested-editor value-label-editor" key={`${path}.${index}`}>
       <div className="typed-grid">
         <ScalarValueInput value={item.value} valueType={type} allowedValues={allowed} path={`${path}.${index}.value`} onChange={(next) => update(index, "value", next)} />
         <TextInput value={item.label} onChange={(next) => update(index, "label", next)} path={`${path}.${index}.label`} label="Display label" />
       </div>
-      <button type="button" className="small danger" onClick={() => onChange(labels.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>
+      <button type="button" className="small danger" onClick={() => onChange(labels.filter((_, itemIndex) => itemIndex !== index))}>{editorLabel("Remove")}</button>
     </article>)}
   </section>;
 }

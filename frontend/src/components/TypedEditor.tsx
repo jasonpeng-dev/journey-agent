@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { factInitialValueMetadata, metadataForKind, rootFieldRegistry, type FieldMetadata } from "../editor-registry";
 import type { RootCollectionSelection } from "../editor-collections";
 import type { DraftObject, JsonObject } from "../editor";
-import { fieldLabel } from "../ui";
+import { editorLabel, fieldLabel } from "../ui";
 import {
   AdvancedSection,
   BooleanControl,
@@ -116,7 +116,7 @@ function FactEditor({ value, document, path, onChange }: { value: JsonObject; do
 
 function FactList({ value, document, path, onChange }: { value: unknown; document: JsonObject; path: string; onChange: (value: unknown) => void }) {
   const facts = Array.isArray(value) ? value : [];
-  return <section className="nested-list"><div className="typed-array-heading"><h4>Facts</h4><button type="button" className="small" onClick={() => onChange([...facts, { key: "new_fact", name: "New fact", description: "", value_type: "BOOLEAN", initial_value: false, initial_visibility: "KNOWN", allowed_values: [] }])}>＋ 添加 Fact</button></div>{facts.map((fact, index) => fact && typeof fact === "object" && !Array.isArray(fact) ? <FactEditor key={`${path}.${index}`} value={fact as JsonObject} document={document} path={`${path}.${index}`} onChange={(next) => onChange(facts.map((old, oldIndex) => oldIndex === index ? next : old))} /> : null)}</section>;
+  return <section className="nested-list"><div className="typed-array-heading"><h4>{editorLabel("Facts")}</h4><button type="button" className="small" onClick={() => onChange([...facts, { key: "new_fact", name: "新事实", description: "", value_type: "BOOLEAN", initial_value: false, initial_visibility: "KNOWN", allowed_values: [] }])}>＋ {editorLabel("Add fact")}</button></div>{facts.map((fact, index) => fact && typeof fact === "object" && !Array.isArray(fact) ? <FactEditor key={`${path}.${index}`} value={fact as JsonObject} document={document} path={`${path}.${index}`} onChange={(next) => onChange(facts.map((old, oldIndex) => oldIndex === index ? next : old))} /> : null)}</section>;
 }
 
 function EntityEditor({ entity, document, onChange, focusPath }: { entity: DraftObject; document: JsonObject; onChange: (value: JsonObject) => void; focusPath?: string | null }) {
@@ -140,14 +140,14 @@ function EntityEditor({ entity, document, onChange, focusPath }: { entity: Draft
   </div>
     {entity.kind === "node" && <FactList value={value.facts} document={document} path={`${entity.kind}.${entity.key}.facts`} onChange={(next) => onChange({ ...value, facts: next })} />}
     {metadata.nested?.map((nested) => <AdvancedJsonField key={nested} value={value[nested]} onChange={(next) => onChange({ ...value, [nested]: next })} path={`${entity.kind}.${entity.key}.${nested}`} label={fieldLabel(nested)} />)}
-    <p className="typed-help">未在基础表单中展开的合法字段会保留在原 Draft；复杂结构当前标记为 Advanced，不会静默删除。</p>
+    <p className="typed-help">未在基础表单中展开的合法字段会保留在原始草稿中；复杂结构当前标记为高级结构，不会静默删除。</p>
   </div>;
 }
 
 function RootEditor({ rootKey, value, document, onChange }: { rootKey: string; value: unknown; document: JsonObject; onChange: (value: unknown) => void }) {
   const object = cloneObject(value);
   const fields = rootFieldRegistry[rootKey] ?? [];
-  return <div className="typed-root-editor"><div className="typed-grid">{fields.map((metadata) => <FieldRow key={metadata.path} metadata={metadata} value={object} document={document} path={rootKey} onChange={onChange as (value: JsonObject) => void} />)}</div>{rootKey === "initialization" && <p className="typed-help">Resource definitions 在 World 中维护；resource initial states、pools 和 region knowledge 属于初始化数据，当前保留为 Advanced 结构。</p>}{rootKey === "planning" && <p className="typed-help">Planning instructions 已提供 typed 文本数组入口；recovery hints 在 Phase 3 Rule/Planning 表单中展开。</p>}</div>;
+  return <div className="typed-root-editor"><div className="typed-grid">{fields.map((metadata) => <FieldRow key={metadata.path} metadata={metadata} value={object} document={document} path={rootKey} onChange={onChange as (value: JsonObject) => void} />)}</div>{rootKey === "initialization" && <p className="typed-help">资源定义在世界模型中维护；资源初始状态、资源池和区域资源知识属于初始化数据，当前以高级结构保留。</p>}{rootKey === "planning" && <p className="typed-help">规划指引已提供结构化文本数组入口；恢复提示会在规则与规划表单中展开。</p>}</div>;
 }
 
 export function TypedEditor({ section, value, document, onChange, path = section, focusPath, collectionSelection = null, onCollectionChange, onCollectionRemove }: Props) {
