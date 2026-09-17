@@ -20,6 +20,7 @@ from app.api.schemas.phase_d import (
     PublicActionLocationResponse,
     PublicActionRequirementResponse,
     PublicActorResponse,
+    PublicEntityPresentationResponse,
     PublicExecutionPhase,
     PublicFactResponse,
     PublicGameStatus,
@@ -38,6 +39,7 @@ from app.api.schemas.phase_d import (
     PublicPlanningCycleResponse,
     PublicPlanResponse,
     PublicPlanStepResponse,
+    PublicPresentationResponse,
     PublicProducerBindingResponse,
     PublicRelationResponse,
     PublicResolvedGoalDraftResponse,
@@ -85,6 +87,7 @@ from app.infrastructure.db.models import (
     PlayerExecutionCheckpoint,
     ResolvedGoalDraft,
     Scenario,
+    ScenarioPresentationProfile,
     ScenarioVersion,
     WorldOperation,
 )
@@ -102,6 +105,7 @@ from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.mission_roadmap import MissionRoadmap, MissionRoadmapProjector
 from app.services.player_action_report import format_player_knowledge_changes
 from app.services.player_pacing import PlayerExecutionPhase
+from app.services.presentation_resolver import resolved_presentation_for_scenario
 from app.services.spatial_projection import SpatialDisplayProjector, SpatialNodeProjection
 
 
@@ -130,8 +134,16 @@ class PlayerProjectionService:
     ) -> PlayerGameStateResponse:
         scope = GameInstanceService(self.db).load(game_instance_id)
         game = GameLifecycleService(self.db).get(game_instance_id)
+        scenario_version = self.db.get(ScenarioVersion, scope.scenario_version_id)
+        assert scenario_version is not None
         definition = ScenarioVersionRepository(self.db).load(scope.scenario_version_id).definition
         assert isinstance(definition, ScenarioDefinitionV2)
+        stored_profile = self.db.get(ScenarioPresentationProfile, scenario_version.scenario_id)
+        presentation = resolved_presentation_for_scenario(
+            definition,
+            stored_profile.profile_document if stored_profile is not None else None,
+        )
+        presentation_revision = stored_profile.revision if stored_profile is not None else 1
         node_definitions = {item.key: item for item in definition.world.nodes}
         resource_definitions = {item.key: item for item in definition.world.resources}
         role_definitions = {item.key: item for item in definition.actors.roles}
@@ -240,6 +252,9 @@ class PlayerProjectionService:
                     if item.name.strip()
                 ]
             ),
+            presentation=PublicPresentationResponse(
+                **presentation.public_document(revision=presentation_revision)
+            ),
             visible_nodes=[
                 PublicNodeResponse(
                     key=item.node_key,
@@ -251,6 +266,11 @@ class PlayerProjectionService:
                         else None
                     ),
                     node_family=definition.node_family_for_node(item.node_key).value,
+                    presentation=self._entity_presentation(
+                        presentation,
+                        definition.node_family_for_node(item.node_key).value,
+                        item.node_key,
+                    ),
                     region_key=(
                         node_projections[item.node_key].region_key
                         if node_projections[item.node_key] is not None
@@ -301,6 +321,19 @@ class PlayerProjectionService:
                         else None
                     ),
                     node_family=definition.node_family_for_node(item.node_key).value,
+                    value_label=presentation.fact_value_label(
+                        next(
+                            fact
+                            for fact in node_definitions[item.node_key].facts
+                            if fact.key == item.fact_key
+                        ),
+                        item.truth_value,
+                    ),
+                    presentation_slot=self._fact_presentation_slot(
+                        definition,
+                        item.node_key,
+                        item.fact_key,
+                    ),
                     region_key=(
                         node_projections[item.node_key].region_key
                         if node_projections[item.node_key] is not None
@@ -342,6 +375,21 @@ class PlayerProjectionService:
                         if str(item["target_node_key"]) in node_definitions
                         else None
                     ),
+                    relation_type_name=(
+                        relation_type.name
+                        if (
+                            relation_type := definition.world.relation_type(
+                                str(item["relation_type_key"])
+                            )
+                        )
+                        is not None
+                        else None
+                    ),
+                    relation_type_description=(
+                        relation_type.description
+                        if relation_type is not None
+                        else None
+                    ),
                 )
                 for item in known_relations
             ],
@@ -373,6 +421,8 @@ class PlayerProjectionService:
                     scope_node_name=spatial.resource_scope(item.scope_node_key).scope_node_name,
                     scope_region_key=spatial.resource_scope(item.scope_node_key).scope_region_key,
                     scope_region_name=spatial.resource_scope(item.scope_node_key).scope_region_name,
+                    unit=resource_definitions[item.resource_key].unit,
+                    display_unit=resource_definitions[item.resource_key].display_unit,
                 )
                 for item in public_resources
             ],
@@ -429,6 +479,56 @@ class PlayerProjectionService:
             ],
             pending_approval_id=pending,
         )
+
+    @staticmethod
+    def _entity_presentation(
+        presentation: Any,
+        family: str,
+        semantic_key: str | None = None,
+    ) -> PublicEntityPresentationResponse:
+        resolved = presentation.entity(family, semantic_key=semantic_key)
+        return PublicEntityPresentationResponse(
+            summary_slot=resolved.summary_slot.value,
+            detail_level=resolved.detail_level.value,
+            default_open=resolved.default_open.value,
+            knowledge_level=resolved.knowledge_level.value,
+            semantic_order=[item.value for item in resolved.semantic_order],
+        )
+
+    @staticmethod
+    def _fact_presentation_slot(
+        definition: ScenarioDefinitionV2,
+        node_key: str,
+        fact_key: str,
+    ) -> str:
+        """Assign a bounded header slot from authored fact order and family.
+
+        The resolver does not attach meaning to a machine Fact key.  The
+        first safe Fact authored for a Facility/Transport is the primary
+        header and the second is secondary; all remaining known Facts stay in
+        the semantic body.  Profiles can still change depth and placement
+        without changing Knowledge or Truth.
+        """
+
+        node = definition.world.node(node_key)
+        if node is None:
+            return "SEMANTIC"
+        index = next(
+            (index for index, fact in enumerate(node.facts) if fact.key == fact_key),
+            None,
+        )
+        family = definition.node_family_for_node(node_key).value
+        if index is None:
+            return "SEMANTIC"
+        if family == "FACILITY":
+            if index == 0:
+                return "HEADER_PRIMARY"
+            if index == 1:
+                return "HEADER_SECONDARY"
+            return "SEMANTIC"
+        if family == "TRANSPORT" and index == 0:
+            return "HEADER_PRIMARY"
+        return "SEMANTIC"
 
     @staticmethod
     def _is_player_usable_regional_pool(item: GameInstanceResourceState) -> bool:

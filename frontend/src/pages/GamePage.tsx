@@ -1189,6 +1189,7 @@ export function KnowledgeAccordion({
 }
 
 type KnownWorldAccordionsProps = {
+  presentation?: PlayerGameState["presentation"];
   resources: PlayerGameState["resources"];
   publicResourceNames?: Record<string, string>;
   resourceIntelligence?: ResourceIntelligence;
@@ -1204,6 +1205,7 @@ type KnownWorldAccordionsProps = {
 };
 
 export function KnownWorldAccordions({
+  presentation,
   resources,
   publicResourceNames = {},
   resourceIntelligence,
@@ -1260,23 +1262,27 @@ export function KnownWorldAccordions({
   const assignedFactKeys = new Set<string>();
   const assignedRelationKeys = new Set<string>();
   const factIdentity = (fact: PlayerGameState["known_facts"][number]) => `${fact.node_key}:${fact.fact_key}`;
+  const nodeFamily = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
+    node?.node_family ?? node?.node_type_key?.toUpperCase();
+  const factFamily = (fact: PlayerGameState["known_facts"][number]) =>
+    fact.node_family ?? fact.node_type_key?.toUpperCase();
   const isRegionNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
-    node?.node_type_key === "region";
+    nodeFamily(node) === "REGION";
   const isFacilityNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
-    node?.node_type_key === "facility";
+    nodeFamily(node) === "FACILITY";
   const isTransportNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
-    node?.node_type_key === "transport";
+    nodeFamily(node) === "TRANSPORT";
 
   knownFacts.forEach((fact) => {
     const node = nodeByKey.get(fact.node_key);
     const facts = factsByNode.get(fact.node_key) ?? [];
     facts.push(fact);
     factsByNode.set(fact.node_key, facts);
-    if (isFacilityNode(node) || fact.node_type_key === "facility" || isTransportNode(node)) {
+    if (isFacilityNode(node) || factFamily(fact) === "FACILITY" || isTransportNode(node)) {
       assignedFactKeys.add(factIdentity(fact));
       return;
     }
-    if (isRegionNode(node) || fact.node_type_key === "region") {
+    if (isRegionNode(node) || factFamily(fact) === "REGION") {
       const regionKey = node?.key ?? fact.region_key;
       if (regionKey) {
         const group = regionFacts.get(regionKey) ?? [];
@@ -1471,7 +1477,7 @@ export function KnownWorldAccordions({
                         <span className="knowledge-relation-arrow" aria-hidden="true">{"\u2192"}</span>
                         <strong>{nodeDisplayName(relation.target_node_key, relation.target_node_name)}</strong>
                       </div>
-                      <small>{knownRelationDescription(relation.relation_type_key)}</small>
+                      <small>{knownRelationDescription(relation.relation_type_key, relation.relation_type_name)}</small>
                     </div>
                   ))}
                 </div>
@@ -1482,9 +1488,14 @@ export function KnownWorldAccordions({
                   const nodeRelations = relationsBySource.get(node.key) ?? [];
                   const facility = isFacilityNode(node);
                   const transport = isTransportNode(node);
-                  const powerFact = nodeFacts.find((fact) => fact.fact_key === "power_supply");
-                  const operationalFact = nodeFacts.find((fact) => fact.fact_key === "operational");
-                  const passabilityFact = nodeFacts.find((fact) => fact.fact_key === "passable");
+                  const primaryHeaderFact = nodeFacts.find(
+                    (fact) => fact.presentation_slot === "HEADER_PRIMARY",
+                  );
+                  const secondaryHeaderFact = nodeFacts.find(
+                    (fact) => fact.presentation_slot === "HEADER_SECONDARY",
+                  );
+                  const leadingFact = primaryHeaderFact ?? nodeFacts[0];
+                  const supportingFact = secondaryHeaderFact ?? nodeFacts[1];
                   const targetContracts = targetContractsFor(node.key);
                   const associatedResources = node.associated_known_resources ?? [];
                   const facilityResourceRows = facility
@@ -1538,8 +1549,8 @@ export function KnownWorldAccordions({
                             <strong>{node.name}</strong>
                             <small>{node.endpoint_region_names?.join(" ↔ ") ?? group.name}</small>
                           </span>
-                          <span className={"knowledge-facility-status " + statusTone(passabilityFact?.value ?? "UNKNOWN")}>
-                            {passabilityFact ? factDisplayValue(passabilityFact) : "待探索"}
+                          <span className={"knowledge-facility-status " + statusTone(leadingFact?.value ?? "UNKNOWN")}>
+                            {leadingFact ? factDisplayValue(leadingFact) : "待探索"}
                           </span>
                           <span className="knowledge-transport-column-spacer" aria-hidden="true" />
                         </div>
@@ -1548,7 +1559,10 @@ export function KnownWorldAccordions({
                   }
 
                   if (facility) {
-                    const facilityOpen = expandedFacilities[node.key] === true;
+                    const defaultFacilityOpen = node.presentation?.default_open === "FULL"
+                      || presentation?.default_open === "FULL";
+                    const facilityOpen = expandedFacilities[node.key]
+                      ?? defaultFacilityOpen;
                     return (
                       <details
                         className="knowledge-facility-card"
@@ -1569,11 +1583,11 @@ export function KnownWorldAccordions({
                             <strong>{node.name}</strong>
                           </span>
                           <span className="knowledge-facility-statuses">
-                            <span className={"knowledge-facility-status " + statusTone(powerFact?.value ?? "UNKNOWN")}>
-                              {powerFact ? factDisplayValue(powerFact) : "供电未知"}
+                            <span className={"knowledge-facility-status " + statusTone(supportingFact?.value ?? "UNKNOWN")}>
+                              {supportingFact ? factDisplayValue(supportingFact) : "供电未知"}
                             </span>
-                            <span className={"knowledge-facility-status " + statusTone(operationalFact?.value ?? "UNKNOWN")}>
-                              {operationalFact ? facilityStatusDisplayValue(operationalFact) : "状态未知"}
+                            <span className={"knowledge-facility-status " + statusTone(leadingFact?.value ?? "UNKNOWN")}>
+                              {leadingFact ? facilityStatusDisplayValue(leadingFact) : "状态未知"}
                             </span>
                           </span>
                           <span className="knowledge-facility-toggle" aria-hidden="true">
@@ -1622,7 +1636,7 @@ export function KnownWorldAccordions({
                               <span className="knowledge-relation-arrow" aria-hidden="true">{"\u2192"}</span>
                               <strong>{relation.target_node_name ?? relation.target_node_key}</strong>
                             </div>
-                            <small>{knownRelationDescription(relation.relation_type_key)}</small>
+                            <small>{knownRelationDescription(relation.relation_type_key, relation.relation_type_name)}</small>
                           </div>
                         ))}
                         {nodeFacts.length === 0 && nodeRelations.length === 0 && (
@@ -1777,7 +1791,12 @@ export function KnownWorldAccordions({
                         knownResources.map(({ resourceKey, resource, synthetic }) => (
                           <div className="knowledge-entry" key={regionKey + ":" + resourceKey}>
                             <div className="knowledge-entry-copy">
-                              <strong>{resource.resource_name}</strong>
+                              <strong>
+                                {resource.resource_name}
+                                {(resource.display_unit ?? resource.unit)
+                                  ? ` · ${resource.display_unit ?? resource.unit}`
+                                  : ""}
+                              </strong>
                               {!synthetic && !region.resource_survey_completed && <small>已确认</small>}
                               {resource.pools
                                 .filter(
@@ -1831,7 +1850,14 @@ export function KnownWorldAccordions({
                       .filter(([, resource]) => (resource.known_total ?? resource.known_available) > 0)
                       .map(([resourceKey, resource]) => (
                         <div className="knowledge-entry" key={"global:" + resourceKey}>
-                          <div className="knowledge-entry-copy"><strong>{resource.resource_name}</strong></div>
+                          <div className="knowledge-entry-copy">
+                            <strong>
+                              {resource.resource_name}
+                              {(resource.display_unit ?? resource.unit)
+                                ? ` · ${resource.display_unit ?? resource.unit}`
+                                : ""}
+                            </strong>
+                          </div>
                           <span className="console-pill success knowledge-status-pill">
                             {resource.known_total == null || resource.known_total === resource.known_available
                               ? resource.known_available
@@ -1948,7 +1974,7 @@ export function KnownWorldAccordions({
                   <span className="knowledge-relation-arrow" aria-hidden="true">→</span>
                   <strong>{relation.target_node_name ?? relation.target_node_key}</strong>
                 </div>
-                <small>{knownRelationDescription(relation.relation_type_key)}</small>
+                <small>{knownRelationDescription(relation.relation_type_key, relation.relation_type_name)}</small>
               </div>
             ))}
           </div>
@@ -2413,6 +2439,7 @@ export function GamePage() {
         <aside className="command-panel world-panel">
           <header className="command-panel-heading"><div><p>01 · 世界</p><h1>已知世界</h1></div><span className="console-pill success">玩家可见</span></header>
           <KnownWorldAccordions
+            presentation={play.data.presentation}
             resources={play.data.resources}
             publicResourceNames={roadmapResourceNames}
             resourceIntelligence={play.data.resource_intelligence}

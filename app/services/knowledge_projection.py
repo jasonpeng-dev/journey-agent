@@ -1629,7 +1629,7 @@ class SharedKnowledgeProjection:
     def resource_intelligence(self) -> dict[str, Any]:
         """Return region/resource aggregates plus visible Pool detail."""
 
-        resource_names = {item.key: item.name for item in self.definition.world.resources}
+        resource_definitions = {item.key: item for item in self.definition.world.resources}
         grouped: dict[tuple[str | None, str], list[KnownResourcePoolView]] = defaultdict(list)
         for pool in self.visible_resource_pools():
             grouped[(pool.region_key, pool.resource_key)].append(pool)
@@ -1640,10 +1640,16 @@ class SharedKnowledgeProjection:
             for (pool_region, resource_key), pool_rows in grouped.items():
                 if pool_region != region_key:
                     continue
-                resources[resource_key] = self._resource_summary(
+                summary = self._resource_summary(
                     pool_rows,
-                    resource_names[resource_key],
+                    resource_definitions[resource_key].name,
                 )
+                resource = resource_definitions[resource_key]
+                if resource.unit is not None:
+                    summary["unit"] = resource.unit
+                if resource.display_unit is not None:
+                    summary["display_unit"] = resource.display_unit
+                resources[resource_key] = summary
             regions[region_key] = {
                 "region_name": region_node.name if region_node is not None else region_key,
                 "resource_inventory_visibility": state.resource_inventory_visibility.value,
@@ -1653,9 +1659,15 @@ class SharedKnowledgeProjection:
         global_resources: dict[str, Any] = {}
         for (global_region_key, resource_key), pool_rows in grouped.items():
             if global_region_key is None:
-                global_resources[resource_key] = self._resource_summary(
-                    pool_rows, resource_names[resource_key]
+                summary = self._resource_summary(
+                    pool_rows, resource_definitions[resource_key].name
                 )
+                resource = resource_definitions[resource_key]
+                if resource.unit is not None:
+                    summary["unit"] = resource.unit
+                if resource.display_unit is not None:
+                    summary["display_unit"] = resource.display_unit
+                global_resources[resource_key] = summary
         return {
             "total_regions": len(self.region_keys),
             "visible_region_count": sum(
@@ -1724,6 +1736,16 @@ class SharedKnowledgeProjection:
                     continue
                 zero_summary = {
                     "resource_name": definition_resource.name,
+                    **(
+                        {"unit": definition_resource.unit}
+                        if definition_resource.unit is not None
+                        else {}
+                    ),
+                    **(
+                        {"display_unit": definition_resource.display_unit}
+                        if definition_resource.display_unit is not None
+                        else {}
+                    ),
                     "known_total": 0,
                     "known_available": 0,
                     "knowledge_status": "KNOWN_ZERO",

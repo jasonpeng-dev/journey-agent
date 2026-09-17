@@ -664,6 +664,8 @@ class PublicFactResponse(ApiModel):
     node_name: str | None = None
     node_type_key: str | None = None
     node_family: Literal["GENERIC", "REGION", "FACILITY", "TRANSPORT"] = "GENERIC"
+    value_label: str | None = None
+    presentation_slot: Literal["HEADER_PRIMARY", "HEADER_SECONDARY", "SEMANTIC"] = "SEMANTIC"
     region_key: str | None = None
     region_name: str | None = None
     endpoint_region_keys: list[str] = Field(default_factory=list)
@@ -681,6 +683,26 @@ class PublicNodeResponse(ApiModel):
     endpoint_region_keys: list[str] = Field(default_factory=list)
     endpoint_region_names: list[str] = Field(default_factory=list)
     associated_known_resources: list[dict[str, Any]] = Field(default_factory=list)
+    presentation: PublicEntityPresentationResponse | None = None
+
+
+class PublicEntityPresentationResponse(ApiModel):
+    summary_slot: Literal["HEADER", "BODY", "BOTH"]
+    detail_level: Literal["SUMMARY", "DETAIL", "CAUSALITY"]
+    default_open: Literal["COLLAPSED", "COMPACT", "FULL"]
+    knowledge_level: Literal["A", "A+B", "A+B+C"]
+    semantic_order: list[
+        Literal[
+            "NAME",
+            "NODE_TYPE",
+            "VISIBILITY",
+            "ACCESS",
+            "FACTS",
+            "RELATIONS",
+            "RESOURCES",
+            "STATUS",
+        ]
+    ] = Field(default_factory=list)
 
 
 class PublicRelationResponse(ApiModel):
@@ -690,6 +712,8 @@ class PublicRelationResponse(ApiModel):
     target_node_key: str
     source_node_name: str | None = None
     target_node_name: str | None = None
+    relation_type_name: str | None = None
+    relation_type_description: str | None = None
 
 
 class PublicActionRequirementResponse(ApiModel):
@@ -812,6 +836,8 @@ class PublicResourceResponse(ApiModel):
     scope_node_name: str | None = None
     scope_region_key: str | None = None
     scope_region_name: str | None = None
+    unit: str | None = None
+    display_unit: str | None = None
 
 
 class PublicActorResponse(ApiModel):
@@ -833,11 +859,29 @@ class PublicScenarioMetadataResponse(ApiModel):
     goal_presets: list[PublicGoalPresetResponse] = Field(default_factory=list)
 
 
+class PublicPresentationResponse(ApiModel):
+    revision: int = Field(ge=1)
+    template: Literal["compact", "standard", "detailed"]
+    density: Literal["COMPACT", "STANDARD", "DETAILED"]
+    default_open: Literal["COLLAPSED", "COMPACT", "FULL"]
+    summary_slot: Literal["HEADER", "BODY", "BOTH"]
+    entity_detail: Literal["SUMMARY", "DETAIL", "CAUSALITY"]
+    knowledge_level: Literal["A", "A+B", "A+B+C"]
+    semantic_order: list[str] = Field(default_factory=list)
+    resource_order: list[str] = Field(default_factory=list)
+    relation_order: list[str] = Field(default_factory=list)
+    actor_fields: list[str] = Field(default_factory=list)
+    roadmap_detail: Literal["SUMMARY", "DETAIL", "CAUSALITY"]
+    plan_default: Literal["COLLAPSED", "COMPACT", "FULL"]
+    timeline_density: Literal["COMPACT", "STANDARD", "DETAILED"]
+
+
 class PlayerGameStateResponse(ApiModel):
     game: GameSummaryResponse
     scenario_metadata: PublicScenarioMetadataResponse = Field(
         default_factory=PublicScenarioMetadataResponse
     )
+    presentation: PublicPresentationResponse | None = None
     visible_nodes: list[PublicNodeResponse]
     known_facts: list[PublicFactResponse]
     known_relations: list[PublicRelationResponse] = Field(default_factory=list)
@@ -925,11 +969,13 @@ __all__ = [
     "PublicActionBriefingResponse",
     "PublicActionDebriefResponse",
     "PublicActionRequirementResponse",
+    "PublicEntityPresentationResponse",
     "PublicExecutionPhase",
     "PublicGameStatus",
     "PublicGoalRequirementResponse",
     "PublicPlanResponse",
     "PublicPlanStepResponse",
+    "PublicPresentationResponse",
     "PublicResolvedGoalDraftResponse",
     "PublicStepStatus",
     "PublicTaskResponse",

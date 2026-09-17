@@ -103,6 +103,12 @@ function factPresentationOrderDescriptor(
   fact: PublicFact,
   policy: FacilityPresentationOrderPolicy,
 ): PresentationOrderDescriptor {
+  if (fact.presentation_slot === "HEADER_PRIMARY") {
+    return { group: "HEADER_PRIMARY", priority: 0, stableKey: fact.fact_key };
+  }
+  if (fact.presentation_slot === "HEADER_SECONDARY") {
+    return { group: "HEADER_SECONDARY", priority: 0, stableKey: fact.fact_key };
+  }
   const primaryIndex = (policy.primaryFactKeys ?? []).indexOf(fact.fact_key);
   if (primaryIndex >= 0) {
     return {
@@ -212,7 +218,8 @@ export function targetKeyForPublicActionRequirement(
 
   const [targetKey] = candidateKeys;
   const target = visibleNodes.find((node) => node.key === targetKey);
-  if (!target || !["facility", "transport"].includes(target.node_type_key ?? "")) return null;
+  const targetFamily = target?.node_family ?? target?.node_type_key?.toUpperCase();
+  if (!target || !["FACILITY", "TRANSPORT"].includes(targetFamily ?? "")) return null;
 
   const hasIncompatibleExplicitScope = resourceRequirements.some((requirement) => {
     const scope = requirement.scope;
@@ -779,7 +786,7 @@ export function buildFacilityDetailRows({
   relationEntries.forEach(({ relation, stableKey }) => {
     const label = relation.relation_type_key === "supplies_power_to"
       ? "可供电"
-      : knownRelationDescription(relation.relation_type_key);
+      : knownRelationDescription(relation.relation_type_key, relation.relation_type_name);
     const targets = relationLabels.get(label) ?? [];
     targets.push(resolveNodeName(relation.target_node_key, relation.target_node_name));
     relationLabels.set(label, targets);

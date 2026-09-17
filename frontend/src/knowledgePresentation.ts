@@ -5,7 +5,9 @@ import type {
 } from "./types";
 import { uiLabel } from "./ui";
 
-const RESOURCE_LABELS: Record<string, string> = {
+// Compatibility-only labels for pre-semantic hand-built DTOs. Live Player
+// responses carry Scenario-authored resource names and take precedence.
+const LEGACY_RESOURCE_LABEL_FALLBACKS: Record<string, string> = {
   communication_equipment: "通信维修部件",
   electrical_repair_parts: "电力维修部件",
   general_engineering_parts: "通用维修部件",
@@ -14,15 +16,18 @@ const RESOURCE_LABELS: Record<string, string> = {
 };
 
 export function resourceDisplayName(key: string, candidate?: string): string {
-  const mapped = RESOURCE_LABELS[key];
-  if (mapped) return mapped;
-  if (candidate && candidate !== key && !/^[a-z0-9_]+$/.test(candidate)) return candidate;
-  return candidate ?? "已知资源";
+  if (candidate && candidate !== key) {
+    const candidateKey = candidate.trim().toLowerCase().replace(/\s+/g, "_");
+    if (candidateKey !== key) return candidate;
+  }
+  return LEGACY_RESOURCE_LABEL_FALLBACKS[key] ?? candidate ?? "已知资源";
 }
 
 const STRUCTURAL_RELATION_TYPES = new Set(["located_in", "endpoint"]);
 
-const RELATION_DESCRIPTIONS: Record<string, string> = {
+// Compatibility-only descriptions for old DTO fixtures. Scenario relation
+// catalog metadata is authoritative for live Player responses.
+const LEGACY_RELATION_DESCRIPTION_FALLBACKS: Record<string, string> = {
   supplies_power_to: "可向其供电",
   contains: "包含目标",
   supports: "提供系统支援",
@@ -68,15 +73,18 @@ export function meaningfulKnownRelations(relations: PublicRelation[]): PublicRel
   return relations.filter((relation) => !STRUCTURAL_RELATION_TYPES.has(relation.relation_type_key));
 }
 
-export function knownRelationDescription(relationTypeKey: string): string {
-  return RELATION_DESCRIPTIONS[relationTypeKey] ?? "当前已掌握的系统关系";
+export function knownRelationDescription(relationTypeKey: string, candidate?: string | null): string {
+  if (candidate && candidate !== relationTypeKey) return candidate;
+  return LEGACY_RELATION_DESCRIPTION_FALLBACKS[relationTypeKey] ?? uiLabel(relationTypeKey);
 }
 
 function knownRelationRequirementDescription(relationTypeKey: string): string {
   return RELATION_REQUIREMENT_DESCRIPTIONS[relationTypeKey] ?? "需要已知的系统关系";
 }
 
-const FACT_LABELS: Record<string, string> = {
+// Compatibility-only labels for old DTO fixtures. Player-safe Fact names
+// from the Scenario take precedence whenever semantic metadata is present.
+const LEGACY_FACT_LABEL_FALLBACKS: Record<string, string> = {
   operational: "运行状态",
   power_supply: "供电状态",
   emergency_power: "应急供电",
@@ -86,7 +94,7 @@ const FACT_LABELS: Record<string, string> = {
   repair_profile: "设施类型",
 };
 
-const MACHINE_VALUE_LABELS: Record<string, string> = {
+const LEGACY_MACHINE_VALUE_LABEL_FALLBACKS: Record<string, string> = {
   central_hospital: "医院设施",
   central_communication_core: "通信核心",
   district_service_center: "公用事业保障设施",
@@ -97,7 +105,9 @@ const MACHINE_VALUE_LABELS: Record<string, string> = {
 };
 
 export function factDisplayLabel(fact: PlayerGameState["known_facts"][number]): string {
-  if (FACT_LABELS[fact.fact_key]) return FACT_LABELS[fact.fact_key];
+  const hasSemanticMetadata = fact.node_family !== undefined || fact.presentation_slot !== undefined;
+  if (hasSemanticMetadata && fact.name && fact.name !== fact.fact_key) return fact.name;
+  if (LEGACY_FACT_LABEL_FALLBACKS[fact.fact_key]) return LEGACY_FACT_LABEL_FALLBACKS[fact.fact_key];
   if (fact.name && fact.name !== fact.fact_key && !/^[a-z0-9_]+$/.test(fact.name)) return fact.name;
   return "已知状态";
 }
@@ -106,6 +116,7 @@ export function factDisplayValue(
   fact: PlayerGameState["known_facts"][number],
   value = fact.value,
 ): string {
+  if (value === fact.value && fact.value_label) return fact.value_label;
   if (typeof value === "boolean") {
     if (fact.fact_key === "operational") return value ? "运行中" : "未运行";
     if (fact.fact_key === "power_supply") return value ? "已供电" : "未供电";
@@ -125,11 +136,11 @@ export function factDisplayValue(
     if (value === "UNAVAILABLE") return "不可用";
   }
   if (fact.fact_key === "repair_profile") {
-    return MACHINE_VALUE_LABELS[value] ?? "设施状态已知";
+    return LEGACY_MACHINE_VALUE_LABEL_FALLBACKS[value] ?? "设施状态已知";
   }
   if (value === "AVAILABLE") return "可用";
   if (value === "UNAVAILABLE") return "不可用";
-  if (MACHINE_VALUE_LABELS[value]) return MACHINE_VALUE_LABELS[value];
+  if (LEGACY_MACHINE_VALUE_LABEL_FALLBACKS[value]) return LEGACY_MACHINE_VALUE_LABEL_FALLBACKS[value];
   return /^[a-z0-9_]+$/i.test(value) ? "当前状态已知" : uiLabel(value);
 }
 
