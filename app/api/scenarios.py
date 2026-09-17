@@ -26,6 +26,10 @@ from app.api.schemas.phase_d import (
     DraftTransformRequest,
     DraftTransformResponse,
     DraftValidationResponse,
+    PresentationProfileHistoryResponse,
+    PresentationProfileReplaceRequest,
+    PresentationProfileResponse,
+    PresentationProfileRestoreRequest,
     ReadinessCheckResponse,
     ReadinessLevel,
     ReferenceEdgeResponse,
@@ -51,6 +55,10 @@ from app.scenarios.authoring import ReferenceEdge, locator_for_path, reference_i
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from app.scenarios.validation import ScenarioValidationIssue
 from app.services.draft_sandbox import DraftSandboxService
+from app.services.presentation_profiles import (
+    PresentationProfileLifecycleError,
+    PresentationProfileService,
+)
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
 
 router = APIRouter(prefix="/api/v1", tags=["scenarios"])
@@ -327,6 +335,93 @@ def get_references(scenario_id: UUID, db: Session = Depends(get_db)) -> Referenc
         _raise_http(exc)
 
 
+@router.get(
+    "/scenarios/{scenario_id}/presentation",
+    response_model=PresentationProfileResponse,
+)
+def get_presentation_profile(
+    scenario_id: UUID,
+    db: Session = Depends(get_db),
+) -> PresentationProfileResponse:
+    try:
+        profile = PresentationProfileService(db).get_current(scenario_id)
+        db.commit()
+        return _presentation_profile_response(profile)
+    except PresentationProfileLifecycleError as exc:
+        db.rollback()
+        _raise_presentation_http(exc)
+
+
+@router.put(
+    "/scenarios/{scenario_id}/presentation",
+    response_model=PresentationProfileResponse,
+)
+def replace_presentation_profile(
+    scenario_id: UUID,
+    request: PresentationProfileReplaceRequest,
+    db: Session = Depends(get_db),
+) -> PresentationProfileResponse:
+    try:
+        profile = PresentationProfileService(db).replace(
+            scenario_id,
+            expected_revision=request.expected_revision,
+            profile_document=request.profile,
+        )
+        db.commit()
+        return _presentation_profile_response(profile)
+    except PresentationProfileLifecycleError as exc:
+        db.rollback()
+        _raise_presentation_http(exc)
+
+
+@router.get(
+    "/scenarios/{scenario_id}/presentation/revisions",
+    response_model=PresentationProfileHistoryResponse,
+)
+def list_presentation_profile_revisions(
+    scenario_id: UUID,
+    db: Session = Depends(get_db),
+) -> PresentationProfileHistoryResponse:
+    try:
+        revisions = PresentationProfileService(db).list_revisions(scenario_id)
+        return PresentationProfileHistoryResponse(
+            scenario_id=scenario_id,
+            revisions=[
+                {
+                    "scenario_id": item.scenario_id,
+                    "revision": item.revision,
+                    "profile": item.profile_document,
+                    "created_at": item.created_at,
+                }
+                for item in revisions
+            ],
+        )
+    except PresentationProfileLifecycleError as exc:
+        _raise_presentation_http(exc)
+
+
+@router.post(
+    "/scenarios/{scenario_id}/presentation/restore",
+    response_model=PresentationProfileResponse,
+)
+def restore_presentation_profile(
+    scenario_id: UUID,
+    request: PresentationProfileRestoreRequest,
+    db: Session = Depends(get_db),
+) -> PresentationProfileResponse:
+    try:
+        profile = PresentationProfileService(db).restore(
+            scenario_id,
+            expected_revision=request.expected_revision,
+            revision=request.revision,
+        )
+        db.commit()
+        return _presentation_profile_response(profile)
+    except PresentationProfileLifecycleError as exc:
+        db.rollback()
+        _raise_presentation_http(exc)
+
+
 @router.post(
     "/scenarios/{scenario_id}/draft/reference-analysis",
     response_model=DraftReferenceAnalysisResponse,
@@ -575,6 +670,15 @@ def _version_summary(version: ScenarioVersion) -> ScenarioVersionSummaryResponse
     )
 
 
+def _presentation_profile_response(profile: Any) -> PresentationProfileResponse:
+    return PresentationProfileResponse(
+        scenario_id=profile.scenario_id,
+        revision=profile.revision,
+        profile=profile.profile_document,
+        updated_at=profile.updated_at,
+    )
+
+
 def _validation_issue(
     issue: ScenarioValidationIssue,
     document: dict[str, Any] | None = None,
@@ -605,6 +709,23 @@ def _raise_http(exc: ScenarioLifecycleError, *, details: dict[str, Any] | None =
         exc.message,
         status_code=status.HTTP_404_NOT_FOUND if not_found else status.HTTP_409_CONFLICT,
         details=details,
+    ) from exc
+
+
+def _raise_presentation_http(exc: PresentationProfileLifecycleError) -> Never:
+    if exc.code.endswith("_NOT_FOUND"):
+        code_status = status.HTTP_404_NOT_FOUND
+    elif exc.code.endswith("_INVALID"):
+        code_status = status.HTTP_422_UNPROCESSABLE_ENTITY
+    elif exc.code.endswith("_ARCHIVED") or exc.code.endswith("_CONFLICT"):
+        code_status = status.HTTP_409_CONFLICT
+    else:
+        code_status = status.HTTP_400_BAD_REQUEST
+    raise AppError(
+        exc.code,
+        exc.message,
+        status_code=code_status,
+        details=exc.details,
     ) from exc
 
 

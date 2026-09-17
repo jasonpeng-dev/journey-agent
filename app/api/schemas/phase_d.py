@@ -189,6 +189,35 @@ class ScenarioDetailResponse(ScenarioSummaryResponse):
     version_count: int = Field(ge=0)
 
 
+class PresentationProfileResponse(ApiModel):
+    scenario_id: UUID
+    revision: int = Field(ge=1)
+    profile: dict[str, Any]
+    updated_at: datetime
+
+
+class PresentationProfileRevisionResponse(ApiModel):
+    scenario_id: UUID
+    revision: int = Field(ge=1)
+    profile: dict[str, Any]
+    created_at: datetime
+
+
+class PresentationProfileHistoryResponse(ApiModel):
+    scenario_id: UUID
+    revisions: list[PresentationProfileRevisionResponse]
+
+
+class PresentationProfileReplaceRequest(ApiModel):
+    expected_revision: int = Field(ge=1)
+    profile: dict[str, Any]
+
+
+class PresentationProfileRestoreRequest(ApiModel):
+    expected_revision: int = Field(ge=1)
+    revision: int = Field(ge=1)
+
+
 class DraftResponse(ApiModel):
     scenario_id: UUID
     revision: int = Field(ge=1)
