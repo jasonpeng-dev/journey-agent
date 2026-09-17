@@ -13,6 +13,7 @@ import {
   sectionForKind,
   sectionObjects,
   sectionRoot,
+  legacySections,
   sections,
   updateObjectName,
   updateSectionRoot,
@@ -34,16 +35,18 @@ const worldViewLabels: Record<WorldView, string> = { all: "全部节点", region
 type WorldMode = "edit" | "topology";
 
 const sectionGroups: Array<{ label: string; items: EditorSection[] }> = [
-  { label: "场景", items: ["overview", "world"] },
-  { label: "实体", items: ["actors", "interactions", "actions"] },
-  { label: "逻辑", items: ["rules", "objectives", "derived-states"] },
-  { label: "配置", items: ["initialization", "goal-resolution", "planning"] },
-  { label: "公开信息", items: ["public-knowledge", "public-references"] },
+  { label: "Scenario foundation", items: ["overview"] },
+  { label: "World model", items: ["node-types", "world-entities", "relations", "resources"] },
+  { label: "Participants & interactions", items: ["roles", "actors", "interactions"] },
+  { label: "Action system", items: ["actions", "rules"] },
+  { label: "Goal system", items: ["objectives", "derived-states", "goal-resolution"] },
+  { label: "Runtime configuration", items: ["initialization", "planning"] },
+  { label: "Public semantics", items: ["public-knowledge", "public-references"] },
   { label: "发布", items: ["validation"] },
 ];
 
 function isEditorSection(value: string): value is EditorSection {
-  return (sections as readonly string[]).includes(value);
+  return [...sections, ...legacySections].includes(value as (typeof sections)[number] | (typeof legacySections)[number]);
 }
 
 function objectDisplayValue(value: JsonObject, fallback: string): string {

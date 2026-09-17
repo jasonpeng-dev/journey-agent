@@ -41,6 +41,7 @@ class DraftAuthoringError(ValueError):
 _COLLECTIONS: dict[str, tuple[str, ...]] = {
     "node_type": ("world", "node_types"),
     "node": ("world", "nodes"),
+    "relation_type": ("world", "relation_types"),
     "relation": ("world", "relations"),
     "resource": ("world", "resources"),
     "role": ("actors", "roles"),
@@ -56,6 +57,7 @@ _COLLECTIONS: dict[str, tuple[str, ...]] = {
 _KEY_FIELDS = {
     "node_type": "key",
     "node": "key",
+    "relation_type": "key",
     "relation": "key",
     "resource": "key",
     "role": "key",
@@ -94,6 +96,7 @@ _ACTION_REFERENCE_FIELDS = {"action_key"}
 _RESOURCE_REFERENCE_FIELDS = {"resource_key"}
 _DERIVED_REFERENCE_FIELDS = {"derived_key"}
 _RELATION_REFERENCE_FIELDS = {"relation_key"}
+_RELATION_TYPE_REFERENCE_FIELDS = {"relation_type_key"}
 _OBJECTIVE_REFERENCE_FIELDS = {"subsumes"}
 _NODE_TYPE_REFERENCE_FIELDS = {
     "node_type_key",
@@ -305,6 +308,8 @@ def _reference_target(
         return ObjectLocator("derived_state", value)
     if field in _RELATION_REFERENCE_FIELDS:
         return ObjectLocator("relation", value)
+    if field in _RELATION_TYPE_REFERENCE_FIELDS:
+        return ObjectLocator("relation_type", value)
     if field == "fact_key":
         return _fact_target(container, value, source)
     if field == "required_fact_key":
@@ -461,6 +466,7 @@ def rename_key(
     object_kind: str,
     old_key: str,
     new_key: str,
+    protected_document: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     key_field = _KEY_FIELDS.get(object_kind)
     if key_field is None:
@@ -480,6 +486,14 @@ def rename_key(
     target = _object(document, object_kind, old_key)
     if target is None:
         raise DraftAuthoringError("SCENARIO_OBJECT_NOT_FOUND", "The Draft object does not exist")
+    if (
+        protected_document is not None
+        and _object(protected_document, object_kind, old_key) is not None
+    ):
+        raise DraftAuthoringError(
+            "SCENARIO_PUBLISHED_STABLE_KEY_RENAME",
+            "published stable key cannot be renamed as display-only change",
+        )
     if _object(document, object_kind, new_key) is not None:
         raise DraftAuthoringError("SCENARIO_OBJECT_KEY_CONFLICT", "The new object key is in use")
     changed = deepcopy(document)

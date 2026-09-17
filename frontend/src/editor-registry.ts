@@ -5,6 +5,7 @@ export type FieldType = "text" | "textarea" | "boolean" | "integer" | "number" |
 export type ReferenceDomain =
   | "node_type"
   | "node"
+  | "relation_type"
   | "fact"
   | "resource"
   | "resource_pool"
@@ -68,24 +69,28 @@ const field = (path: string, type: FieldType, metadata: Omit<FieldMetadata, "pat
 
 export const entityRegistry: Record<EntityKind, EntityMetadata> = {
   node_type: {
-    kind: "node_type", section: "world", label: "Node type", collectionPath: ["world", "node_types"],
+    kind: "node_type", section: "node-types", label: "Node type", collectionPath: ["world", "node_types"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
   },
   node: {
-    kind: "node", section: "world", label: "Node", collectionPath: ["world", "nodes"],
+    kind: "node", section: "world-entities", label: "Node", collectionPath: ["world", "nodes"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("node_type_key", "reference", { referenceDomain: "node_type" }), field("initial_access", "enum", { enum: V2_ENUMS.access }), field("initial_visibility", "enum", { enum: V2_ENUMS.visibility }), field("interaction_keys", "multi-reference", { referenceDomain: "interaction" })],
     nested: ["facts"],
   },
+  relation_type: {
+    kind: "relation_type", section: "relations", label: "Relation type", collectionPath: ["world", "relation_types"],
+    fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
+  },
   relation: {
-    kind: "relation", section: "world", label: "Relation", collectionPath: ["world", "relations"],
-    fields: [field("source_node_key", "reference", { referenceDomain: "node" }), field("relation_type_key", "text"), field("target_node_key", "reference", { referenceDomain: "node" }), field("initial_visibility", "enum", { enum: V2_ENUMS.relationVisibility })],
+    kind: "relation", section: "relations", label: "Relation", collectionPath: ["world", "relations"],
+    fields: [field("key", "text"), field("source_node_key", "reference", { referenceDomain: "node" }), field("relation_type_key", "reference", { referenceDomain: "relation_type" }), field("target_node_key", "reference", { referenceDomain: "node" }), field("initial_visibility", "enum", { enum: V2_ENUMS.relationVisibility })],
   },
   resource: {
-    kind: "resource", section: "world", label: "Resource", collectionPath: ["world", "resources"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("initial_value", "integer"), field("minimum", "integer"), field("maximum", "integer"), field("reservation_supported", "boolean")],
+    kind: "resource", section: "resources", label: "Resource", collectionPath: ["world", "resources"],
+    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("initial_value", "integer"), field("minimum", "integer"), field("maximum", "integer"), field("reservation_supported", "boolean"), field("unit", "text"), field("display_unit", "text")],
   },
   role: {
-    kind: "role", section: "actors", label: "Role", collectionPath: ["actors", "roles"],
+    kind: "role", section: "roles", label: "Role", collectionPath: ["actors", "roles"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("capabilities", "multi-enum", { enum: V2_ENUMS.capabilities })],
   },
   actor: {
@@ -99,7 +104,7 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
   },
   action: {
     kind: "action", section: "actions", label: "Action", collectionPath: ["actions"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("required_interaction_key", "reference", { referenceDomain: "interaction" }), field("execution_mode", "enum", { enum: V2_ENUMS.executionMode }), field("behavior", "enum", { enum: V2_ENUMS.behavior }), field("locality", "enum", { enum: V2_ENUMS.locality }), field("target_kind", "enum", { enum: V2_ENUMS.targetKind }), field("target_semantic_reference_type", "enum", { enum: V2_ENUMS.actionTargetReference }), field("required_actor_role_key", "reference", { referenceDomain: "role" }), field("allowed_actor_capabilities", "multi-enum", { enum: V2_ENUMS.capabilities }), field("source_relation_type_key", "text")],
+    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("required_interaction_key", "reference", { referenceDomain: "interaction" }), field("execution_mode", "enum", { enum: V2_ENUMS.executionMode }), field("behavior", "enum", { enum: V2_ENUMS.behavior }), field("locality", "enum", { enum: V2_ENUMS.locality }), field("target_kind", "enum", { enum: V2_ENUMS.targetKind }), field("target_node_type_keys", "multi-reference", { referenceDomain: "node_type" }), field("target_semantic_reference_type", "enum", { enum: V2_ENUMS.actionTargetReference }), field("required_actor_role_key", "reference", { referenceDomain: "role" }), field("allowed_actor_capabilities", "multi-enum", { enum: V2_ENUMS.capabilities }), field("source_relation_type_key", "reference", { referenceDomain: "relation_type" })],
     nested: ["parameters", "expected_outcomes", "planning", "target_actor_roles", "operation_bindings", "goal_required_slots", "authority_policy"],
   },
   rule: {

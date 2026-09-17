@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { referenceOptions } from "./components/editor/ReferencePicker";
-import { filterDraftObjects, nodeSemanticView, replaceObject, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
+import { filterDraftObjects, nodeSemanticView, replaceObject, sectionDefinition, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
 import { entityRegistry, factInitialValueMetadata } from "./editor-registry";
 import { addObject, defaultArrayItem } from "./templates";
 
@@ -33,8 +33,8 @@ describe("editor draft helpers", () => {
 
   it("registers every V2 authoring section without adding semantic collections", () => {
     expect(sectionRegistry.map((item) => item.id)).toEqual([...sections]);
-    expect(sectionRegistry.find((item) => item.id === "world")?.entityKinds).toEqual(["node_type", "node", "relation", "resource"]);
-    expect(sectionRegistry.some((item) => item.id === "world" && item.rootPath?.includes("regions"))).toBe(false);
+    expect(sectionRegistry.find((item) => item.id === "relations")?.entityKinds).toEqual(["relation_type", "relation"]);
+    expect(sectionDefinition("world")?.entityKinds).toEqual(["node_type", "node", "relation_type", "relation", "resource"]);
     expect(entityRegistry.node.collectionPath).toEqual(["world", "nodes"]);
   });
 

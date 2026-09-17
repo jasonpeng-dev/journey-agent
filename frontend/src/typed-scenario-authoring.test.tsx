@@ -11,6 +11,7 @@ const document: JsonObject = {
   world: {
     node_types: [{ key: "facility", name: "Facility" }],
     nodes: [{ key: "target", name: "Target", node_type_key: "facility", facts: [{ key: "operational", name: "Operational" }] }],
+    relation_types: [{ key: "contains", name: "Contains" }],
     relations: [],
     resources: [{ key: "fuel", name: "Fuel" }],
   },
@@ -125,6 +126,42 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expandNestedCards();
     expect(screen.getByLabelText("依赖类型")).toHaveValue("FACT");
     expect(screen.getByText("知识门槛")).toBeInTheDocument();
+  });
+
+  it("exposes typed value labels, action target taxonomy, and relation catalog pickers", () => {
+    const onChange = vi.fn();
+    render(<TypedEntityEditor entity={entity("action", {
+      key: "repair",
+      name: "Repair",
+      target_kind: "NODE",
+      target_node_type_keys: [],
+      source_relation_type_key: "contains",
+      parameters: [{ key: "amount", name: "Amount", value_type: "INTEGER", required: false }],
+    })} document={document} onChange={onChange} />);
+    expandNestedCards();
+    expect(screen.getByLabelText("Target node types")).toBeInTheDocument();
+    expect(screen.getByLabelText("来源关系类型")).toHaveValue("contains");
+    expect(screen.getByLabelText("Default")).toBeInTheDocument();
+    expect(screen.getByLabelText("语义引用")).toBeInTheDocument();
+
+    cleanup();
+    render(<EntityHarness initial={entity("derived_state", {
+      key: "ready",
+      name: "Ready",
+      value_type: "BOOLEAN",
+      allowed_values: [],
+      value_labels: [],
+      dependencies: [],
+    })} />);
+    expect(screen.getByText("Value labels")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Add value label/ }));
+    expect(screen.getByLabelText("Display label")).toBeInTheDocument();
+  });
+
+  it("renders scenario locality as typed overview fields", () => {
+    render(<TypedEditor section="overview" value={{ key: "scenario", name: "Scenario", description: "", locality: { enabled: true, scoped_resources: true, region_node_type_key: "facility", facility_node_type_key: "facility", transport_node_type_key: "facility", located_in_relation_type_key: "contains", transport_endpoint_relation_type_key: "contains" } }} document={document} onChange={vi.fn()} />);
+    expect(screen.getByLabelText("Region node type")).toHaveValue("facility");
+    expect(screen.getByLabelText("Located-in relation type")).toHaveValue("contains");
   });
 
   it("authors initialization availability requirements and root planning/goal/public sections", () => {

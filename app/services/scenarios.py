@@ -338,7 +338,7 @@ class ScenarioService:
         commit anything. The browser must explicitly save the returned document.
         """
 
-        self._require_working_copy(
+        draft = self._require_working_copy(
             scenario_id,
             expected_revision=expected_revision,
             definition_document=definition_document,
@@ -355,6 +355,7 @@ class ScenarioService:
                     object_kind=object_kind,
                     old_key=old_key,
                     new_key=new_key,
+                    protected_document=self._published_base_document(draft),
                 )
             if object_key is None:
                 raise DraftAuthoringError(
@@ -389,6 +390,7 @@ class ScenarioService:
                 object_kind=object_kind,
                 old_key=old_key,
                 new_key=new_key,
+                protected_document=self._published_base_document(draft),
             )
         except DraftAuthoringError as exc:
             raise ScenarioLifecycleError(
@@ -446,6 +448,12 @@ class ScenarioService:
             )
         _require_scenario_identity(definition_document, scenario.key)
         return draft
+
+    def _published_base_document(self, draft: ScenarioDraft) -> dict[str, Any] | None:
+        if draft.base_scenario_version_id is None:
+            return None
+        version = self.db.get(ScenarioVersion, draft.base_scenario_version_id)
+        return deepcopy(version.snapshot_document) if version is not None else None
 
     def _create(
         self,

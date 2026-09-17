@@ -2,7 +2,11 @@ export type JsonObject = Record<string, unknown>;
 
 export const sections = [
   "overview",
-  "world",
+  "node-types",
+  "world-entities",
+  "relations",
+  "resources",
+  "roles",
   "actors",
   "interactions",
   "actions",
@@ -17,11 +21,14 @@ export const sections = [
   "validation",
 ] as const;
 
-export type EditorSection = (typeof sections)[number];
+export const legacySections = ["world", "actors", "interactions"] as const;
+
+export type EditorSection = (typeof sections)[number] | (typeof legacySections)[number];
 
 export type EntityKind =
   | "node_type"
   | "node"
+  | "relation_type"
   | "relation"
   | "resource"
   | "role"
@@ -50,8 +57,12 @@ export type SectionDefinition = {
 
 export const sectionRegistry: SectionDefinition[] = [
   { id: "overview", labelKey: "overview", rootPath: ["metadata"] },
-  { id: "world", labelKey: "world", entityKinds: ["node_type", "node", "relation", "resource"] },
-  { id: "actors", labelKey: "actors", entityKinds: ["role", "actor"] },
+  { id: "node-types", labelKey: "node_types", entityKinds: ["node_type"] },
+  { id: "world-entities", labelKey: "world_entities", entityKinds: ["node"] },
+  { id: "relations", labelKey: "relations", entityKinds: ["relation_type", "relation"] },
+  { id: "resources", labelKey: "resources", entityKinds: ["resource"] },
+  { id: "roles", labelKey: "roles", entityKinds: ["role"] },
+  { id: "actors", labelKey: "actors", entityKinds: ["actor"] },
   { id: "interactions", labelKey: "interactions", entityKinds: ["interaction"] },
   { id: "actions", labelKey: "actions", entityKinds: ["action"] },
   { id: "rules", labelKey: "rules", entityKinds: ["rule"] },
@@ -68,6 +79,7 @@ export const sectionRegistry: SectionDefinition[] = [
 const COLLECTION_PATHS: Record<EntityKind, string[]> = {
   node_type: ["world", "node_types"],
   node: ["world", "nodes"],
+  relation_type: ["world", "relation_types"],
   relation: ["world", "relations"],
   resource: ["world", "resources"],
   role: ["actors", "roles"],
@@ -83,6 +95,7 @@ const COLLECTION_PATHS: Record<EntityKind, string[]> = {
 const KEY_FIELDS: Record<EntityKind, string> = {
   node_type: "key",
   node: "key",
+  relation_type: "key",
   relation: "key",
   resource: "key",
   role: "key",
@@ -124,6 +137,12 @@ function objectName(kind: EntityKind, value: JsonObject, key: string): string {
   return key;
 }
 
+const legacySectionDefinitions: Record<string, SectionDefinition> = {
+  world: { id: "world", labelKey: "world", entityKinds: ["node_type", "node", "relation_type", "relation", "resource"] },
+  actors: { id: "actors", labelKey: "actors", entityKinds: ["role", "actor"] },
+  interactions: { id: "interactions", labelKey: "interactions", entityKinds: ["interaction"] },
+};
+
 function objectsAt(document: JsonObject, kind: EntityKind): DraftObject[] {
   const raw = readPath(document, COLLECTION_PATHS[kind]);
   if (!Array.isArray(raw)) return [];
@@ -147,7 +166,7 @@ export function entityCollectionPath(kind: EntityKind): string[] {
 }
 
 export function sectionDefinition(section: string): SectionDefinition | undefined {
-  return sectionRegistry.find((item) => item.id === section);
+  return sectionRegistry.find((item) => item.id === section) ?? legacySectionDefinitions[section];
 }
 
 export function sectionObjects(document: JsonObject, section: string): DraftObject[] {
@@ -227,8 +246,9 @@ export function collectionDefaults(kind: EntityKind): JsonObject {
   const defaults: Record<EntityKind, JsonObject> = {
     node_type: { key: "new_node_type", name: "New node type", description: "" },
     node: { key: "new_node", name: "New node", description: "", node_type_key: "", initial_access: "AVAILABLE", initial_visibility: "KNOWN", interaction_keys: [], facts: [] },
-    relation: { source_node_key: "", relation_type_key: "", target_node_key: "", initial_visibility: "VISIBLE" },
-    resource: { key: "new_resource", name: "New resource", description: "", initial_value: 0, minimum: 0, maximum: null, reservation_supported: false },
+    relation_type: { key: "new_relation_type", name: "New relation type", description: "" },
+     relation: { key: "new_relation", source_node_key: "", relation_type_key: "", target_node_key: "", initial_visibility: "VISIBLE" },
+    resource: { key: "new_resource", name: "New resource", description: "", initial_value: 0, minimum: 0, maximum: null, reservation_supported: false, unit: null, display_unit: null },
     role: { key: "new_role", name: "New role", description: "", capabilities: ["EXECUTE_ACTION"] },
     actor: { key: "new_actor", name: "New actor", role_key: "", persona: "", doctrine: [], initial_node_key: "", allowed_action_keys: [], authority_policy: { autonomous_limits: [], approval_required_values: [] } },
     interaction: { key: "new_interaction", name: "New interaction", description: "" },
@@ -257,7 +277,7 @@ export function addObject(document: JsonObject, kind: EntityKind): { document: J
   let index = 2;
   while (collection.some((item) => item && objectKey(kind, item) === key)) key = `${base}_${index++}`;
   const value = collectionDefaults(kind);
-  if (kind !== "relation") value[KEY_FIELDS[kind]] = key;
+  if (kind !== "public_reference") value[KEY_FIELDS[kind]] = key;
   collection.push(value);
   return { document: copy, key: kind === "relation" ? objectKey(kind, value) ?? key : key };
 }

@@ -10,6 +10,7 @@ import {
   EnumSelect,
   MultiValuePicker,
   NumberInput,
+  NestedObjectHeader,
   ReferencePicker,
   ScalarListEditor,
   TextArea,
@@ -17,6 +18,7 @@ import {
 } from "./editor/FormPrimitives";
 import { referenceOptions } from "./editor/ReferencePicker";
 import { fieldId } from "./editor/FormUtils";
+import { ValueLabelList } from "./editor/ValueLabelEditor";
 import {
   ActionAuthorityPolicyEditor,
   ActionEditor,
@@ -32,6 +34,7 @@ import {
   PublicKnowledgeEditor,
   PublicReferenceEditor,
   RuleEditor,
+  ScenarioOverviewEditor,
 } from "./TypedScenarioAuthoring";
 
 type Props = {
@@ -100,12 +103,13 @@ function FactEditor({ value, document, path, onChange }: { value: JsonObject; do
   const factType = typeof value.value_type === "string" ? value.value_type : "BOOLEAN";
   const allowed = Array.isArray(value.allowed_values) ? value.allowed_values : [];
   const typedMetadata = factInitialValueMetadata(factType, allowed);
-  return <article className="nested-editor"><header><strong>Fact</strong><code>{String(value.key ?? "")}</code></header><div className="typed-grid">
+  return <article className="nested-editor"><header className="nested-object-header"><NestedObjectHeader typeLabel="FACT" identity={String(value.key ?? "未命名事实")} /></header><div className="typed-grid">
     {(["key", "name", "description"] as const).map((field) => <FieldRow key={field} metadata={{ path: field, type: field === "description" ? "textarea" : "text" }} value={value} document={document} path={path} onChange={onChange} />)}
     <FieldRow metadata={{ path: "value_type", type: "enum", enum: ["STRING", "ENUM", "INTEGER", "BOOLEAN"] }} value={value} document={document} path={path} onChange={onChange} />
     <FieldRow metadata={typedMetadata} value={value} document={document} path={path} onChange={onChange} />
     <FieldRow metadata={{ path: "initial_visibility", type: "enum", enum: ["KNOWN", "HIDDEN"] }} value={value} document={document} path={path} onChange={onChange} />
     {factType === "ENUM" && <AdvancedJsonField value={value.allowed_values ?? []} onChange={(next) => onChange({ ...value, allowed_values: next })} path={`${path}.allowed_values`} label="Allowed values" />}
+    <ValueLabelList value={value.value_labels} valueType={factType} allowedValues={allowed} path={`${path}.value_labels`} onChange={(next) => onChange({ ...value, value_labels: next })} />
     <AdvancedJsonField value={{ goal_addressable: value.goal_addressable ?? false, goal_aliases: value.goal_aliases ?? [], goal_examples: value.goal_examples ?? [], goal_target_values: value.goal_target_values ?? [] }} onChange={(next) => onChange({ ...value, ...(cloneObject(next)) })} path={`${path}.goal_metadata`} label="Goal metadata" />
   </div></article>;
 }
@@ -149,6 +153,7 @@ function RootEditor({ rootKey, value, document, onChange }: { rootKey: string; v
 export function TypedEditor({ section, value, document, onChange, path = section, focusPath, collectionSelection = null, onCollectionChange, onCollectionRemove }: Props) {
   if (section === "overview" || section === "initialization" || section === "goal-resolution" || section === "planning" || section === "public-knowledge") {
     const rootKey = section === "overview" ? "metadata" : section === "goal-resolution" ? "goal_resolution" : section === "public-knowledge" ? "public_knowledge" : section;
+    if (rootKey === "metadata" && value && typeof value === "object" && !Array.isArray(value)) return <ScenarioOverviewEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
     if (rootKey === "initialization" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailInitializationEditor value={value as JsonObject} document={document} selection={collectionSelection} onChange={onChange as (value: JsonObject) => void} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} /> : <InitializationEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
     if (rootKey === "planning" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailPlanningEditor value={value as JsonObject} document={document} selection={collectionSelection} onChange={onChange as (value: JsonObject) => void} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} /> : <PlanningEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
     if (rootKey === "goal_resolution" && value && typeof value === "object" && !Array.isArray(value)) return <GoalResolutionEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;

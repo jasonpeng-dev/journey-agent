@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import pytest
 
 from app.scenarios.authoring import (
@@ -79,6 +81,37 @@ def test_v2_reference_index_covers_nested_fact_pool_target_role_and_derived_refs
     )
     assert any(edge.target.object_kind == "derived_state" for edge in edges)
     assert any(edge.target.object_kind == "node_type" for edge in edges)
+    assert any(
+        edge.target.object_kind == "relation_type"
+        and edge.target.object_key == "located_in"
+        for edge in edges
+    )
+
+
+def test_published_stable_keys_cannot_be_renamed_but_new_draft_keys_can() -> None:
+    base = _document()
+    with pytest.raises(DraftAuthoringError, match="published stable key") as published:
+        rename_key(
+            deepcopy(base),
+            object_kind="interaction",
+            old_key="diagnosable",
+            new_key="diagnosis_capability",
+            protected_document=base,
+        )
+    assert published.value.code == "SCENARIO_PUBLISHED_STABLE_KEY_RENAME"
+
+    draft = deepcopy(base)
+    draft["interactions"].append(
+        {"key": "new_interaction", "name": "New interaction", "description": ""}
+    )
+    renamed = rename_key(
+        draft,
+        object_kind="interaction",
+        old_key="new_interaction",
+        new_key="renamed_interaction",
+        protected_document=base,
+    )
+    assert any(item["key"] == "renamed_interaction" for item in renamed["interactions"])
 
 
 def test_v2_rename_updates_node_action_and_resource_references_atomically() -> None:

@@ -86,6 +86,11 @@ const labels: Record<string, string> = {
 };
 
 export const sectionLabels: Record<string, string> = {
+  "node-types": "Node types",
+  "world-entities": "World entities",
+  relations: "Relations & topology",
+  resources: "Resource definitions",
+  roles: "Roles",
   interactions: "交互",
   "derived-states": "派生状态",
   initialization: "初始化",
@@ -104,6 +109,7 @@ export const sectionLabels: Record<string, string> = {
 };
 
 export const kindLabels: Record<string, string> = {
+  relation_type: "Relation type",
   relation: "关系",
   derived_state: "派生状态",
   public_reference: "公共引用",
@@ -119,6 +125,9 @@ export const kindLabels: Record<string, string> = {
 };
 
 const fieldLabels: Record<string, string> = {
+  unit: "Unit",
+  display_unit: "Display unit",
+  value_labels: "Value labels",
   key: "稳定键",
   name: "显示名称",
   description: "说明",
