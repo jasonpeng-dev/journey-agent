@@ -35,13 +35,13 @@ const worldViewLabels: Record<WorldView, string> = { all: "全部节点", region
 type WorldMode = "edit" | "topology";
 
 const sectionGroups: Array<{ label: string; items: EditorSection[] }> = [
-  { label: "Scenario foundation", items: ["overview"] },
-  { label: "World model", items: ["node-types", "world-entities", "relations", "resources"] },
-  { label: "Participants & interactions", items: ["roles", "actors", "interactions"] },
-  { label: "Action system", items: ["actions", "rules"] },
-  { label: "Goal system", items: ["objectives", "derived-states", "goal-resolution"] },
-  { label: "Runtime configuration", items: ["initialization", "planning"] },
-  { label: "Public semantics", items: ["public-knowledge", "public-references"] },
+  { label: "场景基础", items: ["overview"] },
+  { label: "世界模型", items: ["world", "node-types", "world-entities", "relations", "resources"] },
+  { label: "参与者与交互", items: ["roles", "actors", "interactions"] },
+  { label: "行动系统", items: ["actions", "rules"] },
+  { label: "目标系统", items: ["objectives", "derived-states", "goal-resolution"] },
+  { label: "运行配置", items: ["initialization", "planning"] },
+  { label: "公共语义", items: ["public-knowledge", "public-references"] },
   { label: "发布", items: ["validation"] },
 ];
 
