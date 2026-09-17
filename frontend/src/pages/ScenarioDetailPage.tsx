@@ -18,6 +18,7 @@ export function ScenarioDetailPage() {
       <div className="detail-card"><code>{scenario.data.key}</code><p>状态：{uiLabel(scenario.data.status)}</p><p>当前草稿修订号：{scenario.data.draft_revision}</p></div>
       <div className="scenario-detail-actions">
         <Link className="primary-button" to={`/scenarios/${scenarioId}/edit/overview`}>编辑当前草稿</Link>
+        <Link className="secondary-button" data-testid="presentation-settings-link" to={`/scenarios/${scenarioId}/presentation`}>界面设置</Link>
         <Link className="secondary-button" to="/scenarios">返回场景库</Link>
       </div>
       <h2 className="section-title">版本历史</h2>

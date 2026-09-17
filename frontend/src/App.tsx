@@ -7,6 +7,7 @@ import { NewGamePage } from "./pages/NewGamePage";
 import { NewScenarioPage } from "./pages/NewScenarioPage";
 import { ScenarioDetailPage } from "./pages/ScenarioDetailPage";
 import { ScenarioLibraryPage } from "./pages/ScenarioLibraryPage";
+import { PresentationSettingsPage } from "./pages/PresentationSettingsPage";
 
 export function App() {
   return (
@@ -19,6 +20,7 @@ export function App() {
         <Route path="/" element={<Navigate replace to="/scenarios" />} />
         <Route path="/scenarios" element={<ScenarioLibraryPage />} />
         <Route path="/scenarios/new" element={<NewScenarioPage />} />
+        <Route path="/scenarios/:scenarioId/presentation" element={<PresentationSettingsPage />} />
         <Route path="/scenarios/:scenarioId" element={<ScenarioDetailPage />} />
         <Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} />
         <Route path="/scenarios/:scenarioId/edit/:section/:objectKey" element={<EditorPage />} />

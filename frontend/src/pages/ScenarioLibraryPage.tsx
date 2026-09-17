@@ -32,6 +32,7 @@ export function ScenarioLibraryPage() {
             </div>
             <div className="scenario-row-actions">
               {scenario.current_published_version_id && <button className="primary-button" disabled={startTest.isPending} onClick={() => startTest.mutate(scenario.current_published_version_id!)}>{startTest.isPending ? "正在创建…" : "直接开始测试"}</button>}
+              <Link className="secondary-button" data-testid={`presentation-settings-link-${scenario.id}`} to={`/scenarios/${scenario.id}/presentation`}>界面设置</Link>
               <Link className="secondary-button" to={`/scenarios/${scenario.id}`}>查看场景</Link>
             </div>
           </article>

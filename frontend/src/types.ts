@@ -50,6 +50,95 @@ export type ScenarioVersionDetail = ScenarioVersion & {
 
 export type ScenarioExample = { key: string; name: string; description: string; maturity: string };
 
+export type PresentationTemplate = "compact" | "standard" | "detailed";
+export type PresentationDensity = "COMPACT" | "STANDARD" | "DETAILED";
+export type PresentationDefaultOpen = "COLLAPSED" | "COMPACT" | "FULL";
+export type PresentationSummarySlot = "HEADER" | "BODY" | "BOTH";
+export type PresentationEntityDetail = "SUMMARY" | "DETAIL" | "CAUSALITY";
+export type PresentationKnowledgeLevel = "A" | "A+B" | "A+B+C";
+export type PresentationPlanDetail = "COLLAPSED" | "COMPACT" | "FULL";
+export type PresentationTimelineDensity = "COMPACT" | "STANDARD" | "DETAILED";
+export type PresentationNodeFamily = "GENERIC" | "REGION" | "FACILITY" | "TRANSPORT";
+export type PresentationSemanticSlot =
+  | "NAME"
+  | "NODE_TYPE"
+  | "VISIBILITY"
+  | "ACCESS"
+  | "FACTS"
+  | "RELATIONS"
+  | "RESOURCES"
+  | "STATUS";
+export type PresentationResourceSlot = "NAME" | "AMOUNT" | "STATUS" | "UNIT";
+export type PresentationRelationSlot = "TYPE" | "TARGET" | "VISIBILITY";
+export type PresentationActorField =
+  | "NAME"
+  | "ROLE"
+  | "LOCATION"
+  | "STATUS"
+  | "TASK"
+  | "CAPABILITIES"
+  | "COMMAND_REACHABILITY";
+
+export type GlobalPresentationOverrides = {
+  density?: PresentationDensity;
+  default_open?: PresentationDefaultOpen;
+  summary_slot?: PresentationSummarySlot;
+  semantic_order?: PresentationSemanticSlot[];
+};
+export type WorldPresentationOverrides = {
+  entity_detail?: PresentationEntityDetail;
+  knowledge_level?: PresentationKnowledgeLevel;
+  resource_order?: PresentationResourceSlot[];
+  relation_order?: PresentationRelationSlot[];
+};
+export type ActorTeamPresentationOverrides = {
+  visible_fields?: PresentationActorField[];
+  field_order?: PresentationActorField[];
+};
+export type GoalExecutionPresentationOverrides = {
+  roadmap_detail?: PresentationEntityDetail;
+  plan_default?: PresentationPlanDetail;
+  timeline_density?: PresentationTimelineDensity;
+};
+export type NodeFamilyPresentationOverride = {
+  node_family: PresentationNodeFamily;
+  entity_detail?: PresentationEntityDetail;
+  default_open?: PresentationDefaultOpen;
+  semantic_order?: PresentationSemanticSlot[];
+};
+export type SemanticPresentationOverride = {
+  semantic_key: string;
+  summary_slot?: PresentationSummarySlot;
+  entity_detail?: PresentationEntityDetail;
+  default_open?: PresentationDefaultOpen;
+};
+export type PresentationProfileDocument = {
+  schema_version: 1;
+  template: PresentationTemplate;
+  global_display?: GlobalPresentationOverrides;
+  world_entities?: WorldPresentationOverrides;
+  actor_team?: ActorTeamPresentationOverrides;
+  goal_execution?: GoalExecutionPresentationOverrides;
+  family_overrides?: NodeFamilyPresentationOverride[];
+  semantic_overrides?: SemanticPresentationOverride[];
+};
+export type PresentationProfileResponse = {
+  scenario_id: string;
+  revision: number;
+  profile: PresentationProfileDocument;
+  updated_at: string;
+};
+export type PresentationProfileRevision = {
+  scenario_id: string;
+  revision: number;
+  profile: PresentationProfileDocument;
+  created_at: string;
+};
+export type PresentationProfileHistoryResponse = {
+  scenario_id: string;
+  revisions: PresentationProfileRevision[];
+};
+
 export type GameSummary = {
   id: string; scenario_id: string; scenario_name: string; scenario_version_id: string; scenario_version_number: number;
   scenario_content_hash: string; status: "ACTIVE" | "SUSPENDED" | "ARCHIVED" | "FAILED" | "COMPLETED";

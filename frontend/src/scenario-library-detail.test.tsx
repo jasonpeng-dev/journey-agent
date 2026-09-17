@@ -86,6 +86,7 @@ describe("Scenario Library and Detail presentation", () => {
     expect(screen.getByText("已发布版本 14")).toBeVisible();
     expect(within(screen.getByTestId("scenario-row-scenario-1")).getByText("当前草稿修订号：14")).toBeVisible();
     expect(within(screen.getByTestId("scenario-row-scenario-1")).getByRole("link", { name: "查看场景" })).toHaveAttribute("href", "/scenarios/scenario-1");
+    expect(screen.getByTestId("presentation-settings-link-scenario-1")).toHaveAttribute("href", "/scenarios/scenario-1/presentation");
     expect(screen.getByRole("button", { name: "直接开始测试" })).toBeVisible();
     expect(screen.getByTestId("scenario-row-scenario-2")).toHaveTextContent("医疗应急演练");
     expect(screen.getByTestId("scenario-row-scenario-2")).not.toHaveTextContent("直接开始测试");
@@ -133,6 +134,7 @@ describe("Scenario Library and Detail presentation", () => {
 
     await screen.findByText(scenario.name);
     expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveAttribute("href", "/scenarios/scenario-1/edit/overview");
+    expect(screen.getByTestId("presentation-settings-link")).toHaveAttribute("href", "/scenarios/scenario-1/presentation");
     expect(screen.getByRole("link", { name: "返回场景库" })).toHaveAttribute("href", "/scenarios");
     expect(screen.getByText("版本历史")).toBeVisible();
     expect(screen.getByText("版本 14")).toBeVisible();

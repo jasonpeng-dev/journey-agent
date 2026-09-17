@@ -1,4 +1,4 @@
-import type { DeveloperSnapshot, Draft, DraftSandboxResult, DraftTransformOperation, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult, WorkingCopyReferenceAnalysis, WorkingCopyTransformResult } from "./types";
+import type { DeveloperSnapshot, Draft, DraftSandboxResult, DraftTransformOperation, GameHistory, GameSummary, GoalSubmission, PlayerGameState, PresentationProfileHistoryResponse, PresentationProfileResponse, PresentationProfileDocument, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult, WorkingCopyReferenceAnalysis, WorkingCopyTransformResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -33,6 +33,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   scenarios: () => request<ScenarioSummary[]>("/api/v1/scenarios"),
   scenario: (id: string) => request<ScenarioSummary>(`/api/v1/scenarios/${id}`),
+  presentation: (id: string) => request<PresentationProfileResponse>(`/api/v1/scenarios/${id}/presentation`),
+  presentationHistory: (id: string) => request<PresentationProfileHistoryResponse>(`/api/v1/scenarios/${id}/presentation/revisions`),
+  savePresentation: (id: string, revision: number, profile: PresentationProfileDocument) =>
+    request<PresentationProfileResponse>(`/api/v1/scenarios/${id}/presentation`, {
+      method: "PUT",
+      body: JSON.stringify({ expected_revision: revision, profile }),
+    }),
+  restorePresentation: (id: string, revision: number, targetRevision: number) =>
+    request<PresentationProfileResponse>(`/api/v1/scenarios/${id}/presentation/restore`, {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision, revision: targetRevision }),
+    }),
   draft: (id: string) => request<Draft>(`/api/v1/scenarios/${id}/draft`),
   references: (id: string) => request<ReferenceIndex>(`/api/v1/scenarios/${id}/draft/references`),
   analyzeWorkingCopyReferences: (id: string, revision: number, document: Record<string, unknown>) =>

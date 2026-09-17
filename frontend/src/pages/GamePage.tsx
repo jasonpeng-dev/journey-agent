@@ -2,8 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 
-import { api } from "../api";
+import { ApiError, api } from "../api";
 import { groupActorsByTask } from "../actorPresentation";
+import { PresentationSettingsPanel } from "../components/PresentationSettingsPanel";
 import { useForkGame } from "../hooks/useForkGame";
 import {
   factDisplayLabel,
@@ -34,6 +35,8 @@ import type {
   PublicTask,
   PublicResolvedGoalDraft,
   PublicTimelineEvent,
+  PresentationProfileDocument,
+  PresentationProfileResponse,
 } from "../types";
 import {
   confirmGoalErrorText,
@@ -69,6 +72,10 @@ import {
   groupResourcesByRegion,
   meaningfulResult,
 } from "../spatialPresentation";
+import {
+  clonePresentationProfile,
+  resolvePresentationProfilePreview,
+} from "../presentationPolicy";
 
 const taskTone: Record<string, string> = {
   COMPLETED: "success",
@@ -2206,6 +2213,10 @@ export function GamePage() {
   const [continuousExecuting, setContinuousExecuting] = useState(false);
   const [developerOpen, setDeveloperOpen] = useState(false);
   const [developerToken, setDeveloperToken] = useState("");
+  const [presentationDrawerOpen, setPresentationDrawerOpen] = useState(false);
+  const [savedPresentationProfile, setSavedPresentationProfile] = useState<PresentationProfileResponse | null>(null);
+  const [workingPresentationProfile, setWorkingPresentationProfile] = useState<PresentationProfileDocument | null>(null);
+  const [presentationSaveState, setPresentationSaveState] = useState<"CLEAN" | "DIRTY" | "SAVING" | "CONFLICT" | "ERROR">("CLEAN");
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [goalFeedback, setGoalFeedback] = useState<string | null>(null);
   const [lastParseResult, setLastParseResult] = useState<
@@ -2352,6 +2363,42 @@ export function GamePage() {
     queryFn: () => api.developerSnapshot(gameId, developerToken),
     enabled: developerOpen && Boolean(developerToken),
   });
+  const presentationScenarioId = play.data?.game.scenario_id ?? "";
+  const presentationProfileQuery = useQuery({
+    queryKey: ["presentation", presentationScenarioId],
+    queryFn: () => api.presentation(presentationScenarioId),
+    enabled: presentationDrawerOpen && Boolean(presentationScenarioId),
+  });
+  useEffect(() => {
+    const next = presentationProfileQuery.data;
+    if (!next || savedPresentationProfile?.revision === next.revision) return;
+    setSavedPresentationProfile(next);
+    setWorkingPresentationProfile(clonePresentationProfile(next.profile));
+    setPresentationSaveState("CLEAN");
+  }, [presentationProfileQuery.data, savedPresentationProfile?.revision]);
+
+  const saveGamePresentation = useMutation({
+    mutationFn: () => {
+      if (!savedPresentationProfile || !workingPresentationProfile) {
+        throw new Error("PresentationProfile 尚未加载");
+      }
+      return api.savePresentation(
+        presentationScenarioId,
+        savedPresentationProfile.revision,
+        workingPresentationProfile,
+      );
+    },
+    onMutate: () => setPresentationSaveState("SAVING"),
+    onSuccess: (next) => {
+      setSavedPresentationProfile(next);
+      setWorkingPresentationProfile(clonePresentationProfile(next.profile));
+      setPresentationSaveState("CLEAN");
+      queryClient.setQueryData(["presentation", presentationScenarioId], next);
+      void queryClient.invalidateQueries({ queryKey: ["presentation", presentationScenarioId] });
+      void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
+    },
+    onError: (error) => setPresentationSaveState(error instanceof ApiError && error.status === 409 ? "CONFLICT" : "ERROR"),
+  });
 
   const loadedTask = play.data?.current_task ?? null;
   const resolvingGoal = submit.isPending || pendingGoal !== null;
@@ -2362,6 +2409,10 @@ export function GamePage() {
   }
   const { game } = play.data;
   const liveGame = livePlay.data.game;
+  const localPresentation = workingPresentationProfile && savedPresentationProfile
+    ? resolvePresentationProfilePreview(workingPresentationProfile, savedPresentationProfile.revision)
+    : null;
+  const effectivePresentation = localPresentation ?? play.data.presentation;
   const goalPresets = scenarioGoalPresets(play.data.scenario_metadata);
   const roadmapNodeNames = {
     ...Object.fromEntries(play.data.visible_nodes.map((node) => [node.key, node.name])),
@@ -2479,12 +2530,34 @@ export function GamePage() {
         <div><span>实例</span><strong>{game.id.slice(0, 8)}</strong></div>
         <div><span>精确版本</span><strong>版本 {game.scenario_version_number}</strong></div>
         <div><span>运行状态</span><strong className={`console-pill ${game.status === "ACTIVE" ? "success" : "neutral"}`}>{uiLabel(game.status)}</strong></div>
+        <div className="scenario-strip-action"><span>界面</span><button type="button" data-testid="game-presentation-settings-button" onClick={() => setPresentationDrawerOpen((open) => !open)}>{presentationDrawerOpen ? "关闭设置" : "界面设置"}</button></div>
       </section>
+      {presentationDrawerOpen && <aside className="presentation-drawer" data-testid="game-presentation-drawer">
+        <header className="presentation-drawer-heading"><div><p className="eyebrow">Live preview</p><h2>界面设置</h2></div><button type="button" onClick={() => setPresentationDrawerOpen(false)}>关闭</button></header>
+        {presentationProfileQuery.isLoading && <p className="muted">正在加载当前 PresentationProfile……</p>}
+        {presentationProfileQuery.error && <p className="error">无法加载界面设置。</p>}
+        {workingPresentationProfile && <PresentationSettingsPanel
+          profile={workingPresentationProfile}
+          compact
+          onChange={(next) => {
+            setWorkingPresentationProfile(next);
+            setPresentationSaveState("DIRTY");
+          }}
+          disabled={saveGamePresentation.isPending || liveGame.status !== "ACTIVE"}
+        />}
+        {savedPresentationProfile && workingPresentationProfile && <footer className="presentation-drawer-footer">
+          <span className={`save-state ${presentationSaveState.toLowerCase()}`} data-testid="game-presentation-save-state">{presentationSaveState}</span>
+          <span>修订 {savedPresentationProfile.revision}</span>
+          <button type="button" disabled={saveGamePresentation.isPending || liveGame.status !== "ACTIVE"} onClick={() => { setWorkingPresentationProfile(clonePresentationProfile(savedPresentationProfile.profile)); setPresentationSaveState("CLEAN"); }}>放弃修改</button>
+          <button type="button" className="primary-button" disabled={saveGamePresentation.isPending || presentationSaveState !== "DIRTY" || liveGame.status !== "ACTIVE"} onClick={() => saveGamePresentation.mutate()}>{saveGamePresentation.isPending ? "正在保存……" : "保存并刷新当前游戏"}</button>
+        </footer>}
+        {saveGamePresentation.error && <p className="error">{presentationSaveState === "CONFLICT" ? "保存冲突：服务器修订已变化，请重新打开设置后重试。" : "保存失败，请稍后重试。"}</p>}
+      </aside>}
       <section className="command-grid">
         <aside className="command-panel world-panel">
           <header className="command-panel-heading"><div><p>01 · 世界</p><h1>已知世界</h1></div><span className="console-pill success">玩家可见</span></header>
           <KnownWorldAccordions
-            presentation={play.data.presentation}
+            presentation={effectivePresentation}
             resources={play.data.resources}
             publicResourceNames={roadmapResourceNames}
             resourceIntelligence={play.data.resource_intelligence}
@@ -2512,7 +2585,7 @@ export function GamePage() {
               onSelect={setSelectedTaskId}
             />
             <div className="timeline-scroll">
-              <Timeline task={task} presentation={play.data.presentation} />
+              <Timeline task={task} presentation={effectivePresentation} />
               {planningForTask && activeOperation && (
                 <WaitingStatus
                   startedAt={activeOperation.startedAt}
@@ -2648,7 +2721,7 @@ export function GamePage() {
                 <MissionRoadmap
                   key={task.id}
                   stages={task.roadmap.stages}
-                  presentation={play.data.presentation}
+                  presentation={effectivePresentation}
                   regionNames={roadmapRegionNames}
                   resourceNames={roadmapResourceNames}
                   nodeNames={roadmapNodeNames}
@@ -2659,7 +2732,7 @@ export function GamePage() {
             </div>
           )}
           {task && !planningForTask && (
-            <PlanHistory task={task} presentation={play.data.presentation} />
+            <PlanHistory task={task} presentation={effectivePresentation} />
           )}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
