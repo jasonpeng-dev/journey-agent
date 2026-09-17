@@ -4,7 +4,10 @@ import { Link, useParams } from "react-router-dom";
 
 import { ApiError, api } from "../api";
 import { PresentationSettingsPanel } from "../components/PresentationSettingsPanel";
-import { clonePresentationProfile } from "../presentationPolicy";
+import {
+  clonePresentationProfile,
+  PRESENTATION_PROFILE_REFRESH_INTERVAL_MS,
+} from "../presentationPolicy";
 import type {
   PresentationProfileDocument,
   PresentationProfileResponse,
@@ -28,6 +31,14 @@ export function PresentationSettingsPage() {
     queryKey: ["presentation", scenarioId],
     queryFn: () => api.presentation(scenarioId),
     enabled: Boolean(scenarioId),
+    refetchOnWindowFocus: false,
+  });
+  const presentationRevision = useQuery({
+    queryKey: ["presentation-revision", scenarioId],
+    queryFn: () => api.presentationRevision(scenarioId),
+    enabled: Boolean(scenarioId),
+    refetchOnWindowFocus: true,
+    refetchInterval: PRESENTATION_PROFILE_REFRESH_INTERVAL_MS,
   });
   const history = useQuery({
     queryKey: ["presentation-history", scenarioId],
@@ -40,11 +51,40 @@ export function PresentationSettingsPage() {
 
   useEffect(() => {
     const next = presentation.data;
-    if (!next || savedProfile?.revision === next.revision) return;
+    if (!next) return;
+    if (!savedProfile) {
+      setSavedProfile(next);
+      setWorkingProfile(clonePresentationProfile(next.profile));
+      setSaveState("CLEAN");
+      return;
+    }
+    if (next.revision <= savedProfile.revision) return;
+    const localDirty = Boolean(
+      workingProfile
+      && JSON.stringify(savedProfile.profile) !== JSON.stringify(workingProfile),
+    );
     setSavedProfile(next);
+    if (localDirty) {
+      setSaveState("CONFLICT");
+      return;
+    }
     setWorkingProfile(clonePresentationProfile(next.profile));
     setSaveState("CLEAN");
-  }, [presentation.data, savedProfile?.revision]);
+  }, [presentation.data, savedProfile, workingProfile]);
+
+  useEffect(() => {
+    const nextRevision = presentationRevision.data?.revision;
+    if (!savedProfile || nextRevision == null || nextRevision <= savedProfile.revision) return;
+    const localDirty = Boolean(
+      workingProfile
+      && JSON.stringify(savedProfile.profile) !== JSON.stringify(workingProfile),
+    );
+    if (localDirty) {
+      setSaveState("CONFLICT");
+      return;
+    }
+    void presentation.refetch();
+  }, [presentation, presentationRevision.data?.revision, savedProfile, workingProfile]);
 
   const dirty = Boolean(
     savedProfile
@@ -58,7 +98,15 @@ export function PresentationSettingsPage() {
 
   const setWorking = (next: PresentationProfileDocument) => {
     setWorkingProfile(next);
-    setSaveState("DIRTY");
+    setSaveState((current) => current === "CONFLICT" ? current : "DIRTY");
+  };
+
+  const reloadServerProfile = async () => {
+    const result = await presentation.refetch();
+    if (!result.data) return;
+    setSavedProfile(result.data);
+    setWorkingProfile(clonePresentationProfile(result.data.profile));
+    setSaveState("CLEAN");
   };
 
   const saveMutation = useMutation({
@@ -72,6 +120,8 @@ export function PresentationSettingsPage() {
       setWorkingProfile(clonePresentationProfile(next.profile));
       setSaveState("CLEAN");
       queryClient.setQueryData(["presentation", scenarioId], next);
+      void queryClient.invalidateQueries({ queryKey: ["presentation", scenarioId] });
+      void queryClient.invalidateQueries({ queryKey: ["presentation-revision", scenarioId] });
       void queryClient.invalidateQueries({ queryKey: ["presentation-history", scenarioId] });
     },
     onError: (error) => setSaveState(error instanceof ApiError && error.status === 409 ? "CONFLICT" : "ERROR"),
@@ -88,6 +138,8 @@ export function PresentationSettingsPage() {
       setWorkingProfile(clonePresentationProfile(next.profile));
       setSaveState("CLEAN");
       queryClient.setQueryData(["presentation", scenarioId], next);
+      void queryClient.invalidateQueries({ queryKey: ["presentation", scenarioId] });
+      void queryClient.invalidateQueries({ queryKey: ["presentation-revision", scenarioId] });
       void queryClient.invalidateQueries({ queryKey: ["presentation-history", scenarioId] });
     },
     onError: (error) => setSaveState(error instanceof ApiError && error.status === 409 ? "CONFLICT" : "ERROR"),
@@ -111,11 +163,13 @@ export function PresentationSettingsPage() {
         </div>
       </div>
 
-      {(saveMutation.error || restoreMutation.error) && (
+      {(saveMutation.error || restoreMutation.error || saveState === "CONFLICT") && (
         <div className="presentation-alert" data-testid="presentation-save-error">
           <strong>{effectiveState === "CONFLICT" ? "保存冲突" : "保存失败"}</strong>
-          <span>{errorMessage(saveMutation.error ?? restoreMutation.error)}</span>
-          {effectiveState === "CONFLICT" && <button type="button" onClick={() => void presentation.refetch()}>重新加载服务器版本</button>}
+          <span>{saveMutation.error || restoreMutation.error
+            ? errorMessage(saveMutation.error ?? restoreMutation.error)
+            : "服务器版本已更新，请重新加载后再保存。"}</span>
+          {effectiveState === "CONFLICT" && <button type="button" onClick={() => void reloadServerProfile()}>重新加载服务器版本</button>}
         </div>
       )}
       {archived && <div className="presentation-alert"><strong>只读场景</strong><span>已归档场景不能修改 PresentationProfile。</span></div>}
@@ -127,7 +181,7 @@ export function PresentationSettingsPage() {
           <Link className="secondary-button" to={`/scenarios/${scenarioId}`}>返回场景详情</Link>
           <button type="button" className="secondary-button" disabled={!dirty || saveMutation.isPending || restoreMutation.isPending} onClick={() => { setWorkingProfile(clonePresentationProfile(savedProfile.profile)); setSaveState("CLEAN"); }}>放弃本地修改</button>
         </div>
-        <button type="button" className="primary-button" data-testid="presentation-save-button" disabled={!dirty || archived || saveMutation.isPending || restoreMutation.isPending} onClick={() => saveMutation.mutate()}>{saveMutation.isPending ? "正在保存……" : "保存界面设置"}</button>
+        <button type="button" className="primary-button" data-testid="presentation-save-button" disabled={!dirty || archived || saveMutation.isPending || restoreMutation.isPending || saveState === "CONFLICT"} onClick={() => saveMutation.mutate()}>{saveMutation.isPending ? "正在保存……" : "保存界面设置"}</button>
       </div>
 
       <section className="presentation-history" data-testid="presentation-history">

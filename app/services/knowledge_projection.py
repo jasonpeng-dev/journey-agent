@@ -1282,7 +1282,7 @@ class SharedKnowledgeProjection:
     ) -> tuple[str | None, str | None]:
         """Read an optional exact source identity from a canonical binding.
 
-        Current Linjiang target contracts are target-only, so they return
+        Legacy target contracts are target-only, so they return
         ``(None, None)``.  The additive fields let a future/source-parameter
         binding carry one exact source without making the Player projection
         aggregate all candidate source requirements.
@@ -1425,8 +1425,8 @@ class SharedKnowledgeProjection:
         if current_value is None and allow_authored_identity:
             # A target-qualified Rule commonly uses an authored profile/role
             # value equal to the immutable target key (for example
-            # ``repair_profile == water_treatment_plant``).  This is a
-            # contract identity, not the current runtime Truth.  Keep the
+            # a typed Fact-value predicate).  This is a contract identity,
+            # not the current runtime Truth.  Keep the
             # target binding discoverable while never projecting the hidden
             # current value.
             if condition.kind == ConditionKind.FACT_EQUALS:

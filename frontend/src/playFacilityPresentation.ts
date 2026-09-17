@@ -4,6 +4,10 @@ import {
   knownRelationDescription,
   publicFactRequirementText,
 } from "./knowledgePresentation";
+import {
+  legacyFactPresentationPriority,
+  legacyFacilityRelationDescription,
+} from "./legacyPresentationCompatibility";
 import type {
   PlayerGameState,
   PublicActionResourceRequirement,
@@ -59,8 +63,6 @@ export const DEFAULT_FACILITY_PRESENTATION_ORDER_POLICY: FacilityPresentationOrd
     "RELATION",
     "OTHER",
   ],
-  primaryFactKeys: ["operational"],
-  secondaryFactKeys: ["power_supply"],
 };
 
 type PresentationOrderDescriptor = {
@@ -108,6 +110,10 @@ function factPresentationOrderDescriptor(
   }
   if (fact.presentation_slot === "HEADER_SECONDARY") {
     return { group: "HEADER_SECONDARY", priority: 0, stableKey: fact.fact_key };
+  }
+  if (!fact.presentation_slot && policy === DEFAULT_FACILITY_PRESENTATION_ORDER_POLICY) {
+    const legacy = legacyFactPresentationPriority(fact.fact_key);
+    return { ...legacy, stableKey: fact.fact_key };
   }
   const primaryIndex = (policy.primaryFactKeys ?? []).indexOf(fact.fact_key);
   if (primaryIndex >= 0) {
@@ -682,10 +688,8 @@ export function buildFacilityDetailRows({
   resolveNodeName,
   presentationOrderPolicy = DEFAULT_FACILITY_PRESENTATION_ORDER_POLICY,
 }: BuildFacilityDetailRowsOptions): FacilityDetailRow[] {
-  const visibleFactKeys = new Set(["repair_profile", "power_generation_capable"]);
   const factBlocks: FacilityPresentationBlock[] = knownFacts
     .filter((fact) => fact.node_key === nodeKey)
-    .filter((fact) => !visibleFactKeys.has(fact.fact_key))
     .map((fact): FacilityPresentationBlock => {
       const producers = producerBindings
         .filter((binding) => binding.target_key === nodeKey)
@@ -784,9 +788,11 @@ export function buildFacilityDetailRows({
   const relationLabels = new Map<string, string[]>();
   const relationStableKeys = new Map<string, string>();
   relationEntries.forEach(({ relation, stableKey }) => {
-    const label = relation.relation_type_key === "supplies_power_to"
-      ? "可供电"
-      : knownRelationDescription(relation.relation_type_key, relation.relation_type_name);
+    const hasSafeRelationMetadata = Boolean(relation.relation_type_name)
+      || relation.is_structural !== undefined;
+    const label = hasSafeRelationMetadata
+      ? knownRelationDescription(relation.relation_type_key, relation.relation_type_name)
+      : legacyFacilityRelationDescription(relation.relation_type_key, relation.relation_type_name);
     const targets = relationLabels.get(label) ?? [];
     targets.push(resolveNodeName(relation.target_node_key, relation.target_node_name));
     relationLabels.set(label, targets);

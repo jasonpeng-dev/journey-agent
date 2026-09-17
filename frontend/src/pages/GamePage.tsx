@@ -72,8 +72,10 @@ import {
   groupResourcesByRegion,
   meaningfulResult,
 } from "../spatialPresentation";
+import { legacyFactStateDisplayText } from "../legacyPresentationCompatibility";
 import {
   clonePresentationProfile,
+  PRESENTATION_PROFILE_REFRESH_INTERVAL_MS,
   resolvePresentationProfilePreview,
 } from "../presentationPolicy";
 
@@ -186,6 +188,8 @@ type MissionRoadmapNames = {
   nodeNames?: Record<string, string>;
   factNames?: Record<string, string>;
   factValues?: Record<string, string | number | boolean>;
+  factSafeMetadata?: Record<string, boolean>;
+  factValueLabels?: Record<string, string>;
 };
 
 function taskObjectiveLabel(goal: string, objectiveNames: string[]): string {
@@ -209,24 +213,24 @@ function factStateDisplayText(
   factName: string,
   currentValue: string | number | boolean | undefined,
   acceptedValues: Array<string | number | boolean>,
+  safeMetadata = false,
+  currentValueLabel?: string,
 ): string {
   const stateName = factName === "目标状态" ? "状态" : factName;
+  if (!safeMetadata) {
+    const legacy = legacyFactStateDisplayText(factName, currentValue, acceptedValues);
+    if (legacy) return legacy;
+  }
+  if (currentValueLabel) return currentValueLabel;
   if (currentValue === true) {
-    if (factName.includes("运行")) return "正在运行";
-    if (factName.includes("供电")) return "已供电";
-    if (factName.includes("通行")) return "可通行";
-    if (factName.includes("发电")) return "正在发电";
     return `${stateName}已达到目标状态`;
   }
   if (currentValue === false) {
-    if (factName.includes("运行")) return "尚未恢复运行";
-    if (factName.includes("供电")) return "尚未供电";
-    if (factName.includes("通行")) return "尚未恢复通行";
-    if (factName.includes("发电")) return "尚未发电";
     return `${stateName}尚未达到目标状态`;
   }
-  if (currentValue === "AVAILABLE") return `${stateName}可用`;
-  if (currentValue === "UNAVAILABLE") return `${stateName}不可用`;
+  if (currentValue !== undefined && currentValue !== null) {
+    return `${stateName}：${uiLabel(String(currentValue))}`;
+  }
   if (acceptedValues.some((value) => value === currentValue)) return `${stateName}已达到目标状态`;
   return `${stateName}待确认`;
 }
@@ -327,6 +331,8 @@ function missionRoadmapRequirementText(
       factName,
       currentValue,
       accepted,
+      names.factSafeMetadata?.[publicFactIdentity(requirement.node_key ?? "", requirement.fact_key)] ?? false,
+      names.factValueLabels?.[publicFactIdentity(requirement.node_key ?? "", requirement.fact_key)],
     );
     return `${targetName}：${stateText}`;
   }
@@ -577,6 +583,8 @@ export function MissionRoadmap({
   nodeNames,
   factNames,
   factValues,
+  factSafeMetadata,
+  factValueLabels,
 }: {
   stages: MissionRoadmapStage[];
   presentation?: PlayerGameState["presentation"];
@@ -586,6 +594,8 @@ export function MissionRoadmap({
   nodeNames?: Record<string, string>;
   factNames?: Record<string, string>;
   factValues?: Record<string, string | number | boolean>;
+  factSafeMetadata?: Record<string, boolean>;
+  factValueLabels?: Record<string, string>;
 }) {
   const defaultOpen = presentation?.default_open === "FULL";
   const [detailsOpen, setDetailsOpen] = useState(defaultOpen);
@@ -616,6 +626,8 @@ export function MissionRoadmap({
                 nodeNames,
                 factNames,
                 factValues,
+                factSafeMetadata,
+                factValueLabels,
               })
             ));
             const visibleRows = presentation?.roadmap_detail === "SUMMARY"
@@ -1614,7 +1626,7 @@ export function KnownWorldAccordions({
                           </span>
                           <span className="knowledge-facility-statuses">
                             <span className={"knowledge-facility-status " + statusTone(supportingFact?.value ?? "UNKNOWN")}>
-                              {supportingFact ? factDisplayValue(supportingFact) : "供电未知"}
+                              {supportingFact ? factDisplayValue(supportingFact) : "状态未知"}
                             </span>
                             <span className={"knowledge-facility-status " + statusTone(leadingFact?.value ?? "UNKNOWN")}>
                               {leadingFact ? facilityStatusDisplayValue(leadingFact) : "状态未知"}
@@ -2368,14 +2380,74 @@ export function GamePage() {
     queryKey: ["presentation", presentationScenarioId],
     queryFn: () => api.presentation(presentationScenarioId),
     enabled: presentationDrawerOpen && Boolean(presentationScenarioId),
+    refetchOnWindowFocus: false,
   });
+  const presentationRevisionQuery = useQuery({
+    queryKey: ["presentation-revision", presentationScenarioId],
+    queryFn: () => api.presentationRevision(presentationScenarioId),
+    enabled: Boolean(presentationScenarioId),
+    refetchOnWindowFocus: true,
+    refetchInterval: PRESENTATION_PROFILE_REFRESH_INTERVAL_MS,
+  });
+  const refetchPresentationProfile = presentationProfileQuery.refetch;
   useEffect(() => {
     const next = presentationProfileQuery.data;
-    if (!next || savedPresentationProfile?.revision === next.revision) return;
+    if (!next) return;
+    if (!savedPresentationProfile) {
+      setSavedPresentationProfile(next);
+      setWorkingPresentationProfile(clonePresentationProfile(next.profile));
+      setPresentationSaveState("CLEAN");
+      return;
+    }
+    if (next.revision <= savedPresentationProfile.revision) return;
+    const localDirty = Boolean(
+      workingPresentationProfile
+      && JSON.stringify(savedPresentationProfile.profile) !== JSON.stringify(workingPresentationProfile),
+    );
     setSavedPresentationProfile(next);
+    if (localDirty) {
+      setPresentationSaveState("CONFLICT");
+      return;
+    }
     setWorkingPresentationProfile(clonePresentationProfile(next.profile));
     setPresentationSaveState("CLEAN");
-  }, [presentationProfileQuery.data, savedPresentationProfile?.revision]);
+  }, [presentationProfileQuery.data, savedPresentationProfile, workingPresentationProfile]);
+
+  useEffect(() => {
+    const nextRevision = presentationRevisionQuery.data?.revision;
+    if (nextRevision == null) return;
+    if (!savedPresentationProfile) {
+      void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
+      return;
+    }
+    if (nextRevision <= savedPresentationProfile.revision) return;
+    const localDirty = Boolean(
+      workingPresentationProfile
+      && JSON.stringify(savedPresentationProfile.profile) !== JSON.stringify(workingPresentationProfile),
+    );
+    if (localDirty) {
+      setPresentationSaveState("CONFLICT");
+      return;
+    }
+    void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
+    if (presentationDrawerOpen) void refetchPresentationProfile();
+  }, [
+    gameId,
+    presentationDrawerOpen,
+    refetchPresentationProfile,
+    presentationRevisionQuery.data?.revision,
+    queryClient,
+    savedPresentationProfile,
+    workingPresentationProfile,
+  ]);
+
+  const reloadGamePresentation = async () => {
+    const result = await presentationProfileQuery.refetch();
+    if (!result.data) return;
+    setSavedPresentationProfile(result.data);
+    setWorkingPresentationProfile(clonePresentationProfile(result.data.profile));
+    setPresentationSaveState("CLEAN");
+  };
 
   const saveGamePresentation = useMutation({
     mutationFn: () => {
@@ -2395,6 +2467,7 @@ export function GamePage() {
       setPresentationSaveState("CLEAN");
       queryClient.setQueryData(["presentation", presentationScenarioId], next);
       void queryClient.invalidateQueries({ queryKey: ["presentation", presentationScenarioId] });
+      void queryClient.invalidateQueries({ queryKey: ["presentation-revision", presentationScenarioId] });
       void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
     },
     onError: (error) => setPresentationSaveState(error instanceof ApiError && error.status === 409 ? "CONFLICT" : "ERROR"),
@@ -2438,6 +2511,17 @@ export function GamePage() {
   );
   const roadmapFactValues = Object.fromEntries(
     play.data.known_facts.map((fact) => [publicFactIdentity(fact.node_key, fact.fact_key), fact.value]),
+  );
+  const roadmapFactSafeMetadata = Object.fromEntries(
+    play.data.known_facts.map((fact) => [
+      publicFactIdentity(fact.node_key, fact.fact_key),
+      fact.node_family != null || fact.presentation_slot != null || fact.value_label != null,
+    ]),
+  );
+  const roadmapFactValueLabels = Object.fromEntries(
+    play.data.known_facts.flatMap((fact) => fact.value_label
+      ? [[publicFactIdentity(fact.node_key, fact.fact_key), fact.value_label]]
+      : []),
   );
   const selectedTaskLoading = Boolean(
     selectedTaskId !== null && loadedTask?.id !== selectedTaskId,
@@ -2541,7 +2625,7 @@ export function GamePage() {
           compact
           onChange={(next) => {
             setWorkingPresentationProfile(next);
-            setPresentationSaveState("DIRTY");
+            setPresentationSaveState((current) => current === "CONFLICT" ? current : "DIRTY");
           }}
           disabled={saveGamePresentation.isPending || liveGame.status !== "ACTIVE"}
         />}
@@ -2551,7 +2635,7 @@ export function GamePage() {
           <button type="button" disabled={saveGamePresentation.isPending || liveGame.status !== "ACTIVE"} onClick={() => { setWorkingPresentationProfile(clonePresentationProfile(savedPresentationProfile.profile)); setPresentationSaveState("CLEAN"); }}>放弃修改</button>
           <button type="button" className="primary-button" disabled={saveGamePresentation.isPending || presentationSaveState !== "DIRTY" || liveGame.status !== "ACTIVE"} onClick={() => saveGamePresentation.mutate()}>{saveGamePresentation.isPending ? "正在保存……" : "保存并刷新当前游戏"}</button>
         </footer>}
-        {saveGamePresentation.error && <p className="error">{presentationSaveState === "CONFLICT" ? "保存冲突：服务器修订已变化，请重新打开设置后重试。" : "保存失败，请稍后重试。"}</p>}
+        {(saveGamePresentation.error || presentationSaveState === "CONFLICT") && <p className="error">{presentationSaveState === "CONFLICT" ? <><span>保存冲突：服务器修订已变化。</span> <button type="button" onClick={() => void reloadGamePresentation()}>重新加载服务器版本</button></> : "保存失败，请稍后重试。"}</p>}
       </aside>}
       <section className="command-grid">
         <aside className="command-panel world-panel">
@@ -2727,6 +2811,8 @@ export function GamePage() {
                   nodeNames={roadmapNodeNames}
                   factNames={roadmapFactNames}
                   factValues={roadmapFactValues}
+                  factSafeMetadata={roadmapFactSafeMetadata}
+                  factValueLabels={roadmapFactValueLabels}
                 />
               )}
             </div>

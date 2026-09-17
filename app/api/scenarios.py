@@ -30,6 +30,7 @@ from app.api.schemas.phase_d import (
     PresentationProfileReplaceRequest,
     PresentationProfileResponse,
     PresentationProfileRestoreRequest,
+    PresentationProfileRevisionCheckResponse,
     ReadinessCheckResponse,
     ReadinessLevel,
     ReferenceEdgeResponse,
@@ -347,6 +348,26 @@ def get_presentation_profile(
         profile = PresentationProfileService(db).get_current(scenario_id)
         db.commit()
         return _presentation_profile_response(profile)
+    except PresentationProfileLifecycleError as exc:
+        db.rollback()
+        _raise_presentation_http(exc)
+
+
+@router.get(
+    "/scenarios/{scenario_id}/presentation/revision",
+    response_model=PresentationProfileRevisionCheckResponse,
+)
+def get_presentation_profile_revision(
+    scenario_id: UUID,
+    db: Session = Depends(get_db),
+) -> PresentationProfileRevisionCheckResponse:
+    try:
+        profile = PresentationProfileService(db).get_current(scenario_id)
+        db.commit()
+        return PresentationProfileRevisionCheckResponse(
+            scenario_id=scenario_id,
+            revision=profile.revision,
+        )
     except PresentationProfileLifecycleError as exc:
         db.rollback()
         _raise_presentation_http(exc)

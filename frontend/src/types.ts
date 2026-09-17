@@ -128,6 +128,7 @@ export type PresentationProfileResponse = {
   profile: PresentationProfileDocument;
   updated_at: string;
 };
+export type PresentationProfileRevisionCheck = { scenario_id: string; revision: number };
 export type PresentationProfileRevision = {
   scenario_id: string;
   revision: number;
@@ -157,7 +158,7 @@ export type GameHistory = {
 };
 
 export type ActionLocation = { kind: string; summary: string; detail: string | null };
-export type PublicRelation = { relation_key?: string | null; source_node_key: string; relation_type_key: string; target_node_key: string; source_node_name?: string | null; target_node_name?: string | null; relation_type_name?: string | null; relation_type_description?: string | null };
+export type PublicRelation = { relation_key?: string | null; source_node_key: string; relation_type_key: string; target_node_key: string; source_node_name?: string | null; target_node_name?: string | null; relation_type_name?: string | null; relation_type_description?: string | null; is_structural?: boolean };
 export type PublicActionResourceRequirement = { resource_key: string; scope?: Record<string, unknown>; minimum: number; known_status?: "KNOWN" | "KNOWN_ZERO" | "UNKNOWN"; known_available?: number | null };
 export type PublicSourceRequirement = {
   source_node_key: string;

@@ -9,35 +9,10 @@ from app.api.schemas.phase_d import PublicKnowledgeChangeResponse
 from app.domain.resources import resource_pool_initial_states
 from app.domain.scenario_v2 import ActionBehavior, EffectKind, ScenarioDefinitionV2
 from app.engine.locality import LocalityEngineError, region_for_node
-
-_FACT_LABELS = {
-    "operational": "设备状态",
-    "power_supply": "供电状态",
-    "emergency_power": "应急供电",
-    "passable": "通行状态",
-    "heavy_engineering_support": "重型工程支援",
-    "heavy_engineering_support_ready": "重型工程支援状态",
-    "repair_profile": "设施类型",
-}
-
-_FACT_VALUE_LABELS: dict[tuple[str | None, object], str] = {
-    ("operational", True): "正常",
-    ("operational", False): "待修复",
-    ("power_supply", True): "已供电",
-    ("power_supply", False): "未供电",
-    ("power_supply", "AVAILABLE"): "已供电",
-    ("power_supply", "UNAVAILABLE"): "未供电",
-    ("emergency_power", True): "已恢复",
-    ("emergency_power", False): "未恢复",
-    ("passable", True): "可通行",
-    ("passable", False): "已阻断",
-    ("heavy_engineering_support", True): "可用",
-    ("heavy_engineering_support", False): "不可用",
-    ("heavy_engineering_support", "AVAILABLE"): "可用",
-    ("heavy_engineering_support", "UNAVAILABLE"): "不可用",
-    ("heavy_engineering_support_ready", True): "已部署",
-    ("heavy_engineering_support_ready", False): "未部署",
-}
+from app.services.legacy_action_report_compatibility import (
+    legacy_fact_change,
+    uses_legacy_action_report,
+)
 
 _ENUM_VALUE_LABELS = {
     "VISIBLE": "已可见",
@@ -48,15 +23,6 @@ _ENUM_VALUE_LABELS = {
     "UNAVAILABLE": "暂不可用",
     "PASSABLE": "可通行",
     "BLOCKED": "已阻断",
-}
-
-_RELATION_LABELS = {
-    "supplies_power_to": "可供电",
-    "contains": "包含目标",
-    "supports": "提供系统支援",
-    "reveals": "可发现目标",
-    "unlocks": "可解锁目标",
-    "enables": "支持目标行动",
 }
 
 _MACHINE_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]*$")
@@ -76,6 +42,11 @@ class PlayerActionReportFormatter:
         self.definition = definition
         self.resource_names = {item.key: item.name for item in definition.world.resources}
         self.node_names = {item.key: item.name for item in definition.world.nodes}
+        self.fact_definitions = {
+            (node.key, fact.key): fact
+            for node in definition.world.nodes
+            for fact in node.facts
+        }
         self.resource_pools = tuple(resource_pool_initial_states(definition))
 
     def format_changes(
@@ -233,23 +204,26 @@ class PlayerActionReportFormatter:
         if kind == "FACT_REVEALED":
             fact_key = key.rsplit(".", maxsplit=1)[-1]
             node_key = key.rsplit(".", maxsplit=1)[0]
-            if not self._should_display_fact(node_key, fact_key):
-                return None
+            fact = self.fact_definitions.get((node_key, fact_key))
+            if uses_legacy_action_report(self.definition):
+                legacy = legacy_fact_change(fact_key, raw_value)
+                if legacy is None:
+                    return None
+                return legacy
             return (
-                _FACT_LABELS.get(fact_key, self._safe_name(raw_name, "已知状态")),
-                self._display_value(raw_value, fact_key=fact_key),
+                fact.name if fact is not None else self._safe_name(raw_name, "已知状态"),
+                self._display_value(raw_value, fact=fact),
             )
         if kind == "RELATION_REVEALED":
             relation_key = self._relation_type_key(key, raw_name)
-            return _RELATION_LABELS.get(relation_key, "已知关系"), None
+            relation = self.definition.world.relation_type(relation_key)
+            return (
+                relation.name if relation is not None else self._safe_name(raw_name, "已知关系"),
+                None,
+            )
         if kind == "NODE_REVEALED":
             return self.node_names.get(key, self._safe_name(raw_name, "已知地点")), None
         return self._safe_name(raw_name, "已知信息"), self._display_value(raw_value)
-
-    def _should_display_fact(self, node_key: str, fact_key: str) -> bool:
-        """Keep only player-useful facts in an action knowledge report."""
-
-        return fact_key != "repair_profile"
 
     def _parse_resource_identity(self, key: str) -> _ResourceIdentity | None:
         parts = key.split("@")
@@ -287,7 +261,7 @@ class PlayerActionReportFormatter:
 
     @staticmethod
     def _relation_type_key(key: str, raw_name: object) -> str:
-        if isinstance(raw_name, str) and raw_name in _RELATION_LABELS:
+        if isinstance(raw_name, str) and raw_name:
             return raw_name
         parts = key.split("__")
         return parts[1] if len(parts) == 3 else ""
@@ -307,9 +281,15 @@ class PlayerActionReportFormatter:
         return PlayerActionReportFormatter._display_value(value)
 
     @staticmethod
-    def _display_value(value: object, *, fact_key: str | None = None) -> str | int | bool | None:
-        if (fact_key, value) in _FACT_VALUE_LABELS:
-            return _FACT_VALUE_LABELS[(fact_key, value)]
+    def _display_value(
+        value: object,
+        *,
+        fact: object | None = None,
+    ) -> str | int | bool | None:
+        value_labels = getattr(fact, "value_labels", ())
+        for item in value_labels:
+            if type(item.value) is type(value) and item.value == value:
+                return item.label
         if isinstance(value, bool):
             return "是" if value else "否"
         if isinstance(value, int):

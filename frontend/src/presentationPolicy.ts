@@ -95,6 +95,8 @@ export const PRESENTATION_OPTIONS = {
   actorFields: SAFE_ACTOR_FIELDS,
 };
 
+export const PRESENTATION_PROFILE_REFRESH_INTERVAL_MS = 15_000;
+
 export function defaultPresentationProfile(): PresentationProfileDocument {
   return {
     schema_version: 1,

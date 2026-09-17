@@ -29,12 +29,20 @@ def test_presentation_profile_current_history_restore_and_optimistic_conflict(
     assert current.json()["revision"] == 1
     assert current.json()["profile"]["template"] == "standard"
 
+    revision = client.get(f"/api/v1/scenarios/{scenario_id}/presentation/revision")
+    assert revision.status_code == 200, revision.text
+    assert revision.json() == {"scenario_id": scenario_id, "revision": 1}
+
     saved = client.put(
         f"/api/v1/scenarios/{scenario_id}/presentation",
         json={"expected_revision": 1, "profile": _profile()},
     )
     assert saved.status_code == 200, saved.text
     assert saved.json()["revision"] == 2
+    assert client.get(f"/api/v1/scenarios/{scenario_id}/presentation/revision").json() == {
+        "scenario_id": scenario_id,
+        "revision": 2,
+    }
 
     stale = client.put(
         f"/api/v1/scenarios/{scenario_id}/presentation",

@@ -196,6 +196,11 @@ class PresentationProfileResponse(ApiModel):
     updated_at: datetime
 
 
+class PresentationProfileRevisionCheckResponse(ApiModel):
+    scenario_id: UUID
+    revision: int = Field(ge=1)
+
+
 class PresentationProfileRevisionResponse(ApiModel):
     scenario_id: UUID
     revision: int = Field(ge=1)
@@ -714,6 +719,7 @@ class PublicRelationResponse(ApiModel):
     target_node_name: str | None = None
     relation_type_name: str | None = None
     relation_type_description: str | None = None
+    is_structural: bool | None = None
 
 
 class PublicActionRequirementResponse(ApiModel):

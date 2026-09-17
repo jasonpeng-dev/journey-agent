@@ -34,6 +34,7 @@ export const api = {
   scenarios: () => request<ScenarioSummary[]>("/api/v1/scenarios"),
   scenario: (id: string) => request<ScenarioSummary>(`/api/v1/scenarios/${id}`),
   presentation: (id: string) => request<PresentationProfileResponse>(`/api/v1/scenarios/${id}/presentation`),
+  presentationRevision: (id: string) => request<import("./types").PresentationProfileRevisionCheck>(`/api/v1/scenarios/${id}/presentation/revision`),
   presentationHistory: (id: string) => request<PresentationProfileHistoryResponse>(`/api/v1/scenarios/${id}/presentation/revisions`),
   savePresentation: (id: string, revision: number, profile: PresentationProfileDocument) =>
     request<PresentationProfileResponse>(`/api/v1/scenarios/${id}/presentation`, {

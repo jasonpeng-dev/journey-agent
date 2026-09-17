@@ -63,6 +63,7 @@ function renderPage() {
 function mockPageData() {
   vi.spyOn(api, "scenario").mockResolvedValue(scenario);
   vi.spyOn(api, "presentation").mockResolvedValue(current);
+  vi.spyOn(api, "presentationRevision").mockResolvedValue({ scenario_id: scenario.id, revision: current.revision });
   vi.spyOn(api, "presentationHistory").mockResolvedValue(history);
 }
 

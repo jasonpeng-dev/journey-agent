@@ -402,6 +402,12 @@ class PlayerProjectionService:
                         if relation_type is not None
                         else None
                     ),
+                    is_structural=(
+                        str(item["relation_type_key"]) in {
+                            definition.metadata.locality.located_in_relation_type_key,
+                            definition.metadata.locality.transport_endpoint_relation_type_key,
+                        }
+                    ),
                 )
                 for item in known_relations
             ],
