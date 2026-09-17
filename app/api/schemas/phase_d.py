@@ -845,6 +845,8 @@ class PublicActorResponse(ApiModel):
     name: str
     role_name: str
     current_node_name: str
+    status: Literal["ACTIVE", "PLANNED", "IDLE"] = "IDLE"
+    task_name: str | None = None
     command_reachability: Literal["ONLINE", "DISCONNECTED"] = "ONLINE"
 
 

@@ -182,7 +182,11 @@ _TEMPLATE_DEFAULTS: dict[PresentationTemplate, _TemplateDefaults] = {
         semantic_order=(PresentationSemanticSlot.NAME, PresentationSemanticSlot.STATUS),
         resource_order=(PresentationResourceSlot.NAME, PresentationResourceSlot.AMOUNT),
         relation_order=(PresentationRelationSlot.TYPE, PresentationRelationSlot.TARGET),
-        actor_fields=(PresentationActorField.NAME, PresentationActorField.ROLE),
+        actor_fields=(
+            PresentationActorField.NAME,
+            PresentationActorField.ROLE,
+            PresentationActorField.STATUS,
+        ),
         roadmap_detail=PresentationEntityDetail.SUMMARY,
         plan_default=PresentationPlanDetail.COLLAPSED,
         timeline_density=PresentationTimelineDensity.COMPACT,
@@ -215,6 +219,7 @@ _TEMPLATE_DEFAULTS: dict[PresentationTemplate, _TemplateDefaults] = {
             PresentationActorField.NAME,
             PresentationActorField.ROLE,
             PresentationActorField.LOCATION,
+            PresentationActorField.STATUS,
             PresentationActorField.COMMAND_REACHABILITY,
         ),
         roadmap_detail=PresentationEntityDetail.DETAIL,
@@ -252,7 +257,8 @@ _TEMPLATE_DEFAULTS: dict[PresentationTemplate, _TemplateDefaults] = {
             PresentationActorField.NAME,
             PresentationActorField.ROLE,
             PresentationActorField.LOCATION,
-            PresentationActorField.CAPABILITIES,
+            PresentationActorField.STATUS,
+            PresentationActorField.TASK,
             PresentationActorField.COMMAND_REACHABILITY,
         ),
         roadmap_detail=PresentationEntityDetail.CAUSALITY,
@@ -260,6 +266,17 @@ _TEMPLATE_DEFAULTS: dict[PresentationTemplate, _TemplateDefaults] = {
         timeline_density=PresentationTimelineDensity.DETAILED,
     ),
 }
+
+_SAFE_ACTOR_FIELDS = frozenset(
+    {
+        PresentationActorField.NAME,
+        PresentationActorField.ROLE,
+        PresentationActorField.LOCATION,
+        PresentationActorField.STATUS,
+        PresentationActorField.TASK,
+        PresentationActorField.COMMAND_REACHABILITY,
+    }
+)
 
 
 def resolve_presentation_profile(document: object | None) -> ResolvedPresentation:
@@ -281,9 +298,14 @@ def resolve_presentation_profile(document: object | None) -> ResolvedPresentatio
         if actors and actors.visible_fields
         else defaults.actor_fields
     )
+    actor_fields = tuple(item for item in actor_fields if item in _SAFE_ACTOR_FIELDS)
     if actors and actors.visible_fields:
         visible_actor_fields = set(actors.visible_fields)
-        actor_fields = tuple(item for item in actor_fields if item in visible_actor_fields)
+        actor_fields = tuple(
+            item
+            for item in actor_fields
+            if item in visible_actor_fields and item in _SAFE_ACTOR_FIELDS
+        )
     return ResolvedPresentation(
         profile=profile,
         template=profile.template,

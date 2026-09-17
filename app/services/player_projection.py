@@ -243,6 +243,18 @@ class PlayerProjectionService:
             if task is not None
             else None
         )
+        public_task = (
+            self.task(
+                task,
+                definition,
+                known_facts={
+                    (item.node_key, item.fact_key): item.truth_value for item in known_facts
+                },
+                known_resources=knowledge_projection.planner_resources()["resources"],
+            )
+            if task is not None
+            else None
+        )
         return PlayerGameStateResponse(
             game=self._game_summary(game, active_task),
             scenario_metadata=PublicScenarioMetadataResponse(
@@ -433,6 +445,8 @@ class PlayerProjectionService:
                     name=item.name,
                     role_name=role_definitions[item.role_key].name,
                     current_node_name=node_definitions[item.current_node_key].name,
+                    status=self._actor_activity(public_task, item.name)[0],
+                    task_name=self._actor_activity(public_task, item.name)[1],
                     command_reachability=(
                         "DISCONNECTED" if item.command_reachability == "DISCONNECTED" else "ONLINE"
                     ),
@@ -440,18 +454,7 @@ class PlayerProjectionService:
                 for item in actors
                 if item.current_node_key in visible_node_keys
             ],
-            current_task=(
-                self.task(
-                    task,
-                    definition,
-                    known_facts={
-                        (item.node_key, item.fact_key): item.truth_value for item in known_facts
-                    },
-                    known_resources=knowledge_projection.planner_resources()["resources"],
-                )
-                if task is not None
-                else None
-            ),
+            current_task=public_task,
             current_goal_draft=(
                 PublicResolvedGoalDraftResponse(
                     draft_id=ready_draft.id,
@@ -494,6 +497,35 @@ class PlayerProjectionService:
             knowledge_level=resolved.knowledge_level.value,
             semantic_order=[item.value for item in resolved.semantic_order],
         )
+
+    @staticmethod
+    def _actor_activity(
+        task: PublicTaskResponse | None,
+        actor_name: str,
+    ) -> tuple[str, str | None]:
+        """Resolve only the safe activity summary already present in Player Task data."""
+
+        if task is None or task.execution_phase in {"COMPLETED", "BLOCKED", "ABORTED"}:
+            return "IDLE", None
+        active_actor_name = (
+            task.briefing.actor_name
+            if task.execution_phase in {"AWAITING_ACTION_ACK", "APPROVAL_REQUIRED"}
+            and task.briefing is not None
+            else None
+        )
+        if active_actor_name == actor_name:
+            return "ACTIVE", task.goal
+        if task.plan is not None and any(
+            step.assigned_actor_name == actor_name and step.status == "CURRENT"
+            for step in task.plan.steps
+        ):
+            return "ACTIVE", task.goal
+        if task.plan is not None and any(
+            step.assigned_actor_name == actor_name and step.status == "PENDING"
+            for step in task.plan.steps
+        ):
+            return "PLANNED", task.goal
+        return "IDLE", None
 
     @staticmethod
     def _fact_presentation_slot(

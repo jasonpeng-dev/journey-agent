@@ -198,41 +198,23 @@ function derivedStateDisplayValue(requirement: MissionRoadmapRequirement): strin
   return String(requirement.current_known_value);
 }
 
-const FACT_GOAL_LABELS: Record<string, string> = {
-  sustained_humanitarian_logistics: "建立持续人道物流能力",
-  sustained_generation_capability: "建立持续发电能力",
-};
-
-const FACT_GOAL_SUFFIXES: Record<string, string> = {
-  operational: "恢复运行",
-  power_supply: "恢复供电",
-  passable: "恢复通行",
-  emergency_power: "恢复应急供电",
-  heavy_engineering_support: "获得重型工程支援",
-  heavy_engineering_support_ready: "部署重型工程支援",
-  rail_freight_capability: "恢复铁路货运能力",
-  emergency_delivery_support: "建立应急配送能力",
-  external_relief_supply_ready: "建立外援供应能力",
-};
-
 function factStateDisplayText(
-  factKey: string,
   factName: string,
   currentValue: string | number | boolean | undefined,
   acceptedValues: Array<string | number | boolean>,
 ): string {
   const stateName = factName === "目标状态" ? "状态" : factName;
   if (currentValue === true) {
-    if (factKey === "operational" || factName.includes("运行")) return "正在运行";
-    if (factKey === "power_supply" || factName.includes("供电")) return "已供电";
-    if (factKey === "passable" || factName.includes("通行")) return "可通行";
+    if (factName.includes("运行")) return "正在运行";
+    if (factName.includes("供电")) return "已供电";
+    if (factName.includes("通行")) return "可通行";
     if (factName.includes("发电")) return "正在发电";
     return `${stateName}已达到目标状态`;
   }
   if (currentValue === false) {
-    if (factKey === "operational" || factName.includes("运行")) return "尚未恢复运行";
-    if (factKey === "power_supply" || factName.includes("供电")) return "尚未供电";
-    if (factKey === "passable" || factName.includes("通行")) return "尚未恢复通行";
+    if (factName.includes("运行")) return "尚未恢复运行";
+    if (factName.includes("供电")) return "尚未供电";
+    if (factName.includes("通行")) return "尚未恢复通行";
     if (factName.includes("发电")) return "尚未发电";
     return `${stateName}尚未达到目标状态`;
   }
@@ -325,7 +307,6 @@ function missionRoadmapRequirementText(
 
   if (requirement.fact_key) {
     const accepted = requirement.accepted_values ?? [];
-    const positive = accepted.some((value) => value === true || value === "AVAILABLE");
     const targetName = requirement.node_key
       ? names.nodeNames?.[requirement.node_key] ?? "目标设施"
       : "目标设施";
@@ -335,14 +316,7 @@ function missionRoadmapRequirementText(
     const currentValue = requirement.node_key
       ? names.factValues?.[publicFactIdentity(requirement.node_key, requirement.fact_key)]
       : undefined;
-    if (positive) {
-      const directLabel = FACT_GOAL_LABELS[requirement.fact_key];
-      if (directLabel && currentValue === undefined) return directLabel;
-      const suffix = FACT_GOAL_SUFFIXES[requirement.fact_key];
-      if (suffix && currentValue === undefined) return targetName + suffix;
-    }
     const stateText = factStateDisplayText(
-      requirement.fact_key,
       factName,
       currentValue,
       accepted,
@@ -590,6 +564,7 @@ function missionRoadmapRequirementRows(
 
 export function MissionRoadmap({
   stages,
+  presentation,
   regionNames,
   resourceNames,
   nodeNames,
@@ -597,6 +572,7 @@ export function MissionRoadmap({
   factValues,
 }: {
   stages: MissionRoadmapStage[];
+  presentation?: PlayerGameState["presentation"];
   summary?: string;
   regionNames?: Record<string, string>;
   resourceNames?: Record<string, string>;
@@ -604,7 +580,11 @@ export function MissionRoadmap({
   factNames?: Record<string, string>;
   factValues?: Record<string, string | number | boolean>;
 }) {
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const defaultOpen = presentation?.default_open === "FULL";
+  const [detailsOpen, setDetailsOpen] = useState(defaultOpen);
+  useEffect(() => {
+    setDetailsOpen(defaultOpen);
+  }, [defaultOpen, presentation?.revision]);
   if (stages.length === 0) return null;
   return (
     <div className="mission-roadmap-details">
@@ -631,11 +611,15 @@ export function MissionRoadmap({
                 factValues,
               })
             ));
-            if (rows.length === 0) return [];
+            const visibleRows = presentation?.roadmap_detail === "SUMMARY"
+              ? rows.filter((row) => row.type !== "field").slice(0, 3)
+              : rows;
+            const safeRows = visibleRows.length > 0 ? visibleRows : rows.slice(0, 1);
+            if (safeRows.length === 0) return [];
             return [(
               <li key={stage.key} className={stage.status.toLowerCase()}>
                 <div className="mission-roadmap-row-list">
-                  {rows.map((row, index) => {
+                  {safeRows.map((row, index) => {
                     if (row.type === "field") {
                       return (
                         <div
@@ -794,6 +778,21 @@ function timelineResultText(event: PublicTimelineEvent): string | null {
   return [status, usageText].filter(Boolean).join(" · ");
 }
 
+type PlanDisplayState = "COLLAPSED" | "COMPACT" | "FULL";
+
+function defaultPlanDisplayState(
+  plan: PublicPlanHistory,
+  latestId: string | null,
+  profileDefault: "COLLAPSED" | "COMPACT" | "FULL" | undefined,
+): PlanDisplayState {
+  if (profileDefault === "COLLAPSED") return "COLLAPSED";
+  if (profileDefault === "FULL") return "FULL";
+  if (profileDefault === "COMPACT") return plan.total_steps >= 6 ? "COMPACT" : "FULL";
+  return plan.total_steps >= 6 && plan.id === latestId
+    ? "COMPACT"
+    : plan.id === latestId ? "FULL" : "COLLAPSED";
+}
+
 function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
   const [open, setOpen] = useState(false);
   return (
@@ -844,8 +843,15 @@ function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
   );
 }
 
-export function Timeline({ task }: { task: PublicTask | null }) {
+export function Timeline({
+  task,
+  presentation,
+}: {
+  task: PublicTask | null;
+  presentation?: PlayerGameState["presentation"];
+}) {
   const timelineRef = useRef<HTMLDivElement>(null);
+  const timelineDensity = presentation?.timeline_density ?? "DETAILED";
   useEffect(() => {
     const element = timelineRef.current;
     if (element) element.scrollTop = element.scrollHeight;
@@ -862,7 +868,11 @@ export function Timeline({ task }: { task: PublicTask | null }) {
     );
   }
   return (
-    <div ref={timelineRef} className="mission-timeline" aria-live="polite">
+    <div
+      ref={timelineRef}
+      className={`mission-timeline timeline-density-${timelineDensity.toLowerCase()}`}
+      aria-live="polite"
+    >
       {task.timeline.map((event) => {
         const base = timelinePresentation[event.kind];
         const presentation =
@@ -930,9 +940,9 @@ export function Timeline({ task }: { task: PublicTask | null }) {
                 </strong>
               )}
               {planReason && <p className="timeline-plan-reason">{planReason}</p>}
-              {planningCycle && <PlanningCycleDetails cycle={planningCycle} />}
+              {planningCycle && timelineDensity !== "COMPACT" && <PlanningCycleDetails cycle={planningCycle} />}
               {event.kind !== "ACTION_RESULT" && <ActionLocationLine location={eventLocation} />}
-              {event.detail && !event.kind.startsWith("PLAN_") && (
+              {event.detail && timelineDensity !== "COMPACT" && !event.kind.startsWith("PLAN_") && (
                 <p>
                   说明：
                   {uiLabel(event.detail)}
@@ -941,7 +951,7 @@ export function Timeline({ task }: { task: PublicTask | null }) {
               {!event.kind.startsWith("PLAN_") && actionResultText && (
                 <p className="timeline-action-result">{actionResultText}</p>
               )}
-              {!event.kind.startsWith("PLAN_") && event.knowledge_changes.length > 0 && (
+              {timelineDensity !== "COMPACT" && !event.kind.startsWith("PLAN_") && event.knowledge_changes.length > 0 && (
                 <ul className="knowledge-gains">
                   {event.knowledge_changes.map((change) => (
                     <li key={`${event.id}:${change.key}`}>
@@ -961,9 +971,14 @@ export function Timeline({ task }: { task: PublicTask | null }) {
   );
 }
 
-export function PlanHistory({ task }: { task: PublicTask }) {
+export function PlanHistory({
+  task,
+  presentation,
+}: {
+  task: PublicTask;
+  presentation?: PlayerGameState["presentation"];
+}) {
   const latestId = task.plan_history.at(-1)?.id ?? null;
-  type PlanDisplayState = "COLLAPSED" | "COMPACT" | "FULL";
   const [displayStates, setDisplayStates] = useState<Record<string, PlanDisplayState>>({});
   const initializedTaskId = useRef<string | null>(null);
   useEffect(() => {
@@ -972,14 +987,16 @@ export function PlanHistory({ task }: { task: PublicTask }) {
       initializedTaskId.current = task.id;
       task.plan_history.forEach((plan) => {
         if (!next[plan.id]) {
-          next[plan.id] = plan.total_steps >= 6 && plan.id === latestId
-            ? "COMPACT"
-            : plan.id === latestId ? "FULL" : "COLLAPSED";
+          next[plan.id] = defaultPlanDisplayState(
+            plan,
+            latestId,
+            presentation?.plan_default,
+          );
         }
       });
       return next;
     });
-  }, [latestId, task.id, task.plan_history]);
+  }, [latestId, presentation?.plan_default, task.id, task.plan_history]);
   if (!task.plan_history.length) return <p className="console-empty">尚未生成执行方案。</p>;
   return (
     <div className="plan-history">
@@ -987,10 +1004,8 @@ export function PlanHistory({ task }: { task: PublicTask }) {
         const isLongPlan = plan.total_steps >= 6;
         const storedState = displayStates[plan.id];
         const state = !isLongPlan && storedState === "COMPACT"
-          ? "COLLAPSED"
-          : storedState ?? (isLongPlan
-            ? plan.id === latestId ? "COMPACT" : "COLLAPSED"
-            : plan.id === latestId ? "FULL" : "COLLAPSED");
+          ? "FULL"
+          : storedState ?? defaultPlanDisplayState(plan, latestId, presentation?.plan_default);
         const open = state !== "COLLAPSED";
         const markerSequence = interruptionMarkerSequence(plan);
         const interruption = plan.interruption;
@@ -1075,6 +1090,11 @@ export function PlanHistory({ task }: { task: PublicTask }) {
                   ))}
                 </ol>
               </div>
+            )}
+            {!open && (reason || task.execution_phase === "APPROVAL_REQUIRED") && (
+              <p className="plan-safety-summary" data-testid={`plan-safety-${plan.id}`}>
+                {task.execution_phase === "APPROVAL_REQUIRED" ? "需要玩家批准" : reason}
+              </p>
             )}
           </section>
         );
@@ -1243,6 +1263,9 @@ export function KnownWorldAccordions({
   const resourceGroups = groupResourcesByRegion(resources);
   const locationGroups = groupNodesByRegion(visibleNodes);
   const actorGroups = groupActorsByTask(actors, task);
+  const actorFields = presentation
+    ? presentation.actor_fields
+    : ["NAME", "ROLE", "LOCATION", "STATUS", "COMMAND_REACHABILITY"];
   const displayedRelations = meaningfulKnownRelations(knownRelations);
   const nodeByKey = new Map(visibleNodes.map((node) => [node.key, node]));
   const nodeDisplayName = (key: string, candidate?: string | null) =>
@@ -1697,18 +1720,40 @@ export function KnownWorldAccordions({
                   {group.actors.map((actor) => (
                     <div className="knowledge-entry" key={actor.key}>
                       <div className="knowledge-entry-copy">
-                        <strong>{actor.name}</strong>
-                        <small>{actor.role_name}</small>
-                      </div>
-                      <div className="actor-status-pills">
-                        <span className="console-pill success knowledge-status-pill">
-                          {actor.current_node_name}
-                        </span>
-                        <span
-                          className={`console-pill ${actor.command_reachability === "DISCONNECTED" ? "danger" : "success"} knowledge-status-pill`}
-                        >
-                          {actor.command_reachability === "DISCONNECTED" ? "失联" : "在线"}
-                        </span>
+                        {actorFields.map((field) => {
+                          if (field === "NAME") return <strong key={field}>{actor.name}</strong>;
+                          if (field === "ROLE") return <small key={field}>{actor.role_name}</small>;
+                          if (field === "LOCATION") {
+                            return (
+                              <span className="console-pill success knowledge-status-pill" data-actor-field={field} key={field}>
+                                {actor.current_node_name}
+                              </span>
+                            );
+                          }
+                          if (field === "STATUS") {
+                            const statusLabel = actor.status === "ACTIVE"
+                              ? "行动中"
+                              : actor.status === "PLANNED"
+                                ? "计划中"
+                                : actor.status === "IDLE" ? "待命中" : group.label;
+                            return <small data-actor-field={field} key={field}>{statusLabel}</small>;
+                          }
+                          if (field === "TASK" && actor.task_name) {
+                            return <small data-actor-field={field} key={field}>{actor.task_name}</small>;
+                          }
+                          if (field === "COMMAND_REACHABILITY") {
+                            return (
+                              <span
+                                className={`console-pill ${actor.command_reachability === "DISCONNECTED" ? "danger" : "success"} knowledge-status-pill`}
+                                data-actor-field={field}
+                                key={field}
+                              >
+                                {actor.command_reachability === "DISCONNECTED" ? "失联" : "在线"}
+                              </span>
+                            );
+                          }
+                          return null;
+                        })}
                       </div>
                     </div>
                   ))}
@@ -2467,7 +2512,7 @@ export function GamePage() {
               onSelect={setSelectedTaskId}
             />
             <div className="timeline-scroll">
-              <Timeline task={task} />
+              <Timeline task={task} presentation={play.data.presentation} />
               {planningForTask && activeOperation && (
                 <WaitingStatus
                   startedAt={activeOperation.startedAt}
@@ -2603,6 +2648,7 @@ export function GamePage() {
                 <MissionRoadmap
                   key={task.id}
                   stages={task.roadmap.stages}
+                  presentation={play.data.presentation}
                   regionNames={roadmapRegionNames}
                   resourceNames={roadmapResourceNames}
                   nodeNames={roadmapNodeNames}
@@ -2612,7 +2658,9 @@ export function GamePage() {
               )}
             </div>
           )}
-          {task && !planningForTask && <PlanHistory task={task} />}
+          {task && !planningForTask && (
+            <PlanHistory task={task} presentation={play.data.presentation} />
+          )}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>

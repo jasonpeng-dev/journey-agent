@@ -100,6 +100,8 @@ class PresentationActorField(StrEnum):
     NAME = "NAME"
     ROLE = "ROLE"
     LOCATION = "LOCATION"
+    STATUS = "STATUS"
+    TASK = "TASK"
     CAPABILITIES = "CAPABILITIES"
     COMMAND_REACHABILITY = "COMMAND_REACHABILITY"
 
