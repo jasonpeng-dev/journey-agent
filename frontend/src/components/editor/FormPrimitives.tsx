@@ -179,19 +179,34 @@ type NestedCardProps = {
   title: string;
   summary?: ReactNode;
   machineKey?: string;
+  typeLabel?: string;
+  identity?: ReactNode;
   children: ReactNode;
   onAdd?: () => void;
   onRemove?: () => void;
   defaultExpanded?: boolean;
 };
 
-export function NestedCard({ title, summary, machineKey, children, onAdd, onRemove, defaultExpanded = false }: NestedCardProps) {
+type NestedObjectHeaderProps = {
+  typeLabel: string;
+  identity?: ReactNode;
+};
+
+export function NestedObjectHeader({ typeLabel, identity }: NestedObjectHeaderProps) {
+  const hasIdentity = identity !== undefined && identity !== null && identity !== "";
+  return <span className="nested-object-heading"><span className="nested-object-type">{normalizedLabel(typeLabel)}</span>{hasIdentity && <strong className="nested-object-identity">{identity}</strong>}</span>;
+}
+
+export function NestedCard({ title, summary, machineKey, typeLabel, identity, children, onAdd, onRemove, defaultExpanded = false }: NestedCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const toggleId = useId();
+  const titleParts = title.split(" · ");
+  const resolvedTypeLabel = typeLabel ?? titleParts[0];
+  const resolvedIdentity = identity ?? (titleParts.length > 1 ? titleParts.slice(1).join(" · ") : machineKey);
   return <article className={`nested-editor nested-card${expanded ? " is-expanded" : ""}`}>
     <header className="nested-card-header">
       <button type="button" className="nested-card-toggle" aria-expanded={expanded} aria-controls={toggleId} onClick={() => setExpanded((current) => !current)}>
-        <span className="nested-card-title"><strong>{normalizedLabel(title)}</strong>{machineKey && <code className="machine-key">{machineKey}</code>}</span>
+        <span className="nested-card-title"><NestedObjectHeader typeLabel={resolvedTypeLabel} identity={resolvedIdentity} /></span>
         {summary && <span className="nested-card-summary">{summary}</span>}
       </button>
       <span className="button-row nested-card-actions">

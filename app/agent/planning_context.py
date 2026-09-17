@@ -309,8 +309,17 @@ def _canonical_planner_input(context: PlanningContext) -> PlannerInput:
                 entry = bindings.setdefault(
                     (action_key, target_key), {"requirements": [], "effects": []}
                 )
+                requirement_effects = requirement.get("effects")
+                if isinstance(requirement_effects, (list, tuple)):
+                    for effect in cast(list[object], requirement_effects):
+                        if isinstance(effect, dict) and effect not in entry["effects"]:
+                            entry["effects"].append(dict(effect))
                 entry["requirements"].append(
-                    {key: value for key, value in requirement.items() if key != "action_key"}
+                    {
+                        key: value
+                        for key, value in requirement.items()
+                        if key not in {"action_key", "effects"}
+                    }
                 )
 
     target_bindings = tuple(
@@ -1137,9 +1146,7 @@ class PlanningContextBuilder:
                     action,
                     known_preconditions=known_preconditions_by_action.get(action.key, ()),
                     source_preconditions=planner_source_preconditions(definition, action),
-                    resource_requirements=global_action_resource_requirements.get(
-                        action.key, ()
-                    ),
+                    resource_requirements=global_action_resource_requirements.get(action.key, ()),
                     target_role_requirements=safe_target_roles,
                 ),
             }
@@ -1455,7 +1462,6 @@ class PlanningContextBuilder:
         return (
             [item for item in values if isinstance(item, dict)] if isinstance(values, list) else []
         )
-
 
     def known_world(self, definition: ScenarioDefinitionV2) -> dict[str, object]:
         """Return the shared knowledge projection used to build PlannerInput."""

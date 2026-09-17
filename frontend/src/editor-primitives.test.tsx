@@ -6,6 +6,7 @@ import {
   EnumSelect,
   MultiValuePicker,
   NestedCard,
+  NestedObjectHeader,
   ReferencePicker,
   TextInput,
 } from "./components/editor/FormPrimitives";
@@ -67,5 +68,12 @@ describe("shared editor form primitives", () => {
     expect(screen.queryByText("nested editor body")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /条件/ }));
     expect(screen.getByText("nested editor body")).toBeInTheDocument();
+  });
+
+  it("keeps nested object type and identity on separate hierarchy levels", () => {
+    render(<NestedObjectHeader typeLabel="FACT" identity="operational" />);
+
+    expect(screen.getByText("FACT")).toHaveClass("nested-object-type");
+    expect(screen.getByText("operational")).toHaveClass("nested-object-identity");
   });
 });
