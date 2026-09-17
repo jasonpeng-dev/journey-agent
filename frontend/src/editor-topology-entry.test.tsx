@@ -61,7 +61,7 @@ afterEach(cleanup);
 
 function renderEditor(section: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[`/scenarios/scenario-1/edit/${section}`]}><Routes><Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} /></Routes></MemoryRouter></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[`/scenarios/scenario-1/edit/${section}`]}><Routes><Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} /><Route path="/scenarios/:scenarioId/edit/:section/:objectKey" element={<EditorPage />} /></Routes></MemoryRouter></QueryClientProvider>);
 }
 
 describe("world topology overview entry", () => {
@@ -83,7 +83,19 @@ describe("world topology overview entry", () => {
   it("keeps Relations as the relation authoring route", async () => {
     renderEditor("relations");
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "关系与拓扑" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "关系" })).toBeInTheDocument());
     expect(screen.queryByRole("region", { name: "分层拓扑浏览器" })).not.toBeInTheDocument();
+  });
+
+  it("opens a topology node in the owning World Entities section", async () => {
+    renderEditor("world");
+
+    await screen.findByRole("img", { name: "范围总览拓扑" });
+    fireEvent.doubleClick(screen.getByRole("button", { name: "北部范围" }));
+    await screen.findByRole("img", { name: "范围内部拓扑" });
+    fireEvent.doubleClick(screen.getByRole("button", { name: "北部实体" }));
+
+    expect(await screen.findByRole("heading", { name: "世界实体" })).toBeInTheDocument();
+    expect(screen.getAllByDisplayValue("北部实体").length).toBeGreaterThan(0);
   });
 });

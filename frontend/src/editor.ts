@@ -126,6 +126,12 @@ function objectKey(kind: EntityKind, value: JsonObject): string | null {
     const target = typeof value.target_node_key === "string" ? value.target_node_key : "";
     return source && relation && target ? `${source}__${relation}__${target}` : null;
   }
+  if (kind === "public_reference") {
+    const refType = typeof value.ref_type === "string" ? value.ref_type : "";
+    const refKey = typeof value.ref_key === "string" ? value.ref_key : "";
+    const term = typeof value.term === "string" ? value.term : "";
+    return refType && refKey && term ? `${refType}:${refKey}:${term}` : null;
+  }
   const key = value[KEY_FIELDS[kind]];
   return typeof key === "string" && key.length > 0 ? key : null;
 }
@@ -182,6 +188,10 @@ export function filterDraftObjects(objects: DraftObject[], search: string, kind 
     if (!query) return true;
     return [item.name, item.key, item.kind].some((value) => value.toLocaleLowerCase().includes(query));
   });
+}
+
+export function draftObjectIdentity(item: Pick<DraftObject, "kind" | "path">): string {
+  return `${item.kind}:${item.path.join("/")}`;
 }
 
 export function objectByKindAndKey(document: JsonObject, kind: EntityKind, key: string): DraftObject | null {

@@ -4,8 +4,9 @@ import { addObject as addRegisteredObject, collectionDefaults, sectionRegistry }
 export const kindsBySection: Record<string, EntityKind[]> = Object.fromEntries(
   sectionRegistry.map((section) => [section.id, section.entityKinds ?? []]),
 );
-kindsBySection.world = ["node_type", "node", "relation_type", "relation", "resource"];
-kindsBySection.actors = ["role", "actor"];
+// The legacy world route is a browser-only topology surface. Authoring belongs
+// to the dedicated World Model sections below it.
+kindsBySection.world = [];
 kindsBySection.interactions = ["interaction"];
 
 export function addObject(document: JsonObject, kind: EntityKind): { document: JsonObject; key: string } {
