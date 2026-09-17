@@ -94,6 +94,20 @@ class ActionLocality(StrEnum):
     REGION = "REGION"
 
 
+class NodeFamilyV2(StrEnum):
+    """Resolved semantic family for a World Node.
+
+    The Scenario locality contract is the only authoring authority for the
+    special Region/Facility/Transport families.  A Scenario without that
+    opt-in remains generic rather than acquiring a second implicit taxonomy.
+    """
+
+    GENERIC = "GENERIC"
+    REGION = "REGION"
+    FACILITY = "FACILITY"
+    TRANSPORT = "TRANSPORT"
+
+
 class ActionTargetKind(StrEnum):
     NODE = "NODE"
     ACTOR = "ACTOR"
@@ -383,6 +397,24 @@ class InteractionDefinitionV2(FrozenDefinitionModel):
     description: str = Field(default="", max_length=2000)
 
 
+class ValueLabelV2(FrozenDefinitionModel):
+    """One typed Scenario value paired with its business display label."""
+
+    value: StrictScalar
+    label: StrictStr = Field(min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_label(self) -> ValueLabelV2:
+        if self.label != self.label.strip():
+            raise ValueError("Value labels must not have surrounding whitespace")
+        return self
+
+
+# The longer alias makes the typed vocabulary discoverable to callers without
+# changing the concise persisted field name used by Scenario documents.
+TypedValueLabelV2 = ValueLabelV2
+
+
 class FactDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -400,6 +432,15 @@ class FactDefinitionV2(FrozenDefinitionModel):
         exclude_if=lambda value: not value,
     )
     allowed_values: tuple[StrictScalar, ...] = ()
+    value_labels: tuple[ValueLabelV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_typed_allowed_values(cls, value: object) -> object:
+        return _normalize_typed_value_labels(value, "Fact")
 
     @model_validator(mode="after")
     def validate_value_domain(self) -> FactDefinitionV2:
@@ -415,12 +456,25 @@ class FactDefinitionV2(FrozenDefinitionModel):
             raise ValueError("initial_value does not match the Fact value_type")
         if self.value_type != FactValueType.ENUM and self.allowed_values:
             raise ValueError("allowed_values are valid only for ENUM Facts")
-        if len(set(self.allowed_values)) != len(self.allowed_values):
-            raise ValueError("Fact allowed_values must be unique")
+        _require_unique_typed(self.allowed_values, "Fact allowed_values")
         if self.value_type == FactValueType.ENUM and any(
             type(value) is not type(self.initial_value) for value in self.allowed_values
         ):
             raise ValueError("ENUM values must share one scalar type")
+        label_values = tuple(item.value for item in self.value_labels)
+        _require_unique_typed(label_values, "Fact value labels")
+        _validate_typed_values(
+            self.value_type,
+            self.allowed_values,
+            label_values,
+            "Fact value label",
+        )
+        if (
+            self.value_type == FactValueType.ENUM
+            and self.value_labels
+            and _typed_value_set(label_values) != _typed_value_set(self.allowed_values)
+        ):
+            raise ValueError("Fact value labels must cover the ENUM domain exactly")
         normalized_aliases = [alias.strip().casefold() for alias in self.goal_aliases]
         normalized_examples = [example.strip().casefold() for example in self.goal_examples]
         if any(not alias for alias in (*normalized_aliases, *normalized_examples)):
@@ -483,6 +537,14 @@ def relation_identity(relation: RelationDefinitionV2) -> str:
     )
 
 
+class RelationTypeDefinitionV2(FrozenDefinitionModel):
+    """Scenario-scoped semantic vocabulary entry for a Relation edge."""
+
+    key: StableKey
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=2000)
+
+
 class ResourceDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -491,6 +553,18 @@ class ResourceDefinitionV2(FrozenDefinitionModel):
     minimum: int
     maximum: int | None = None
     reservation_supported: bool = False
+    unit: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        exclude_if=lambda value: value is None,
+    )
+    display_unit: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_bounds(self) -> ResourceDefinitionV2:
@@ -500,6 +574,10 @@ class ResourceDefinitionV2(FrozenDefinitionModel):
             self.maximum is not None and self.initial_value > self.maximum
         ):
             raise ValueError("Resource initial_value is outside its bounds")
+        for field_name in ("unit", "display_unit"):
+            value = getattr(self, field_name)
+            if value is not None and value != value.strip():
+                raise ValueError(f"Resource {field_name} must not have surrounding whitespace")
         return self
 
 
@@ -508,11 +586,23 @@ class WorldDefinitionV2(FrozenDefinitionModel):
     name: str = Field(min_length=1, max_length=160)
     node_types: tuple[NodeTypeDefinitionV2, ...]
     nodes: tuple[NodeDefinitionV2, ...]
+    relation_types: tuple[RelationTypeDefinitionV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     relations: tuple[RelationDefinitionV2, ...] = ()
     resources: tuple[ResourceDefinitionV2, ...] = ()
 
+    @model_validator(mode="after")
+    def validate_relation_types(self) -> WorldDefinitionV2:
+        _require_unique((item.key for item in self.relation_types), "World Relation Type keys")
+        return self
+
     def node(self, key: str) -> NodeDefinitionV2 | None:
         return next((node for node in self.nodes if node.key == key), None)
+
+    def relation_type(self, key: str) -> RelationTypeDefinitionV2 | None:
+        return next((item for item in self.relation_types if item.key == key), None)
 
 
 class RoleDefinitionV2(FrozenDefinitionModel):
@@ -733,10 +823,19 @@ class DerivedStateDefinitionV2(FrozenDefinitionModel):
     available_value: StrictScalar
     unavailable_value: StrictScalar
     allowed_values: tuple[StrictScalar, ...] = ()
+    value_labels: tuple[ValueLabelV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     goal_addressable: bool = Field(default=False, exclude_if=lambda value: not value)
     goal_aliases: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     goal_examples: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     dependencies: tuple[DerivedStateDependencyV2, ...] = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_typed_allowed_values(cls, value: object) -> object:
+        return _normalize_typed_value_labels(value, "Derived state")
 
     @model_validator(mode="after")
     def validate_value_domain(self) -> DerivedStateDefinitionV2:
@@ -761,8 +860,21 @@ class DerivedStateDefinitionV2(FrozenDefinitionModel):
             raise ValueError("Derived state values do not match value_type")
         if self.value_type != FactValueType.ENUM and self.allowed_values:
             raise ValueError("allowed_values are valid only for ENUM Derived states")
-        if len(set(self.allowed_values)) != len(self.allowed_values):
-            raise ValueError("Derived state allowed_values must be unique")
+        _require_unique_typed(self.allowed_values, "Derived state allowed_values")
+        label_values = tuple(item.value for item in self.value_labels)
+        _require_unique_typed(label_values, "Derived state value labels")
+        _validate_typed_values(
+            self.value_type,
+            self.allowed_values,
+            label_values,
+            "Derived state value label",
+        )
+        if (
+            self.value_type == FactValueType.ENUM
+            and self.value_labels
+            and _typed_value_set(label_values) != _typed_value_set(self.allowed_values)
+        ):
+            raise ValueError("Derived state value labels must cover the ENUM domain exactly")
         normalized_aliases = [alias.strip().casefold() for alias in self.goal_aliases]
         normalized_examples = [example.strip().casefold() for example in self.goal_examples]
         if any(not alias for alias in (*normalized_aliases, *normalized_examples)):
@@ -1501,6 +1613,34 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     def derived_state_definitions(self):  # type: ignore[no-untyped-def]
         return MappingProxyType({state.key: state for state in self.derived_states})
 
+    def node_family_for_type(self, node_type_key: str) -> NodeFamilyV2:
+        """Resolve a safe semantic Node family from the locality authority."""
+
+        locality = self.metadata.locality
+        if not locality.enabled:
+            return NodeFamilyV2.GENERIC
+        family_by_type = {
+            locality.region_node_type_key: NodeFamilyV2.REGION,
+            locality.facility_node_type_key: NodeFamilyV2.FACILITY,
+            locality.transport_node_type_key: NodeFamilyV2.TRANSPORT,
+        }
+        return family_by_type.get(node_type_key, NodeFamilyV2.GENERIC)
+
+    def node_family_for_node(self, node_key: str) -> NodeFamilyV2:
+        """Resolve one Node's family without introducing a second authority."""
+
+        node = self.world.node(node_key)
+        if node is None:
+            raise KeyError(f"Unknown Scenario Node: {node_key}")
+        return self.node_family_for_type(node.node_type_key)
+
+    def node_family_metadata(self) -> dict[str, NodeFamilyV2]:
+        """Return resolved safe family metadata keyed by Node identity."""
+
+        return {
+            node.key: self.node_family_for_type(node.node_type_key) for node in self.world.nodes
+        }
+
     @model_validator(mode="after")
     def validate_references(self) -> ScenarioDefinitionV2:
         if self.metadata.key != self.world.key:
@@ -1660,10 +1800,80 @@ def _normalize_transport_resource_parameters(
     }
 
 
+def _normalize_typed_value_labels(value: object, owner: str) -> object:
+    """Accept typed label entries without weakening the scalar domain.
+
+    Existing documents continue to use ``allowed_values: [scalar, ...]``.
+    During authoring, the same list may contain ``{value, label}`` entries;
+    they are normalized into the existing scalar domain plus the explicit
+    ``value_labels`` vocabulary.  A mapping with any other shape is rejected,
+    so a weak ``dict[str, str]`` contract can never become canonical data.
+    """
+
+    if not isinstance(value, Mapping):
+        return value
+    payload = dict(value)
+    raw_allowed = payload.get("allowed_values")
+
+    def normalize_entries(raw: object) -> list[dict[str, object]] | None:
+        if not isinstance(raw, (list, tuple)):
+            if raw in (None, (), []):
+                return []
+            raise ValueError(f"{owner} value labels must be a list of typed entries")
+        entries: list[dict[str, object]] = []
+        for item in raw:
+            if isinstance(item, ValueLabelV2):
+                entries.append({"value": item.value, "label": item.label})
+            elif isinstance(item, Mapping):
+                if set(item) != {"value", "label"}:
+                    raise ValueError(
+                        f"{owner} typed value label entries must contain only value and label"
+                    )
+                entries.append({"value": item["value"], "label": item["label"]})
+            else:
+                raise ValueError(f"{owner} value labels must contain typed entries")
+        return entries
+
+    scalar_values: list[StrictScalar] = []
+    typed_entries: list[dict[str, object]] = []
+    if isinstance(raw_allowed, (list, tuple)):
+        for item in raw_allowed:
+            if isinstance(item, ValueLabelV2):
+                typed_entries.append({"value": item.value, "label": item.label})
+            elif isinstance(item, Mapping):
+                if set(item) != {"value", "label"}:
+                    raise ValueError(
+                        f"{owner} typed allowed_values entries must contain only value and label"
+                    )
+                typed_entries.append({"value": item["value"], "label": item["label"]})
+            else:
+                scalar_values.append(item)
+
+    label_entries = normalize_entries(payload.get("value_labels"))
+    value_type = payload.get("value_type")
+    is_enum = value_type in {FactValueType.ENUM, FactValueType.ENUM.value}
+    if not typed_entries and is_enum and not scalar_values and label_entries:
+        payload["allowed_values"] = [entry["value"] for entry in label_entries]
+        return payload
+
+    if not typed_entries:
+        return payload
+    if scalar_values:
+        raise ValueError(f"{owner} allowed_values cannot mix scalar and typed entries")
+
+    payload["allowed_values"] = (
+        [entry["value"] for entry in typed_entries] if is_enum else []
+    )
+    if not payload.get("value_labels"):
+        payload["value_labels"] = typed_entries
+    return payload
+
+
 def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     world = definition.world
     _require_unique((item.key for item in world.node_types), "World Node Type keys")
     _require_unique((item.key for item in world.nodes), "World Node keys")
+    _require_unique((item.key for item in world.relation_types), "World Relation Type keys")
     _require_unique((item.key for item in world.resources), "World Resource keys")
     _require_unique((item.key for item in definition.interactions), "Interaction keys")
     _require_unique((item.key for item in definition.actors.roles), "Role keys")
@@ -1717,7 +1927,11 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
         else:
             _require_key(actors, reference.ref_key, "Public reference Actor")
 
-    _validate_locality_contract(definition, nodes, node_types)
+    relation_type_keys = (
+        {item.key for item in world.relation_types} if world.relation_types else None
+    )
+    _validate_relation_type_references(definition, relation_type_keys)
+    _validate_locality_contract(definition, nodes, node_types, relation_type_keys)
     _validate_resource_initial_states(definition, nodes)
     _validate_resource_pools(definition, nodes)
     _validate_region_resource_knowledge(definition, nodes)
@@ -2212,8 +2426,28 @@ def _validate_typed_values(
             raise ValueError(f"{label} does not match INTEGER")
         if value_type == FactValueType.BOOLEAN and type(value) is not bool:
             raise ValueError(f"{label} does not match BOOLEAN")
-        if value_type == FactValueType.ENUM and value not in allowed_values:
+        if (
+            value_type == FactValueType.ENUM
+            and _typed_value_identity(value) not in _typed_value_set(allowed_values)
+        ):
             raise ValueError(f"{label} is outside the ENUM domain")
+
+
+def _typed_value_identity(value: StrictScalar) -> tuple[type[object], StrictScalar]:
+    """Keep bool/int identities distinct while retaining scalar equality."""
+
+    return type(value), value
+
+
+def _typed_value_set(
+    values: tuple[StrictScalar, ...] | list[StrictScalar],
+) -> set[tuple[type[object], StrictScalar]]:
+    return {_typed_value_identity(value) for value in values}
+
+
+def _require_unique_typed(values: tuple[StrictScalar, ...], label: str) -> None:
+    if len(_typed_value_set(values)) != len(values):
+        raise ValueError(f"{label} must be unique")
 
 
 def _validate_gate(
@@ -2226,10 +2460,56 @@ def _validate_gate(
             raise ValueError("Objective gate value is outside the ENUM Fact domain")
 
 
+def _validate_relation_type_references(
+    definition: ScenarioDefinitionV2,
+    relation_type_keys: set[str] | None,
+) -> None:
+    """Validate catalog references when a Scenario opts into typed relations.
+
+    ``None`` deliberately represents the legacy uncatalogued read path. An
+    empty catalog is still a valid new Scenario, but once catalog entries are
+    authored every relation-type reference must resolve to one of them.
+    """
+
+    if relation_type_keys is None:
+        return
+
+    def require_relation_type(key: str, label: str) -> None:
+        _require_key(relation_type_keys, key, label)
+
+    def validate_selector(selector: NodeSelectorV2 | None) -> None:
+        if selector is not None and selector.relation_type_key is not None:
+            require_relation_type(selector.relation_type_key, "Node selector Relation Type")
+
+    def validate_condition(condition: ConditionV2 | None) -> None:
+        if condition is None:
+            return
+        validate_selector(condition.node)
+        if condition.relation_type_key is not None:
+            require_relation_type(condition.relation_type_key, "Condition Relation Type")
+        for child in condition.conditions:
+            validate_condition(child)
+        validate_condition(condition.condition)
+
+    for relation in definition.world.relations:
+        require_relation_type(relation.relation_type_key, "World Relation")
+    for action in definition.actions:
+        if action.source_relation_type_key is not None:
+            require_relation_type(
+                action.source_relation_type_key,
+                f"Action {action.key} source Relation Type",
+            )
+    for rule in definition.rules:
+        validate_condition(rule.condition)
+        for effect in rule.effects:
+            validate_selector(effect.node)
+
+
 def _validate_locality_contract(
     definition: ScenarioDefinitionV2,
     nodes: dict[str, NodeDefinitionV2],
     node_types: set[str],
+    relation_type_keys: set[str] | None = None,
 ) -> None:
     locality = definition.metadata.locality
     if not locality.enabled:
@@ -2241,7 +2521,11 @@ def _validate_locality_contract(
     ):
         assert key is not None
         _require_key(node_types, key, label)
-    relation_types = {item.relation_type_key for item in definition.world.relations}
+    relation_types = (
+        relation_type_keys
+        if relation_type_keys is not None
+        else {item.relation_type_key for item in definition.world.relations}
+    )
     for key, label in (
         (locality.located_in_relation_type_key, "located_in Relation Type"),
         (locality.transport_endpoint_relation_type_key, "endpoint Relation Type"),
@@ -2487,10 +2771,12 @@ __all__ = [
     "EffectKind",
     "EngineCapability",
     "LocalityContractV2",
+    "NodeFamilyV2",
     "PublicKnowledgeDefinitionV2",
     "PublicReferenceTypeV2",
     "PublicReferenceV2",
     "RegionResourceKnowledgeInitialStateV2",
+    "RelationTypeDefinitionV2",
     "ResourceAvailabilityRequirementV2",
     "ResourceInitialStateV2",
     "ResourcePoolDefinitionV2",
@@ -2500,6 +2786,8 @@ __all__ = [
     "RulePhase",
     "RuleTrigger",
     "ScenarioDefinitionV2",
+    "TypedValueLabelV2",
+    "ValueLabelV2",
     "knowledge_gate_is_revealed",
     "transport_resource_entries",
 ]

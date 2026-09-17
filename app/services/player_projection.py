@@ -250,6 +250,7 @@ class PlayerProjectionService:
                         if node_projections[item.node_key] is not None
                         else None
                     ),
+                    node_family=definition.node_family_for_node(item.node_key).value,
                     region_key=(
                         node_projections[item.node_key].region_key
                         if node_projections[item.node_key] is not None
@@ -299,6 +300,7 @@ class PlayerProjectionService:
                         if node_projections[item.node_key] is not None
                         else None
                     ),
+                    node_family=definition.node_family_for_node(item.node_key).value,
                     region_key=(
                         node_projections[item.node_key].region_key
                         if node_projections[item.node_key] is not None

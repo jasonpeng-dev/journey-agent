@@ -206,6 +206,19 @@ world:
   - key: transport
     name: 交通通道
     description: ''
+  relation_types:
+  - key: contains
+    name: Contains
+    description: A World Node contains the target Node.
+  - key: endpoint
+    name: Endpoint
+    description: A Transport Node connects to the target Region.
+  - key: located_in
+    name: Located in
+    description: A Facility or Transport Node is located in the target Region.
+  - key: supplies_power_to
+    name: Supplies power to
+    description: A power source can supply the target Facility.
   nodes:
   - key: central_district
     name: 中央城区

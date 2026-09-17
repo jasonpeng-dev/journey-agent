@@ -634,6 +634,7 @@ class PublicFactResponse(ApiModel):
     value: str | int | bool
     node_name: str | None = None
     node_type_key: str | None = None
+    node_family: Literal["GENERIC", "REGION", "FACILITY", "TRANSPORT"] = "GENERIC"
     region_key: str | None = None
     region_name: str | None = None
     endpoint_region_keys: list[str] = Field(default_factory=list)
@@ -645,6 +646,7 @@ class PublicNodeResponse(ApiModel):
     name: str
     accessible: bool
     node_type_key: str | None = None
+    node_family: Literal["GENERIC", "REGION", "FACILITY", "TRANSPORT"] = "GENERIC"
     region_key: str | None = None
     region_name: str | None = None
     endpoint_region_keys: list[str] = Field(default_factory=list)

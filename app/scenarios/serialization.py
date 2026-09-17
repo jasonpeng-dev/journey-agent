@@ -56,12 +56,18 @@ def _canonical_v2_payload(
     world = normalized["world"]
     world["node_types"].sort(key=lambda item: item["key"])
     world["nodes"].sort(key=lambda item: item["key"])
+    relation_types = world.get("relation_types")
+    if isinstance(relation_types, list):
+        relation_types.sort(key=lambda item: item["key"])
     for node in world["nodes"]:
         node["interaction_keys"].sort()
         node["facts"].sort(key=lambda item: item["key"])
         for fact in node["facts"]:
             if fact["value_type"] == "ENUM":
                 fact["allowed_values"].sort(key=_scalar_sort_key)
+            fact.get("value_labels", []).sort(
+                key=lambda item: (_scalar_sort_key(item["value"]), str(item["label"]))
+            )
             fact.get("goal_aliases", []).sort(key=lambda value: str(value).casefold())
             fact.get("goal_examples", []).sort(key=lambda value: str(value).casefold())
             fact.get("goal_target_values", []).sort(key=_scalar_sort_key)
@@ -185,6 +191,9 @@ def _canonical_v2_payload(
         for state in derived_states:
             state.get("goal_aliases", []).sort(key=lambda value: str(value).casefold())
             state.get("goal_examples", []).sort(key=lambda value: str(value).casefold())
+            state.get("value_labels", []).sort(
+                key=lambda item: (_scalar_sort_key(item["value"]), str(item["label"]))
+            )
             for dependency in state["dependencies"]:
                 dependency.get("accepted_values", []).sort(key=_scalar_sort_key)
                 gate = dependency.get("knowledge_gate")
