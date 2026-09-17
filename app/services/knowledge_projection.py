@@ -1598,7 +1598,8 @@ class SharedKnowledgeProjection:
                     or not region_state.resource_survey_completed
                 ):
                     continue
-            availability_requirement = self.availability_requirement_for_pool(row)
+            raw_availability_requirement = self.raw_availability_requirement_for_pool(row)
+            availability_requirement = self.known_requirement(raw_availability_requirement)
             visible.append(
                 KnownResourcePoolView(
                     pool_key=row.pool_key,
@@ -1614,7 +1615,7 @@ class SharedKnowledgeProjection:
                     ),
                     availability_requirement=availability_requirement,
                     availability_requirement_status=self.requirement_status(
-                        availability_requirement
+                        raw_availability_requirement
                     ),
                 )
             )
@@ -1820,11 +1821,15 @@ class SharedKnowledgeProjection:
     def availability_requirement_for_pool(
         self, row: GameInstanceResourceState
     ) -> dict[str, Any] | None:
-        raw = self._static_pool_requirements.get(
+        return self.known_requirement(self.raw_availability_requirement_for_pool(row))
+
+    def raw_availability_requirement_for_pool(
+        self, row: GameInstanceResourceState
+    ) -> dict[str, Any] | None:
+        return self._static_pool_requirements.get(
             (row.resource_key, row.scope_node_key, row.pool_key),
             row.availability_requirement,
         )
-        return self.known_requirement(raw)
 
     def known_requirement(self, raw: dict[str, Any] | None) -> dict[str, Any] | None:
         if not raw:
@@ -1832,17 +1837,10 @@ class SharedKnowledgeProjection:
         node_key = raw.get("node_key")
         fact_key = raw.get("fact_key")
         if not isinstance(node_key, str) or not isinstance(fact_key, str):
-            return None
-        known = self.db.scalar(
-            select(GameInstanceFactState.visibility).where(
-                GameInstanceFactState.game_instance_id == self.scope.game_instance_id,
-                GameInstanceFactState.node_key == node_key,
-                GameInstanceFactState.fact_key == fact_key,
-            )
-        )
+            return {"status": "UNKNOWN"}
+        known = self._requirement_visibility(node_key, fact_key)
         if known != Visibility.KNOWN:
-            return dict(raw)
-        result = dict(raw)
+            return {"status": "UNKNOWN"}
         fact_value = self.db.scalar(
             select(GameInstanceFactState.truth_value).where(
                 GameInstanceFactState.game_instance_id == self.scope.game_instance_id,
@@ -1850,15 +1848,37 @@ class SharedKnowledgeProjection:
                 GameInstanceFactState.fact_key == fact_key,
             )
         )
-        result["known_value"] = fact_value
-        return result
+        return {
+            "status": "KNOWN",
+            "node_key": node_key,
+            "fact_key": fact_key,
+            "value": raw.get("value"),
+            "known_value": fact_value,
+        }
+
+    def _requirement_visibility(self, node_key: str, fact_key: str) -> Visibility | None:
+        return self.db.scalar(
+            select(GameInstanceFactState.visibility).where(
+                GameInstanceFactState.game_instance_id == self.scope.game_instance_id,
+                GameInstanceFactState.node_key == node_key,
+                GameInstanceFactState.fact_key == fact_key,
+            )
+        )
 
     def requirement_status(self, raw: dict[str, Any] | None) -> str | None:
         """Expose only whether a declared unlock requirement is known."""
 
         if not raw:
             return None
-        return "KNOWN" if self.known_requirement(raw) is not None else "UNKNOWN"
+        node_key = raw.get("node_key")
+        fact_key = raw.get("fact_key")
+        if not isinstance(node_key, str) or not isinstance(fact_key, str):
+            return "UNKNOWN"
+        return (
+            "KNOWN"
+            if self._requirement_visibility(node_key, fact_key) == Visibility.KNOWN
+            else "UNKNOWN"
+        )
 
 
 def _enum_value(row: object, attribute: str, default: Any) -> Any:

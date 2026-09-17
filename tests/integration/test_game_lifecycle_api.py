@@ -62,7 +62,15 @@ def test_games_bind_exact_version_and_instances_are_isolated(
     assert loaded.json()["scenario_name"] == GENERIC_TEST.metadata.name
     player_state = client.get(f"/api/v1/games/{first.json()['id']}/play")
     assert player_state.status_code == 200
-    assert player_state.json()["game"]["scenario_name"] == GENERIC_TEST.metadata.name
+    payload = player_state.json()
+    assert payload["game"]["scenario_name"] == GENERIC_TEST.metadata.name
+    assert payload["scenario_metadata"]["goal_presets"] == [
+        {"key": item.key, "name": item.name} for item in GENERIC_TEST.objectives
+    ]
+    assert "definition_document" not in payload
+    assert "world" not in payload
+    assert "actions" not in payload
+    assert "rules" not in payload
     missing = client.get(f"/api/v1/games/{uuid4()}")
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "GAME_INSTANCE_NOT_FOUND"

@@ -745,6 +745,28 @@ class PublicProducerBindingResponse(ApiModel):
     requirements: list[PublicProducerRequirementResponse] = Field(default_factory=list)
 
 
+class PublicUnknownResourceAvailabilityRequirementResponse(ApiModel):
+    """Player-safe marker for an unavailable pool whose unlock Fact is unknown."""
+
+    status: Literal["UNKNOWN"]
+
+
+class PublicKnownResourceAvailabilityRequirementResponse(ApiModel):
+    """Player-safe unlock metadata revealed only after the referenced Fact is known."""
+
+    status: Literal["KNOWN"]
+    node_key: str
+    fact_key: str
+    value: Any
+    known_value: Any
+
+
+PublicResourceAvailabilityRequirementResponse = (
+    PublicUnknownResourceAvailabilityRequirementResponse
+    | PublicKnownResourceAvailabilityRequirementResponse
+)
+
+
 class PublicResourceResponse(ApiModel):
     key: str
     name: str
@@ -753,7 +775,7 @@ class PublicResourceResponse(ApiModel):
     pool_key: str = "default"
     facility_key: str | None = None
     availability: Literal["AVAILABLE", "UNAVAILABLE"] = "AVAILABLE"
-    availability_requirement: dict[str, Any] | None = None
+    availability_requirement: PublicResourceAvailabilityRequirementResponse | None = None
     availability_requirement_status: Literal["KNOWN", "UNKNOWN"] | None = None
     scope_node_key: str | None = None
     scope_node_name: str | None = None
@@ -769,8 +791,22 @@ class PublicActorResponse(ApiModel):
     command_reachability: Literal["ONLINE", "DISCONNECTED"] = "ONLINE"
 
 
+class PublicGoalPresetResponse(ApiModel):
+    """Minimal goal picker metadata; formal objective definitions stay server-side."""
+
+    key: str
+    name: str
+
+
+class PublicScenarioMetadataResponse(ApiModel):
+    goal_presets: list[PublicGoalPresetResponse] = Field(default_factory=list)
+
+
 class PlayerGameStateResponse(ApiModel):
     game: GameSummaryResponse
+    scenario_metadata: PublicScenarioMetadataResponse = Field(
+        default_factory=PublicScenarioMetadataResponse
+    )
     visible_nodes: list[PublicNodeResponse]
     known_facts: list[PublicFactResponse]
     known_relations: list[PublicRelationResponse] = Field(default_factory=list)

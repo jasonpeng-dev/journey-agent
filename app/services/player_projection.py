@@ -23,6 +23,7 @@ from app.api.schemas.phase_d import (
     PublicExecutionPhase,
     PublicFactResponse,
     PublicGameStatus,
+    PublicGoalPresetResponse,
     PublicGoalRequirementResponse,
     PublicKnowledgeChangeResponse,
     PublicNodeResponse,
@@ -43,6 +44,7 @@ from app.api.schemas.phase_d import (
     PublicResourceResponse,
     PublicResourceUsageKind,
     PublicResourceUsageResponse,
+    PublicScenarioMetadataResponse,
     PublicStepStatus,
     PublicTargetActionContractResponse,
     PublicTaskResponse,
@@ -112,6 +114,7 @@ class _PlayerResourceRow:
     facility_key: str | None
     availability: str
     availability_requirement: dict[str, Any] | None
+    availability_requirement_status: str | None
     scope_node_key: str | None
 
 
@@ -230,6 +233,13 @@ class PlayerProjectionService:
         )
         return PlayerGameStateResponse(
             game=self._game_summary(game, active_task),
+            scenario_metadata=PublicScenarioMetadataResponse(
+                goal_presets=[
+                    PublicGoalPresetResponse(key=item.key, name=item.name)
+                    for item in definition.objectives
+                    if item.name.strip()
+                ]
+            ),
             visible_nodes=[
                 PublicNodeResponse(
                     key=item.node_key,
@@ -355,12 +365,8 @@ class PlayerProjectionService:
                         if hasattr(item.availability, "value")
                         else item.availability
                     ),
-                    availability_requirement=knowledge_projection.known_requirement(
-                        item.availability_requirement
-                    ),
-                    availability_requirement_status=knowledge_projection.requirement_status(
-                        item.availability_requirement
-                    ),
+                    availability_requirement=item.availability_requirement,
+                    availability_requirement_status=item.availability_requirement_status,
                     scope_node_key=item.scope_node_key,
                     scope_node_name=spatial.resource_scope(item.scope_node_key).scope_node_name,
                     scope_region_key=spatial.resource_scope(item.scope_node_key).scope_region_key,
@@ -476,8 +482,19 @@ class PlayerProjectionService:
             requirements = [
                 knowledge_projection.availability_requirement_for_pool(item) for item in ordered
             ]
+            requirement_statuses = [
+                knowledge_projection.requirement_status(
+                    knowledge_projection.raw_availability_requirement_for_pool(item)
+                )
+                for item in ordered
+            ]
             requirement = (
                 requirements[0] if all(item == requirements[0] for item in requirements) else None
+            )
+            requirement_status = (
+                requirement_statuses[0]
+                if all(item == requirement_statuses[0] for item in requirement_statuses)
+                else None
             )
             result.append(
                 _PlayerResourceRow(
@@ -488,6 +505,7 @@ class PlayerProjectionService:
                     facility_key=representative.facility_key if len(ordered) == 1 else None,
                     availability=availability,
                     availability_requirement=requirement,
+                    availability_requirement_status=requirement_status,
                     scope_node_key=representative.scope_node_key,
                 )
             )

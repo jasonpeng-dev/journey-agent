@@ -34,7 +34,6 @@ import type {
   PublicTask,
   PublicResolvedGoalDraft,
   PublicTimelineEvent,
-  ScenarioVersionDetail,
 } from "../types";
 import {
   confirmGoalErrorText,
@@ -2106,25 +2105,14 @@ export function GoalComposer({
 }
 
 function scenarioGoalPresets(
-  version: ScenarioVersionDetail | undefined,
+  metadata: PlayerGameState["scenario_metadata"] | undefined,
 ): string[] {
-  return (version?.definition_document.objectives ?? []).flatMap((item) => {
-    if (typeof item.key !== "string" || typeof item.name !== "string" || !item.name.trim()) {
+  return (metadata?.goal_presets ?? []).flatMap((item) => {
+    if (!item.name.trim()) {
       return [];
     }
     return [item.name];
   });
-}
-
-function definitionNameMap(value: unknown): Record<string, string> {
-  if (!Array.isArray(value)) return {};
-  return Object.fromEntries(value.flatMap((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    const entry = item as Record<string, unknown>;
-    return typeof entry.key === "string" && typeof entry.name === "string"
-      ? [[entry.key, entry.name]]
-      : [];
-  }));
 }
 
 export function MissionLogPanel({ children }: { children: ReactNode }) {
@@ -2169,19 +2157,6 @@ export function GamePage() {
     refetchOnReconnect: !continuousExecuting,
     refetchInterval: (query) =>
       planningRefetchInterval(query.state.data, activeOperation, continuousExecuting),
-  });
-  const scenario = useQuery({
-    queryKey: ["scenario", play.data?.game.scenario_id],
-    queryFn: () => api.scenario(play.data!.game.scenario_id),
-    enabled: Boolean(play.data?.game.scenario_id),
-  });
-  const scenarioVersion = useQuery({
-    queryKey: ["scenario-version", play.data?.game.scenario_id, play.data?.game.scenario_version_id],
-    queryFn: () => api.scenarioVersion(
-      play.data!.game.scenario_id,
-      play.data!.game.scenario_version_id,
-    ),
-    enabled: Boolean(play.data?.game.scenario_id && play.data?.game.scenario_version_id),
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["play", gameId] });
   const syncLivePlay = (state: PlayerGameState) => {
@@ -2316,13 +2291,8 @@ export function GamePage() {
   }
   const { game } = play.data;
   const liveGame = livePlay.data.game;
-  const goalPresets = scenarioGoalPresets(scenarioVersion.data);
-  const rawScenarioWorld = scenarioVersion.data?.definition_document.world;
-  const scenarioWorld = rawScenarioWorld && typeof rawScenarioWorld === "object" && !Array.isArray(rawScenarioWorld)
-    ? rawScenarioWorld as Record<string, unknown>
-    : {};
+  const goalPresets = scenarioGoalPresets(play.data.scenario_metadata);
   const roadmapNodeNames = {
-    ...definitionNameMap(scenarioWorld.nodes),
     ...Object.fromEntries(play.data.visible_nodes.map((node) => [node.key, node.name])),
   };
   const roadmapRegionNames = {
@@ -2334,7 +2304,6 @@ export function GamePage() {
     ),
   };
   const roadmapResourceNames = {
-    ...definitionNameMap(scenarioWorld.resources),
     ...Object.fromEntries(play.data.resources.map((resource) => [resource.key, resource.name])),
     ...Object.fromEntries(
       Object.values(play.data.resource_intelligence?.regions ?? {}).flatMap((region) => (
@@ -2435,7 +2404,7 @@ export function GamePage() {
         </div>
       )}
       <section className="scenario-strip">
-        <div><span>场景</span><strong>{scenario.data?.name ?? "正在加载……"}</strong></div>
+        <div><span>场景</span><strong>{game.scenario_name}</strong></div>
         <div><span>实例</span><strong>{game.id.slice(0, 8)}</strong></div>
         <div><span>精确版本</span><strong>版本 {game.scenario_version_number}</strong></div>
         <div><span>运行状态</span><strong className={`console-pill ${game.status === "ACTIVE" ? "success" : "neutral"}`}>{uiLabel(game.status)}</strong></div>
@@ -2445,7 +2414,7 @@ export function GamePage() {
           <header className="command-panel-heading"><div><p>01 · 世界</p><h1>已知世界</h1></div><span className="console-pill success">玩家可见</span></header>
           <KnownWorldAccordions
             resources={play.data.resources}
-            publicResourceNames={definitionNameMap(scenarioWorld.resources)}
+            publicResourceNames={roadmapResourceNames}
             resourceIntelligence={play.data.resource_intelligence}
             visibleNodes={play.data.visible_nodes}
             actors={play.data.actors}
@@ -2584,7 +2553,7 @@ export function GamePage() {
               readyDraft={readyGoalDraft}
               confirming={confirmGoal.isPending}
               goalPresets={goalPresets}
-              presetsLoaded={scenarioVersion.isFetched}
+              presetsLoaded={play.isFetched}
               onGoalChange={setGoal}
               onSubmit={() => submit.mutate()}
               onConfirm={(draftId) => confirmGoal.mutate(draftId)}
