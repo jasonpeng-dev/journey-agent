@@ -1111,11 +1111,6 @@ export function PlanHistory({
                 </ol>
               </div>
             )}
-            {!open && (reason || task.execution_phase === "APPROVAL_REQUIRED") && (
-              <p className="plan-safety-summary" data-testid={`plan-safety-${plan.id}`}>
-                {task.execution_phase === "APPROVAL_REQUIRED" ? "需要玩家批准" : reason}
-              </p>
-            )}
           </section>
         );
       })}
@@ -1748,46 +1743,58 @@ export function KnownWorldAccordions({
               </summary>
               <div className="knowledge-region-content">
                 <div className="knowledge-entry-list">
-                  {group.actors.map((actor) => (
-                    <div className="knowledge-entry" key={actor.key}>
-                      <div className="knowledge-entry-copy">
-                        {actorFields.map((field) => {
-                          if (field === "NAME") return <strong key={field}>{actor.name}</strong>;
-                          if (field === "ROLE") return <small key={field}>{actor.role_name}</small>;
-                          if (field === "LOCATION") {
-                            return (
-                              <span className="console-pill success knowledge-status-pill" data-actor-field={field} key={field}>
-                                {actor.current_node_name}
-                              </span>
-                            );
-                          }
-                          if (field === "STATUS") {
-                            const statusLabel = actor.status === "ACTIVE"
-                              ? "行动中"
-                              : actor.status === "PLANNED"
-                                ? "计划中"
-                                : actor.status === "IDLE" ? "待命中" : group.label;
-                            return <small data-actor-field={field} key={field}>{statusLabel}</small>;
-                          }
-                          if (field === "TASK" && actor.task_name) {
-                            return <small data-actor-field={field} key={field}>{actor.task_name}</small>;
-                          }
-                          if (field === "COMMAND_REACHABILITY") {
-                            return (
-                              <span
-                                className={`console-pill ${actor.command_reachability === "DISCONNECTED" ? "danger" : "success"} knowledge-status-pill`}
-                                data-actor-field={field}
-                                key={field}
-                              >
-                                {actor.command_reachability === "DISCONNECTED" ? "失联" : "在线"}
-                              </span>
-                            );
-                          }
-                          return null;
-                        })}
+                  {group.actors.map((actor) => {
+                    const badgeFields = actorFields.filter(
+                      (field) => field === "LOCATION" || field === "COMMAND_REACHABILITY",
+                    );
+                    const copyFields = actorFields.filter(
+                      (field) => field !== "LOCATION" && field !== "COMMAND_REACHABILITY",
+                    );
+                    return (
+                      <div className="knowledge-entry actor-entry" key={actor.key}>
+                        <div className="knowledge-entry-copy">
+                          {copyFields.map((field) => {
+                            if (field === "NAME") return <strong key={field}>{actor.name}</strong>;
+                            if (field === "ROLE") return <small key={field}>{actor.role_name}</small>;
+                            if (field === "STATUS") {
+                              const statusLabel = actor.status === "ACTIVE"
+                                ? "行动中"
+                                : actor.status === "PLANNED"
+                                  ? "计划中"
+                                  : actor.status === "IDLE" ? "待命中" : group.label;
+                              return <small data-actor-field={field} key={field}>{statusLabel}</small>;
+                            }
+                            if (field === "TASK" && actor.task_name) {
+                              return <small data-actor-field={field} key={field}>{actor.task_name}</small>;
+                            }
+                            return null;
+                          })}
+                        </div>
+                        {badgeFields.length > 0 && (
+                          <div className="actor-status-pills">
+                            {badgeFields.map((field) => {
+                              if (field === "LOCATION") {
+                                return (
+                                  <span className="console-pill success knowledge-status-pill" data-actor-field={field} key={field}>
+                                    {actor.current_node_name}
+                                  </span>
+                                );
+                              }
+                              return (
+                                <span
+                                  className={`console-pill ${actor.command_reachability === "DISCONNECTED" ? "danger" : "success"} knowledge-status-pill`}
+                                  data-actor-field={field}
+                                  key={field}
+                                >
+                                  {actor.command_reachability === "DISCONNECTED" ? "失联" : "在线"}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </details>

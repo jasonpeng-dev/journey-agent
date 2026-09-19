@@ -236,7 +236,8 @@ button:disabled, .editor-control:disabled { cursor: not-allowed; opacity: .55; }
 .knowledge-node-details .knowledge-entry { min-height: 32px; padding-left: 0; padding-right: 0; }
 .knowledge-fact-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-fact-value { flex: 0 0 auto; max-width: 42%; white-space: normal; }
-.actor-status-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; justify-content: flex-end; }
+.actor-entry { align-items: flex-start; }
+.actor-status-pills { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.35rem; }
 .actor-status-pills .knowledge-status-pill { max-width: 10rem; }
 .knowledge-status-pill { min-width: 42px; height: 26px; justify-content: center; padding: 4px 8px; font-variant-numeric: tabular-nums; text-align: center; }
 .knowledge-resource-pills { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
