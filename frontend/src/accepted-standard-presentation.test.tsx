@@ -234,7 +234,7 @@ describe("accepted standard PLAY presentation contract", () => {
     expect(details).not.toHaveTextContent("所需队伍");
   });
 
-  it.fails("defines standard as the accepted causal and Actor baseline", () => {
+  it("defines standard as the accepted causal and Actor baseline", () => {
     const resolved = resolvePresentationProfilePreview({
       schema_version: 1,
       template: "standard",
@@ -249,6 +249,19 @@ describe("accepted standard PLAY presentation contract", () => {
       "LOCATION",
       "COMMAND_REACHABILITY",
     ]);
+  });
+
+  it("keeps compact subtractive and detailed additive around the standard Actor baseline", () => {
+    const compact = resolvePresentationProfilePreview({ schema_version: 1, template: "compact", family_overrides: [], semantic_overrides: [] });
+    const standard = standardPresentation();
+    const detailed = resolvePresentationProfilePreview({ schema_version: 1, template: "detailed", family_overrides: [], semantic_overrides: [] });
+
+    expect(compact.actor_fields).toEqual(["NAME", "ROLE"]);
+    expect(standard.actor_fields).toEqual(["NAME", "ROLE", "LOCATION", "COMMAND_REACHABILITY"]);
+    expect(detailed.actor_fields).toEqual(["NAME", "ROLE", "LOCATION", "STATUS", "TASK", "COMMAND_REACHABILITY"]);
+    expect(compact.roadmap_detail).toBe("SUMMARY");
+    expect(standard.roadmap_detail).toBe("DETAIL");
+    expect(detailed.roadmap_detail).toBe("CAUSALITY");
   });
 
   it("does not treat task failure or disconnected command reachability as Actor activity failure", () => {
@@ -276,6 +289,31 @@ describe("accepted standard PLAY presentation contract", () => {
     expect(screen.getByText("待命中")).toBeVisible();
     expect(screen.getByText("失联")).toBeVisible();
     expect(screen.queryByText("失败")).not.toBeInTheDocument();
+  });
+
+  it("renders activity status and task only as detailed additions", () => {
+    const actor = {
+      key: "repair_team",
+      name: "Repair Team",
+      role_name: "Response",
+      current_node_name: "Clinic",
+      status: "ACTIVE" as const,
+      task_name: "Restore clinic",
+      command_reachability: "ONLINE" as const,
+    };
+    const renderActors = (presentation: NonNullable<PlayerGameState["presentation"]>) => {
+      render(<KnownWorldAccordions presentation={presentation} resources={[]} visibleNodes={[]} actors={[actor]} knownFacts={[]} />);
+      fireEvent.click(screen.getByTestId("knowledge-accordion-actors").querySelector("button")!);
+    };
+
+    renderActors(standardPresentation());
+    expect(document.querySelector('[data-actor-field="STATUS"]')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-actor-field="TASK"]')).not.toBeInTheDocument();
+    cleanup();
+
+    renderActors(resolvePresentationProfilePreview({ schema_version: 1, template: "detailed", family_overrides: [], semantic_overrides: [] }));
+    expect(document.querySelector('[data-actor-field="STATUS"]')).toBeInTheDocument();
+    expect(document.querySelector('[data-actor-field="TASK"]')).toHaveTextContent("Restore clinic");
   });
 
   it("applies semantic_order to Facility semantic/resource/relation groups", () => {

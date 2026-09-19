@@ -26,8 +26,24 @@ const SAFE_ACTOR_FIELDS: PresentationActorField[] = [
   "COMMAND_REACHABILITY",
 ];
 
+const STANDARD_DEFAULTS: PresentationDefaults = {
+  density: "STANDARD",
+  default_open: "COMPACT",
+  summary_slot: "HEADER",
+  entity_detail: "DETAIL",
+  knowledge_level: "A+B+C",
+  semantic_order: ["NAME", "STATUS", "FACTS", "RESOURCES", "RELATIONS"],
+  resource_order: ["NAME", "AMOUNT", "STATUS", "UNIT"],
+  relation_order: ["TYPE", "TARGET", "VISIBILITY"],
+  actor_fields: ["NAME", "ROLE", "LOCATION", "COMMAND_REACHABILITY"],
+  roadmap_detail: "DETAIL",
+  plan_default: "COMPACT",
+  timeline_density: "STANDARD",
+};
+
 const TEMPLATE_DEFAULTS: Record<PresentationTemplate, PresentationDefaults> = {
   compact: {
+    ...STANDARD_DEFAULTS,
     density: "COMPACT",
     default_open: "COLLAPSED",
     summary_slot: "HEADER",
@@ -36,26 +52,14 @@ const TEMPLATE_DEFAULTS: Record<PresentationTemplate, PresentationDefaults> = {
     semantic_order: ["NAME", "STATUS"],
     resource_order: ["NAME", "AMOUNT"],
     relation_order: ["TYPE", "TARGET"],
-    actor_fields: ["NAME", "ROLE", "STATUS"],
+    actor_fields: ["NAME", "ROLE"],
     roadmap_detail: "SUMMARY",
     plan_default: "COLLAPSED",
     timeline_density: "COMPACT",
   },
-  standard: {
-    density: "STANDARD",
-    default_open: "COMPACT",
-    summary_slot: "HEADER",
-    entity_detail: "DETAIL",
-    knowledge_level: "A+B+C",
-    semantic_order: ["NAME", "STATUS", "FACTS", "RESOURCES", "RELATIONS"],
-    resource_order: ["NAME", "AMOUNT", "STATUS", "UNIT"],
-    relation_order: ["TYPE", "TARGET", "VISIBILITY"],
-    actor_fields: ["NAME", "ROLE", "LOCATION", "STATUS", "COMMAND_REACHABILITY"],
-    roadmap_detail: "DETAIL",
-    plan_default: "COMPACT",
-    timeline_density: "STANDARD",
-  },
+  standard: STANDARD_DEFAULTS,
   detailed: {
+    ...STANDARD_DEFAULTS,
     density: "DETAILED",
     default_open: "FULL",
     summary_slot: "BOTH",
@@ -71,8 +75,6 @@ const TEMPLATE_DEFAULTS: Record<PresentationTemplate, PresentationDefaults> = {
       "RESOURCES",
       "RELATIONS",
     ],
-    resource_order: ["NAME", "AMOUNT", "STATUS", "UNIT"],
-    relation_order: ["TYPE", "TARGET", "VISIBILITY"],
     actor_fields: ["NAME", "ROLE", "LOCATION", "STATUS", "TASK", "COMMAND_REACHABILITY"],
     roadmap_detail: "CAUSALITY",
     plan_default: "FULL",

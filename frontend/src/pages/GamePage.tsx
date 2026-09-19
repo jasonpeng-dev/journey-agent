@@ -1285,7 +1285,7 @@ export function KnownWorldAccordions({
   const actorGroups = groupActorsByTask(actors, task);
   const actorFields = presentation
     ? presentation.actor_fields
-    : ["NAME", "ROLE", "LOCATION", "STATUS", "COMMAND_REACHABILITY"];
+    : ["NAME", "ROLE", "LOCATION", "COMMAND_REACHABILITY"];
   const displayedRelations = meaningfulKnownRelations(knownRelations);
   const nodeByKey = new Map(visibleNodes.map((node) => [node.key, node]));
   const nodeDisplayName = (key: string, candidate?: string | null) =>

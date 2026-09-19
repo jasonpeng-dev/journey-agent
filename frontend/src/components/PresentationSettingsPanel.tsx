@@ -58,6 +58,12 @@ const labels: Record<string, string> = {
   COMMAND_REACHABILITY: "指挥可达性",
 };
 
+const templateDescriptions: Record<PresentationTemplate, string> = {
+  compact: "\u6807\u51c6\u6a21\u677f\u7684\u7cbe\u7b80\u89c6\u56fe\uff1a\u66f4\u5c11\u5b89\u5168\u5b57\u6bb5\u3001\u66f4\u6d45\u56e0\u679c\u5c42\u7ea7\u3001\u9ed8\u8ba4\u6298\u53e0\u3002",
+  standard: "\u4ea7\u54c1\u9ed8\u8ba4\uff1a\u5b8c\u6574 A/B/C\u3001\u6210\u719f\u8bbe\u65bd\u5c42\u7ea7\u4e0e\u539f\u9a8c\u6536\u53c2\u4e0e\u8005\u5b57\u6bb5\u3002",
+  detailed: "\u6807\u51c6\u6a21\u677f\u7684\u8be6\u7ec6\u89c6\u56fe\uff1a\u589e\u52a0\u5b89\u5168\u652f\u6301\u4fe1\u606f\u3001\u53c2\u4e0e\u8005\u72b6\u6001\u4e0e\u4efb\u52a1\u3002",
+};
+
 function displayLabel(value: string): string {
   return labels[value] ?? value;
 }
@@ -173,6 +179,7 @@ export function PresentationSettingsPanel({
               {PRESENTATION_OPTIONS.templates.map((option) => <option key={option} value={option}>{displayLabel(option)}</option>)}
             </select>
           </label>
+          <p className="typed-help" data-testid="presentation-template-description">{templateDescriptions[effective.template]}</p>
           <SelectField label="信息密度" testId="presentation-density" value={profile.global_display?.density} values={PRESENTATION_OPTIONS.densities} disabled={disabled} onChange={(value) => update("global_display", "density", value)} />
           <SelectField label="默认展开" testId="presentation-default-open" value={profile.global_display?.default_open} values={PRESENTATION_OPTIONS.defaultOpen} disabled={disabled} onChange={(value) => update("global_display", "default_open", value)} />
           <SelectField label="摘要位置" testId="presentation-summary-slot" value={profile.global_display?.summary_slot} values={PRESENTATION_OPTIONS.summarySlots} disabled={disabled} onChange={(value) => update("global_display", "summary_slot", value)} />

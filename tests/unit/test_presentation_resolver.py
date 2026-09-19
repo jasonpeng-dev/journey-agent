@@ -6,12 +6,28 @@ from app.services.presentation_resolver import resolve_presentation_profile
 
 def test_product_templates_resolve_bounded_defaults_without_scenario_knowledge() -> None:
     compact = resolve_presentation_profile({"schema_version": 1, "template": "compact"})
+    standard = resolve_presentation_profile({"schema_version": 1, "template": "standard"})
     detailed = resolve_presentation_profile({"schema_version": 1, "template": "detailed"})
 
     assert compact.density.value == "COMPACT"
     assert compact.knowledge_level == PresentationKnowledgeLevel.A
     assert detailed.entity_detail.value == "CAUSALITY"
     assert detailed.plan_default.value == "FULL"
+    assert [item.value for item in compact.actor_fields] == ["NAME", "ROLE"]
+    assert [item.value for item in standard.actor_fields] == [
+        "NAME",
+        "ROLE",
+        "LOCATION",
+        "COMMAND_REACHABILITY",
+    ]
+    assert [item.value for item in detailed.actor_fields] == [
+        "NAME",
+        "ROLE",
+        "LOCATION",
+        "STATUS",
+        "TASK",
+        "COMMAND_REACHABILITY",
+    ]
 
 
 def test_profile_precedence_is_product_then_global_then_family_then_semantic() -> None:

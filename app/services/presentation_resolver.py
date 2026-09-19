@@ -7,7 +7,7 @@ relations, resources, or runtime state.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.domain.presentation import (
@@ -186,61 +186,59 @@ class _TemplateDefaults:
     timeline_density: PresentationTimelineDensity
 
 
+_STANDARD_DEFAULTS = _TemplateDefaults(
+    density=PresentationDensity.STANDARD,
+    default_open=PresentationDefaultOpen.COMPACT,
+    summary_slot=PresentationSummarySlot.HEADER,
+    entity_detail=PresentationEntityDetail.DETAIL,
+    knowledge_level=PresentationKnowledgeLevel.A_PLUS_B_PLUS_C,
+    semantic_order=(
+        PresentationSemanticSlot.NAME,
+        PresentationSemanticSlot.STATUS,
+        PresentationSemanticSlot.FACTS,
+        PresentationSemanticSlot.RESOURCES,
+        PresentationSemanticSlot.RELATIONS,
+    ),
+    resource_order=(
+        PresentationResourceSlot.NAME,
+        PresentationResourceSlot.AMOUNT,
+        PresentationResourceSlot.STATUS,
+        PresentationResourceSlot.UNIT,
+    ),
+    relation_order=(
+        PresentationRelationSlot.TYPE,
+        PresentationRelationSlot.TARGET,
+        PresentationRelationSlot.VISIBILITY,
+    ),
+    actor_fields=(
+        PresentationActorField.NAME,
+        PresentationActorField.ROLE,
+        PresentationActorField.LOCATION,
+        PresentationActorField.COMMAND_REACHABILITY,
+    ),
+    roadmap_detail=PresentationEntityDetail.DETAIL,
+    plan_default=PresentationPlanDetail.COMPACT,
+    timeline_density=PresentationTimelineDensity.STANDARD,
+)
+
 _TEMPLATE_DEFAULTS: dict[PresentationTemplate, _TemplateDefaults] = {
-    PresentationTemplate.COMPACT: _TemplateDefaults(
+    PresentationTemplate.STANDARD: _STANDARD_DEFAULTS,
+    PresentationTemplate.COMPACT: replace(
+        _STANDARD_DEFAULTS,
         density=PresentationDensity.COMPACT,
         default_open=PresentationDefaultOpen.COLLAPSED,
-        summary_slot=PresentationSummarySlot.HEADER,
         entity_detail=PresentationEntityDetail.SUMMARY,
         knowledge_level=PresentationKnowledgeLevel.A,
         semantic_order=(PresentationSemanticSlot.NAME, PresentationSemanticSlot.STATUS),
         resource_order=(PresentationResourceSlot.NAME, PresentationResourceSlot.AMOUNT),
         relation_order=(PresentationRelationSlot.TYPE, PresentationRelationSlot.TARGET),
-        actor_fields=(
-            PresentationActorField.NAME,
-            PresentationActorField.ROLE,
-            PresentationActorField.STATUS,
-        ),
+        actor_fields=(PresentationActorField.NAME, PresentationActorField.ROLE),
         roadmap_detail=PresentationEntityDetail.SUMMARY,
         plan_default=PresentationPlanDetail.COLLAPSED,
         timeline_density=PresentationTimelineDensity.COMPACT,
     ),
-    PresentationTemplate.STANDARD: _TemplateDefaults(
-        density=PresentationDensity.STANDARD,
-        default_open=PresentationDefaultOpen.COMPACT,
-        summary_slot=PresentationSummarySlot.HEADER,
-        entity_detail=PresentationEntityDetail.DETAIL,
-        knowledge_level=PresentationKnowledgeLevel.A_PLUS_B_PLUS_C,
-        semantic_order=(
-            PresentationSemanticSlot.NAME,
-            PresentationSemanticSlot.STATUS,
-            PresentationSemanticSlot.FACTS,
-            PresentationSemanticSlot.RESOURCES,
-            PresentationSemanticSlot.RELATIONS,
-        ),
-        resource_order=(
-            PresentationResourceSlot.NAME,
-            PresentationResourceSlot.AMOUNT,
-            PresentationResourceSlot.STATUS,
-            PresentationResourceSlot.UNIT,
-        ),
-        relation_order=(
-            PresentationRelationSlot.TYPE,
-            PresentationRelationSlot.TARGET,
-            PresentationRelationSlot.VISIBILITY,
-        ),
-        actor_fields=(
-            PresentationActorField.NAME,
-            PresentationActorField.ROLE,
-            PresentationActorField.LOCATION,
-            PresentationActorField.STATUS,
-            PresentationActorField.COMMAND_REACHABILITY,
-        ),
-        roadmap_detail=PresentationEntityDetail.DETAIL,
-        plan_default=PresentationPlanDetail.COMPACT,
-        timeline_density=PresentationTimelineDensity.STANDARD,
-    ),
-    PresentationTemplate.DETAILED: _TemplateDefaults(
+    PresentationTemplate.DETAILED: replace(
+        _STANDARD_DEFAULTS,
         density=PresentationDensity.DETAILED,
         default_open=PresentationDefaultOpen.FULL,
         summary_slot=PresentationSummarySlot.BOTH,
@@ -255,17 +253,6 @@ _TEMPLATE_DEFAULTS: dict[PresentationTemplate, _TemplateDefaults] = {
             PresentationSemanticSlot.FACTS,
             PresentationSemanticSlot.RESOURCES,
             PresentationSemanticSlot.RELATIONS,
-        ),
-        resource_order=(
-            PresentationResourceSlot.NAME,
-            PresentationResourceSlot.AMOUNT,
-            PresentationResourceSlot.STATUS,
-            PresentationResourceSlot.UNIT,
-        ),
-        relation_order=(
-            PresentationRelationSlot.TYPE,
-            PresentationRelationSlot.TARGET,
-            PresentationRelationSlot.VISIBILITY,
         ),
         actor_fields=(
             PresentationActorField.NAME,
