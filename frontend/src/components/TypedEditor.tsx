@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 
 import { factInitialValueMetadata, metadataForKind, rootFieldRegistry, type FieldMetadata } from "../editor-registry";
-import type { RootCollectionSelection } from "../editor-collections";
+import type { RootOwnerSelection } from "../editor-collections";
 import type { DraftObject, JsonObject } from "../editor";
 import { editorLabel, fieldLabel } from "../ui";
 import {
@@ -44,7 +44,7 @@ type Props = {
   onChange: (value: unknown) => void;
   path?: string;
   focusPath?: string | null;
-  collectionSelection?: RootCollectionSelection | null;
+  collectionSelection?: RootOwnerSelection | null;
   onCollectionChange?: (value: JsonObject) => void;
   onCollectionRemove?: () => void;
 };

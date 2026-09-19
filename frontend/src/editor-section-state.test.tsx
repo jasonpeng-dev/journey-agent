@@ -25,11 +25,19 @@ const draft = {
   revision: 1,
   definition_document: {
     metadata: { key: "scenario-1", name: "测试场景" },
+    initialization: {
+      start_node_key: "central",
+      primary_actor_key: "operator",
+      resource_initial_states: [{ resource_key: "relief", scope_node_key: "central", value: 10, reserved_value: 0 }],
+      resource_pools: [{ pool_key: "central_pool", resource_key: "relief", region_key: "central", quantity: 10, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false }],
+      region_resource_knowledge: [{ region_key: "central", resource_inventory_visibility: "VISIBLE", resource_survey_completed: true }],
+    },
     world: {
       key: "scenario-1",
       name: "测试世界",
       node_types: [{ key: "region", name: "区域" }],
       nodes: [{ key: "central", name: "中央区", node_type_key: "region" }],
+      relation_types: [{ key: "located_in", name: "位于" }],
       relations: [],
       resources: [{ key: "relief", name: "救援物资" }],
     },
@@ -38,6 +46,8 @@ const draft = {
       actor_profiles: [{ key: "operator", name: "值班员", role_key: "coordinator" }],
     },
     rules: [{ key: "stabilize", phase: "RESOLVE", trigger: "STATE", action_key: "", priority: 1 }],
+    planning: { instructions: ["优先保障生命安全"], recovery_hints: [{ failure_code: "BLOCKED", hint: "重新检查道路" }] },
+    public_knowledge: { resource_source_hints: [{ resource_key: "relief", primary_region_key: "central", candidate_region_keys: [] }] },
     public_references: [{ term: "中央区", ref_type: "REGION", ref_key: "central" }],
   },
   validation_status: "VALID",
@@ -175,5 +185,42 @@ describe("Editor section state ownership", () => {
     expect(document.querySelector(".object-panel")).not.toBeInTheDocument();
     expect(screen.queryByText("OBJECTS")).not.toBeInTheDocument();
     expect(screen.queryByText("Typed 编辑器")).not.toBeInTheDocument();
+  });
+
+  it("uses one active owner for hybrid sections and keeps selection clean", async () => {
+    renderEditor("/scenarios/scenario-1/edit/initialization");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "初始化入口", level: 3 })).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "基础配置", level: 4 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "资源初始状态", level: 4 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "资源池", level: 4 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "区域资源知识", level: 4 })).toBeInTheDocument();
+    expect(screen.getByLabelText("起始节点")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /central_pool/ }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "central_pool", level: 3 })).toBeInTheDocument());
+    expect(screen.queryByLabelText("起始节点")).not.toBeInTheDocument();
+    expect(screen.getByText("未修改")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("link", { name: "规划" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "规划指引", level: 3 })).toBeInTheDocument());
+    expect(screen.getByDisplayValue("优先保障生命安全")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /BLOCKED/ }));
+    await waitFor(() => expect(screen.getByDisplayValue("重新检查道路")).toBeInTheDocument());
+    expect(screen.queryByDisplayValue("优先保障生命安全")).not.toBeInTheDocument();
+    expect(screen.getByText("未修改")).toBeInTheDocument();
+  });
+
+  it("keeps public knowledge collection-only and groups relation kinds", async () => {
+    renderEditor("/scenarios/scenario-1/edit/public-knowledge");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "公共知识" })).toBeInTheDocument());
+    expect(screen.getByText("资源发现知识")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "公共知识配置" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("link", { name: "关系" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "关系" })).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "关系类型" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "关系实例" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "＋ 新增关系类型" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "＋ 新增关系实例" })).toBeInTheDocument();
   });
 });

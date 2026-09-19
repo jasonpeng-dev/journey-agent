@@ -8,8 +8,24 @@ export type RootCollectionKey =
   | "region_resource_knowledge";
 
 export type RootCollectionSelection = {
+  owner: "collection";
   collection: RootCollectionKey;
   index: number;
+};
+
+export type RootSingletonOwnerKey = "initialization-entry" | "planning-instructions";
+
+export type RootSingletonSelection = {
+  owner: "singleton";
+  key: RootSingletonOwnerKey;
+};
+
+export type RootOwnerSelection = RootCollectionSelection | RootSingletonSelection;
+
+export type RootSingletonOwnerDefinition = {
+  key: RootSingletonOwnerKey;
+  label: string;
+  summary: string;
 };
 
 export type RootCollectionDefinition = {
@@ -26,7 +42,7 @@ export type RootCollectionItem = RootCollectionSelection & {
 
 const definitions: Partial<Record<EditorSection, RootCollectionDefinition[]>> = {
   "public-knowledge": [
-    { key: "resource_source_hints", label: "资源来源提示", singularLabel: "资源来源提示" },
+    { key: "resource_source_hints", label: "资源发现知识", singularLabel: "资源来源提示" },
   ],
   planning: [
     { key: "recovery_hints", label: "恢复提示", singularLabel: "恢复提示" },
@@ -77,6 +93,7 @@ export function rootCollectionItems(section: string, value: unknown): RootCollec
     return values.flatMap((item, index) => {
       const object = objectValue(item);
       return object ? [{
+        owner: "collection",
         collection: definition.key,
         index,
         value: object,
@@ -93,6 +110,16 @@ export function rootCollectionDefault(collection: RootCollectionKey): JsonObject
   if (collection === "resource_initial_states") return { resource_key: "", scope_node_key: null, value: 0, reserved_value: 0 };
   if (collection === "resource_pools") return { pool_key: "new_pool", resource_key: "", region_key: null, facility_key: null, quantity: 0, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false };
   return { region_key: "", resource_inventory_visibility: "VISIBLE", resource_survey_completed: false };
+}
+
+export function rootSingletonOwner(section: string): RootSingletonOwnerDefinition | null {
+  if (section === "initialization") {
+    return { key: "initialization-entry", label: "初始化入口", summary: "起始节点与主要参与者" };
+  }
+  if (section === "planning") {
+    return { key: "planning-instructions", label: "规划指引", summary: "规划器使用的场景级指引" };
+  }
+  return null;
 }
 
 export function rootCollectionLabel(collection: RootCollectionKey): string {

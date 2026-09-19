@@ -23,7 +23,7 @@ import {
   type JsonObject,
 } from "../editor";
 import { kindsBySection } from "../templates";
-import { rootCollectionDefinitions, rootCollectionDefault, rootCollectionItems, type RootCollectionSelection } from "../editor-collections";
+import { rootCollectionDefinitions, rootCollectionDefault, rootCollectionItems, rootSingletonOwner, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
 import { sectionStructure } from "../editor-structure";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
@@ -34,7 +34,7 @@ type SaveState = WorkingCopySaveState;
 const saveLabels: Record<SaveState, string> = { UNCHANGED: "未修改", DIRTY: "有未保存修改", SAVING: "保存中", CONFLICT: "版本冲突", ERROR: "保存失败" };
 type WorldView = "all" | "regions" | "facilities" | "transports";
 const worldViewLabels: Record<WorldView, string> = { all: "全部节点", regions: "区域", facilities: "设施", transports: "交通" };
-type ScopedCollectionSelection = { section: EditorSection; selection: RootCollectionSelection };
+type ScopedCollectionSelection = { section: EditorSection; selection: RootOwnerSelection };
 
 function isEditorSection(value: string): value is EditorSection {
   return [...sections, ...legacySections].includes(value as (typeof sections)[number] | (typeof legacySections)[number]);
@@ -75,6 +75,7 @@ export function EditorPage() {
   const requestedSection: EditorSection = isEditorSection(routeSection) ? routeSection : "overview";
   const section: EditorSection = requestedSection === "world" && objectKey ? "world-entities" : requestedSection;
   const structure = sectionStructure(section);
+  const singletonOwner = useMemo(() => rootSingletonOwner(section), [section]);
   const navigateRouter = useNavigate();
   const navigate = (to: string) => navigateRouter(normalizeEditorNavigation(to, scenarioId));
   const [searchParams] = useSearchParams();
@@ -91,7 +92,7 @@ export function EditorPage() {
   const [objectSearch, setObjectSearch] = useState("");
   const [kindFilter, setKindFilter] = useState("all");
   const [collectionSelectionState, setCollectionSelectionState] = useState<ScopedCollectionSelection | null>(null);
-  const setCollectionSelection = (selection: RootCollectionSelection | null) => {
+  const setCollectionSelection = (selection: RootOwnerSelection | null) => {
     setCollectionSelectionState(selection ? { section, selection } : null);
   };
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -118,7 +119,7 @@ export function EditorPage() {
   }, [draftQuery.data, scenarioId]);
   useEffect(() => { setObjectSearch(""); setKindFilter("all"); }, [section, worldView]);
   useEffect(() => {
-    setCollectionSelectionState(null);
+    setCollectionSelectionState(singletonOwner ? { section, selection: { owner: "singleton", key: singletonOwner.key } } : null);
     setInspectorOpen(false);
     if (section === "world") {
       if (!objectKey) {
@@ -130,7 +131,7 @@ export function EditorPage() {
       setTopologySelection(null);
       setTopologyFocusNodeKey(null);
     }
-  }, [section, objectKey]);
+  }, [section, objectKey, singletonOwner]);
 
   const save = useMutation({
     mutationFn: (value: { revision: number; document: Record<string, unknown> }) => api.saveDraft(scenarioId, value.revision, value.document),
@@ -184,7 +185,13 @@ export function EditorPage() {
     const query = objectSearch.trim().toLocaleLowerCase();
     return collectionItems.filter((item) => !query || [item.title, item.summary, item.collection].some((value) => value.toLocaleLowerCase().includes(query)));
   }, [collectionItems, objectSearch]);
-  const selectedCollectionItem = collectionSelection ? collectionItems.find((item) => item.collection === collectionSelection.collection && item.index === collectionSelection.index) ?? null : null;
+  const singletonOwnerVisible = singletonOwner
+    ? !objectSearch.trim() || [singletonOwner.label, singletonOwner.summary].some((value) => value.toLocaleLowerCase().includes(objectSearch.trim().toLocaleLowerCase()))
+    : false;
+  const selectedCollectionItem = collectionSelection?.owner === "collection"
+    ? collectionItems.find((item) => item.collection === collectionSelection.collection && item.index === collectionSelection.index) ?? null
+    : null;
+  const selectedSingletonOwner = collectionSelection?.owner === "singleton" ? singletonOwner : null;
   const selected = objects.find((item) => item.key === objectKey) ?? null;
   const focusPath = searchParams.get("focus_path");
   const editorFocusPath = focusPath ? `${selected ? `${selected.kind}.${selected.key}` : rootEditorKey(section) ?? ""}.${focusPath}` : null;
@@ -266,13 +273,13 @@ export function EditorPage() {
     editDocument(updateSectionRoot(local.definition_document, section, { ...root, [selection.collection]: collection }));
     setCollectionSelection(null);
   };
-  const createCollectionItem = (collectionKey: RootCollectionSelection["collection"]) => {
+  const createCollectionItem = (collectionKey: RootCollectionKey) => {
     const root = structuredClone(sectionValue) as JsonObject;
     const collection = Array.isArray(root[collectionKey]) ? [...root[collectionKey] as unknown[]] : [];
     const index = collection.length;
     collection.push(rootCollectionDefault(collectionKey));
     editDocument(updateSectionRoot(local.definition_document, section, { ...root, [collectionKey]: collection }));
-    setCollectionSelection({ collection: collectionKey, index });
+    setCollectionSelection({ owner: "collection", collection: collectionKey, index });
   };
 
   const rename = async () => {
@@ -345,7 +352,7 @@ export function EditorPage() {
   const showWorldTopology = structure.workspace.renderer === "topology";
   const usesRootCollections = structure.master.source === "root-collections";
   const masterCount = usesRootCollections
-    ? collectionItems.length
+    ? collectionItems.length + (singletonOwner ? 1 : 0)
     : structure.master.source === "topology"
       ? nodeSemanticView(local.definition_document, "all").length
       : objects.length;
@@ -355,6 +362,8 @@ export function EditorPage() {
       ? objectDisplayValue(selected.value, selected.name)
       : selectedCollectionItem
         ? selectedCollectionItem.title
+        : selectedSingletonOwner
+          ? selectedSingletonOwner.label
         : sectionLabels[section] ?? section;
   const workspaceSubtitle = showWorldTopology
     ? "浏览范围、实体与关系；编辑请进入对应的世界模型页面"
@@ -362,6 +371,8 @@ export function EditorPage() {
       ? `${kindLabels[selected.kind] ?? selected.kind} · 可编辑对象`
       : selectedCollectionItem
         ? "编辑当前集合项"
+        : selectedSingletonOwner
+          ? selectedSingletonOwner.summary
         : structure.mode === "SINGLETON"
           ? "编辑这一份场景配置"
           : structure.mode === "WORKFLOW"
@@ -369,6 +380,32 @@ export function EditorPage() {
             : structure.mode === "HYBRID"
               ? "选择配置或集合项后编辑对应内容"
               : "从左侧选择或新建对象";
+  const entityGroups = structure.master.source === "entities" && structure.master.grouped
+    ? structure.owners.entityKinds.map((kind) => ({
+      kind,
+      label: kind === "relation" ? "关系实例" : kindLabels[kind] ?? kind,
+      items: filteredObjects.filter((item) => item.kind === kind),
+      total: objects.filter((item) => item.kind === kind).length,
+    }))
+    : [];
+  const renderObjectItem = (item: (typeof objects)[number]) => (
+    <Link
+      className={`object-list-item${item.key === objectKey ? " selected" : ""}`}
+      key={draftObjectIdentity(item)}
+      to={`/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(item.key)}`}
+      onClick={(event) => {
+        if (structure.master.source !== "topology" || item.kind !== "node") return;
+        event.preventDefault();
+        setTopologyFocusNodeKey(item.key);
+        const scopeKey = findScopeForNode(local.definition_document, item.key);
+        if (scopeKey) setTopologyContext({ kind: "scope", scopeKey });
+        setTopologySelection({ kind: "node", key: item.key });
+      }}
+    >
+      <span>{item.name}</span>
+      <code>{kindLabels[item.kind] ?? item.kind} · {item.key}</code>
+    </Link>
+  );
   const taxonomy = editorSectionTaxonomy[section] ?? { category: "场景编辑器", label: sectionLabels[section] ?? section };
   return <main className="editor-shell">
     <aside className="editor-nav">
@@ -382,10 +419,32 @@ export function EditorPage() {
         {structure.master.visible && <aside className="object-list object-panel">
           <header className="object-panel-header"><div><p className="panel-kicker">{structure.mode === "BROWSER" ? "世界结构" : structure.mode === "HYBRID" ? "配置导航" : "内容导航"}</p><div className="object-panel-title">{sectionLabels[section] ?? section}</div></div><span className="object-count">{masterCount}</span></header>
           {structure.master.source === "topology" && <div className="segmented-control world-filter-tabs" role="tablist" aria-label="World 对象筛选">{(["all", "regions", "facilities", "transports"] as WorldView[]).map((item) => <button type="button" className={worldView === item ? "selected" : ""} aria-pressed={worldView === item} key={item} onClick={() => setWorldView(item)}><span>{worldViewLabels[item]}</span><small>{nodeSemanticView(local.definition_document, item).length}</small></button>)}</div>}
-          <div className="object-panel-tools">{structure.master.searchable && <label className="object-search">搜索<input value={objectSearch} placeholder={usesRootCollections ? "名称、代码或标识" : "名称或稳定键"} onChange={(event) => setObjectSearch(event.target.value)} /></label>}{structure.master.source === "entities" && availableKinds.length > 1 && <label className="object-filter">对象类型<select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">全部类型</option>{availableKinds.map((kind) => <option key={kind} value={kind}>{kindLabels[kind] ?? kind}</option>)}</select></label>}{structure.master.create === "entity" && <div className="object-list-actions">{(kindsBySection[section] ?? []).map((kind) => <button type="button" className="editor-button editor-button-secondary add-object" key={kind} onClick={() => createObject(kind)}>＋ {kindLabels[kind] ?? kind}</button>)}</div>}</div>
-          <div className="object-list-scroll">{usesRootCollections ? <div className="collection-list-groups">{collectionDefinitions.map((definition) => <section className="collection-list-group" key={definition.key}><header><div><h4>{definition.label}</h4><span>{collectionItems.filter((item) => item.collection === definition.key).length} 项</span></div><button type="button" className="editor-button editor-button-secondary" onClick={() => createCollectionItem(definition.key)}>＋ 新增</button></header>{filteredCollectionItems.filter((item) => item.collection === definition.key).map((item) => <button type="button" className={`collection-list-item${collectionSelection?.collection === item.collection && collectionSelection.index === item.index ? " selected" : ""}`} key={`${item.collection}:${item.index}`} onClick={() => setCollectionSelection({ collection: item.collection, index: item.index })}><strong>{item.title}</strong><span>{item.summary}</span><code>{item.collection}.{item.index}</code></button>)}{collectionItems.filter((item) => item.collection === definition.key).length === 0 && <p className="muted collection-list-empty">暂无项目</p>}</section>)}</div> : <>{objects.length === 0 && <p className="muted object-empty">暂无可编辑项目。</p>}{objects.length > 0 && filteredObjects.length === 0 && <p className="muted object-empty">没有匹配的对象。</p>}{filteredObjects.map((item) => <Link className={`object-list-item${item.key === objectKey ? " selected" : ""}`} key={draftObjectIdentity(item)} to={`/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(item.key)}`} onClick={(event) => { if (structure.master.source === "topology" && item.kind === "node") { event.preventDefault(); setTopologyFocusNodeKey(item.key); const scopeKey = findScopeForNode(local.definition_document, item.key); if (scopeKey) setTopologyContext({ kind: "scope", scopeKey }); setTopologySelection({ kind: "node", key: item.key }); } }}><span>{item.name}</span><code>{kindLabels[item.kind] ?? item.kind} · {item.key}</code></Link>)}</>}</div>
+          <div className="object-panel-tools">{structure.master.searchable && <label className="object-search">搜索<input value={objectSearch} placeholder={usesRootCollections ? "名称、代码或标识" : "名称或稳定键"} onChange={(event) => setObjectSearch(event.target.value)} /></label>}{structure.master.source === "entities" && availableKinds.length > 1 && !structure.master.grouped && <label className="object-filter">对象类型<select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">全部类型</option>{availableKinds.map((kind) => <option key={kind} value={kind}>{kindLabels[kind] ?? kind}</option>)}</select></label>}{structure.master.create === "entity" && !structure.master.grouped && <div className="object-list-actions">{(kindsBySection[section] ?? []).map((kind) => <button type="button" className="editor-button editor-button-secondary add-object" key={kind} onClick={() => createObject(kind)}>＋ {kindLabels[kind] ?? kind}</button>)}</div>}</div>
+          <div className="object-list-scroll">
+            {usesRootCollections ? <div className="collection-list-groups">
+              {singletonOwner && <section className="collection-list-group">
+                <header><div><h4>基础配置</h4><span>1 项</span></div></header>
+                {singletonOwnerVisible && <button type="button" className={`collection-list-item${collectionSelection?.owner === "singleton" ? " selected" : ""}`} onClick={() => setCollectionSelection({ owner: "singleton", key: singletonOwner.key })}><strong>{singletonOwner.label}</strong><span>{singletonOwner.summary}</span><code>{singletonOwner.key}</code></button>}
+              </section>}
+              {collectionDefinitions.map((definition) => <section className="collection-list-group" key={definition.key}>
+                <header><div><h4>{definition.label}</h4><span>{collectionItems.filter((item) => item.collection === definition.key).length} 项</span></div><button type="button" className="editor-button editor-button-secondary" onClick={() => createCollectionItem(definition.key)}>＋ 新增{definition.singularLabel}</button></header>
+                {filteredCollectionItems.filter((item) => item.collection === definition.key).map((item) => <button type="button" className={`collection-list-item${collectionSelection?.owner === "collection" && collectionSelection.collection === item.collection && collectionSelection.index === item.index ? " selected" : ""}`} key={`${item.collection}:${item.index}`} onClick={() => setCollectionSelection({ owner: "collection", collection: item.collection, index: item.index })}><strong>{item.title}</strong><span>{item.summary}</span><code>{item.collection}.{item.index}</code></button>)}
+                {collectionItems.filter((item) => item.collection === definition.key).length === 0 && <p className="muted collection-list-empty">暂无项目</p>}
+              </section>)}
+            </div> : entityGroups.length > 0 ? <div className="collection-list-groups">
+              {entityGroups.map((group) => <section className="collection-list-group" key={group.kind}>
+                <header><div><h4>{group.label}</h4><span>{group.total} 项</span></div><button type="button" className="editor-button editor-button-secondary" onClick={() => createObject(group.kind)}>＋ 新增{group.label}</button></header>
+                {group.items.map(renderObjectItem)}
+                {group.total === 0 && <p className="muted collection-list-empty">暂无{group.label}</p>}
+              </section>)}
+            </div> : <>
+              {objects.length === 0 && <p className="muted object-empty">暂无可编辑项目。</p>}
+              {objects.length > 0 && filteredObjects.length === 0 && <p className="muted object-empty">没有匹配的对象。</p>}
+              {filteredObjects.map(renderObjectItem)}
+            </>}
+          </div>
         </aside>}
-         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} onChange={(value) => editDocument(replaceObject(local.definition_document, section, selected.key, value))} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection) updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection) removeCollectionItem(collectionSelection); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel validation={validation} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
+         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} onChange={(value) => editDocument(replaceObject(local.definition_document, section, selected.key, value))} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel validation={validation} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
         {structure.capabilities.inspector && <aside className={`inspector inspector-new${inspectorOpen ? " is-open" : " is-collapsed"}`}><div className="inspector-heading"><div><p className="panel-kicker">详情</p><h3>{showWorldTopology ? "拓扑检查器" : "检查器"}</h3></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen(false)}>收起</button></div><div className="inspector-scroll">
           {showWorldTopology ? <>
             {!topologySelection && <div className="inspector-empty"><strong>未选择拓扑对象</strong><p className="muted">单击范围或实体查看摘要，双击进入下一层。</p></div>}

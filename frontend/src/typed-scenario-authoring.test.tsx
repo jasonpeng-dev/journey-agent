@@ -190,14 +190,25 @@ describe("typed ScenarioDefinition v2 authoring", () => {
 
   it("uses master-detail rendering for root collection sections", () => {
     const onCollectionChange = vi.fn();
-    render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }, { failure_code: "RETRY", hint: "Try again" }] }} document={document} collectionSelection={{ collection: "recovery_hints", index: 0 }} onChange={vi.fn()} onCollectionChange={onCollectionChange} onCollectionRemove={vi.fn()} />);
+    render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }, { failure_code: "RETRY", hint: "Try again" }] }} document={document} collectionSelection={{ owner: "collection", collection: "recovery_hints", index: 0 }} onChange={vi.fn()} onCollectionChange={onCollectionChange} onCollectionRemove={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "恢复提示" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("BLOCKED")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Inspect again")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("RETRY")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Plan safely")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByDisplayValue("BLOCKED"), { target: { value: "MODEL_PROVIDER_TIMEOUT" } });
     expect(onCollectionChange).toHaveBeenCalledWith(expect.objectContaining({ failure_code: "MODEL_PROVIDER_TIMEOUT" }));
+
+    cleanup();
+    render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }] }} document={document} collectionSelection={{ owner: "singleton", key: "planning-instructions" }} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} />);
+    expect(screen.getByDisplayValue("Plan safely")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("BLOCKED")).not.toBeInTheDocument();
+
+    cleanup();
+    render(<TypedEditor section="public-knowledge" value={{ resource_source_hints: [] }} document={document} collectionSelection={null} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} />);
+    expect(screen.queryByRole("heading", { name: "公共知识配置" })).not.toBeInTheDocument();
+    expect(screen.getByText("请选择或新建资源发现知识")).toBeInTheDocument();
   });
 });
