@@ -190,7 +190,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
 
   it("uses master-detail rendering for root collection sections", () => {
     const onCollectionChange = vi.fn();
-    render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }, { failure_code: "RETRY", hint: "Try again" }] }} document={document} collectionSelection={{ owner: "collection", collection: "recovery_hints", index: 0 }} onChange={vi.fn()} onCollectionChange={onCollectionChange} onCollectionRemove={vi.fn()} />);
+    render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }, { failure_code: "RETRY", hint: "Try again" }] }} document={document} collectionSelection={{ owner: "collection", collection: "recovery_hints", identity: JSON.stringify(["BLOCKED"]) }} onChange={vi.fn()} onCollectionChange={onCollectionChange} onCollectionRemove={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "恢复提示" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("BLOCKED")).toBeInTheDocument();

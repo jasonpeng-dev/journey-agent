@@ -10,7 +10,7 @@ export type RootCollectionKey =
 export type RootCollectionSelection = {
   owner: "collection";
   collection: RootCollectionKey;
-  index: number;
+  identity: string;
 };
 
 export type RootSingletonOwnerKey = "initialization-entry" | "planning-instructions";
@@ -35,6 +35,7 @@ export type RootCollectionDefinition = {
 };
 
 export type RootCollectionItem = RootCollectionSelection & {
+  index: number;
   value: JsonObject;
   title: string;
   summary: string;
@@ -56,6 +57,103 @@ const definitions: Partial<Record<EditorSection, RootCollectionDefinition[]>> = 
 
 function objectValue(value: unknown): JsonObject | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
+}
+
+function identityString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Canonical identities mirror ScenarioDefinitionV2 uniqueness invariants. */
+export function rootCollectionIdentity(collection: RootCollectionKey, value: JsonObject): string | null {
+  if (collection === "resource_source_hints") {
+    const resourceKey = identityString(value.resource_key);
+    return resourceKey ? JSON.stringify([resourceKey]) : null;
+  }
+  if (collection === "recovery_hints") {
+    const failureCode = identityString(value.failure_code);
+    return failureCode ? JSON.stringify([failureCode]) : null;
+  }
+  if (collection === "resource_initial_states") {
+    const resourceKey = identityString(value.resource_key);
+    const scopeNodeKey = value.scope_node_key === null || value.scope_node_key === undefined
+      ? null
+      : identityString(value.scope_node_key);
+    return resourceKey && (scopeNodeKey !== null || value.scope_node_key == null)
+      ? JSON.stringify([resourceKey, scopeNodeKey])
+      : null;
+  }
+  if (collection === "resource_pools") {
+    const poolKey = identityString(value.pool_key);
+    return poolKey ? JSON.stringify([poolKey]) : null;
+  }
+  const regionKey = identityString(value.region_key);
+  return regionKey ? JSON.stringify([regionKey]) : null;
+}
+
+export function rootCollectionReferencePath(collection: RootCollectionKey, value: JsonObject): string | null {
+  return collection === "resource_pools" && identityString(value.pool_key)
+    ? `resource_pools.${value.pool_key}`
+    : null;
+}
+
+function collectionValues(root: JsonObject, collection: RootCollectionKey): JsonObject[] {
+  const values = root[collection];
+  return Array.isArray(values) ? values.flatMap((value) => {
+    const object = objectValue(value);
+    return object ? [object] : [];
+  }) : [];
+}
+
+export function rootCollectionItem(
+  root: JsonObject,
+  selection: RootCollectionSelection,
+): { index: number; value: JsonObject } | null {
+  const values = collectionValues(root, selection.collection);
+  const index = values.findIndex((value) => rootCollectionIdentity(selection.collection, value) === selection.identity);
+  return index >= 0 ? { index, value: values[index] } : null;
+}
+
+export function rootCollectionSelectionForPath(root: JsonObject, fieldPath: string | null): RootCollectionSelection | null {
+  if (!fieldPath) return null;
+  const [collectionName, indexText] = fieldPath.split(".");
+  const definition = Object.values(definitions).flatMap((items) => items ?? []).find((item) => item.key === collectionName);
+  if (!definition || !/^\d+$/.test(indexText ?? "")) return null;
+  const value = collectionValues(root, definition.key)[Number(indexText)];
+  const identity = value ? rootCollectionIdentity(definition.key, value) : null;
+  return identity ? { owner: "collection", collection: definition.key, identity } : null;
+}
+
+export type RootCollectionMutation =
+  | { ok: true; root: JsonObject; selection: RootCollectionSelection | null }
+  | { ok: false; reason: string };
+
+export function replaceRootCollectionItem(
+  root: JsonObject,
+  selection: RootCollectionSelection,
+  item: JsonObject,
+): RootCollectionMutation {
+  const selected = rootCollectionItem(root, selection);
+  if (!selected) return { ok: false, reason: "当前集合项已不存在。" };
+  const identity = rootCollectionIdentity(selection.collection, item);
+  if (!identity) return { ok: false, reason: "请先填写完整的集合项身份字段。" };
+  const values = collectionValues(root, selection.collection);
+  if (values.some((value, index) => index !== selected.index && rootCollectionIdentity(selection.collection, value) === identity)) {
+    return { ok: false, reason: "集合中已存在相同身份的项目。" };
+  }
+  values[selected.index] = structuredClone(item);
+  return {
+    ok: true,
+    root: { ...structuredClone(root), [selection.collection]: values },
+    selection: { owner: "collection", collection: selection.collection, identity },
+  };
+}
+
+export function removeRootCollectionItem(root: JsonObject, selection: RootCollectionSelection): RootCollectionMutation {
+  const selected = rootCollectionItem(root, selection);
+  if (!selected) return { ok: false, reason: "当前集合项已不存在。" };
+  const values = collectionValues(root, selection.collection);
+  values.splice(selected.index, 1);
+  return { ok: true, root: { ...structuredClone(root), [selection.collection]: values }, selection: null };
 }
 
 function compact(value: unknown, fallback: string): string {
@@ -95,6 +193,7 @@ export function rootCollectionItems(section: string, value: unknown): RootCollec
       return object ? [{
         owner: "collection",
         collection: definition.key,
+        identity: rootCollectionIdentity(definition.key, object) ?? JSON.stringify(["invalid", definition.key, object]),
         index,
         value: object,
         title: itemTitle(definition.key, object, index),
@@ -104,12 +203,32 @@ export function rootCollectionItems(section: string, value: unknown): RootCollec
   });
 }
 
-export function rootCollectionDefault(collection: RootCollectionKey): JsonObject {
-  if (collection === "resource_source_hints") return { resource_key: "", primary_region_key: null, candidate_region_keys: [] };
-  if (collection === "recovery_hints") return { failure_code: "FAILURE", hint: "" };
-  if (collection === "resource_initial_states") return { resource_key: "", scope_node_key: null, value: 0, reserved_value: 0 };
-  if (collection === "resource_pools") return { pool_key: "new_pool", resource_key: "", region_key: null, facility_key: null, quantity: 0, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false };
-  return { region_key: "", resource_inventory_visibility: "VISIBLE", resource_survey_completed: false };
+export function rootCollectionDefault(collection: RootCollectionKey, existing: JsonObject[] = []): JsonObject {
+  const candidate = (suffix: string): JsonObject => {
+    if (collection === "resource_source_hints") return { resource_key: `new_resource${suffix}`, primary_region_key: "new_region", candidate_region_keys: [] };
+    if (collection === "recovery_hints") return { failure_code: `FAILURE${suffix.toUpperCase()}`, hint: "请填写恢复建议。" };
+    if (collection === "resource_initial_states") return { resource_key: `new_resource${suffix}`, scope_node_key: null, value: 0, reserved_value: 0 };
+    if (collection === "resource_pools") return { pool_key: `new_pool${suffix}`, resource_key: "new_resource", region_key: null, facility_key: null, quantity: 0, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false };
+    return { region_key: `new_region${suffix}`, resource_inventory_visibility: "VISIBLE", resource_survey_completed: false };
+  };
+  const identities = new Set(existing.map((value) => rootCollectionIdentity(collection, value)).filter(Boolean));
+  for (let sequence = 1; ; sequence += 1) {
+    const value = candidate(sequence === 1 ? "" : `_${sequence}`);
+    if (!identities.has(rootCollectionIdentity(collection, value))) return value;
+  }
+}
+
+export function appendRootCollectionItem(root: JsonObject, collection: RootCollectionKey): RootCollectionMutation {
+  const values = collectionValues(root, collection);
+  const value = rootCollectionDefault(collection, values);
+  const identity = rootCollectionIdentity(collection, value);
+  if (!identity) return { ok: false, reason: "无法为新集合项建立身份。" };
+  values.push(value);
+  return {
+    ok: true,
+    root: { ...structuredClone(root), [collection]: values },
+    selection: { owner: "collection", collection, identity },
+  };
 }
 
 export function rootSingletonOwner(section: string): RootSingletonOwnerDefinition | null {

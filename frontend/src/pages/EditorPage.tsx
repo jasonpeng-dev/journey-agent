@@ -23,7 +23,7 @@ import {
   type JsonObject,
 } from "../editor";
 import { kindsBySection } from "../templates";
-import { rootCollectionDefinitions, rootCollectionDefault, rootCollectionItems, rootSingletonOwner, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
+import { appendRootCollectionItem, removeRootCollectionItem, replaceRootCollectionItem, rootCollectionDefinitions, rootCollectionIdentity, rootCollectionItems, rootCollectionReferencePath, rootCollectionSelectionForPath, rootSingletonOwner, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
 import { sectionStructure } from "../editor-structure";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
@@ -78,7 +78,7 @@ export function EditorPage() {
   const singletonOwner = useMemo(() => rootSingletonOwner(section), [section]);
   const navigateRouter = useNavigate();
   const navigate = (to: string) => navigateRouter(normalizeEditorNavigation(to, scenarioId));
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const draftQuery = useQuery({ queryKey: ["draft", scenarioId], queryFn: () => api.draft(scenarioId) });
   const [serverDraft, setServerDraft] = useState<Draft | null>(null);
@@ -92,8 +92,19 @@ export function EditorPage() {
   const [objectSearch, setObjectSearch] = useState("");
   const [kindFilter, setKindFilter] = useState("all");
   const [collectionSelectionState, setCollectionSelectionState] = useState<ScopedCollectionSelection | null>(null);
-  const setCollectionSelection = (selection: RootOwnerSelection | null) => {
+  const setCollectionSelection = (selection: RootOwnerSelection | null, replace = false) => {
     setCollectionSelectionState(selection ? { section, selection } : null);
+    const next = new URLSearchParams(searchParams);
+    next.delete("owner");
+    next.delete("collection");
+    next.delete("item");
+    if (selection?.owner === "singleton") next.set("owner", selection.key);
+    if (selection?.owner === "collection") {
+      next.set("owner", "collection");
+      next.set("collection", selection.collection);
+      next.set("item", selection.identity);
+    }
+    setSearchParams(next, { replace });
   };
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [topologyContext, setTopologyContext] = useState<TopologyContext>({ kind: "overview" });
@@ -119,7 +130,6 @@ export function EditorPage() {
   }, [draftQuery.data, scenarioId]);
   useEffect(() => { setObjectSearch(""); setKindFilter("all"); }, [section, worldView]);
   useEffect(() => {
-    setCollectionSelectionState(singletonOwner ? { section, selection: { owner: "singleton", key: singletonOwner.key } } : null);
     setInspectorOpen(false);
     if (section === "world") {
       if (!objectKey) {
@@ -181,6 +191,21 @@ export function EditorPage() {
   const collectionDefinitions = useMemo(() => rootCollectionDefinitions(section), [section]);
   const collectionItems = useMemo(() => rootCollectionItems(section, sectionValue), [section, sectionValue]);
   const collectionSelection = collectionSelectionState?.section === section ? collectionSelectionState.selection : null;
+  useEffect(() => {
+    const owner = searchParams.get("owner");
+    const collection = searchParams.get("collection");
+    const identity = searchParams.get("item");
+    const collectionMatch = collectionDefinitions.find((definition) => definition.key === collection);
+    if (owner === "collection" && collectionMatch && identity && collectionItems.some((item) => item.collection === collectionMatch.key && item.identity === identity)) {
+      setCollectionSelectionState({ section, selection: { owner: "collection", collection: collectionMatch.key, identity } });
+      return;
+    }
+    if (singletonOwner && owner === singletonOwner.key) {
+      setCollectionSelectionState({ section, selection: { owner: "singleton", key: singletonOwner.key } });
+      return;
+    }
+    setCollectionSelectionState(singletonOwner ? { section, selection: { owner: "singleton", key: singletonOwner.key } } : null);
+  }, [collectionDefinitions, collectionItems, searchParams, section, singletonOwner]);
   const filteredCollectionItems = useMemo(() => {
     const query = objectSearch.trim().toLocaleLowerCase();
     return collectionItems.filter((item) => !query || [item.title, item.summary, item.collection].some((value) => value.toLocaleLowerCase().includes(query)));
@@ -189,7 +214,7 @@ export function EditorPage() {
     ? !objectSearch.trim() || [singletonOwner.label, singletonOwner.summary].some((value) => value.toLocaleLowerCase().includes(objectSearch.trim().toLocaleLowerCase()))
     : false;
   const selectedCollectionItem = collectionSelection?.owner === "collection"
-    ? collectionItems.find((item) => item.collection === collectionSelection.collection && item.index === collectionSelection.index) ?? null
+    ? collectionItems.find((item) => item.collection === collectionSelection.collection && item.identity === collectionSelection.identity) ?? null
     : null;
   const selectedSingletonOwner = collectionSelection?.owner === "singleton" ? singletonOwner : null;
   const selected = objects.find((item) => item.key === objectKey) ?? null;
@@ -262,24 +287,43 @@ export function EditorPage() {
   const createObject = (kind: EntityKind) => { const added = addObject(local.definition_document, kind); editDocument(added.document); navigate(`/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(added.key)}`); };
   const updateCollectionItem = (selection: RootCollectionSelection, item: JsonObject) => {
     const root = structuredClone(sectionValue) as JsonObject;
-    const collection = Array.isArray(root[selection.collection]) ? [...root[selection.collection] as unknown[]] : [];
-    collection[selection.index] = structuredClone(item);
-    editDocument(updateSectionRoot(local.definition_document, section, { ...root, [selection.collection]: collection }));
+    const selectedItem = selectedCollectionItem?.value ?? null;
+    const referencePath = selectedItem ? rootCollectionReferencePath(selection.collection, selectedItem) : null;
+    const identityChanged = rootCollectionIdentity(selection.collection, item) !== selection.identity;
+    const identityReferences = referencePath ? refsQuery.data?.references.filter((edge) => edge.target.object_kind === "initialization" && edge.target.field_path === referencePath) ?? [] : [];
+    if (identityChanged && identityReferences.length > 0) {
+      setMessage("该身份仍被其他配置引用，不能直接修改。请先移除相关引用。");
+      return;
+    }
+    const result = replaceRootCollectionItem(root, selection, item);
+    if (!result.ok) { setMessage(result.reason); return; }
+    setMessage("");
+    editDocument(updateSectionRoot(local.definition_document, section, result.root));
+    setCollectionSelection(result.selection, true);
   };
   const removeCollectionItem = (selection: RootCollectionSelection) => {
     const root = structuredClone(sectionValue) as JsonObject;
-    const collection = Array.isArray(root[selection.collection]) ? [...root[selection.collection] as unknown[]] : [];
-    collection.splice(selection.index, 1);
-    editDocument(updateSectionRoot(local.definition_document, section, { ...root, [selection.collection]: collection }));
+    const selectedItem = selectedCollectionItem?.value ?? null;
+    const referencePath = selectedItem ? rootCollectionReferencePath(selection.collection, selectedItem) : null;
+    const references = referencePath ? refsQuery.data?.references.filter((edge) => edge.target.object_kind === "initialization" && edge.target.field_path === referencePath) ?? [] : [];
+    if (references.length > 0) {
+      setMessage("该集合项仍被其他配置引用，不能删除。请先移除相关引用。");
+      return;
+    }
+    if (!window.confirm("确定删除当前集合项吗？")) return;
+    const result = removeRootCollectionItem(root, selection);
+    if (!result.ok) { setMessage(result.reason); return; }
+    setMessage("");
+    editDocument(updateSectionRoot(local.definition_document, section, result.root));
     setCollectionSelection(null);
   };
   const createCollectionItem = (collectionKey: RootCollectionKey) => {
     const root = structuredClone(sectionValue) as JsonObject;
-    const collection = Array.isArray(root[collectionKey]) ? [...root[collectionKey] as unknown[]] : [];
-    const index = collection.length;
-    collection.push(rootCollectionDefault(collectionKey));
-    editDocument(updateSectionRoot(local.definition_document, section, { ...root, [collectionKey]: collection }));
-    setCollectionSelection({ owner: "collection", collection: collectionKey, index });
+    const result = appendRootCollectionItem(root, collectionKey);
+    if (!result.ok || !result.selection) { setMessage(result.ok ? "无法选择新集合项。" : result.reason); return; }
+    setMessage("");
+    editDocument(updateSectionRoot(local.definition_document, section, result.root));
+    setCollectionSelection(result.selection);
   };
 
   const rename = async () => {
@@ -342,8 +386,18 @@ export function EditorPage() {
     }
     const targetSection = sectionForLocator(locator.object_kind);
     const target = locator.object_key ? `/${encodeURIComponent(locator.object_key)}` : "";
-    const query = locator.field_path ? `?focus_path=${encodeURIComponent(locator.field_path)}` : "";
-    navigate(`/scenarios/${scenarioId}/edit/${targetSection}${target}${query}`);
+    const query = new URLSearchParams();
+    if (locator.field_path) query.set("focus_path", locator.field_path);
+    const targetRoot = sectionRoot(local.definition_document, targetSection);
+    const rootSelection = targetRoot && typeof targetRoot === "object" && !Array.isArray(targetRoot)
+      ? rootCollectionSelectionForPath(targetRoot as JsonObject, locator.field_path)
+      : null;
+    if (rootSelection) {
+      query.set("owner", "collection");
+      query.set("collection", rootSelection.collection);
+      query.set("item", rootSelection.identity);
+    }
+    navigate(`/scenarios/${scenarioId}/edit/${targetSection}${target}${query.size > 0 ? `?${query}` : ""}`);
   };
 
   const openTopologyEditor = (nodeKey: string) => {
@@ -428,7 +482,7 @@ export function EditorPage() {
               </section>}
               {collectionDefinitions.map((definition) => <section className="collection-list-group" key={definition.key}>
                 <header><div><h4>{definition.label}</h4><span>{collectionItems.filter((item) => item.collection === definition.key).length} 项</span></div><button type="button" className="editor-button editor-button-secondary" onClick={() => createCollectionItem(definition.key)}>＋ 新增{definition.singularLabel}</button></header>
-                {filteredCollectionItems.filter((item) => item.collection === definition.key).map((item) => <button type="button" className={`collection-list-item${collectionSelection?.owner === "collection" && collectionSelection.collection === item.collection && collectionSelection.index === item.index ? " selected" : ""}`} key={`${item.collection}:${item.index}`} onClick={() => setCollectionSelection({ owner: "collection", collection: item.collection, index: item.index })}><strong>{item.title}</strong><span>{item.summary}</span><code>{item.collection}.{item.index}</code></button>)}
+                {filteredCollectionItems.filter((item) => item.collection === definition.key).map((item) => <button type="button" className={`collection-list-item${collectionSelection?.owner === "collection" && collectionSelection.collection === item.collection && collectionSelection.identity === item.identity ? " selected" : ""}`} key={`${item.collection}:${item.identity}`} onClick={() => setCollectionSelection({ owner: "collection", collection: item.collection, identity: item.identity })}><strong>{item.title}</strong><span>{item.summary}</span><code>{item.collection} · {item.identity}</code></button>)}
                 {collectionItems.filter((item) => item.collection === definition.key).length === 0 && <p className="muted collection-list-empty">暂无项目</p>}
               </section>)}
             </div> : entityGroups.length > 0 ? <div className="collection-list-groups">

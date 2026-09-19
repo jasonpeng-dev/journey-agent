@@ -24,7 +24,7 @@ export type SectionStructure = {
     searchable: boolean;
     create: CreateCapability;
     grouped: boolean;
-    itemIdentity: "none" | "route-object" | "collection-index" | "topology-key";
+    itemIdentity: "none" | "route-object" | "collection-identity" | "topology-key";
   };
   workspace: {
     renderer: WorkspaceRenderer;
@@ -116,7 +116,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
   initialization: declaration(
     "initialization",
     "HYBRID",
-    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-index" },
+    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-identity" },
     { renderer: "hybrid", title: "section", selection: "root-owner" },
     { create: true, rename: false, delete: true, inspector: false, advancedJson: "root-and-item" },
     "root-collection",
@@ -132,7 +132,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
   planning: declaration(
     "planning",
     "HYBRID",
-    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-index" },
+    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-identity" },
     { renderer: "hybrid", title: "section", selection: "root-owner" },
     { create: true, rename: false, delete: true, inspector: false, advancedJson: "root-and-item" },
     "root-collection",
@@ -140,7 +140,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
   "public-knowledge": declaration(
     "public-knowledge",
     "COLLECTION",
-    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-index" },
+    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-identity" },
     { renderer: "root-collection", title: "selected-item", selection: "root-owner" },
     { create: true, rename: false, delete: true, inspector: false, advancedJson: "item-only" },
     "root-collection",

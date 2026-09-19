@@ -17,6 +17,7 @@ vi.mock("./api", () => ({
     draft: vi.fn(),
     analyzeWorkingCopyReferences: vi.fn(),
     saveDraft: vi.fn(),
+    validateDraft: vi.fn(),
   },
 }));
 
@@ -66,6 +67,7 @@ beforeEach(() => {
   vi.mocked(api.draft).mockResolvedValue(draft);
   vi.mocked(api.analyzeWorkingCopyReferences).mockResolvedValue({ scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [] });
   vi.mocked(api.saveDraft).mockResolvedValue(draft);
+  vi.mocked(api.validateDraft).mockResolvedValue({ scenario_id: "scenario-1", revision: 1, content_hash: null, publish_ready: false, issues: [], readiness: [] });
 });
 
 afterEach(cleanup);
@@ -208,6 +210,73 @@ describe("Editor section state ownership", () => {
     await waitFor(() => expect(screen.getByDisplayValue("重新检查道路")).toBeInTheDocument());
     expect(screen.queryByDisplayValue("优先保障生命安全")).not.toBeInTheDocument();
     expect(screen.getByText("未修改")).toBeInTheDocument();
+  });
+
+  it("restores a root collection selection from a durable deep link", async () => {
+    const identity = encodeURIComponent(JSON.stringify(["BLOCKED"]));
+    renderEditor(`/scenarios/scenario-1/edit/planning?owner=collection&collection=recovery_hints&item=${identity}`);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "BLOCKED", level: 3 })).toBeInTheDocument());
+    expect(screen.getByDisplayValue("重新检查道路")).toBeInTheDocument();
+    expect(screen.getByText("未修改")).toBeInTheDocument();
+  });
+
+  it("creates a uniquely addressable root item and returns to the hybrid fallback after delete", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderEditor("/scenarios/scenario-1/edit/planning");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "规划指引", level: 3 })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "＋ 新增恢复提示" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "FAILURE", level: 3 })).toBeInTheDocument());
+    expect(screen.getByText("有未保存修改")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("请填写恢复建议。")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除此项" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "规划指引", level: 3 })).toBeInTheDocument());
+    expect(screen.queryByRole("heading", { name: "BLOCKED", level: 3 })).not.toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it("replays a validation locator into the matching root collection item", async () => {
+    vi.mocked(api.validateDraft).mockResolvedValue({
+      scenario_id: "scenario-1",
+      revision: 1,
+      content_hash: null,
+      publish_ready: false,
+      readiness: [],
+      issues: [{ severity: "ERROR", code: "POOL_QUANTITY", path: "initialization.resource_pools.0.quantity", message: "Invalid quantity", locator: { object_kind: "initialization", object_key: null, field_path: "resource_pools.0.quantity" } }],
+    });
+    renderEditor("/scenarios/scenario-1/edit/validation");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "验证与发布" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "验证当前草稿" }));
+    fireEvent.click(await screen.findByText(/POOL_QUANTITY/));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "central_pool", level: 3 })).toBeInTheDocument());
+    expect(screen.getByLabelText("数量")).toBeInTheDocument();
+  });
+
+  it("guards deletion of a referenced resource pool", async () => {
+    vi.mocked(api.analyzeWorkingCopyReferences).mockResolvedValue({
+      scenario_id: "scenario-1",
+      base_revision: 1,
+      source: "WORKING_COPY",
+      references: [{
+        source: { object_kind: "rule", object_key: "stabilize", field_path: "effects.0.pool_key" },
+        target: { object_kind: "initialization", object_key: null, field_path: "resource_pools.central_pool" },
+      }],
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderEditor("/scenarios/scenario-1/edit/initialization");
+    await waitFor(() => expect(screen.getByRole("button", { name: /central_pool/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /central_pool/ }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "central_pool", level: 3 })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "删除此项" }));
+    expect(await screen.findByText("该集合项仍被其他配置引用，不能删除。请先移除相关引用。")).toBeInTheDocument();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(screen.getByText("未修改")).toBeInTheDocument();
+    confirm.mockRestore();
   });
 
   it("keeps public knowledge collection-only and groups relation kinds", async () => {
