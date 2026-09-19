@@ -7,6 +7,7 @@ import {
   legacyFactDisplayLabel,
   legacyFactDisplayValue,
   legacyFacilityStatusDisplayValue,
+  isLegacyPresentationFact,
   legacyMeaningfulKnownRelations,
   legacyPublicFactRequirementText,
   legacyRelationDescription,
@@ -30,7 +31,10 @@ export function resourceDisplayName(key: string, candidate?: string): string {
 }
 
 function hasSafeFactMetadata(fact: PlayerGameState["known_facts"][number]): boolean {
-  return fact.node_family != null || fact.presentation_slot != null || fact.value_label != null;
+  return fact.presentation_role != null
+    || fact.summary_value_label != null
+    || fact.detail_value_label != null
+    || fact.value_label != null;
 }
 
 export function resourceAvailabilityRequirementText(
@@ -100,7 +104,12 @@ export function factDisplayValue(
   value = fact.value,
 ): string {
   const hasSafeMetadata = hasSafeFactMetadata(fact);
-  if (!hasSafeMetadata) return legacyFactDisplayValue(fact, value);
+  if ((!hasSafeMetadata || isLegacyPresentationFact(fact))) {
+    if (value === fact.value && fact.detail_value_label) return fact.detail_value_label;
+    if (value === fact.value && fact.value_label) return fact.value_label;
+    return legacyFactDisplayValue(fact, value);
+  }
+  if (value === fact.value && fact.detail_value_label) return fact.detail_value_label;
   if (value === fact.value && fact.value_label) return fact.value_label;
   if (typeof value === "boolean") return value ? "是" : "否";
   if (typeof value === "number") return String(value);
@@ -153,9 +162,11 @@ export function publicFactRequirementText(
 export function facilityStatusDisplayValue(
   fact: PlayerGameState["known_facts"][number],
 ): string {
-  const hasSafeMetadata = hasSafeFactMetadata(fact);
-  if (!hasSafeMetadata) return legacyFacilityStatusDisplayValue(fact);
-  return factDisplayValue(fact);
+  if (fact.summary_value_label) return fact.summary_value_label;
+  if (!hasSafeFactMetadata(fact) || isLegacyPresentationFact(fact)) {
+    return legacyFacilityStatusDisplayValue(fact);
+  }
+  return fact.value_label ?? factDisplayValue(fact);
 }
 
 export function publicFactIdentity(nodeKey: string, factKey: string): string {

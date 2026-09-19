@@ -108,6 +108,16 @@ class NodeFamilyV2(StrEnum):
     TRANSPORT = "TRANSPORT"
 
 
+class FactPresentationRoleV2(StrEnum):
+    """Authored presentation intent without assigning domain meaning to a key."""
+
+    HEADER_PRIMARY = "HEADER_PRIMARY"
+    HEADER_SECONDARY = "HEADER_SECONDARY"
+    BODY_MAIN = "BODY_MAIN"
+    SUPPORTING = "SUPPORTING"
+    REQUIREMENT_ONLY = "REQUIREMENT_ONLY"
+
+
 class ActionTargetKind(StrEnum):
     NODE = "NODE"
     ACTOR = "ACTOR"
@@ -402,10 +412,17 @@ class ValueLabelV2(FrozenDefinitionModel):
 
     value: StrictScalar
     label: StrictStr = Field(min_length=1, max_length=160)
+    summary_label: StrictStr | None = Field(
+        default=None, min_length=1, max_length=160, exclude_if=lambda value: value is None
+    )
+    detail_label: StrictStr | None = Field(
+        default=None, min_length=1, max_length=160, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def validate_label(self) -> ValueLabelV2:
-        if self.label != self.label.strip():
+        labels = (self.label, self.summary_label, self.detail_label)
+        if any(label is not None and label != label.strip() for label in labels):
             raise ValueError("Value labels must not have surrounding whitespace")
         return self
 
@@ -435,6 +452,10 @@ class FactDefinitionV2(FrozenDefinitionModel):
     value_labels: tuple[ValueLabelV2, ...] = Field(
         default=(),
         exclude_if=lambda value: not value,
+    )
+    presentation_role: FactPresentationRoleV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
     )
 
     @model_validator(mode="before")
@@ -1823,13 +1844,14 @@ def _normalize_typed_value_labels(value: object, owner: str) -> object:
         entries: list[dict[str, object]] = []
         for item in raw:
             if isinstance(item, ValueLabelV2):
-                entries.append({"value": item.value, "label": item.label})
+                entries.append(item.model_dump(mode="json"))
             elif isinstance(item, Mapping):
-                if set(item) != {"value", "label"}:
+                allowed_fields = {"value", "label", "summary_label", "detail_label"}
+                if not {"value", "label"}.issubset(item) or set(item) - allowed_fields:
                     raise ValueError(
-                        f"{owner} typed value label entries must contain only value and label"
+                        f"{owner} typed value label entries contain unsupported fields"
                     )
-                entries.append({"value": item["value"], "label": item["label"]})
+                entries.append({key: item[key] for key in allowed_fields if key in item})
             else:
                 raise ValueError(f"{owner} value labels must contain typed entries")
         return entries
@@ -1839,13 +1861,14 @@ def _normalize_typed_value_labels(value: object, owner: str) -> object:
     if isinstance(raw_allowed, (list, tuple)):
         for item in raw_allowed:
             if isinstance(item, ValueLabelV2):
-                typed_entries.append({"value": item.value, "label": item.label})
+                typed_entries.append(item.model_dump(mode="json"))
             elif isinstance(item, Mapping):
-                if set(item) != {"value", "label"}:
+                allowed_fields = {"value", "label", "summary_label", "detail_label"}
+                if not {"value", "label"}.issubset(item) or set(item) - allowed_fields:
                     raise ValueError(
-                        f"{owner} typed allowed_values entries must contain only value and label"
+                        f"{owner} typed allowed_values entries contain unsupported fields"
                     )
-                typed_entries.append({"value": item["value"], "label": item["label"]})
+                typed_entries.append({key: item[key] for key in allowed_fields if key in item})
             else:
                 scalar_values.append(item)
 
@@ -2770,6 +2793,7 @@ __all__ = [
     "DerivedStateDependencyV2",
     "EffectKind",
     "EngineCapability",
+    "FactPresentationRoleV2",
     "LocalityContractV2",
     "NodeFamilyV2",
     "PublicKnowledgeDefinitionV2",

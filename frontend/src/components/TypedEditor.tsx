@@ -108,6 +108,7 @@ function FactEditor({ value, document, path, onChange }: { value: JsonObject; do
     <FieldRow metadata={{ path: "value_type", type: "enum", enum: ["STRING", "ENUM", "INTEGER", "BOOLEAN"] }} value={value} document={document} path={path} onChange={onChange} />
     <FieldRow metadata={typedMetadata} value={value} document={document} path={path} onChange={onChange} />
     <FieldRow metadata={{ path: "initial_visibility", type: "enum", enum: ["KNOWN", "HIDDEN"] }} value={value} document={document} path={path} onChange={onChange} />
+    <FieldRow metadata={{ path: "presentation_role", type: "enum", enum: ["HEADER_PRIMARY", "HEADER_SECONDARY", "BODY_MAIN", "SUPPORTING", "REQUIREMENT_ONLY"] }} value={value} document={document} path={path} onChange={onChange} />
     {factType === "ENUM" && <AdvancedJsonField value={value.allowed_values ?? []} onChange={(next) => onChange({ ...value, allowed_values: next })} path={`${path}.allowed_values`} label="Allowed values" />}
     <ValueLabelList value={value.value_labels} valueType={factType} allowedValues={allowed} path={`${path}.value_labels`} onChange={(next) => onChange({ ...value, value_labels: next })} />
     <AdvancedJsonField value={{ goal_addressable: value.goal_addressable ?? false, goal_aliases: value.goal_aliases ?? [], goal_examples: value.goal_examples ?? [], goal_target_values: value.goal_target_values ?? [] }} onChange={(next) => onChange({ ...value, ...(cloneObject(next)) })} path={`${path}.goal_metadata`} label="Goal metadata" />

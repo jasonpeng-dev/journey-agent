@@ -6,6 +6,7 @@ import {
 } from "./knowledgePresentation";
 import {
   legacyFactPresentationPriority,
+  legacyFactPresentationRole,
   legacyFacilityRelationDescription,
 } from "./legacyPresentationCompatibility";
 import type {
@@ -15,6 +16,7 @@ import type {
   PublicProducerRequirement,
   PublicRelation,
   PublicTargetActionContract,
+  PublicPresentation,
   ResourceIntelligence,
 } from "./types";
 
@@ -30,6 +32,7 @@ export type FacilityResourcePresentationRow = {
   availabilityRequirement: Record<string, unknown> | null;
   availabilityRequirementStatus: "KNOWN" | "UNKNOWN" | null;
   unlockText?: string;
+  displayUnit?: string | null;
 };
 
 export type FacilityDetailRow = {
@@ -105,10 +108,11 @@ function factPresentationOrderDescriptor(
   fact: PublicFact,
   policy: FacilityPresentationOrderPolicy,
 ): PresentationOrderDescriptor {
-  if (fact.presentation_slot === "HEADER_PRIMARY") {
+  const role = resolveFacilityFactRole(fact);
+  if (role === "HEADER_PRIMARY") {
     return { group: "HEADER_PRIMARY", priority: 0, stableKey: fact.fact_key };
   }
-  if (fact.presentation_slot === "HEADER_SECONDARY") {
+  if (role === "HEADER_SECONDARY") {
     return { group: "HEADER_SECONDARY", priority: 0, stableKey: fact.fact_key };
   }
   if (!fact.presentation_slot && policy === DEFAULT_FACILITY_PRESENTATION_ORDER_POLICY) {
@@ -136,6 +140,10 @@ function factPresentationOrderDescriptor(
     priority: policy.factPriority?.(fact) ?? 0,
     stableKey: fact.fact_key,
   };
+}
+
+export function resolveFacilityFactRole(fact: PublicFact): NonNullable<PublicFact["presentation_role"]> {
+  return fact.presentation_role ?? legacyFactPresentationRole(fact);
 }
 
 export type TargetActionRequirementRow = FacilityDetailRow & {
@@ -367,11 +375,13 @@ type ResourceCandidate = {
   availabilityRequirementStatus: "KNOWN" | "UNKNOWN" | null;
   source: "PROJECTION" | "ASSOCIATED";
   hasExplicitPoolKey: boolean;
+  displayUnit?: string | null;
 };
 
 function resourceCandidateFromPool(
   resourceKey: string,
   resourceName: string,
+  displayUnit: string | null | undefined,
   pool: {
     pool_key: string;
     quantity: number;
@@ -391,6 +401,7 @@ function resourceCandidateFromPool(
     availabilityRequirementStatus: pool.availability_requirement_status ?? null,
     source: "PROJECTION",
     hasExplicitPoolKey: true,
+    displayUnit,
   };
 }
 
@@ -419,6 +430,9 @@ function resourceCandidateFromAssociated(
         : null,
     source: "ASSOCIATED",
     hasExplicitPoolKey: typeof resource.pool_key === "string",
+    displayUnit: typeof resource.display_unit === "string"
+      ? resource.display_unit
+      : typeof resource.unit === "string" ? resource.unit : null,
   };
 }
 
@@ -433,14 +447,24 @@ function collectFacilityResourceCandidates(
       Object.entries(region.resources ?? {}).forEach(([resourceKey, resource]) => {
         resource.pools.forEach((pool) => {
           if (pool.facility_key !== nodeKey) return;
-          candidates.push(resourceCandidateFromPool(resourceKey, resource.resource_name, pool));
+          candidates.push(resourceCandidateFromPool(
+            resourceKey,
+            resource.resource_name,
+            resource.display_unit ?? resource.unit,
+            pool,
+          ));
         });
       });
     });
     Object.entries(resourceIntelligence.global_resources).forEach(([resourceKey, resource]) => {
       resource.pools.forEach((pool) => {
         if (pool.facility_key !== nodeKey) return;
-        candidates.push(resourceCandidateFromPool(resourceKey, resource.resource_name, pool));
+        candidates.push(resourceCandidateFromPool(
+          resourceKey,
+          resource.resource_name,
+          resource.display_unit ?? resource.unit,
+          pool,
+        ));
       });
     });
   }
@@ -560,6 +584,7 @@ export function buildFacilityResourceRows(
       availability: unavailable ? "UNAVAILABLE" : "AVAILABLE",
       availabilityRequirement: requirement,
       availabilityRequirementStatus: requirementStatus,
+      displayUnit: metadataCandidates.find((candidate) => candidate.displayUnit)?.displayUnit ?? null,
       unlockText: resourceBinding
         ? bindingUnlockText
         : unavailable && requirementStatus === "KNOWN"
@@ -579,6 +604,7 @@ export type BuildFacilityDetailRowsOptions = {
   resourceName: (key: string) => string;
   resolveNodeName: (key: string, candidate?: string | null) => string;
   presentationOrderPolicy?: FacilityPresentationOrderPolicy;
+  presentation?: Pick<PublicPresentation, "knowledge_level" | "semantic_order" | "resource_order" | "relation_order">;
 };
 
 function producerRequirementValue(
@@ -687,9 +713,14 @@ export function buildFacilityDetailRows({
   resourceName,
   resolveNodeName,
   presentationOrderPolicy = DEFAULT_FACILITY_PRESENTATION_ORDER_POLICY,
+  presentation,
 }: BuildFacilityDetailRowsOptions): FacilityDetailRow[] {
+  const knowledgeLevel = presentation?.knowledge_level ?? "A+B+C";
+  const includeRecovery = knowledgeLevel !== "A";
+  const includeRequirements = knowledgeLevel === "A+B+C";
   const factBlocks: FacilityPresentationBlock[] = knownFacts
     .filter((fact) => fact.node_key === nodeKey)
+    .filter((fact) => !["SUPPORTING", "REQUIREMENT_ONLY"].includes(resolveFacilityFactRole(fact)))
     .map((fact): FacilityPresentationBlock => {
       const producers = producerBindings
         .filter((binding) => binding.target_key === nodeKey)
@@ -708,12 +739,12 @@ export function buildFacilityDetailRows({
             value: factDisplayValue(fact),
             kind: "DETAIL" as const,
           },
-          ...producers.map((binding) => ({
+          ...(includeRecovery ? producers.map((binding) => ({
             key: `${binding.binding_key}:output:${fact.fact_key}`,
             label: "恢复方式：",
             value: binding.action_name,
             kind: "RECOVERY" as const,
-          })),
+          })) : []),
         ],
         producerBindings: producers,
         descriptor: factPresentationOrderDescriptor(fact, presentationOrderPolicy),
@@ -811,27 +842,71 @@ export function buildFacilityDetailRows({
     },
   }));
 
+  const resourceOrder = presentation?.resource_order ?? ["NAME", "AMOUNT", "STATUS", "UNIT"];
+  const orderedResourceBlocks = resourceBlocks.map((block, index) => {
+    const resource = facilityResourceRows[index];
+    const parts = resourceOrder.flatMap((slot) => {
+      if (slot === "AMOUNT") return [`\u00d7${String(resource.quantity)}`];
+      if (slot === "STATUS" && resource.availability === "UNAVAILABLE") return ["\u6682\u4e0d\u53ef\u7528"];
+      if (slot === "UNIT" && resource.displayUnit) return [resource.displayUnit];
+      return [];
+    });
+    return {
+      ...block,
+      rows: block.rows.map((row, rowIndex) => rowIndex === 0 ? {
+        ...row,
+        label: resourceOrder.includes("NAME") ? row.label : "\u8d44\u6e90\uff1a",
+        value: parts.join("\uff0c"),
+      } : row),
+    };
+  });
+  const relationOrder = presentation?.relation_order ?? ["TYPE", "TARGET", "VISIBILITY"];
+  const orderedRelationBlocks = relationBlocks.map((block) => ({
+    ...block,
+    rows: block.rows.map((row) => ({
+      ...row,
+      label: relationOrder.includes("TYPE") ? row.label : "\u5173\u7cfb\uff1a",
+      value: [
+        ...(relationOrder.includes("TARGET") ? [row.value] : []),
+      ].join("\u3001"),
+    })),
+  }));
+
+  const semanticGroup: Partial<Record<PublicPresentation["semantic_order"][number], FacilityPresentationGroup[]>> = {
+    STATUS: ["HEADER_PRIMARY", "HEADER_SECONDARY"],
+    FACTS: ["SEMANTIC", "OTHER"],
+    RESOURCES: ["RESOURCE"],
+    RELATIONS: ["RELATION"],
+  };
+  const configuredGroups = (presentation?.semantic_order ?? [])
+    .flatMap((slot) => semanticGroup[slot] ?? []);
+  const groupOrder = configuredGroups.length > 0
+    ? [...new Set(configuredGroups)]
+    : presentationOrderPolicy.groupOrder;
+
   const blocks = resolvePresentationOrder(
     [
       ...factBlocks,
       ...semanticBlocks,
-      ...resourceBlocks,
-      ...relationBlocks,
+      ...orderedResourceBlocks,
+      ...orderedRelationBlocks,
     ],
     (block) => block.descriptor,
-    presentationOrderPolicy,
+    { ...presentationOrderPolicy, groupOrder },
   );
   const usedBindingKeys = new Set<string>();
   return blocks.flatMap((block) => {
     const rows = [...block.rows];
     block.producerBindings?.forEach((binding) => {
       if (usedBindingKeys.has(binding.binding_key)) return;
-      rows.push(...producerRequirementRows(
-        binding,
-        knownFacts,
-        resourceName,
-        resolveNodeName,
-      ));
+      if (includeRequirements) {
+        rows.push(...producerRequirementRows(
+          binding,
+          knownFacts,
+          resourceName,
+          resolveNodeName,
+        ));
+      }
       usedBindingKeys.add(binding.binding_key);
     });
     return rows;

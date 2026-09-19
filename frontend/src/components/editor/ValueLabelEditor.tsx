@@ -54,6 +54,8 @@ export function ValueLabelList({ value, valueType, allowedValues = [], path, onC
       <div className="typed-grid">
         <ScalarValueInput value={item.value} valueType={type} allowedValues={allowed} path={`${path}.${index}.value`} onChange={(next) => update(index, "value", next)} />
         <TextInput value={item.label} onChange={(next) => update(index, "label", next)} path={`${path}.${index}.label`} label="Display label" />
+        <TextInput value={item.summary_label} onChange={(next) => update(index, "summary_label", next || undefined)} path={`${path}.${index}.summary_label`} label="Summary label" />
+        <TextInput value={item.detail_label} onChange={(next) => update(index, "detail_label", next || undefined)} path={`${path}.${index}.detail_label`} label="Detail label" />
       </div>
       <button type="button" className="small danger" onClick={() => onChange(labels.filter((_, itemIndex) => itemIndex !== index))}>{editorLabel("Remove")}</button>
     </article>)}

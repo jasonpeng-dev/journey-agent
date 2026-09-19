@@ -99,4 +99,4 @@ def test_corrupt_historical_profile_falls_back_to_product_default() -> None:
     )
 
     assert resolved.template.value == "standard"
-    assert resolved.knowledge_level == PresentationKnowledgeLevel.A_PLUS_B
+    assert resolved.knowledge_level == PresentationKnowledgeLevel.A_PLUS_B_PLUS_C

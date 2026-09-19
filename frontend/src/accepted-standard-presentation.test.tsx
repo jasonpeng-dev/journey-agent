@@ -105,7 +105,7 @@ describe("accepted standard PLAY presentation contract", () => {
     expect(legacyFactDisplayValue(power)).toBe("未供电");
   });
 
-  it.fails("applies accepted wording to historical facts carrying safe projection metadata", () => {
+  it("applies accepted wording to historical facts carrying safe projection metadata", () => {
     const operational = fact("operational", "运行状态", false, "HEADER_PRIMARY");
     const power = fact("power_supply", "供电状态", "UNAVAILABLE", "HEADER_SECONDARY");
 
@@ -169,7 +169,7 @@ describe("accepted standard PLAY presentation contract", () => {
     ]);
   });
 
-  it.fails("does not promote a historical supporting-only Fact into a main A row", () => {
+  it("does not promote a historical supporting-only Fact into a main A row", () => {
     const rows = buildFacilityDetailRows({
       nodeKey: facility.key,
       knownFacts: [
@@ -187,7 +187,7 @@ describe("accepted standard PLAY presentation contract", () => {
     expect(rows.some((row) => row.key.includes("repair_profile"))).toBe(false);
   });
 
-  it.fails("uses summary_slot to move Facility summaries out of the header", () => {
+  it("uses summary_slot to move Facility summaries out of the header", () => {
     const card = renderFacility(
       [
         fact("operational", "运行状态", false, "HEADER_PRIMARY"),
@@ -199,7 +199,7 @@ describe("accepted standard PLAY presentation contract", () => {
     expect(card.querySelector("summary .knowledge-facility-statuses")).not.toBeInTheDocument();
   });
 
-  it.fails("uses knowledge_level A as a subtractive view of standard causality", () => {
+  it("uses knowledge_level A as a subtractive view of standard causality", () => {
     const producer: PublicProducerBinding = {
       binding_key: "restore:accepted_facility",
       action_key: "restore_facility",
@@ -278,8 +278,48 @@ describe("accepted standard PLAY presentation contract", () => {
     expect(screen.queryByText("失败")).not.toBeInTheDocument();
   });
 
-  it.todo("applies semantic_order to Facility semantic/resource/relation groups");
-  it.todo("applies resource_order to resolved Facility resource fields");
-  it.todo("applies relation_order to resolved Facility relation fields");
-  it.todo("uses authored generic semantic metadata for Medical, Space, and Investigation fixtures");
+  it("applies semantic_order to Facility semantic/resource/relation groups", () => {
+    const rows = buildFacilityDetailRows({
+      nodeKey: facility.key,
+      knownFacts: [fact("operational", "\u8fd0\u884c\u72b6\u6001", false)],
+      knownRelations: [{ source_node_key: facility.key, relation_type_key: "supports", target_node_key: "clinic", relation_type_name: "\u652f\u6301", target_node_name: "\u8bca\u6240" }],
+      knownActionRequirements: [], producerBindings: [],
+      facilityResourceRows: [{ key: "supply", resourceKey: "supply", resourceName: "\u8865\u7ed9", quantity: 2, availability: "AVAILABLE", availabilityRequirement: null, availabilityRequirementStatus: null }],
+      resourceName: (key) => key,
+      resolveNodeName: (_key, candidate) => candidate ?? "\u8bca\u6240",
+      presentation: standardPresentation({ semantic_order: ["RELATIONS", "RESOURCES", "STATUS"] }),
+    });
+    expect(rows.map((row) => row.key)).toEqual([`${facility.key}:relation:0`, "supply", `${facility.key}:fact:operational`]);
+  });
+
+  it("applies resource_order to resolved Facility resource fields", () => {
+    const rows = buildFacilityDetailRows({
+      nodeKey: facility.key, knownFacts: [], knownRelations: [], knownActionRequirements: [], producerBindings: [],
+      facilityResourceRows: [{ key: "parts", resourceKey: "parts", resourceName: "\u90e8\u4ef6", quantity: 5, availability: "UNAVAILABLE", availabilityRequirement: null, availabilityRequirementStatus: null, displayUnit: "\u7bb1" }],
+      resourceName: (key) => key,
+      resolveNodeName: (_key, candidate) => candidate ?? facility.name,
+      presentation: standardPresentation({ resource_order: ["STATUS", "UNIT", "AMOUNT"] }),
+    });
+    expect(rows[0]).toMatchObject({ label: "\u8d44\u6e90\uff1a", value: "\u6682\u4e0d\u53ef\u7528\uff0c\u7bb1\uff0c\u00d75" });
+  });
+
+  it("applies relation_order to resolved Facility relation fields", () => {
+    const rows = buildFacilityDetailRows({
+      nodeKey: facility.key, knownFacts: [],
+      knownRelations: [{ source_node_key: facility.key, relation_type_key: "supports", target_node_key: "clinic", relation_type_name: "\u652f\u6301", target_node_name: "\u8bca\u6240" }],
+      knownActionRequirements: [], producerBindings: [], facilityResourceRows: [],
+      resourceName: (key) => key,
+      resolveNodeName: (_key, candidate) => candidate ?? "\u8bca\u6240",
+      presentation: standardPresentation({ relation_order: ["TARGET"] }),
+    });
+    expect(rows[0]).toMatchObject({ label: "\u5173\u7cfb\uff1a", value: "\u8bca\u6240" });
+  });
+
+  it("uses authored generic semantic metadata for Medical, Space, and Investigation fixtures", () => {
+    for (const [domain, key] of [["Medical", "triage"], ["Space", "oxygen"], ["Investigation", "evidence"]]) {
+      const authored: PublicFact = { ...fact(key, `${domain} state`, "BLOCKED"), presentation_role: "HEADER_PRIMARY", summary_value_label: `${domain} summary`, detail_value_label: `${domain} detail` };
+      expect(facilityStatusDisplayValue(authored)).toBe(`${domain} summary`);
+      expect(factDisplayValue(authored)).toBe(`${domain} detail`);
+    }
+  });
 });

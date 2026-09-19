@@ -670,6 +670,18 @@ class PublicFactResponse(ApiModel):
     node_type_key: str | None = None
     node_family: Literal["GENERIC", "REGION", "FACILITY", "TRANSPORT"] = "GENERIC"
     value_label: str | None = None
+    summary_value_label: str | None = None
+    detail_value_label: str | None = None
+    presentation_role: (
+        Literal[
+            "HEADER_PRIMARY",
+            "HEADER_SECONDARY",
+            "BODY_MAIN",
+            "SUPPORTING",
+            "REQUIREMENT_ONLY",
+        ]
+        | None
+    ) = None
     presentation_slot: Literal["HEADER_PRIMARY", "HEADER_SECONDARY", "SEMANTIC"] = "SEMANTIC"
     region_key: str | None = None
     region_name: str | None = None

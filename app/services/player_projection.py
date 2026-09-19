@@ -341,6 +341,33 @@ class PlayerProjectionService:
                         ),
                         item.truth_value,
                     ),
+                    summary_value_label=presentation.fact_summary_value_label(
+                        next(
+                            fact
+                            for fact in node_definitions[item.node_key].facts
+                            if fact.key == item.fact_key
+                        ),
+                        item.truth_value,
+                    ),
+                    detail_value_label=presentation.fact_detail_value_label(
+                        next(
+                            fact
+                            for fact in node_definitions[item.node_key].facts
+                            if fact.key == item.fact_key
+                        ),
+                        item.truth_value,
+                    ),
+                    presentation_role=(
+                        fact_definition.presentation_role.value
+                        if (
+                            fact_definition := next(
+                                fact
+                                for fact in node_definitions[item.node_key].facts
+                                if fact.key == item.fact_key
+                            )
+                        ).presentation_role is not None
+                        else None
+                    ),
                     presentation_slot=self._fact_presentation_slot(
                         definition,
                         item.node_key,
@@ -550,6 +577,11 @@ class PlayerProjectionService:
 
         node = definition.world.node(node_key)
         if node is None:
+            return "SEMANTIC"
+        authored_fact = next((fact for fact in node.facts if fact.key == fact_key), None)
+        if authored_fact is not None and authored_fact.presentation_role is not None:
+            if authored_fact.presentation_role.value in {"HEADER_PRIMARY", "HEADER_SECONDARY"}:
+                return authored_fact.presentation_role.value
             return "SEMANTIC"
         index = next(
             (index for index, fact in enumerate(node.facts) if fact.key == fact_key),

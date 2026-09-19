@@ -46,7 +46,7 @@ const TEMPLATE_DEFAULTS: Record<PresentationTemplate, PresentationDefaults> = {
     default_open: "COMPACT",
     summary_slot: "HEADER",
     entity_detail: "DETAIL",
-    knowledge_level: "A+B",
+    knowledge_level: "A+B+C",
     semantic_order: ["NAME", "STATUS", "FACTS", "RESOURCES", "RELATIONS"],
     resource_order: ["NAME", "AMOUNT", "STATUS", "UNIT"],
     relation_order: ["TYPE", "TARGET", "VISIBILITY"],

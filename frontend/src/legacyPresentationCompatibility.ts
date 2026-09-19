@@ -55,6 +55,22 @@ const LEGACY_STRUCTURAL_RELATIONS = new Set(["located_in", "endpoint"]);
 
 type PublicFact = PlayerGameState["known_facts"][number];
 
+const LEGACY_FACT_KEYS = new Set(Object.keys(LEGACY_FACT_LABELS));
+const LEGACY_SUPPORTING_FACT_KEYS = new Set(["repair_profile", "power_generation_capable"]);
+
+export function isLegacyPresentationFact(fact: PublicFact): boolean {
+  return fact.presentation_role == null && LEGACY_FACT_KEYS.has(fact.fact_key);
+}
+
+export function legacyFactPresentationRole(
+  fact: PublicFact,
+): NonNullable<PublicFact["presentation_role"]> {
+  if (fact.fact_key === "operational") return "HEADER_PRIMARY";
+  if (fact.fact_key === "power_supply") return "HEADER_SECONDARY";
+  if (LEGACY_SUPPORTING_FACT_KEYS.has(fact.fact_key)) return "SUPPORTING";
+  return "BODY_MAIN";
+}
+
 export function legacyResourceDisplayName(key: string, candidate?: string): string {
   return LEGACY_RESOURCE_LABELS[key] ?? candidate ?? "已知资源";
 }

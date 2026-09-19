@@ -62,6 +62,7 @@ import {
   mergeTargetActionContracts,
   publicResourceRequirementIdentity,
   publicResourceRequirementParts,
+  resolveFacilityFactRole,
   targetKeyForPublicActionRequirement,
   uniquePublicResourceRequirements,
 } from "../playFacilityPresentation";
@@ -1531,13 +1532,16 @@ export function KnownWorldAccordions({
                   const facility = isFacilityNode(node);
                   const transport = isTransportNode(node);
                   const primaryHeaderFact = nodeFacts.find(
-                    (fact) => fact.presentation_slot === "HEADER_PRIMARY",
+                    (fact) => resolveFacilityFactRole(fact) === "HEADER_PRIMARY",
                   );
                   const secondaryHeaderFact = nodeFacts.find(
-                    (fact) => fact.presentation_slot === "HEADER_SECONDARY",
+                    (fact) => resolveFacilityFactRole(fact) === "HEADER_SECONDARY",
                   );
-                  const leadingFact = primaryHeaderFact ?? nodeFacts[0];
-                  const supportingFact = secondaryHeaderFact ?? nodeFacts[1];
+                  const mainFacts = nodeFacts.filter(
+                    (fact) => !["SUPPORTING", "REQUIREMENT_ONLY"].includes(resolveFacilityFactRole(fact)),
+                  );
+                  const leadingFact = primaryHeaderFact ?? mainFacts[0];
+                  const supportingFact = secondaryHeaderFact ?? mainFacts[1];
                   const targetContracts = targetContractsFor(node.key);
                   const associatedResources = node.associated_known_resources ?? [];
                   const facilityResourceRows = facility
@@ -1574,6 +1578,7 @@ export function KnownWorldAccordions({
                       facilityResourceRows,
                       resourceName,
                       resolveNodeName: nodeDisplayName,
+                      presentation,
                     })
                     : [];
                   const renderTargetActionRequirementRows = () => targetActionRequirementRows.map((row) => (
@@ -1624,14 +1629,14 @@ export function KnownWorldAccordions({
                           <span className="knowledge-facility-heading">
                             <strong>{node.name}</strong>
                           </span>
-                          <span className="knowledge-facility-statuses">
+                          {presentation?.summary_slot !== "BODY" && <span className="knowledge-facility-statuses">
                             <span className={"knowledge-facility-status " + statusTone(supportingFact?.value ?? "UNKNOWN")}>
                               {supportingFact ? factDisplayValue(supportingFact) : "状态未知"}
                             </span>
                             <span className={"knowledge-facility-status " + statusTone(leadingFact?.value ?? "UNKNOWN")}>
                               {leadingFact ? facilityStatusDisplayValue(leadingFact) : "状态未知"}
                             </span>
-                          </span>
+                          </span>}
                           <span className="knowledge-facility-toggle" aria-hidden="true">
                             {facilityOpen ? "-" : "+"}
                           </span>

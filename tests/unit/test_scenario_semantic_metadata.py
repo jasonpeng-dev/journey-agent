@@ -42,6 +42,26 @@ def test_typed_fact_value_labels_round_trip_and_preserve_scalar_runtime_domain()
     assert round_tripped == fact
 
 
+def test_fact_presentation_metadata_is_typed_optional_and_round_trips() -> None:
+    payload = _enum_fact_payload()
+    payload["presentation_role"] = "HEADER_PRIMARY"
+    payload["value_labels"] = [
+        {
+            "value": "READY",
+            "label": "Ready",
+            "summary_label": "Ready now",
+            "detail_label": "System ready",
+        },
+        {"value": "BLOCKED", "label": "Blocked"},
+    ]
+    fact = FactDefinitionV2.model_validate(payload)
+    assert fact.presentation_role is not None
+    assert fact.presentation_role.value == "HEADER_PRIMARY"
+    assert fact.value_labels[0].summary_label == "Ready now"
+    assert fact.value_labels[0].detail_label == "System ready"
+    assert FactDefinitionV2.model_validate(fact.model_dump(mode="json")) == fact
+
+
 def test_typed_value_labels_support_non_string_identity_and_reject_bad_vocabularies() -> None:
     boolean_fact = FactDefinitionV2.model_validate(
         {

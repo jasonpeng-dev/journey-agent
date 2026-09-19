@@ -152,6 +152,20 @@ class ResolvedPresentation:
         return None
 
     @staticmethod
+    def fact_summary_value_label(fact: FactDefinitionV2, value: object) -> str | None:
+        for item in fact.value_labels:
+            if type(item.value) is type(value) and item.value == value:
+                return item.summary_label or item.label
+        return None
+
+    @staticmethod
+    def fact_detail_value_label(fact: FactDefinitionV2, value: object) -> str | None:
+        for item in fact.value_labels:
+            if type(item.value) is type(value) and item.value == value:
+                return item.detail_label or item.label
+        return None
+
+    @staticmethod
     def resource_unit(resource: ResourceDefinitionV2) -> str | None:
         return resource.display_unit or resource.unit
 
@@ -196,7 +210,7 @@ _TEMPLATE_DEFAULTS: dict[PresentationTemplate, _TemplateDefaults] = {
         default_open=PresentationDefaultOpen.COMPACT,
         summary_slot=PresentationSummarySlot.HEADER,
         entity_detail=PresentationEntityDetail.DETAIL,
-        knowledge_level=PresentationKnowledgeLevel.A_PLUS_B,
+        knowledge_level=PresentationKnowledgeLevel.A_PLUS_B_PLUS_C,
         semantic_order=(
             PresentationSemanticSlot.NAME,
             PresentationSemanticSlot.STATUS,
