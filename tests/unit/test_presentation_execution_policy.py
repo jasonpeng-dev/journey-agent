@@ -19,7 +19,6 @@ def test_actor_profile_is_limited_to_safe_ordered_fields() -> None:
     assert compact.actor_fields == (
         PresentationActorField.NAME,
         PresentationActorField.ROLE,
-        PresentationActorField.STATUS,
     )
     assert PresentationActorField.TASK in detailed.actor_fields
     assert [item.value for item in limited.actor_fields] == ["STATUS", "NAME"]

@@ -604,7 +604,7 @@ export type BuildFacilityDetailRowsOptions = {
   resourceName: (key: string) => string;
   resolveNodeName: (key: string, candidate?: string | null) => string;
   presentationOrderPolicy?: FacilityPresentationOrderPolicy;
-  presentation?: Pick<PublicPresentation, "knowledge_level" | "semantic_order" | "resource_order" | "relation_order">;
+  presentation?: Pick<PublicPresentation, "entity_detail" | "knowledge_level" | "semantic_order" | "resource_order" | "relation_order">;
 };
 
 function producerRequirementValue(
@@ -720,7 +720,11 @@ export function buildFacilityDetailRows({
   const includeRequirements = knowledgeLevel === "A+B+C";
   const factBlocks: FacilityPresentationBlock[] = knownFacts
     .filter((fact) => fact.node_key === nodeKey)
-    .filter((fact) => !["SUPPORTING", "REQUIREMENT_ONLY"].includes(resolveFacilityFactRole(fact)))
+    .filter((fact) => {
+      const role = resolveFacilityFactRole(fact);
+      if (role === "REQUIREMENT_ONLY") return false;
+      return role !== "SUPPORTING" || presentation?.entity_detail === "CAUSALITY";
+    })
     .map((fact): FacilityPresentationBlock => {
       const producers = producerBindings
         .filter((binding) => binding.target_key === nodeKey)

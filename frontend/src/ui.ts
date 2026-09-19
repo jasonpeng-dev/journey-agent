@@ -33,6 +33,8 @@ const labels: Record<string, string> = {
   NEEDS_CLARIFICATION: "需要澄清",
   ACCEPTED: "已接受",
   AVAILABLE: "可用",
+  UNAVAILABLE: "不可用",
+  UNKNOWN: "未知",
   LOCKED: "锁定",
   KNOWN: "已知",
   HIDDEN: "隐藏",

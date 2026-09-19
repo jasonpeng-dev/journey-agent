@@ -1542,6 +1542,14 @@ export function KnownWorldAccordions({
                   );
                   const leadingFact = primaryHeaderFact ?? mainFacts[0];
                   const supportingFact = secondaryHeaderFact ?? mainFacts[1];
+                  const facilityPresentation = presentation ? {
+                    ...presentation,
+                    summary_slot: node.presentation?.summary_slot ?? presentation.summary_slot,
+                    entity_detail: node.presentation?.detail_level ?? presentation.entity_detail,
+                    default_open: node.presentation?.default_open ?? presentation.default_open,
+                    knowledge_level: node.presentation?.knowledge_level ?? presentation.knowledge_level,
+                    semantic_order: node.presentation?.semantic_order ?? presentation.semantic_order,
+                  } : undefined;
                   const targetContracts = targetContractsFor(node.key);
                   const associatedResources = node.associated_known_resources ?? [];
                   const facilityResourceRows = facility
@@ -1578,7 +1586,7 @@ export function KnownWorldAccordions({
                       facilityResourceRows,
                       resourceName,
                       resolveNodeName: nodeDisplayName,
-                      presentation,
+                      presentation: facilityPresentation,
                     })
                     : [];
                   const renderTargetActionRequirementRows = () => targetActionRequirementRows.map((row) => (
@@ -1606,8 +1614,7 @@ export function KnownWorldAccordions({
                   }
 
                   if (facility) {
-                    const defaultFacilityOpen = node.presentation?.default_open === "FULL"
-                      || presentation?.default_open === "FULL";
+                    const defaultFacilityOpen = facilityPresentation?.default_open === "FULL";
                     const facilityOpen = expandedFacilities[node.key]
                       ?? defaultFacilityOpen;
                     return (
@@ -1629,7 +1636,7 @@ export function KnownWorldAccordions({
                           <span className="knowledge-facility-heading">
                             <strong>{node.name}</strong>
                           </span>
-                          {presentation?.summary_slot !== "BODY" && <span className="knowledge-facility-statuses">
+                          {facilityPresentation?.summary_slot !== "BODY" && <span className="knowledge-facility-statuses">
                             <span className={"knowledge-facility-status " + statusTone(supportingFact?.value ?? "UNKNOWN")}>
                               {supportingFact ? factDisplayValue(supportingFact) : "状态未知"}
                             </span>
