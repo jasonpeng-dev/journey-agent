@@ -72,6 +72,8 @@ describe("world topology overview entry", () => {
     fireEvent.click(overviewLink);
 
     expect(await screen.findByRole("region", { name: "分层拓扑浏览器" })).toBeInTheDocument();
+    expect(screen.queryByRole("tablist", { name: "World 视图模式" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "对象编辑" })).not.toBeInTheDocument();
     expect(screen.getByRole("img", { name: "范围总览拓扑" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "北部范围" }));
 
@@ -95,7 +97,8 @@ describe("world topology overview entry", () => {
     await screen.findByRole("img", { name: "范围内部拓扑" });
     fireEvent.doubleClick(screen.getByRole("button", { name: "北部实体" }));
 
-    expect(await screen.findByRole("heading", { name: "世界实体" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("editor-taxonomy-heading")).toHaveTextContent("世界模型/世界实体"));
+    expect(screen.getByRole("heading", { name: "北部实体" })).toBeInTheDocument();
     expect(screen.getAllByDisplayValue("北部实体").length).toBeGreaterThan(0);
   });
 });

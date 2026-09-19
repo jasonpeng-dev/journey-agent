@@ -75,9 +75,8 @@ describe("EditorPage topology interaction contract", () => {
 
     expect(screen.queryByText("返回场景")).not.toBeInTheDocument();
     const discard = screen.getByRole("button", { name: "放弃修改" });
-    const inspector = screen.getByRole("button", { name: "显示检查器" });
     expect(discard.compareDocumentPosition(returnButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(returnButton.compareDocumentPosition(inspector) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "显示检查器" })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByDisplayValue("Test Scenario"), { target: { value: "Changed Scenario" } });
     fireEvent.click(returnButton);

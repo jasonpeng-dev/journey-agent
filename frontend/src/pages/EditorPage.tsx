@@ -24,6 +24,7 @@ import {
 } from "../editor";
 import { kindsBySection } from "../templates";
 import { rootCollectionDefinitions, rootCollectionDefault, rootCollectionItems, type RootCollectionSelection } from "../editor-collections";
+import { sectionStructure } from "../editor-structure";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
 import type { Draft, DraftSandboxResult, ValidationResult } from "../types";
@@ -33,7 +34,6 @@ type SaveState = WorkingCopySaveState;
 const saveLabels: Record<SaveState, string> = { UNCHANGED: "未修改", DIRTY: "有未保存修改", SAVING: "保存中", CONFLICT: "版本冲突", ERROR: "保存失败" };
 type WorldView = "all" | "regions" | "facilities" | "transports";
 const worldViewLabels: Record<WorldView, string> = { all: "全部节点", regions: "区域", facilities: "设施", transports: "交通" };
-type WorldMode = "edit" | "topology";
 type ScopedCollectionSelection = { section: EditorSection; selection: RootCollectionSelection };
 
 function isEditorSection(value: string): value is EditorSection {
@@ -74,6 +74,7 @@ export function EditorPage() {
   const { scenarioId = "", section: routeSection = "overview", objectKey } = useParams();
   const requestedSection: EditorSection = isEditorSection(routeSection) ? routeSection : "overview";
   const section: EditorSection = requestedSection === "world" && objectKey ? "world-entities" : requestedSection;
+  const structure = sectionStructure(section);
   const navigateRouter = useNavigate();
   const navigate = (to: string) => navigateRouter(normalizeEditorNavigation(to, scenarioId));
   const [searchParams] = useSearchParams();
@@ -87,8 +88,6 @@ export function EditorPage() {
   const [sandboxGoal, setSandboxGoal] = useState("");
   const [sandbox, setSandbox] = useState<DraftSandboxResult | null>(null);
   const [worldView, setWorldView] = useState<WorldView>("all");
-  const worldMode = "topology" as WorldMode;
-  const setWorldMode = (mode: WorldMode) => { void mode; };
   const [objectSearch, setObjectSearch] = useState("");
   const [kindFilter, setKindFilter] = useState("all");
   const [collectionSelectionState, setCollectionSelectionState] = useState<ScopedCollectionSelection | null>(null);
@@ -122,7 +121,6 @@ export function EditorPage() {
     setCollectionSelectionState(null);
     setInspectorOpen(false);
     if (section === "world") {
-      setWorldMode(objectKey ? "edit" : "topology");
       if (!objectKey) {
         setTopologyContext({ kind: "overview" });
         setTopologySelection(null);
@@ -167,15 +165,15 @@ export function EditorPage() {
   });
   const local = useMemo(() => serverDraft && workingDocument ? { ...serverDraft, definition_document: workingDocument } : null, [serverDraft, workingDocument]);
   const hasUnsavedChanges = workingCopyIsDirty(serverDraft, workingDocument);
-  const topologyModeActive = section === "world";
+  const topologyModeActive = structure.mode === "BROWSER";
   useEffect(() => {
     if (topologyModeActive && topologySelection) setInspectorOpen(true);
   }, [topologyModeActive, topologySelection]);
 
   const objects = useMemo(() => {
     if (!local) return [];
-    return section === "world" ? nodeSemanticView(local.definition_document, worldView) : sectionObjects(local.definition_document, section);
-  }, [local, section, worldView]);
+    return structure.master.source === "topology" ? nodeSemanticView(local.definition_document, worldView) : sectionObjects(local.definition_document, section);
+  }, [local, section, structure.master.source, worldView]);
   const availableKinds = useMemo(() => Array.from(new Set(objects.map((item) => item.kind))), [objects]);
   const filteredObjects = useMemo(() => filterDraftObjects(objects, objectSearch, kindFilter), [objects, objectSearch, kindFilter]);
   const sectionValue = local ? sectionRoot(local.definition_document, section) : null;
@@ -342,11 +340,35 @@ export function EditorPage() {
   };
 
   const openTopologyEditor = (nodeKey: string) => {
-    setWorldMode("edit");
     navigate(`/scenarios/${scenarioId}/edit/world/${encodeURIComponent(nodeKey)}`);
   };
-  const showWorldTopology = topologyModeActive;
-  const isCollectionSection = collectionDefinitions.length > 0;
+  const showWorldTopology = structure.workspace.renderer === "topology";
+  const usesRootCollections = structure.master.source === "root-collections";
+  const masterCount = usesRootCollections
+    ? collectionItems.length
+    : structure.master.source === "topology"
+      ? nodeSemanticView(local.definition_document, "all").length
+      : objects.length;
+  const workspaceTitle = showWorldTopology
+    ? "世界拓扑"
+    : selected
+      ? objectDisplayValue(selected.value, selected.name)
+      : selectedCollectionItem
+        ? selectedCollectionItem.title
+        : sectionLabels[section] ?? section;
+  const workspaceSubtitle = showWorldTopology
+    ? "浏览范围、实体与关系；编辑请进入对应的世界模型页面"
+    : selected
+      ? `${kindLabels[selected.kind] ?? selected.kind} · 可编辑对象`
+      : selectedCollectionItem
+        ? "编辑当前集合项"
+        : structure.mode === "SINGLETON"
+          ? "编辑这一份场景配置"
+          : structure.mode === "WORKFLOW"
+            ? "验证、测试并发布当前草稿"
+            : structure.mode === "HYBRID"
+              ? "选择配置或集合项后编辑对应内容"
+              : "从左侧选择或新建对象";
   const taxonomy = editorSectionTaxonomy[section] ?? { category: "场景编辑器", label: sectionLabels[section] ?? section };
   return <main className="editor-shell">
     <aside className="editor-nav">
@@ -354,17 +376,17 @@ export function EditorPage() {
       <nav className="editor-section-nav" aria-label="编辑器导航">{editorTaxonomyGroups.map((group) => <div className="editor-nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => <Link className={item === section ? "active" : ""} key={item} to={`/scenarios/${scenarioId}/edit/${item}`} onClick={(event) => { if (hasUnsavedChanges) { event.preventDefault(); guardedNavigate(`/scenarios/${scenarioId}/edit/${item}`); } }}>{sectionLabels[item] ?? item}</Link>)}</div>)}</nav>
     </aside>
     <section className="editor-main">
-      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span><button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={() => discardWorkingCopy()}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button></div></header>
+      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span><button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={() => discardWorkingCopy()}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
       {message && <div className="conflict-banner"><p>{message}</p>{saveState === "CONFLICT" && <button type="button" className="editor-button editor-button-secondary" onClick={() => void reloadServerDraft()}>重新加载服务器草稿</button>}</div>}
-      <div className={`editor-columns${inspectorOpen ? "" : " inspector-collapsed"}`}>
-        <aside className="object-list object-panel">
-          <header className="object-panel-header"><div><p className="panel-kicker">{isCollectionSection ? "COLLECTIONS" : section === "world" ? "STRUCTURE" : "OBJECTS"}</p><h3>{section === "world" ? "World 结构" : isCollectionSection && collectionDefinitions.length === 1 ? collectionDefinitions[0].label : sectionLabels[section] ?? "对象"}</h3></div><span className="object-count">{isCollectionSection ? collectionItems.length : section === "world" ? nodeSemanticView(local.definition_document, "all").length : objects.length}</span></header>
-          {section === "world" && <div className="segmented-control world-filter-tabs" role="tablist" aria-label="World 对象筛选">{(["all", "regions", "facilities", "transports"] as WorldView[]).map((item) => <button type="button" className={worldView === item ? "selected" : ""} aria-pressed={worldView === item} key={item} onClick={() => setWorldView(item)}><span>{worldViewLabels[item]}</span><small>{nodeSemanticView(local.definition_document, item).length}</small></button>)}</div>}
-          <div className="object-panel-tools"><label className="object-search">搜索对象<input value={objectSearch} placeholder={isCollectionSection ? "名称、代码或稳定键" : "名称或稳定键"} onChange={(event) => setObjectSearch(event.target.value)} /></label>{!isCollectionSection && section !== "world" && availableKinds.length > 1 && <label className="object-filter">对象类型<select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">全部类型</option>{availableKinds.map((kind) => <option key={kind} value={kind}>{kindLabels[kind] ?? kind}</option>)}</select></label>}{!isCollectionSection && <div className="object-list-actions">{(kindsBySection[section] ?? []).map((kind) => <button type="button" className="editor-button editor-button-secondary add-object" key={kind} onClick={() => createObject(kind)}>＋ {kindLabels[kind] ?? kind}</button>)}</div>}</div>
-          <div className="object-list-scroll">{isCollectionSection ? <div className="collection-list-groups">{collectionDefinitions.map((definition) => <section className="collection-list-group" key={definition.key}><header><div><h4>{definition.label}</h4><span>{collectionItems.filter((item) => item.collection === definition.key).length} 项</span></div><button type="button" className="editor-button editor-button-secondary" onClick={() => createCollectionItem(definition.key)}>＋ 新增</button></header>{filteredCollectionItems.filter((item) => item.collection === definition.key).map((item) => <button type="button" className={`collection-list-item${collectionSelection?.collection === item.collection && collectionSelection.index === item.index ? " selected" : ""}`} key={`${item.collection}:${item.index}`} onClick={() => setCollectionSelection({ collection: item.collection, index: item.index })}><strong>{item.title}</strong><span>{item.summary}</span><code>{item.collection}.{item.index}</code></button>)}{collectionItems.filter((item) => item.collection === definition.key).length === 0 && <p className="muted collection-list-empty">暂无项目</p>}</section>)}</div> : <>{objects.length === 0 && <p className="muted object-empty">此部分还没有带稳定键的对象。</p>}{objects.length > 0 && filteredObjects.length === 0 && <p className="muted object-empty">没有匹配的对象。</p>}{filteredObjects.map((item) => <Link className={`object-list-item${item.key === objectKey ? " selected" : ""}`} key={draftObjectIdentity(item)} to={`/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(item.key)}`} onClick={(event) => { if (section === "world" && worldMode === "topology" && item.kind === "node") { event.preventDefault(); setTopologyFocusNodeKey(item.key); const scopeKey = findScopeForNode(local.definition_document, item.key); if (scopeKey) setTopologyContext({ kind: "scope", scopeKey }); setTopologySelection({ kind: "node", key: item.key }); } else if (section === "world") setWorldMode("edit"); }}><span>{item.name}</span><code>{kindLabels[item.kind] ?? item.kind} · {item.key}</code></Link>)}</>}</div>
-        </aside>
-         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">WORKSPACE</p><h3>{showWorldTopology ? "分层拓扑浏览器" : selected ? objectDisplayValue(selected.value, selected.name) : selectedCollectionItem ? selectedCollectionItem.title : isCollectionSection ? sectionLabels[section] ?? section : "Typed 编辑器"}</h3><p className="canvas-subtitle">{showWorldTopology ? "从世界总览进入范围，再聚焦实体邻域；Working Copy 只读投影" : selected ? `${kindLabels[selected.kind] ?? selected.kind} · 可编辑对象` : selectedCollectionItem ? "集合项详情编辑" : isCollectionSection ? "左侧选择集合项；顶层固定配置保留在这里" : "结构化 Scenario authoring"}</p></div>{section === "world" && <div className="world-mode-tabs" role="tablist" aria-label="World 视图模式"><button type="button" className={worldMode === "edit" ? "selected" : ""} aria-pressed={worldMode === "edit"} onClick={() => setWorldMode("edit")}>对象编辑</button><button type="button" className={worldMode === "topology" ? "selected" : ""} aria-pressed={worldMode === "topology"} onClick={() => setWorldMode("topology")}>拓扑浏览</button></div>}</header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{!showWorldTopology && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} onChange={(value) => editDocument(replaceObject(local.definition_document, section, selected.key, value))} />}{!showWorldTopology && !selected && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection) updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection) removeCollectionItem(collectionSelection); }} />}{!showWorldTopology && !selected && section === "validation" && <ValidationPanel validation={validation} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{!showWorldTopology && !selected && section !== "validation" && sectionValue === null && <div className="canvas-empty"><strong>从左侧选择一个对象</strong><p>选择或新建对象后，在这里编辑它的结构化字段。</p></div>}</div></section>
-        <aside className={`inspector inspector-new${inspectorOpen ? " is-open" : " is-collapsed"}`}><div className="inspector-heading"><div><p className="panel-kicker">DETAILS</p><h3>{showWorldTopology ? "拓扑检查器" : "检查器"}</h3></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen(false)}>收起</button></div><div className="inspector-scroll">
+      <div className={`editor-columns${structure.master.visible ? "" : " master-hidden"}${inspectorOpen ? "" : " inspector-collapsed"}`}>
+        {structure.master.visible && <aside className="object-list object-panel">
+          <header className="object-panel-header"><div><p className="panel-kicker">{structure.mode === "BROWSER" ? "世界结构" : structure.mode === "HYBRID" ? "配置导航" : "内容导航"}</p><div className="object-panel-title">{sectionLabels[section] ?? section}</div></div><span className="object-count">{masterCount}</span></header>
+          {structure.master.source === "topology" && <div className="segmented-control world-filter-tabs" role="tablist" aria-label="World 对象筛选">{(["all", "regions", "facilities", "transports"] as WorldView[]).map((item) => <button type="button" className={worldView === item ? "selected" : ""} aria-pressed={worldView === item} key={item} onClick={() => setWorldView(item)}><span>{worldViewLabels[item]}</span><small>{nodeSemanticView(local.definition_document, item).length}</small></button>)}</div>}
+          <div className="object-panel-tools">{structure.master.searchable && <label className="object-search">搜索<input value={objectSearch} placeholder={usesRootCollections ? "名称、代码或标识" : "名称或稳定键"} onChange={(event) => setObjectSearch(event.target.value)} /></label>}{structure.master.source === "entities" && availableKinds.length > 1 && <label className="object-filter">对象类型<select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">全部类型</option>{availableKinds.map((kind) => <option key={kind} value={kind}>{kindLabels[kind] ?? kind}</option>)}</select></label>}{structure.master.create === "entity" && <div className="object-list-actions">{(kindsBySection[section] ?? []).map((kind) => <button type="button" className="editor-button editor-button-secondary add-object" key={kind} onClick={() => createObject(kind)}>＋ {kindLabels[kind] ?? kind}</button>)}</div>}</div>
+          <div className="object-list-scroll">{usesRootCollections ? <div className="collection-list-groups">{collectionDefinitions.map((definition) => <section className="collection-list-group" key={definition.key}><header><div><h4>{definition.label}</h4><span>{collectionItems.filter((item) => item.collection === definition.key).length} 项</span></div><button type="button" className="editor-button editor-button-secondary" onClick={() => createCollectionItem(definition.key)}>＋ 新增</button></header>{filteredCollectionItems.filter((item) => item.collection === definition.key).map((item) => <button type="button" className={`collection-list-item${collectionSelection?.collection === item.collection && collectionSelection.index === item.index ? " selected" : ""}`} key={`${item.collection}:${item.index}`} onClick={() => setCollectionSelection({ collection: item.collection, index: item.index })}><strong>{item.title}</strong><span>{item.summary}</span><code>{item.collection}.{item.index}</code></button>)}{collectionItems.filter((item) => item.collection === definition.key).length === 0 && <p className="muted collection-list-empty">暂无项目</p>}</section>)}</div> : <>{objects.length === 0 && <p className="muted object-empty">暂无可编辑项目。</p>}{objects.length > 0 && filteredObjects.length === 0 && <p className="muted object-empty">没有匹配的对象。</p>}{filteredObjects.map((item) => <Link className={`object-list-item${item.key === objectKey ? " selected" : ""}`} key={draftObjectIdentity(item)} to={`/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(item.key)}`} onClick={(event) => { if (structure.master.source === "topology" && item.kind === "node") { event.preventDefault(); setTopologyFocusNodeKey(item.key); const scopeKey = findScopeForNode(local.definition_document, item.key); if (scopeKey) setTopologyContext({ kind: "scope", scopeKey }); setTopologySelection({ kind: "node", key: item.key }); } }}><span>{item.name}</span><code>{kindLabels[item.kind] ?? item.kind} · {item.key}</code></Link>)}</>}</div>
+        </aside>}
+         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} onChange={(value) => editDocument(replaceObject(local.definition_document, section, selected.key, value))} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection) updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection) removeCollectionItem(collectionSelection); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel validation={validation} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
+        {structure.capabilities.inspector && <aside className={`inspector inspector-new${inspectorOpen ? " is-open" : " is-collapsed"}`}><div className="inspector-heading"><div><p className="panel-kicker">详情</p><h3>{showWorldTopology ? "拓扑检查器" : "检查器"}</h3></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen(false)}>收起</button></div><div className="inspector-scroll">
           {showWorldTopology ? <>
             {!topologySelection && <div className="inspector-empty"><strong>未选择拓扑对象</strong><p className="muted">单击范围或实体查看摘要，双击进入下一层。</p></div>}
             {topologyScope && <><section className="inspector-section"><p className="inspector-section-title">范围摘要</p><h4 className="topology-inspector-title">{topologyScope.name}</h4><p className="muted">{topologyScope.description || "当前 authored scope"}</p><div className="topology-metrics"><span><strong>{topologyScope.internalNodeCount}</strong>内部实体</span><span><strong>{topologyScope.externalConnectionCount}</strong>外部连接</span><span><strong>{topologyScope.factCount}</strong>事实</span></div></section><section className="inspector-section"><p className="inspector-section-title">相邻范围</p>{topologyScope.neighborScopeKeys.length === 0 ? <p className="muted">没有外部连接。</p> : topologyScope.neighborScopeKeys.map((key) => <button type="button" className="topology-inspector-link" key={key} onClick={() => { setTopologyContext({ kind: "scope", scopeKey: key }); setTopologySelection({ kind: "scope", key }); }}>{topologyOverview.scopes.find((scope) => scope.key === key)?.name ?? key}</button>)}</section><section className="inspector-section inspector-actions"><button type="button" className="editor-button editor-button-primary" onClick={() => setTopologyContext({ kind: "scope", scopeKey: topologyScope.key })}>进入范围</button><button type="button" className="editor-button editor-button-secondary" onClick={() => openTopologyEditor(topologyScope.key)}>在编辑器中打开</button></section></>}
@@ -372,7 +394,7 @@ export function EditorPage() {
             {topologyPortal && <section className="inspector-section"><p className="inspector-section-title">边界出口</p><h4 className="topology-inspector-title">→ {topologyPortal.neighborScopeName}</h4><p className="muted">{topologyPortal.transportNodeNames.join("、") || topologyPortal.relationSummaries.join("、") || "边界连接"}</p><div className="inspector-actions"><button type="button" className="editor-button editor-button-primary" onClick={() => { setTopologyContext({ kind: "scope", scopeKey: topologyPortal.neighborScopeKey }); setTopologySelection({ kind: "scope", key: topologyPortal.neighborScopeKey }); }}>前往 {topologyPortal.neighborScopeName}</button>{topologyPortal.transportNodeKeys.length === 1 && <button type="button" className="editor-button editor-button-secondary" onClick={() => openTopologyEditor(topologyPortal.transportNodeKeys[0])}>打开连接对象</button>}</div></section>}
             {topologyRelation && <section className="inspector-section"><p className="inspector-section-title">关系摘要</p><h4 className="topology-inspector-title">{topologyRelation.relationTypeKey}</h4><p>{topologyRelation.sourceNodeName} → {topologyRelation.targetNodeName}</p><code className="machine-key">{topologyRelation.key}</code></section>}
           </> : !selected ? <div className="inspector-empty"><strong>未选择对象</strong><p className="muted">选择一个对象后查看身份、引用和危险操作。</p></div> : <><section className="inspector-section"><p className="inspector-section-title">对象身份</p>{(typeof selected.value.name === "string" || typeof selected.value.term === "string") && <label>显示名称<input value={objectDisplayValue(selected.value, selected.key)} onChange={(event) => changeName(event.target.value)} /></label>}<label>稳定键<input readOnly value={selected.key} /></label></section><section className="inspector-section"><p className="inspector-section-title">引用关系</p>{usedBy.length === 0 ? <p className="muted">没有对象引用。</p> : usedBy.map((edge, index) => <Link key={index} to={`/scenarios/${scenarioId}/edit/${sectionForKind(edge.source.object_kind)}/${edge.source.object_key ? encodeURIComponent(edge.source.object_key) : ""}`}>{kindLabels[edge.source.object_kind] ?? edge.source.object_kind} · {edge.source.object_key ?? edge.source.field_path}</Link>)}</section><section className="inspector-section inspector-danger"><p className="inspector-section-title">危险操作</p><div className="button-row"><button type="button" className="editor-button editor-button-secondary" onClick={() => void rename()}>重命名稳定键</button><button type="button" className="editor-button editor-button-danger" onClick={() => void remove()}>删除</button></div></section></>}
-        </div></aside>
+        </div></aside>}
       </div>
     </section>
   </main>;

@@ -60,11 +60,11 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-function renderEditor() {
+function renderEditor(initialEntry = "/scenarios/scenario-1/edit/public-references") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/scenarios/scenario-1/edit/public-references"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <HistoryControls />
         <Routes>
           <Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} />
@@ -159,5 +159,21 @@ describe("Editor section state ownership", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "规则" })).toBeInTheDocument());
     expect(screen.getByText("stabilize")).toBeInTheDocument();
     expect(screen.getByText("未修改")).toBeInTheDocument();
+  });
+
+  it("uses singleton and workflow shells without empty object navigation or technical titles", async () => {
+    renderEditor("/scenarios/scenario-1/edit/overview");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "概览" })).toBeInTheDocument());
+    expect(document.querySelector(".object-panel")).not.toBeInTheDocument();
+    expect(screen.queryByText("Typed 编辑器")).not.toBeInTheDocument();
+    expect(screen.queryByText("结构化 Scenario authoring")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("搜索")).not.toBeInTheDocument();
+
+    cleanup();
+    renderEditor("/scenarios/scenario-1/edit/validation");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "验证与发布" })).toBeInTheDocument());
+    expect(document.querySelector(".object-panel")).not.toBeInTheDocument();
+    expect(screen.queryByText("OBJECTS")).not.toBeInTheDocument();
+    expect(screen.queryByText("Typed 编辑器")).not.toBeInTheDocument();
   });
 });

@@ -507,10 +507,12 @@ button:disabled, .editor-control:disabled { cursor: not-allowed; opacity: .55; }
 .conflict-banner p { min-width: 0; margin: 0; color: #7d3933; font-size: 11px; }
 .editor-columns { display: grid; flex: 1 1 auto; grid-template-columns: minmax(220px, 258px) minmax(0, 1fr) minmax(250px, 300px); gap: 12px; min-width: 0; min-height: 0; margin: 0; overflow: hidden; padding: 14px 22px 18px; }
 .editor-columns.inspector-collapsed { grid-template-columns: minmax(220px, 258px) minmax(0, 1fr); }
+.editor-columns.master-hidden { grid-template-columns: minmax(0, 1fr) minmax(250px, 300px); }
+.editor-columns.master-hidden.inspector-collapsed { grid-template-columns: minmax(0, 1fr); }
 .object-list, .canvas, .inspector { min-width: 0; min-height: 0; padding: 0; border: 1px solid #d8d5ca; border-radius: 13px; background: #fcfbf7; box-shadow: 0 10px 24px rgb(48 59 48 / 5%); }
 .object-panel { display: flex; flex-direction: column; overflow: hidden; }
 .object-panel-header { display: flex; flex: 0 0 auto; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 16px 15px 12px; border-bottom: 1px solid #e7e2d7; }
-.object-panel-header h3 { min-width: 0; margin: 4px 0 0; overflow: hidden; color: #1d382e; font: 650 17px/1.2 Georgia, serif; text-overflow: ellipsis; white-space: nowrap; }
+.object-panel-header h3, .object-panel-title { min-width: 0; margin: 4px 0 0; overflow: hidden; color: #1d382e; font: 650 17px/1.2 Georgia, serif; text-overflow: ellipsis; white-space: nowrap; }
 .object-count { flex: 0 0 auto; padding: 4px 7px; border-radius: 999px; color: #467261; background: #e4f0eb; font: 700 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
 .object-panel-tools { flex: 0 0 auto; padding: 11px 13px 10px; border-bottom: 1px solid #eee9df; }
 .object-search, .object-filter { display: grid; gap: 5px; margin: 0 0 9px; color: #587066; font-size: 10px; font-weight: 800; letter-spacing: .02em; }
