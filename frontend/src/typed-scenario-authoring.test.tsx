@@ -55,7 +55,6 @@ describe("typed ScenarioDefinition v2 authoring", () => {
       effects: [{ kind: "SET_FACT", node: { kind: "CURRENT_TARGET" }, fact_key: "operational", value: { source: "LITERAL", literal: true } }],
     })} />);
     expandNestedCards();
-
     fireEvent.change(screen.getByLabelText("条件类型"), { target: { value: "RESOURCE_COMPARE" } });
     expect(screen.getByLabelText("资源")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("效果类型"), { target: { value: "REVEAL_TARGET_REGION_FACILITY_FACTS" } });
@@ -210,5 +209,23 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     render(<TypedEditor section="public-knowledge" value={{ resource_source_hints: [] }} document={document} collectionSelection={null} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} />);
     expect(screen.queryByRole("heading", { name: "公共知识配置" })).not.toBeInTheDocument();
     expect(screen.getByText("请选择或新建资源发现知识")).toBeInTheDocument();
+  });
+
+  it("keeps unknown future AST variants editable through an isolated JSON fallback", () => {
+    render(<EntityHarness initial={entity("rule", {
+      key: "future-rule",
+      phase: "RESOLVE",
+      trigger: "STATE",
+      priority: 0,
+      condition: { kind: "FUTURE_CONDITION", payload: { enabled: true } },
+      effects: [{ kind: "FUTURE_EFFECT", payload: 7 }],
+    })} />);
+    expandNestedCards();
+    fireEvent.click(screen.getByRole("button", { name: /未知条件 JSON/ }));
+    fireEvent.click(screen.getByRole("button", { name: /未知效果 JSON/ }));
+
+    expect((screen.getByLabelText(/未知条件 JSON/) as HTMLTextAreaElement).value).toContain("FUTURE_CONDITION");
+    expect((screen.getByLabelText(/未知效果 JSON/) as HTMLTextAreaElement).value).toContain("FUTURE_EFFECT");
+    expect(screen.queryByLabelText("条件类型")).not.toBeInTheDocument();
   });
 });

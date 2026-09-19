@@ -6,7 +6,7 @@ export type MasterSource = "none" | "entities" | "root-collections" | "topology"
 export type CreateCapability = "none" | "entity" | "root-collection-item";
 export type SelectionStrategy = "none" | "route-object" | "root-owner" | "topology" | "workflow";
 export type WorkspaceRenderer = "root" | "entity" | "root-collection" | "hybrid" | "topology" | "workflow";
-export type AdvancedJsonCapability = "none" | "nested-only" | "item-only" | "root-and-item" | "full-owner";
+export type AdvancedJsonCapability = "none" | "nested-only" | "unknown-variant";
 export type LocatorStrategy = "singleton" | "entity" | "root-collection" | "mixed-entity" | "browser" | "workflow";
 
 export type SectionStructure = {
@@ -75,7 +75,7 @@ const entityCapabilities: SectionStructure["capabilities"] = {
   rename: true,
   delete: true,
   inspector: true,
-  advancedJson: "nested-only",
+  advancedJson: "none",
 };
 
 const declarations: Record<EditorSection, StructureDeclaration> = {
@@ -84,7 +84,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
     "SINGLETON",
     { visible: false, source: "none", label: "section", searchable: false, create: "none", grouped: false, itemIdentity: "none" },
     { renderer: "root", title: "section", selection: "none" },
-    { create: false, rename: false, delete: false, inspector: false, advancedJson: "full-owner" },
+    { create: false, rename: false, delete: false, inspector: false, advancedJson: "none" },
     "singleton",
   ),
   world: declaration(
@@ -96,7 +96,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
     "browser",
   ),
   "node-types": declaration("node-types", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
-  "world-entities": declaration("world-entities", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
+  "world-entities": declaration("world-entities", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "nested-only" }, "entity"),
   relations: declaration(
     "relations",
     "COLLECTION",
@@ -107,18 +107,18 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
   ),
   resources: declaration("resources", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
   roles: declaration("roles", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
-  actors: declaration("actors", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
+  actors: declaration("actors", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "nested-only" }, "entity"),
   interactions: declaration("interactions", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
-  actions: declaration("actions", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
-  rules: declaration("rules", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
-  objectives: declaration("objectives", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
-  "derived-states": declaration("derived-states", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
+  actions: declaration("actions", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "nested-only" }, "entity"),
+  rules: declaration("rules", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "unknown-variant" }, "entity"),
+  objectives: declaration("objectives", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "unknown-variant" }, "entity"),
+  "derived-states": declaration("derived-states", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "unknown-variant" }, "entity"),
   initialization: declaration(
     "initialization",
     "HYBRID",
     { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-identity" },
     { renderer: "hybrid", title: "section", selection: "root-owner" },
-    { create: true, rename: false, delete: true, inspector: false, advancedJson: "root-and-item" },
+    { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
     "root-collection",
   ),
   "goal-resolution": declaration(
@@ -126,7 +126,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
     "SINGLETON",
     { visible: false, source: "none", label: "section", searchable: false, create: "none", grouped: false, itemIdentity: "none" },
     { renderer: "root", title: "section", selection: "none" },
-    { create: false, rename: false, delete: false, inspector: false, advancedJson: "full-owner" },
+    { create: false, rename: false, delete: false, inspector: false, advancedJson: "none" },
     "singleton",
   ),
   planning: declaration(
@@ -134,7 +134,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
     "HYBRID",
     { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-identity" },
     { renderer: "hybrid", title: "section", selection: "root-owner" },
-    { create: true, rename: false, delete: true, inspector: false, advancedJson: "root-and-item" },
+    { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
     "root-collection",
   ),
   "public-knowledge": declaration(
@@ -142,7 +142,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
     "COLLECTION",
     { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-identity" },
     { renderer: "root-collection", title: "selected-item", selection: "root-owner" },
-    { create: true, rename: false, delete: true, inspector: false, advancedJson: "item-only" },
+    { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
     "root-collection",
   ),
   "public-references": declaration("public-references", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, rename: false }, "mixed-entity"),

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { sectionStructure, sectionStructureRegistry, type SectionMode } from "./editor-structure";
+import { rootFieldRegistry } from "./editor-registry";
 
 const expectedModes: Record<SectionMode, string[]> = {
   SINGLETON: ["overview", "goal-resolution"],
@@ -55,5 +56,13 @@ describe("section structure registry", () => {
       mode: "COLLECTION",
       master: { source: "root-collections" },
     });
+  });
+
+  it("declares only reachable Advanced JSON ownership without duplicate root fields", () => {
+    expect(sectionStructure("overview").capabilities.advancedJson).toBe("none");
+    expect(sectionStructure("initialization").capabilities.advancedJson).toBe("none");
+    expect(sectionStructure("actions").capabilities.advancedJson).toBe("nested-only");
+    expect(sectionStructure("rules").capabilities.advancedJson).toBe("unknown-variant");
+    expect(Object.values(rootFieldRegistry).flat().filter((field) => field.type === "json" || field.advanced)).toEqual([]);
   });
 });

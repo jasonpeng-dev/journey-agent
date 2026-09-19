@@ -10,6 +10,7 @@ import {
   draftObjectIdentity,
   filterDraftObjects,
   nodeSemanticView,
+  objectIdentity,
   replaceObject,
   sectionForKind,
   sectionObjects,
@@ -23,8 +24,9 @@ import {
   type JsonObject,
 } from "../editor";
 import { kindsBySection } from "../templates";
-import { appendRootCollectionItem, removeRootCollectionItem, replaceRootCollectionItem, rootCollectionDefinitions, rootCollectionIdentity, rootCollectionItems, rootCollectionReferencePath, rootCollectionSelectionForPath, rootSingletonOwner, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
+import { appendRootCollectionItem, removeRootCollectionItem, replaceRootCollectionItem, rootCollectionDefinitions, rootCollectionIdentity, rootCollectionItems, rootCollectionReferencePath, rootSingletonOwner, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
 import { sectionStructure } from "../editor-structure";
+import { editorLocatorFromValidation, editorLocatorHref } from "../editor-locator";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
 import type { Draft, DraftSandboxResult, ValidationResult } from "../types";
@@ -54,15 +56,6 @@ function rootEditorKey(section: EditorSection): string | null {
   return null;
 }
 
-function sectionForLocator(kind: string): EditorSection {
-  if (kind === "metadata") return "overview";
-  if (kind === "goal_resolution") return "goal-resolution";
-  if (kind === "public_knowledge") return "public-knowledge";
-  if (kind === "initialization") return "initialization";
-  if (kind === "planning") return "planning";
-  return sectionForKind(kind);
-}
-
 function normalizeEditorNavigation(to: string, scenarioId: string): string {
   const legacyWorldObjectPrefix = `/scenarios/${scenarioId}/edit/world/`;
   return to.startsWith(legacyWorldObjectPrefix)
@@ -77,8 +70,10 @@ export function EditorPage() {
   const structure = sectionStructure(section);
   const singletonOwner = useMemo(() => rootSingletonOwner(section), [section]);
   const navigateRouter = useNavigate();
-  const navigate = (to: string) => navigateRouter(normalizeEditorNavigation(to, scenarioId));
+  const navigate = (to: string, options?: { replace?: boolean }) => navigateRouter(normalizeEditorNavigation(to, scenarioId), options);
   const [searchParams, setSearchParams] = useSearchParams();
+  const requestedKind = searchParams.get("kind");
+  const routeKind = structure.owners.entityKinds.includes(requestedKind as EntityKind) ? requestedKind as EntityKind : null;
   const queryClient = useQueryClient();
   const draftQuery = useQuery({ queryKey: ["draft", scenarioId], queryFn: () => api.draft(scenarioId) });
   const [serverDraft, setServerDraft] = useState<Draft | null>(null);
@@ -217,7 +212,13 @@ export function EditorPage() {
     ? collectionItems.find((item) => item.collection === collectionSelection.collection && item.identity === collectionSelection.identity) ?? null
     : null;
   const selectedSingletonOwner = collectionSelection?.owner === "singleton" ? singletonOwner : null;
-  const selected = objects.find((item) => item.key === objectKey) ?? null;
+  const selected = objects.find((item) => item.key === objectKey && (!routeKind || item.kind === routeKind)) ?? null;
+  useEffect(() => {
+    if (section !== "relations" || !objectKey || routeKind || !selected) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("kind", selected.kind);
+    setSearchParams(next, { replace: true });
+  }, [objectKey, routeKind, searchParams, section, selected, setSearchParams]);
   const focusPath = searchParams.get("focus_path");
   const editorFocusPath = focusPath ? `${selected ? `${selected.kind}.${selected.key}` : rootEditorKey(section) ?? ""}.${focusPath}` : null;
   const usedBy = refsQuery.data?.references.filter((edge) => edge.target.object_kind === selected?.kind && edge.target.object_key === selected?.key) ?? [];
@@ -281,10 +282,27 @@ export function EditorPage() {
   };
   const changeName = (name: string) => {
     if (!selected) return;
-    if (typeof selected.value.name === "string") editDocument(updateObjectName(local.definition_document, section, selected.key, name));
-    else if (typeof selected.value.term === "string") editDocument(replaceObject(local.definition_document, section, selected.key, { ...selected.value, term: name }));
+    if (typeof selected.value.name === "string") editDocument(updateObjectName(local.definition_document, section, selected.key, name, selected.kind));
   };
-  const createObject = (kind: EntityKind) => { const added = addObject(local.definition_document, kind); editDocument(added.document); navigate(`/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(added.key)}`); };
+  const createObject = (kind: EntityKind) => {
+    const added = addObject(local.definition_document, kind);
+    editDocument(added.document);
+    navigate(editorLocatorHref({ owner: "entity", section, kind, objectKey: added.key, fieldPath: null }, scenarioId));
+  };
+  const updateSelectedEntity = (value: JsonObject) => {
+    if (!selected) return;
+    const nextIdentity = objectIdentity(selected.kind, value);
+    if (!nextIdentity) { setMessage("请填写完整的对象身份字段。"); return; }
+    if (objects.some((item) => item !== selected && item.kind === selected.kind && item.key === nextIdentity)) {
+      setMessage("同类型对象已使用该身份。");
+      return;
+    }
+    setMessage("");
+    editDocument(replaceObject(local.definition_document, section, selected.key, value, selected.kind));
+    if (nextIdentity !== selected.key) {
+      navigate(editorLocatorHref({ owner: "entity", section, kind: selected.kind, objectKey: nextIdentity, fieldPath: null }, scenarioId), { replace: true });
+    }
+  };
   const updateCollectionItem = (selection: RootCollectionSelection, item: JsonObject) => {
     const root = structuredClone(sectionValue) as JsonObject;
     const selectedItem = selectedCollectionItem?.value ?? null;
@@ -340,7 +358,7 @@ export function EditorPage() {
         return;
       }
       editDocument(transformed.definition_document);
-      navigate(`/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(newKey)}`);
+      navigate(editorLocatorHref({ owner: "entity", section, kind: selected.kind, objectKey: newKey, fieldPath: null }, scenarioId), { replace: true });
     } catch (error) { setSaveState(error instanceof ApiError && error.code === "SCENARIO_DRAFT_CONFLICT" ? "CONFLICT" : "ERROR"); setMessage(errorText(error, "稳定键重命名失败。")); }
   };
 
@@ -384,20 +402,12 @@ export function EditorPage() {
       setMessage(`无法自动定位此诊断，请按原始路径查看：${issue.path}`);
       return;
     }
-    const targetSection = sectionForLocator(locator.object_kind);
-    const target = locator.object_key ? `/${encodeURIComponent(locator.object_key)}` : "";
-    const query = new URLSearchParams();
-    if (locator.field_path) query.set("focus_path", locator.field_path);
-    const targetRoot = sectionRoot(local.definition_document, targetSection);
-    const rootSelection = targetRoot && typeof targetRoot === "object" && !Array.isArray(targetRoot)
-      ? rootCollectionSelectionForPath(targetRoot as JsonObject, locator.field_path)
-      : null;
-    if (rootSelection) {
-      query.set("owner", "collection");
-      query.set("collection", rootSelection.collection);
-      query.set("item", rootSelection.identity);
+    const target = editorLocatorFromValidation(locator, local.definition_document);
+    if (!target) {
+      setMessage(`无法精确定位此诊断，请按原始路径查看：${issue.path}`);
+      return;
     }
-    navigate(`/scenarios/${scenarioId}/edit/${targetSection}${target}${query.size > 0 ? `?${query}` : ""}`);
+    navigate(editorLocatorHref(target, scenarioId));
   };
 
   const openTopologyEditor = (nodeKey: string) => {
@@ -444,9 +454,9 @@ export function EditorPage() {
     : [];
   const renderObjectItem = (item: (typeof objects)[number]) => (
     <Link
-      className={`object-list-item${item.key === objectKey ? " selected" : ""}`}
+      className={`object-list-item${selected?.kind === item.kind && selected.key === item.key ? " selected" : ""}`}
       key={draftObjectIdentity(item)}
-      to={`/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(item.key)}`}
+      to={editorLocatorHref({ owner: "entity", section, kind: item.kind, objectKey: item.key, fieldPath: null }, scenarioId)}
       onClick={(event) => {
         if (structure.master.source !== "topology" || item.kind !== "node") return;
         event.preventDefault();
@@ -498,7 +508,7 @@ export function EditorPage() {
             </>}
           </div>
         </aside>}
-         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} onChange={(value) => editDocument(replaceObject(local.definition_document, section, selected.key, value))} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel validation={validation} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
+         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} onChange={updateSelectedEntity} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel validation={validation} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
         {structure.capabilities.inspector && <aside className={`inspector inspector-new${inspectorOpen ? " is-open" : " is-collapsed"}`}><div className="inspector-heading"><div><p className="panel-kicker">详情</p><h3>{showWorldTopology ? "拓扑检查器" : "检查器"}</h3></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen(false)}>收起</button></div><div className="inspector-scroll">
           {showWorldTopology ? <>
             {!topologySelection && <div className="inspector-empty"><strong>未选择拓扑对象</strong><p className="muted">单击范围或实体查看摘要，双击进入下一层。</p></div>}
@@ -506,7 +516,7 @@ export function EditorPage() {
             {topologyNode && <><section className="inspector-section"><p className="inspector-section-title">实体摘要</p><h4 className="topology-inspector-title">{topologyNode.name}</h4><p className="muted machine-key">{topologyNode.key}</p><div className="topology-detail-list"><span>类型 <strong>{topologyNode.nodeTypeName}</strong></span><span>所在范围 <strong>{topologyNode.scopeKeys.join("、") || "未归属"}</strong></span><span>直接关系 <strong>{topologyNode.relationCount}</strong></span><span>Facts <strong>{topologyNode.factCount}</strong></span></div></section><section className="inspector-section"><p className="inspector-section-title">邻域操作</p><button type="button" className="editor-button editor-button-primary" onClick={() => setTopologyContext({ kind: "entity", entityKey: topologyNode.key, scopeKey: topologyNode.scopeKeys[0] ?? findScopeForNode(local.definition_document, topologyNode.key) })}>聚焦关系</button><button type="button" className="editor-button editor-button-secondary" onClick={() => openTopologyEditor(topologyNode.key)}>在编辑器中打开</button></section>{topologyNeighborhood && <section className="inspector-section"><p className="inspector-section-title">一跳关系</p>{topologyNeighborhood.relations.length === 0 ? <p className="muted">没有直接关系。</p> : topologyNeighborhood.relations.map((relation) => <p className="topology-relation-summary" key={relation.key}>{relation.sourceNodeName} <span>{relation.relationTypeKey}</span> {relation.targetNodeName}</p>)}</section>}</>}
             {topologyPortal && <section className="inspector-section"><p className="inspector-section-title">边界出口</p><h4 className="topology-inspector-title">→ {topologyPortal.neighborScopeName}</h4><p className="muted">{topologyPortal.transportNodeNames.join("、") || topologyPortal.relationSummaries.join("、") || "边界连接"}</p><div className="inspector-actions"><button type="button" className="editor-button editor-button-primary" onClick={() => { setTopologyContext({ kind: "scope", scopeKey: topologyPortal.neighborScopeKey }); setTopologySelection({ kind: "scope", key: topologyPortal.neighborScopeKey }); }}>前往 {topologyPortal.neighborScopeName}</button>{topologyPortal.transportNodeKeys.length === 1 && <button type="button" className="editor-button editor-button-secondary" onClick={() => openTopologyEditor(topologyPortal.transportNodeKeys[0])}>打开连接对象</button>}</div></section>}
             {topologyRelation && <section className="inspector-section"><p className="inspector-section-title">关系摘要</p><h4 className="topology-inspector-title">{topologyRelation.relationTypeKey}</h4><p>{topologyRelation.sourceNodeName} → {topologyRelation.targetNodeName}</p><code className="machine-key">{topologyRelation.key}</code></section>}
-          </> : !selected ? <div className="inspector-empty"><strong>未选择对象</strong><p className="muted">选择一个对象后查看身份、引用和危险操作。</p></div> : <><section className="inspector-section"><p className="inspector-section-title">对象身份</p>{(typeof selected.value.name === "string" || typeof selected.value.term === "string") && <label>显示名称<input value={objectDisplayValue(selected.value, selected.key)} onChange={(event) => changeName(event.target.value)} /></label>}<label>稳定键<input readOnly value={selected.key} /></label></section><section className="inspector-section"><p className="inspector-section-title">引用关系</p>{usedBy.length === 0 ? <p className="muted">没有对象引用。</p> : usedBy.map((edge, index) => <Link key={index} to={`/scenarios/${scenarioId}/edit/${sectionForKind(edge.source.object_kind)}/${edge.source.object_key ? encodeURIComponent(edge.source.object_key) : ""}`}>{kindLabels[edge.source.object_kind] ?? edge.source.object_kind} · {edge.source.object_key ?? edge.source.field_path}</Link>)}</section><section className="inspector-section inspector-danger"><p className="inspector-section-title">危险操作</p><div className="button-row"><button type="button" className="editor-button editor-button-secondary" onClick={() => void rename()}>重命名稳定键</button><button type="button" className="editor-button editor-button-danger" onClick={() => void remove()}>删除</button></div></section></>}
+          </> : !selected ? <div className="inspector-empty"><strong>未选择对象</strong><p className="muted">选择一个对象后查看身份、引用和危险操作。</p></div> : <><section className="inspector-section"><p className="inspector-section-title">对象身份</p>{typeof selected.value.name === "string" && <label>显示名称<input value={objectDisplayValue(selected.value, selected.key)} onChange={(event) => changeName(event.target.value)} /></label>}<label>{selected.kind === "public_reference" ? "语义身份" : selected.kind === "relation" && !selected.value.key ? "复合身份" : "稳定键"}<input readOnly value={selected.key} /></label></section><section className="inspector-section"><p className="inspector-section-title">引用关系</p>{usedBy.length === 0 ? <p className="muted">没有对象引用。</p> : usedBy.map((edge, index) => edge.source.object_key ? <Link key={index} to={editorLocatorHref({ owner: "entity", section: sectionForKind(edge.source.object_kind), kind: edge.source.object_kind as EntityKind, objectKey: edge.source.object_key, fieldPath: edge.source.field_path }, scenarioId)}>{kindLabels[edge.source.object_kind] ?? edge.source.object_kind} · {edge.source.object_key}</Link> : <p className="muted" key={index}>{kindLabels[edge.source.object_kind] ?? edge.source.object_kind} · {edge.source.field_path}</p>)}</section><section className="inspector-section inspector-danger"><p className="inspector-section-title">危险操作</p><div className="button-row">{structure.capabilities.rename && (selected.kind !== "relation" || typeof selected.value.key === "string") && <button type="button" className="editor-button editor-button-secondary" onClick={() => void rename()}>重命名稳定键</button>}<button type="button" className="editor-button editor-button-danger" onClick={() => void remove()}>删除</button></div></section></>}
         </div></aside>}
       </div>
     </section>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { referenceOptions } from "./components/editor/ReferencePicker";
-import { filterDraftObjects, nodeSemanticView, replaceObject, sectionDefinition, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
+import { addObject as addEditorObject, filterDraftObjects, nodeSemanticView, objectIdentity, replaceObject, sectionDefinition, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
 import { entityRegistry, factInitialValueMetadata } from "./editor-registry";
 import { addObject, defaultArrayItem, kindsBySection } from "./templates";
 
@@ -75,5 +75,22 @@ describe("editor draft helpers", () => {
     expect(filterDraftObjects(objects, "south_bridge").map((item) => item.key)).toEqual(["south_bridge"]);
     expect(filterDraftObjects(objects, "", "node")).toHaveLength(2);
     expect(filterDraftObjects(objects, "", "relation")).toHaveLength(0);
+  });
+
+  it("keeps sibling relation kinds distinct when their identities match", () => {
+    const original = { world: {
+      relation_types: [{ key: "same", name: "Same type" }],
+      relations: [{ key: "same", source_node_key: "a", relation_type_key: "same", target_node_key: "b" }],
+    } };
+    const changed = replaceObject(original, "relations", "same", { key: "same", source_node_key: "b", relation_type_key: "same", target_node_key: "a" }, "relation");
+    expect(sectionObjects(changed, "relations").find((item) => item.kind === "relation_type")?.value.name).toBe("Same type");
+    expect(sectionObjects(changed, "relations").find((item) => item.kind === "relation")?.value.source_node_key).toBe("b");
+  });
+
+  it("creates and derives a complete PublicReference composite identity", () => {
+    const added = addEditorObject({ world: { nodes: [{ key: "central", name: "Central" }], resources: [] }, public_references: [] }, "public_reference");
+    const reference = sectionObjects(added.document, "public-references")[0];
+    expect(reference.key).toBe("NODE:central:New reference");
+    expect(objectIdentity("public_reference", reference.value)).toBe(reference.key);
   });
 });

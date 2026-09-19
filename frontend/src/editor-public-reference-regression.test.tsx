@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
 import { EditorPage } from "./pages/EditorPage";
@@ -58,6 +58,8 @@ beforeEach(() => {
   vi.mocked(api.saveDraft).mockResolvedValue(draft);
 });
 
+afterEach(cleanup);
+
 function renderEditor() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -104,5 +106,21 @@ describe("Editor public-reference section isolation", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "公共引用" })).toBeInTheDocument());
     expect(screen.getAllByText(/公共引用 · REGION:/)).toHaveLength(2);
     expect(screen.queryByText("参与者 · operator")).not.toBeInTheDocument();
+  });
+
+  it("uses composite identity without presenting a fake stable-key rename", async () => {
+    renderEditor();
+    const reference = await screen.findByRole("link", { name: /Central District/ });
+    fireEvent.click(reference);
+    await waitFor(() => expect(screen.getByLabelText("公共术语")).toHaveValue("Central District"));
+
+    fireEvent.click(screen.getByRole("button", { name: "显示检查器" }));
+    expect(screen.getByLabelText("语义身份")).toHaveValue("REGION:central_district:Central District");
+    expect(screen.queryByLabelText("稳定键")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重命名稳定键" })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("公共术语"), { target: { value: "Central Core" } });
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Central Core", level: 3 })).toBeInTheDocument());
+    expect(screen.getByText("有未保存修改")).toBeInTheDocument();
   });
 });

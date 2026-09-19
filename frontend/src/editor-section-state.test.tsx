@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, cleanup } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
@@ -39,7 +39,7 @@ const draft = {
       node_types: [{ key: "region", name: "区域" }],
       nodes: [{ key: "central", name: "中央区", node_type_key: "region" }],
       relation_types: [{ key: "located_in", name: "位于" }],
-      relations: [],
+      relations: [{ key: "located_in", source_node_key: "central", relation_type_key: "located_in", target_node_key: "central", initial_visibility: "VISIBLE" }],
       resources: [{ key: "relief", name: "救援物资" }],
     },
     actors: {
@@ -63,6 +63,11 @@ function HistoryControls() {
   return <><button type="button" onClick={() => navigate(-1)}>测试后退</button><button type="button" onClick={() => navigate(1)}>测试前进</button></>;
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="editor-location">{location.pathname}{location.search}</output>;
+}
+
 beforeEach(() => {
   vi.mocked(api.draft).mockResolvedValue(draft);
   vi.mocked(api.analyzeWorkingCopyReferences).mockResolvedValue({ scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [] });
@@ -78,6 +83,7 @@ function renderEditor(initialEntry = "/scenarios/scenario-1/edit/public-referenc
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <HistoryControls />
+        <LocationProbe />
         <Routes>
           <Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} />
           <Route path="/scenarios/:scenarioId/edit/:section/:objectKey" element={<EditorPage />} />
@@ -291,5 +297,18 @@ describe("Editor section state ownership", () => {
     expect(screen.getByRole("heading", { name: "关系实例" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "＋ 新增关系类型" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "＋ 新增关系实例" })).toBeInTheDocument();
+  });
+
+  it("uses kind-qualified relation identity and normalizes legacy links", async () => {
+    renderEditor("/scenarios/scenario-1/edit/relations/located_in");
+    await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("?kind=relation_type"));
+    expect(screen.getAllByLabelText("显示名称").some((element) => (element as HTMLInputElement).value === "位于")).toBe(true);
+    expect(screen.queryByLabelText("来源节点")).not.toBeInTheDocument();
+
+    cleanup();
+    renderEditor("/scenarios/scenario-1/edit/relations/located_in?kind=relation");
+    await waitFor(() => expect(screen.getByLabelText("来源节点")).toBeInTheDocument());
+    expect(screen.queryAllByLabelText("显示名称")).toHaveLength(0);
+    expect(screen.getByTestId("editor-location")).toHaveTextContent("?kind=relation");
   });
 });

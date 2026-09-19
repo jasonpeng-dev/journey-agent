@@ -75,7 +75,6 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
   node: {
     kind: "node", section: "world-entities", label: "节点", collectionPath: ["world", "nodes"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("node_type_key", "reference", { referenceDomain: "node_type" }), field("initial_access", "enum", { enum: V2_ENUMS.access }), field("initial_visibility", "enum", { enum: V2_ENUMS.visibility }), field("interaction_keys", "multi-reference", { referenceDomain: "interaction" })],
-    nested: ["facts"],
   },
   relation_type: {
     kind: "relation_type", section: "relations", label: "关系类型", collectionPath: ["world", "relation_types"],
@@ -129,11 +128,11 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
 };
 
 export const rootFieldRegistry: Record<string, readonly FieldMetadata[]> = {
-  metadata: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("locality", "json", { advanced: true })],
+  metadata: [field("key", "text"), field("name", "text"), field("description", "textarea")],
   goal_resolution: [field("allow_llm_fallback", "boolean"), field("clarification_prompt", "textarea"), field("world_goal_state_catalog", "boolean")],
-  planning: [field("instructions", "text"), field("recovery_hints", "json", { advanced: true })],
-  public_knowledge: [field("resource_source_hints", "json", { advanced: true })],
-  initialization: [field("start_node_key", "reference", { referenceDomain: "node" }), field("primary_actor_key", "reference", { referenceDomain: "actor" }), field("resource_initial_states", "json", { advanced: true }), field("resource_pools", "json", { advanced: true }), field("region_resource_knowledge", "json", { advanced: true })],
+  planning: [field("instructions", "text")],
+  public_knowledge: [],
+  initialization: [field("start_node_key", "reference", { referenceDomain: "node" }), field("primary_actor_key", "reference", { referenceDomain: "actor" })],
 };
 
 export function metadataForKind(kind: EntityKind): EntityMetadata {

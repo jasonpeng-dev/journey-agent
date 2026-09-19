@@ -117,7 +117,7 @@ function readPath(value: unknown, path: string[]): unknown {
   return current;
 }
 
-function objectKey(kind: EntityKind, value: JsonObject): string | null {
+export function objectIdentity(kind: EntityKind, value: JsonObject): string | null {
   if (kind === "relation") {
     const explicit = value.key;
     if (typeof explicit === "string" && explicit.length > 0) return explicit;
@@ -155,7 +155,7 @@ function objectsAt(document: JsonObject, kind: EntityKind): DraftObject[] {
   return raw.flatMap((item, index) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const value = item as JsonObject;
-    const key = objectKey(kind, value);
+    const key = objectIdentity(kind, value);
     if (!key) return [];
     return [{
       kind,
@@ -198,16 +198,16 @@ export function objectByKindAndKey(document: JsonObject, kind: EntityKind, key: 
   return objectsAt(document, kind).find((item) => item.key === key) ?? null;
 }
 
-export function updateObjectName(document: JsonObject, section: string, key: string, name: string): JsonObject {
+export function updateObjectName(document: JsonObject, section: string, key: string, name: string, kind?: EntityKind): JsonObject {
   const copy = structuredClone(document) as JsonObject;
-  const target = sectionObjects(copy, section).find((item) => item.key === key);
+  const target = sectionObjects(copy, section).find((item) => item.key === key && (!kind || item.kind === kind));
   if (target) target.value.name = name;
   return copy;
 }
 
-export function replaceObject(document: JsonObject, section: string, key: string, value: JsonObject): JsonObject {
+export function replaceObject(document: JsonObject, section: string, key: string, value: JsonObject, kind?: EntityKind): JsonObject {
   const copy = structuredClone(document) as JsonObject;
-  const target = sectionObjects(copy, section).find((item) => item.key === key);
+  const target = sectionObjects(copy, section).find((item) => item.key === key && (!kind || item.kind === kind));
   if (target) {
     const collection = readPath(copy, target.path.slice(0, -1));
     if (Array.isArray(collection)) collection[Number(target.path.at(-1))] = structuredClone(value);
@@ -285,11 +285,21 @@ export function addObject(document: JsonObject, kind: EntityKind): { document: J
   const base = kind === "relation" ? "new_relation" : kind === "public_reference" ? "new_reference" : String(collectionDefaults(kind).key);
   let key = base;
   let index = 2;
-  while (collection.some((item) => item && objectKey(kind, item) === key)) key = `${base}_${index++}`;
+  while (collection.some((item) => item && objectIdentity(kind, item) === key)) key = `${base}_${index++}`;
   const value = collectionDefaults(kind);
-  if (kind !== "public_reference") value[KEY_FIELDS[kind]] = key;
+  if (kind === "public_reference") {
+    const nodes = objectsAt(copy, "node");
+    const resources = objectsAt(copy, "resource");
+    const target = nodes[0] ?? resources[0];
+    value.ref_type = target?.kind === "resource" ? "RESOURCE" : "NODE";
+    value.ref_key = target?.key ?? "new_reference_target";
+    let term = "New reference";
+    let termIndex = 2;
+    while (collection.some((item) => item && objectIdentity(kind, { ...value, term }) === objectIdentity(kind, item))) term = `New reference ${termIndex++}`;
+    value.term = term;
+  } else value[KEY_FIELDS[kind]] = key;
   collection.push(value);
-  return { document: copy, key: kind === "relation" ? objectKey(kind, value) ?? key : key };
+  return { document: copy, key: objectIdentity(kind, value) ?? key };
 }
 
 export function getByPath(value: unknown, path: string[]): unknown {
