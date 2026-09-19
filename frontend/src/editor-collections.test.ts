@@ -5,6 +5,7 @@ import {
   removeRootCollectionItem,
   replaceRootCollectionItem,
   rootCollectionIdentity,
+  rootCollectionIdentityLabel,
   rootCollectionItem,
   rootCollectionSelectionForPath,
   type RootCollectionKey,
@@ -22,6 +23,14 @@ const identityCases: Array<[RootCollectionKey, JsonObject, string]> = [
 describe("root collection durable identity", () => {
   it.each(identityCases)("derives the canonical %s identity", (collection, value, identity) => {
     expect(rootCollectionIdentity(collection, value)).toBe(identity);
+  });
+
+  it("presents semantic collection identities without exposing canonical JSON", () => {
+    expect(rootCollectionIdentityLabel("resource_initial_states", { resource_key: "water", scope_node_key: "north" }))
+      .toBe("资源 · water / 作用域 · north");
+    expect(rootCollectionIdentityLabel("resource_initial_states", { resource_key: "water", scope_node_key: null }))
+      .toBe("资源 · water / 作用域 · 全局");
+    expect(rootCollectionIdentityLabel("resource_pools", { pool_key: "north_water" })).toBe("资源池 · north_water");
   });
 
   it("keeps selection on the same item after reorder and removal before it", () => {

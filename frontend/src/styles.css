@@ -597,8 +597,29 @@ button:disabled, .editor-control:disabled { cursor: not-allowed; opacity: .55; }
 .world-graph-node tspan { pointer-events: none; }
 .graph-empty { padding: 32px; }
 .machine-key { max-width: 100%; }
+.validation-panel { display: grid; gap: 16px; }
+.validation-section { min-width: 0; padding: 18px; border: 1px solid #dedbd0; border-radius: 11px; background: #fffefa; }
+.validation-section h4 { margin: 0 0 10px; color: #29483e; font: 650 16px/1.25 Georgia, serif; }
+.validation-section > .muted { margin: 0 0 13px; }
+.validation-section .issue code { display: block; max-width: 100%; overflow-wrap: anywhere; }
+.validation-panel .sandbox-panel { margin-top: 0; }
 @media (max-width: 1180px) { .editor-columns { grid-template-columns: minmax(210px, 245px) minmax(0, 1fr); }.editor-columns.inspector-collapsed { grid-template-columns: minmax(210px, 245px) minmax(0, 1fr); }.inspector-new { display: none !important; } }
 @media (max-width: 1050px) { .editor-shell { grid-template-columns: 220px minmax(0, 1fr); }.editor-toolbar { padding-right: 16px; padding-left: 16px; }.editor-columns { padding-right: 16px; padding-left: 16px; }.editor-heading-actions { gap: 5px; }.editor-button { padding-right: 8px; padding-left: 8px; } }
+@media (max-width: 760px) {
+  .app-shell:has(.editor-shell) { height: auto; min-height: 100dvh; overflow: auto; }
+  .editor-shell { grid-template-columns: minmax(0, 1fr); height: auto; min-height: calc(100dvh - 64px); overflow: visible; }
+  .editor-nav { max-height: 38dvh; border-right: 0; border-bottom: 1px solid #d7d4ca; }
+  .editor-main { overflow: visible; }
+  .editor-toolbar { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .editor-heading-actions { width: 100%; justify-content: flex-start; }
+  .editor-columns, .editor-columns.inspector-collapsed, .editor-columns.master-hidden, .editor-columns.master-hidden.inspector-collapsed { grid-template-columns: minmax(0, 1fr); overflow: visible; padding: 12px; }
+  .object-panel { max-height: 48dvh; }
+  .canvas { min-height: 68dvh; }
+  .canvas-header h3, .object-panel-header h3, .object-panel-title { overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
+  .canvas-body { padding: 16px 14px 22px; }
+  .root-singleton-heading, .collection-detail-heading { flex-direction: column; }
+  .collection-detail-heading code { max-width: 100%; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
+}
 
 /* Generic hierarchical topology explorer */
 .topology-explorer { display: flex; flex-direction: column; }

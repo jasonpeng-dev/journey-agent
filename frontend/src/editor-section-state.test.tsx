@@ -193,6 +193,10 @@ describe("Editor section state ownership", () => {
     expect(document.querySelector(".object-panel")).not.toBeInTheDocument();
     expect(screen.queryByText("OBJECTS")).not.toBeInTheDocument();
     expect(screen.queryByText("Typed 编辑器")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "草稿检查与发布" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "运行准备度" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "问题" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "预览/测试当前草稿" })).toBeInTheDocument();
   });
 
   it("uses one active owner for hybrid sections and keeps selection clean", async () => {

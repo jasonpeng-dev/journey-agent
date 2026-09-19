@@ -39,6 +39,7 @@ export type RootCollectionItem = RootCollectionSelection & {
   value: JsonObject;
   title: string;
   summary: string;
+  identityLabel: string;
 };
 
 const definitions: Partial<Record<EditorSection, RootCollectionDefinition[]>> = {
@@ -179,6 +180,19 @@ function itemSummary(collection: RootCollectionKey, value: JsonObject): string {
   return compact(value.region_key, "待配置区域");
 }
 
+/** A concise semantic identity for presentation; canonical JSON identities stay URL-only. */
+export function rootCollectionIdentityLabel(collection: RootCollectionKey, value: JsonObject): string {
+  if (collection === "resource_source_hints") return `资源 · ${compact(value.resource_key, "待填写")}`;
+  if (collection === "recovery_hints") return `失败代码 · ${compact(value.failure_code, "待填写")}`;
+  if (collection === "resource_initial_states") {
+    const resource = compact(value.resource_key, "待填写");
+    const scope = value.scope_node_key == null ? "全局" : compact(value.scope_node_key, "待填写");
+    return `资源 · ${resource} / 作用域 · ${scope}`;
+  }
+  if (collection === "resource_pools") return `资源池 · ${compact(value.pool_key, "待填写")}`;
+  return `区域 · ${compact(value.region_key, "待填写")}`;
+}
+
 export function rootCollectionDefinitions(section: string): RootCollectionDefinition[] {
   return definitions[section as EditorSection] ?? [];
 }
@@ -198,6 +212,7 @@ export function rootCollectionItems(section: string, value: unknown): RootCollec
         value: object,
         title: itemTitle(definition.key, object, index),
         summary: itemSummary(definition.key, object),
+        identityLabel: rootCollectionIdentityLabel(definition.key, object),
       }] : [];
     });
   });
