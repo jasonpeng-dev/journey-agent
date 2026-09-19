@@ -110,6 +110,24 @@ export const sectionLabels: Record<string, string> = {
   validation: "验证与发布",
 };
 
+export const editorTaxonomyGroups = [
+  { label: "场景基础", items: ["overview"] },
+  { label: "世界模型", items: ["world", "node-types", "world-entities", "relations", "resources"] },
+  { label: "参与者与交互", items: ["roles", "actors", "interactions"] },
+  { label: "行动系统", items: ["actions", "rules"] },
+  { label: "目标系统", items: ["objectives", "derived-states", "goal-resolution"] },
+  { label: "运行配置", items: ["initialization", "planning"] },
+  { label: "公开信息", items: ["public-knowledge", "public-references"] },
+  { label: "发布", items: ["validation"] },
+] as const;
+
+export const editorSectionTaxonomy: Record<string, { category: string; label: string }> = Object.fromEntries(
+  editorTaxonomyGroups.flatMap((group) => group.items.map((section) => [
+    section,
+    { category: group.label, label: sectionLabels[section] ?? section },
+  ])),
+);
+
 export const kindLabels: Record<string, string> = {
   relation_type: "关系类型",
   relation: "关系",

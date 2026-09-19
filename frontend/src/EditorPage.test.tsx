@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
 import { EditorPage } from "./pages/EditorPage";
@@ -46,9 +46,13 @@ beforeEach(() => {
   vi.mocked(api.saveDraft).mockResolvedValue(draft);
 });
 
-function renderEditor() {
+function LocationProbe() {
+  return <output data-testid="editor-location">{useLocation().pathname}</output>;
+}
+
+function renderEditor(initialEntry = "/scenarios/scenario-1/edit/world") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/scenarios/scenario-1/edit/world"]}><Routes><Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} /></Routes></MemoryRouter></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initialEntry]}><Routes><Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} /><Route path="/scenarios/:scenarioId" element={<div>Scenario Detail</div>} /></Routes><LocationProbe /></MemoryRouter></QueryClientProvider>);
 }
 
 describe("EditorPage topology interaction contract", () => {
@@ -63,4 +67,39 @@ describe("EditorPage topology interaction contract", () => {
     expect(api.saveDraft).not.toHaveBeenCalled();
     expect(screen.getByText("未修改")).toBeInTheDocument();
   });
+
+  it("relocates return to the action bar and reuses the Working Copy dirty guard", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderEditor("/scenarios/scenario-1/edit/overview");
+    const returnButton = await screen.findByRole("button", { name: "返回场景详情" });
+
+    expect(screen.queryByText("返回场景")).not.toBeInTheDocument();
+    const discard = screen.getByRole("button", { name: "放弃修改" });
+    const inspector = screen.getByRole("button", { name: "显示检查器" });
+    expect(discard.compareDocumentPosition(returnButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(returnButton.compareDocumentPosition(inspector) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.change(screen.getByDisplayValue("Test Scenario"), { target: { value: "Changed Scenario" } });
+    fireEvent.click(returnButton);
+    expect(confirm).toHaveBeenCalled();
+    expect(screen.getByTestId("editor-location")).toHaveTextContent("/scenarios/scenario-1/edit/overview");
+    expect(screen.getByDisplayValue("Changed Scenario")).toBeVisible();
+
+    confirm.mockReturnValue(true);
+    fireEvent.click(returnButton);
+    await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/scenarios/scenario-1"));
+  });
+
+  it("returns directly to Scenario Detail when the Working Copy is clean", async () => {
+    const confirm = vi.spyOn(window, "confirm");
+    renderEditor("/scenarios/scenario-1/edit/overview");
+    fireEvent.click(await screen.findByRole("button", { name: "返回场景详情" }));
+    await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/scenarios/scenario-1"));
+    expect(confirm).not.toHaveBeenCalled();
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
 });

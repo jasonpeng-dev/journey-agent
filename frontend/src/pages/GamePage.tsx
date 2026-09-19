@@ -76,9 +76,11 @@ import {
 import { legacyFactStateDisplayText } from "../legacyPresentationCompatibility";
 import {
   clonePresentationProfile,
+  defaultPresentationProfile,
   PRESENTATION_PROFILE_REFRESH_INTERVAL_MS,
   resolvePresentationProfilePreview,
 } from "../presentationPolicy";
+import { useUnsavedChangesGuard } from "../useUnsavedChangesGuard";
 
 const taskTone: Record<string, string> = {
   COMPLETED: "success",
@@ -2243,6 +2245,7 @@ type GamePresentationSettingsModalProps = {
   disabled: boolean;
   onChange: (profile: PresentationProfileDocument) => void;
   onReturnPreview: () => void;
+  onRestoreDefault: () => void;
   onDiscard: () => void;
   onSave: () => void;
   onReload: () => void;
@@ -2259,16 +2262,22 @@ export function GamePresentationSettingsModal({
   disabled,
   onChange,
   onReturnPreview,
+  onRestoreDefault,
   onDiscard,
   onSave,
   onReload,
 }: GamePresentationSettingsModalProps) {
   useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") onReturnPreview();
     };
     window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
   }, [onReturnPreview]);
 
   return (
@@ -2278,7 +2287,7 @@ export function GamePresentationSettingsModal({
           <div>
             <p className="eyebrow">Live preview</p>
             <h2 id="game-presentation-modal-title">界面设置</h2>
-            <p className="muted">{scenarioName}</p>
+            <span className="presentation-scenario-badge">{scenarioName}</span>
           </div>
           <div className="presentation-modal-status">
             <span className={`save-state ${saveState.toLowerCase()}`} data-testid="game-presentation-save-state">{saveState}</span>
@@ -2286,7 +2295,6 @@ export function GamePresentationSettingsModal({
           </div>
         </header>
         <div className="presentation-modal-body">
-          <p className="presentation-scope-notice">保存后将应用于此场景的所有版本和游戏实例。</p>
           {loading && <p className="muted">正在加载当前 PresentationProfile……</p>}
           {loadError && <p className="error">无法加载界面设置。</p>}
           {workingProfile && (
@@ -2301,10 +2309,17 @@ export function GamePresentationSettingsModal({
           )}
         </div>
         <footer className="presentation-modal-footer">
-          <button type="button" className="secondary-button" onClick={onReturnPreview}>返回预览</button>
-          <div>
-            <button type="button" className="secondary-button presentation-discard-button" disabled={disabled || saveState === "CLEAN"} onClick={onDiscard}>放弃修改</button>
-            <button type="button" className="primary-button" disabled={disabled || saveState !== "DIRTY"} onClick={onSave}>{saveState === "SAVING" ? "正在保存……" : "保存并应用"}</button>
+          <div className="presentation-bottom-notes" data-testid="game-presentation-bottom-notes">
+            <span>只调整安全信息的排列与密度，不修改场景、知识或 Agent 行为。</span>
+            <span>保存后的界面设置适用于此场景的所有版本和游戏实例。</span>
+          </div>
+          <div className="presentation-modal-action-row">
+            <button type="button" className="secondary-button action-button-centered" onClick={onReturnPreview}>返回预览</button>
+            <div>
+              <button type="button" className="secondary-button action-button-centered" disabled={disabled} onClick={onRestoreDefault}>恢复默认设置</button>
+              <button type="button" className="secondary-button presentation-discard-button action-button-centered" disabled={disabled || saveState === "CLEAN"} onClick={onDiscard}>放弃修改</button>
+              <button type="button" className="primary-button action-button-centered" disabled={disabled || saveState !== "DIRTY"} onClick={onSave}>{saveState === "SAVING" ? "正在保存……" : "保存并应用"}</button>
+            </div>
           </div>
         </footer>
       </section>
@@ -2581,15 +2596,7 @@ export function GamePage() {
   const effectivePresentationSaveState = ["SAVING", "CONFLICT", "ERROR"].includes(presentationSaveState)
     ? presentationSaveState
     : presentationDirty ? "DIRTY" : "CLEAN";
-  useEffect(() => {
-    if (!presentationDirty) return;
-    const beforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [presentationDirty]);
+  useUnsavedChangesGuard(presentationDirty, "存在未保存的界面预览修改，离开后将丢失。确定离开吗？");
 
   const loadedTask = play.data?.current_task ?? null;
   const resolvingGoal = submit.isPending || pendingGoal !== null;
@@ -2749,11 +2756,14 @@ export function GamePage() {
             setPresentationSaveState((current) => current === "CONFLICT" ? current : "DIRTY");
           }}
           onReturnPreview={() => setPresentationModalOpen(false)}
+          onRestoreDefault={() => {
+            setWorkingPresentationProfile(defaultPresentationProfile());
+            setPresentationSaveState((current) => current === "CONFLICT" ? current : "DIRTY");
+          }}
           onDiscard={() => {
             if (!savedPresentationProfile) return;
             setWorkingPresentationProfile(clonePresentationProfile(savedPresentationProfile.profile));
             setPresentationSaveState("CLEAN");
-            setPresentationModalOpen(false);
           }}
           onSave={() => saveGamePresentation.mutate()}
           onReload={() => void reloadGamePresentation()}

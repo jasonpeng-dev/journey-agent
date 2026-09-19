@@ -27,7 +27,7 @@ import { rootCollectionDefinitions, rootCollectionDefault, rootCollectionItems, 
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
 import type { Draft, DraftSandboxResult, ValidationResult } from "../types";
-import { diagnosticMessage, errorText, kindLabels, sectionLabels, uiLabel } from "../ui";
+import { diagnosticMessage, editorSectionTaxonomy, editorTaxonomyGroups, errorText, kindLabels, sectionLabels, uiLabel } from "../ui";
 
 type SaveState = WorkingCopySaveState;
 const saveLabels: Record<SaveState, string> = { UNCHANGED: "未修改", DIRTY: "有未保存修改", SAVING: "保存中", CONFLICT: "版本冲突", ERROR: "保存失败" };
@@ -35,17 +35,6 @@ type WorldView = "all" | "regions" | "facilities" | "transports";
 const worldViewLabels: Record<WorldView, string> = { all: "全部节点", regions: "区域", facilities: "设施", transports: "交通" };
 type WorldMode = "edit" | "topology";
 type ScopedCollectionSelection = { section: EditorSection; selection: RootCollectionSelection };
-
-const sectionGroups: Array<{ label: string; items: EditorSection[] }> = [
-  { label: "场景基础", items: ["overview"] },
-  { label: "世界模型", items: ["world", "node-types", "world-entities", "relations", "resources"] },
-  { label: "参与者与交互", items: ["roles", "actors", "interactions"] },
-  { label: "行动系统", items: ["actions", "rules"] },
-  { label: "目标系统", items: ["objectives", "derived-states", "goal-resolution"] },
-  { label: "运行配置", items: ["initialization", "planning"] },
-  { label: "公共语义", items: ["public-knowledge", "public-references"] },
-  { label: "发布", items: ["validation"] },
-];
 
 function isEditorSection(value: string): value is EditorSection {
   return [...sections, ...legacySections].includes(value as (typeof sections)[number] | (typeof legacySections)[number]);
@@ -358,13 +347,14 @@ export function EditorPage() {
   };
   const showWorldTopology = topologyModeActive;
   const isCollectionSection = collectionDefinitions.length > 0;
+  const taxonomy = editorSectionTaxonomy[section] ?? { category: "场景编辑器", label: sectionLabels[section] ?? section };
   return <main className="editor-shell">
     <aside className="editor-nav">
-      <div className="editor-nav-header"><Link className="editor-nav-back" to={`/scenarios/${scenarioId}`} onClick={(event) => { if (hasUnsavedChanges) { event.preventDefault(); guardedNavigate(`/scenarios/${scenarioId}`); } }}><span aria-hidden="true">←</span> 返回场景</Link><div className="editor-nav-identity"><p>SCENARIO EDITOR</p><h2>当前草稿</h2><span>Working copy</span></div></div>
-      <nav className="editor-section-nav" aria-label="编辑器导航">{sectionGroups.map((group) => <div className="editor-nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => <Link className={item === section ? "active" : ""} key={item} to={`/scenarios/${scenarioId}/edit/${item}`} onClick={(event) => { if (hasUnsavedChanges) { event.preventDefault(); guardedNavigate(`/scenarios/${scenarioId}/edit/${item}`); } }}>{sectionLabels[item] ?? item}</Link>)}</div>)}</nav>
+      <div className="editor-nav-header"><div className="editor-nav-identity"><p>SCENARIO EDITOR</p><h2>当前草稿</h2></div></div>
+      <nav className="editor-section-nav" aria-label="编辑器导航">{editorTaxonomyGroups.map((group) => <div className="editor-nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => <Link className={item === section ? "active" : ""} key={item} to={`/scenarios/${scenarioId}/edit/${item}`} onClick={(event) => { if (hasUnsavedChanges) { event.preventDefault(); guardedNavigate(`/scenarios/${scenarioId}/edit/${item}`); } }}>{sectionLabels[item] ?? item}</Link>)}</div>)}</nav>
     </aside>
     <section className="editor-main">
-      <header className="editor-toolbar"><div className="editor-toolbar-context"><p className="eyebrow">场景编辑器</p><div className="editor-breadcrumb"><span>场景</span><span aria-hidden="true">/</span><strong>{sectionLabels[section] ?? section}</strong>{selected && <><span aria-hidden="true">/</span><span>{objectDisplayValue(selected.value, selected.name)}</span></>}{selectedCollectionItem && <><span aria-hidden="true">/</span><span>{selectedCollectionItem.title}</span></>}</div><p className="editor-toolbar-subtitle">{selected ? `${kindLabels[selected.kind] ?? selected.kind} · 结构化字段` : selectedCollectionItem ? `${selectedCollectionItem.collection} · 集合项详情` : `编辑 ${sectionLabels[section] ?? section} 配置`}</p></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span><button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={() => discardWorkingCopy()}>放弃修改</button><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button></div></header>
+      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span><button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={() => discardWorkingCopy()}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button></div></header>
       {message && <div className="conflict-banner"><p>{message}</p>{saveState === "CONFLICT" && <button type="button" className="editor-button editor-button-secondary" onClick={() => void reloadServerDraft()}>重新加载服务器草稿</button>}</div>}
       <div className={`editor-columns${inspectorOpen ? "" : " inspector-collapsed"}`}>
         <aside className="object-list object-panel">

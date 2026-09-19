@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
 import { EditorPage } from "./pages/EditorPage";
+import { editorSectionTaxonomy } from "./ui";
 
 vi.mock("./api", () => ({
   ApiError: class ApiError extends Error {
@@ -84,6 +85,35 @@ function expectSection({ heading, item, kind, count, createButton }: { heading: 
 }
 
 describe("Editor section state ownership", () => {
+  it("uses the central taxonomy for the two-level editor heading without helper copy", async () => {
+    expect(editorSectionTaxonomy).toMatchObject({
+      overview: { category: "场景基础", label: "概览" },
+      "node-types": { category: "世界模型", label: "节点类型" },
+      "world-entities": { category: "世界模型", label: "世界实体" },
+      relations: { category: "世界模型", label: "关系" },
+      resources: { category: "世界模型", label: "资源定义" },
+      roles: { category: "参与者与交互", label: "角色" },
+      actors: { category: "参与者与交互", label: "参与者" },
+      interactions: { category: "参与者与交互", label: "交互" },
+      actions: { category: "行动系统", label: "行动" },
+      rules: { category: "行动系统", label: "规则" },
+      objectives: { category: "目标系统", label: "目标" },
+      "derived-states": { category: "目标系统", label: "派生状态" },
+      "public-knowledge": { category: "公开信息", label: "公共知识" },
+      "public-references": { category: "公开信息", label: "公共引用" },
+    });
+
+    renderEditor();
+    const heading = await screen.findByTestId("editor-taxonomy-heading");
+    expect(heading).toHaveTextContent("公开信息/公共引用");
+    expect(screen.queryByText("Working copy")).not.toBeInTheDocument();
+    expect(document.querySelector(".editor-toolbar-subtitle")).not.toBeInTheDocument();
+    expect(screen.queryByText("编辑 公共引用 配置")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("link", { name: "资源定义" }));
+    await waitFor(() => expect(screen.getByTestId("editor-taxonomy-heading")).toHaveTextContent("世界模型/资源定义"));
+  });
+
   it("derives master list, selection, and create affordance from every active section", async () => {
     renderEditor();
 

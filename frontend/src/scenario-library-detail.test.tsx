@@ -1,10 +1,12 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 import { api } from "./api";
+import { App } from "./App";
+import { NewScenarioPage } from "./pages/NewScenarioPage";
 import { ScenarioDetailPage } from "./pages/ScenarioDetailPage";
 import { ScenarioLibraryPage } from "./pages/ScenarioLibraryPage";
 import type { Draft, ScenarioSummary, ScenarioVersion } from "./types";
@@ -74,7 +76,7 @@ afterEach(() => {
 });
 
 describe("Scenario Library and Detail presentation", () => {
-  it("renders every scenario as a compact single-column row with right-aligned actions", async () => {
+  it("renders every scenario as one accessible link to Scenario Detail without legacy actions", async () => {
     vi.spyOn(api, "scenarios").mockResolvedValue([scenario, secondScenario]);
 
     renderWithRouter(<ScenarioLibraryPage />, ["/scenarios"]);
@@ -82,42 +84,55 @@ describe("Scenario Library and Detail presentation", () => {
     const list = await screen.findByTestId("scenario-library-list");
     expect(list).toHaveClass("scenario-list");
     expect(screen.getAllByTestId(/scenario-row-/)).toHaveLength(2);
+    expect(screen.getByRole("link", { name: "新建场景" })).toHaveAttribute("href", "/scenarios/new");
     expect(screen.getByText(scenario.name)).toBeVisible();
     expect(screen.getByText("已发布版本 14")).toBeVisible();
-    expect(within(screen.getByTestId("scenario-row-scenario-1")).getByText("当前草稿修订号：14")).toBeVisible();
-    expect(within(screen.getByTestId("scenario-row-scenario-1")).getByRole("link", { name: "查看场景" })).toHaveAttribute("href", "/scenarios/scenario-1");
-    expect(screen.getByTestId("presentation-settings-link-scenario-1")).toHaveAttribute("href", "/scenarios/scenario-1/presentation");
-    expect(screen.getByRole("button", { name: "直接开始测试" })).toBeVisible();
+    const firstRow = screen.getByTestId("scenario-row-scenario-1");
+    expect(within(firstRow).getByText("当前草稿修订号：14")).toBeVisible();
+    expect(firstRow).toHaveAttribute("href", "/scenarios/scenario-1");
+    expect(firstRow.tagName).toBe("A");
+    expect(screen.queryByRole("button", { name: "直接开始测试" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "界面设置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "查看场景" })).not.toBeInTheDocument();
     expect(screen.getByTestId("scenario-row-scenario-2")).toHaveTextContent("医疗应急演练");
     expect(screen.getByTestId("scenario-row-scenario-2")).not.toHaveTextContent("直接开始测试");
   });
 
-  it("keeps direct test behavior and navigates to the created game", async () => {
+  it("keeps creation in the Scenario Library heading and removes it from global navigation", async () => {
     vi.spyOn(api, "scenarios").mockResolvedValue([scenario]);
-    vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue("00000000-0000-0000-0000-000000000001");
-    const createGame = vi.spyOn(api, "createGame").mockResolvedValue({
-      id: "game-1",
-      scenario_id: scenario.id,
-      scenario_name: scenario.name,
-      scenario_version_id: version.id,
-      scenario_version_number: version.version_number,
-      scenario_content_hash: version.content_hash,
-      status: "ACTIVE",
-      runtime_revision: 1,
-      is_checkpoint: false,
-      checkpointed_from_game_instance_id: null,
-      checkpoint_source_runtime_revision: null,
-      inherited_task_count: 0,
-      active_task_id: null,
-      created_at: scenario.created_at,
-      updated_at: scenario.updated_at,
-    });
+    renderWithRouter(<App />, ["/scenarios"]);
 
+    await screen.findByTestId("scenario-library-list");
+    const globalNavigation = within(screen.getByRole("banner")).getByRole("navigation");
+    expect(within(globalNavigation).getByRole("link", { name: "场景库" })).toBeVisible();
+    expect(within(globalNavigation).getByRole("link", { name: "游戏" })).toBeVisible();
+    expect(within(globalNavigation).queryByRole("link", { name: "新建场景" })).not.toBeInTheDocument();
+    expect(within(screen.getByRole("main")).getByRole("link", { name: "新建场景" })).toHaveClass("primary-button");
+  });
+
+  it("provides a top-right return from scenario creation to the Scenario Library", async () => {
+    vi.spyOn(api, "examples").mockResolvedValue([]);
+    renderWithRouter(
+      <Routes>
+        <Route path="/scenarios/new" element={<NewScenarioPage />} />
+        <Route path="/scenarios" element={<div>Scenario Library</div>} />
+      </Routes>,
+      ["/scenarios/new"],
+    );
+
+    const returnLink = screen.getByRole("link", { name: "返回场景库" });
+    expect(returnLink).toHaveAttribute("href", "/scenarios");
+    expect(returnLink).toHaveClass("action-button-centered");
+    expect(returnLink.closest(".page-heading")).toHaveClass("new-scenario-heading");
+    fireEvent.click(returnLink);
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/scenarios"));
+  });
+
+  it("navigates from the whole Scenario row to its Detail route", async () => {
+    vi.spyOn(api, "scenarios").mockResolvedValue([scenario]);
     renderWithRouter(<ScenarioLibraryPage />, ["/scenarios"]);
-    (await screen.findByRole("button", { name: "直接开始测试" })).click();
-
-    await waitFor(() => expect(createGame).toHaveBeenCalledWith(version.id, "00000000-0000-0000-0000-000000000001"));
-    expect(screen.getByTestId("location")).toHaveTextContent("/games/game-1");
+    fireEvent.click(await screen.findByTestId("scenario-row-scenario-1"));
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/scenarios/scenario-1"));
   });
 
   it("places a stable library return link beside the edit action without changing history controls", async () => {
@@ -134,8 +149,17 @@ describe("Scenario Library and Detail presentation", () => {
 
     await screen.findByText(scenario.name);
     expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveAttribute("href", "/scenarios/scenario-1/edit/overview");
+    expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveClass("primary-button");
     expect(screen.getByTestId("presentation-settings-link")).toHaveAttribute("href", "/scenarios/scenario-1/presentation");
-    expect(screen.getByRole("link", { name: "返回场景库" })).toHaveAttribute("href", "/scenarios");
+    expect(screen.getByTestId("presentation-settings-link")).toHaveClass("primary-button");
+    expect(screen.queryByText("适用于此场景的所有版本和游戏实例")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回场景库" })).toHaveClass("navigation-away-button");
+    expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveClass("scenario-detail-action-button");
+    expect(screen.getByTestId("presentation-settings-link")).toHaveClass("scenario-detail-action-button");
+    expect(screen.getByRole("link", { name: "返回场景库" })).toHaveClass("scenario-detail-action-button");
+    expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveClass("action-button-centered");
+    expect(screen.getByTestId("presentation-settings-link")).toHaveClass("action-button-centered");
+    expect(screen.getByRole("link", { name: "返回场景库" })).toHaveClass("action-button-centered");
     expect(screen.getByText("版本历史")).toBeVisible();
     expect(screen.getByText("版本 14")).toBeVisible();
 

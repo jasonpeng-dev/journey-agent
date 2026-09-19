@@ -1,19 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { ApiError, api } from "../api";
 import { PresentationSettingsPanel } from "../components/PresentationSettingsPanel";
 import {
   clonePresentationProfile,
+  defaultPresentationProfile,
   PRESENTATION_PROFILE_REFRESH_INTERVAL_MS,
+  resolvePresentationProfilePreview,
 } from "../presentationPolicy";
 import type {
   PresentationProfileDocument,
   PresentationProfileResponse,
 } from "../types";
+import { useUnsavedChangesGuard } from "../useUnsavedChangesGuard";
 
 type SaveState = "CLEAN" | "DIRTY" | "SAVING" | "CONFLICT" | "ERROR";
+
+const presentationStatusLabels: Record<string, string> = {
+  compact: "紧凑",
+  standard: "标准",
+  detailed: "详细",
+  COMPACT: "紧凑",
+  STANDARD: "标准",
+  DETAILED: "详细",
+};
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "请求失败，请稍后重试。";
@@ -21,6 +33,7 @@ function errorMessage(error: unknown): string {
 
 export function PresentationSettingsPage() {
   const { scenarioId = "" } = useParams();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const scenario = useQuery({
     queryKey: ["scenario", scenarioId],
@@ -96,6 +109,8 @@ export function PresentationSettingsPage() {
     ? saveState
     : saveMutationPendingPlaceholder(saveState, dirty);
 
+  useUnsavedChangesGuard(dirty, "存在未保存的界面设置修改，离开后将丢失。确定离开吗？");
+
   const setWorking = (next: PresentationProfileDocument) => {
     setWorkingProfile(next);
     setSaveState((current) => current === "CONFLICT" ? current : "DIRTY");
@@ -107,6 +122,11 @@ export function PresentationSettingsPage() {
     setSavedProfile(result.data);
     setWorkingProfile(clonePresentationProfile(result.data.profile));
     setSaveState("CLEAN");
+  };
+
+  const returnToScenario = () => {
+    if (dirty && !window.confirm("存在未保存的界面设置修改，离开后将丢失。确定返回场景详情吗？")) return;
+    navigate(`/scenarios/${scenarioId}`);
   };
 
   const saveMutation = useMutation({
@@ -148,20 +168,32 @@ export function PresentationSettingsPage() {
   if (!scenario.data || !workingProfile || !savedProfile) {
     return <main className="page"><p>{scenario.error || presentation.error ? "无法加载界面设置。" : "正在加载界面设置……"}</p></main>;
   }
+  const effectiveProfile = resolvePresentationProfilePreview(workingProfile, savedProfile.revision);
 
   return (
     <main className="page presentation-settings-page">
-      <div className="page-heading">
-        <div>
+      <header className="presentation-page-header">
+        <div className="presentation-page-title" data-testid="presentation-page-title">
           <p className="eyebrow">Scenario presentation</p>
           <h1>界面设置</h1>
-          <p className="muted">{scenario.data.name} · 只调整安全信息的排列与密度，不修改场景、知识或 Agent 行为。</p>
         </div>
-        <div className="presentation-page-actions">
-          <span className={`save-state ${effectiveState.toLowerCase()}`} data-testid="presentation-save-state">{effectiveState}</span>
-          <span className="presentation-revision">当前修订号：{savedProfile.revision}</span>
+        <div className="presentation-page-summary" data-testid="presentation-page-summary">
+          <span className="presentation-scenario-badge">{scenario.data.name}</span>
+          <div className="presentation-page-actions">
+            <div className="presentation-page-status">
+              <span>当前：{presentationStatusLabels[effectiveProfile.template]} / {presentationStatusLabels[effectiveProfile.density]}</span>
+              <span className="presentation-revision">修订 {savedProfile.revision}</span>
+              <span className={`save-state ${effectiveState.toLowerCase()}`} data-testid="presentation-save-state">{effectiveState}</span>
+            </div>
+            <div className="presentation-page-action-buttons">
+              <button type="button" className="primary-button action-button-centered" data-testid="presentation-save-button" disabled={!dirty || archived || saveMutation.isPending || restoreMutation.isPending || saveState === "CONFLICT"} onClick={() => saveMutation.mutate()}>{saveMutation.isPending ? "正在保存……" : "保存"}</button>
+              <button type="button" className="secondary-button action-button-centered" data-testid="presentation-restore-default-button" disabled={archived || saveMutation.isPending || restoreMutation.isPending} onClick={() => setWorking(defaultPresentationProfile())}>恢复默认设置</button>
+              <button type="button" className="secondary-button action-button-centered" data-testid="presentation-discard-button" disabled={!dirty || saveMutation.isPending || restoreMutation.isPending} onClick={() => { setWorkingProfile(clonePresentationProfile(savedProfile.profile)); setSaveState("CLEAN"); }}>放弃修改</button>
+              <button type="button" className="secondary-button navigation-away-button action-button-centered" data-testid="presentation-return-button" disabled={saveMutation.isPending || restoreMutation.isPending} onClick={returnToScenario}>返回场景详情</button>
+            </div>
+          </div>
         </div>
-      </div>
+      </header>
 
       {(saveMutation.error || restoreMutation.error || saveState === "CONFLICT") && (
         <div className="presentation-alert" data-testid="presentation-save-error">
@@ -176,14 +208,6 @@ export function PresentationSettingsPage() {
 
       <PresentationSettingsPanel profile={workingProfile} onChange={setWorking} disabled={archived || saveMutation.isPending || restoreMutation.isPending} />
 
-      <div className="presentation-workstation-footer">
-        <div className="presentation-footer-links">
-          <Link className="secondary-button" to={`/scenarios/${scenarioId}`}>返回场景详情</Link>
-          <button type="button" className="secondary-button" disabled={!dirty || saveMutation.isPending || restoreMutation.isPending} onClick={() => { setWorkingProfile(clonePresentationProfile(savedProfile.profile)); setSaveState("CLEAN"); }}>放弃本地修改</button>
-        </div>
-        <button type="button" className="primary-button" data-testid="presentation-save-button" disabled={!dirty || archived || saveMutation.isPending || restoreMutation.isPending || saveState === "CONFLICT"} onClick={() => saveMutation.mutate()}>{saveMutation.isPending ? "正在保存……" : "保存界面设置"}</button>
-      </div>
-
       <section className="presentation-history" data-testid="presentation-history">
         <div className="presentation-card-heading"><div><p className="eyebrow">Revision history</p><h2>历史版本</h2></div><span className="presentation-effective">恢复会生成新的当前修订</span></div>
         {history.isLoading && <p className="muted">正在加载历史……</p>}
@@ -197,6 +221,10 @@ export function PresentationSettingsPage() {
           ))}
         </div>
       </section>
+      <div className="presentation-bottom-notes" data-testid="presentation-bottom-notes">
+        <span>只调整安全信息的排列与密度，不修改场景、知识或 Agent 行为。</span>
+        <span>保存后的界面设置适用于此场景的所有版本和游戏实例。</span>
+      </div>
     </main>
   );
 }
