@@ -2232,6 +2232,86 @@ export function MissionLogPanel({ children }: { children: ReactNode }) {
   );
 }
 
+type GamePresentationSettingsModalProps = {
+  scenarioName: string;
+  savedProfile: PresentationProfileResponse | null;
+  workingProfile: PresentationProfileDocument | null;
+  saveState: "CLEAN" | "DIRTY" | "SAVING" | "CONFLICT" | "ERROR";
+  loading: boolean;
+  loadError: boolean;
+  saveError: boolean;
+  disabled: boolean;
+  onChange: (profile: PresentationProfileDocument) => void;
+  onReturnPreview: () => void;
+  onDiscard: () => void;
+  onSave: () => void;
+  onReload: () => void;
+};
+
+export function GamePresentationSettingsModal({
+  scenarioName,
+  savedProfile,
+  workingProfile,
+  saveState,
+  loading,
+  loadError,
+  saveError,
+  disabled,
+  onChange,
+  onReturnPreview,
+  onDiscard,
+  onSave,
+  onReload,
+}: GamePresentationSettingsModalProps) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onReturnPreview();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onReturnPreview]);
+
+  return (
+    <div className="presentation-modal-overlay" data-testid="game-presentation-modal-overlay">
+      <section aria-labelledby="game-presentation-modal-title" aria-modal="true" className="presentation-modal" data-testid="game-presentation-modal" role="dialog">
+        <header className="presentation-modal-heading">
+          <div>
+            <p className="eyebrow">Live preview</p>
+            <h2 id="game-presentation-modal-title">界面设置</h2>
+            <p className="muted">{scenarioName}</p>
+          </div>
+          <div className="presentation-modal-status">
+            <span className={`save-state ${saveState.toLowerCase()}`} data-testid="game-presentation-save-state">{saveState}</span>
+            {savedProfile && <span>修订 {savedProfile.revision} · {savedProfile.profile.template}</span>}
+          </div>
+        </header>
+        <div className="presentation-modal-body">
+          <p className="presentation-scope-notice">保存后将应用于此场景的所有版本和游戏实例。</p>
+          {loading && <p className="muted">正在加载当前 PresentationProfile……</p>}
+          {loadError && <p className="error">无法加载界面设置。</p>}
+          {workingProfile && (
+            <PresentationSettingsPanel profile={workingProfile} compact onChange={onChange} disabled={disabled} />
+          )}
+          {(saveError || saveState === "CONFLICT") && (
+            <p className="error">
+              {saveState === "CONFLICT"
+                ? <><span>保存冲突：服务器修订已变化。</span> <button type="button" onClick={onReload}>重新加载服务器版本</button></>
+                : "保存失败，请稍后重试。"}
+            </p>
+          )}
+        </div>
+        <footer className="presentation-modal-footer">
+          <button type="button" className="secondary-button" onClick={onReturnPreview}>返回预览</button>
+          <div>
+            <button type="button" className="secondary-button presentation-discard-button" disabled={disabled || saveState === "CLEAN"} onClick={onDiscard}>放弃修改</button>
+            <button type="button" className="primary-button" disabled={disabled || saveState !== "DIRTY"} onClick={onSave}>{saveState === "SAVING" ? "正在保存……" : "保存并应用"}</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export function GamePage() {
   const { gameId = "" } = useParams();
   const queryClient = useQueryClient();
@@ -2244,7 +2324,7 @@ export function GamePage() {
   const [continuousExecuting, setContinuousExecuting] = useState(false);
   const [developerOpen, setDeveloperOpen] = useState(false);
   const [developerToken, setDeveloperToken] = useState("");
-  const [presentationDrawerOpen, setPresentationDrawerOpen] = useState(false);
+  const [presentationModalOpen, setPresentationModalOpen] = useState(false);
   const [savedPresentationProfile, setSavedPresentationProfile] = useState<PresentationProfileResponse | null>(null);
   const [workingPresentationProfile, setWorkingPresentationProfile] = useState<PresentationProfileDocument | null>(null);
   const [presentationSaveState, setPresentationSaveState] = useState<"CLEAN" | "DIRTY" | "SAVING" | "CONFLICT" | "ERROR">("CLEAN");
@@ -2398,7 +2478,7 @@ export function GamePage() {
   const presentationProfileQuery = useQuery({
     queryKey: ["presentation", presentationScenarioId],
     queryFn: () => api.presentation(presentationScenarioId),
-    enabled: presentationDrawerOpen && Boolean(presentationScenarioId),
+    enabled: presentationModalOpen && Boolean(presentationScenarioId),
     refetchOnWindowFocus: false,
   });
   const presentationRevisionQuery = useQuery({
@@ -2449,10 +2529,10 @@ export function GamePage() {
       return;
     }
     void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
-    if (presentationDrawerOpen) void refetchPresentationProfile();
+    if (presentationModalOpen) void refetchPresentationProfile();
   }, [
     gameId,
-    presentationDrawerOpen,
+    presentationModalOpen,
     refetchPresentationProfile,
     presentationRevisionQuery.data?.revision,
     queryClient,
@@ -2488,9 +2568,28 @@ export function GamePage() {
       void queryClient.invalidateQueries({ queryKey: ["presentation", presentationScenarioId] });
       void queryClient.invalidateQueries({ queryKey: ["presentation-revision", presentationScenarioId] });
       void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
+      setPresentationModalOpen(false);
     },
     onError: (error) => setPresentationSaveState(error instanceof ApiError && error.status === 409 ? "CONFLICT" : "ERROR"),
   });
+
+  const presentationDirty = Boolean(
+    savedPresentationProfile
+    && workingPresentationProfile
+    && JSON.stringify(savedPresentationProfile.profile) !== JSON.stringify(workingPresentationProfile),
+  );
+  const effectivePresentationSaveState = ["SAVING", "CONFLICT", "ERROR"].includes(presentationSaveState)
+    ? presentationSaveState
+    : presentationDirty ? "DIRTY" : "CLEAN";
+  useEffect(() => {
+    if (!presentationDirty) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [presentationDirty]);
 
   const loadedTask = play.data?.current_task ?? null;
   const resolvingGoal = submit.isPending || pendingGoal !== null;
@@ -2633,29 +2732,33 @@ export function GamePage() {
         <div><span>实例</span><strong>{game.id.slice(0, 8)}</strong></div>
         <div><span>精确版本</span><strong>版本 {game.scenario_version_number}</strong></div>
         <div><span>运行状态</span><strong className={`console-pill ${game.status === "ACTIVE" ? "success" : "neutral"}`}>{uiLabel(game.status)}</strong></div>
-        <div className="scenario-strip-action"><span>界面</span><button type="button" data-testid="game-presentation-settings-button" onClick={() => setPresentationDrawerOpen((open) => !open)}>{presentationDrawerOpen ? "关闭设置" : "界面设置"}</button></div>
+        <div className="scenario-strip-action"><span>界面</span>{presentationDirty && !presentationModalOpen && <span className="presentation-preview-indicator" data-testid="game-presentation-preview-indicator">预览中</span>}<button type="button" data-testid="game-presentation-settings-button" onClick={() => setPresentationModalOpen(true)}>界面设置</button></div>
       </section>
-      {presentationDrawerOpen && <aside className="presentation-drawer" data-testid="game-presentation-drawer">
-        <header className="presentation-drawer-heading"><div><p className="eyebrow">Live preview</p><h2>界面设置</h2></div><button type="button" onClick={() => setPresentationDrawerOpen(false)}>关闭</button></header>
-        {presentationProfileQuery.isLoading && <p className="muted">正在加载当前 PresentationProfile……</p>}
-        {presentationProfileQuery.error && <p className="error">无法加载界面设置。</p>}
-        {workingPresentationProfile && <PresentationSettingsPanel
-          profile={workingPresentationProfile}
-          compact
+      {presentationModalOpen && (
+        <GamePresentationSettingsModal
+          scenarioName={game.scenario_name}
+          savedProfile={savedPresentationProfile}
+          workingProfile={workingPresentationProfile}
+          saveState={effectivePresentationSaveState}
+          loading={presentationProfileQuery.isLoading}
+          loadError={Boolean(presentationProfileQuery.error)}
+          saveError={Boolean(saveGamePresentation.error)}
+          disabled={saveGamePresentation.isPending || liveGame.status !== "ACTIVE"}
           onChange={(next) => {
             setWorkingPresentationProfile(next);
             setPresentationSaveState((current) => current === "CONFLICT" ? current : "DIRTY");
           }}
-          disabled={saveGamePresentation.isPending || liveGame.status !== "ACTIVE"}
-        />}
-        {savedPresentationProfile && workingPresentationProfile && <footer className="presentation-drawer-footer">
-          <span className={`save-state ${presentationSaveState.toLowerCase()}`} data-testid="game-presentation-save-state">{presentationSaveState}</span>
-          <span>修订 {savedPresentationProfile.revision}</span>
-          <button type="button" disabled={saveGamePresentation.isPending || liveGame.status !== "ACTIVE"} onClick={() => { setWorkingPresentationProfile(clonePresentationProfile(savedPresentationProfile.profile)); setPresentationSaveState("CLEAN"); }}>放弃修改</button>
-          <button type="button" className="primary-button" disabled={saveGamePresentation.isPending || presentationSaveState !== "DIRTY" || liveGame.status !== "ACTIVE"} onClick={() => saveGamePresentation.mutate()}>{saveGamePresentation.isPending ? "正在保存……" : "保存并刷新当前游戏"}</button>
-        </footer>}
-        {(saveGamePresentation.error || presentationSaveState === "CONFLICT") && <p className="error">{presentationSaveState === "CONFLICT" ? <><span>保存冲突：服务器修订已变化。</span> <button type="button" onClick={() => void reloadGamePresentation()}>重新加载服务器版本</button></> : "保存失败，请稍后重试。"}</p>}
-      </aside>}
+          onReturnPreview={() => setPresentationModalOpen(false)}
+          onDiscard={() => {
+            if (!savedPresentationProfile) return;
+            setWorkingPresentationProfile(clonePresentationProfile(savedPresentationProfile.profile));
+            setPresentationSaveState("CLEAN");
+            setPresentationModalOpen(false);
+          }}
+          onSave={() => saveGamePresentation.mutate()}
+          onReload={() => void reloadGamePresentation()}
+        />
+      )}
       <section className="command-grid">
         <aside className="command-panel world-panel">
           <header className="command-panel-heading"><div><p>01 · 世界</p><h1>已知世界</h1></div><span className="console-pill success">玩家可见</span></header>
