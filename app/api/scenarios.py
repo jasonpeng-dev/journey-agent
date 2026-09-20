@@ -26,6 +26,7 @@ from app.api.schemas.phase_d import (
     DraftTransformRequest,
     DraftTransformResponse,
     DraftValidationResponse,
+    InitializationPreviewRequest,
     PresentationProfileHistoryResponse,
     PresentationProfileReplaceRequest,
     PresentationProfileResponse,
@@ -54,6 +55,7 @@ from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersio
 from app.infrastructure.db.session import get_db
 from app.scenarios.authoring import ReferenceEdge, locator_for_path, reference_index
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
+from app.scenarios.initialization import bootstrap_parity, initialization_projection
 from app.scenarios.validation import ScenarioValidationIssue
 from app.services.draft_sandbox import DraftSandboxService
 from app.services.presentation_profiles import (
@@ -210,6 +212,40 @@ def validate_draft(
         )
     except ScenarioLifecycleError as exc:
         db.rollback()
+        _raise_http(exc)
+
+
+@router.post(
+    "/scenarios/{scenario_id}/draft/initialization-preview",
+    response_model=dict[str, Any],
+)
+def preview_initialization(
+    scenario_id: UUID,
+    request: InitializationPreviewRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Project a working copy without saving, publishing, or creating a Game."""
+
+    service = ScenarioService(db)
+    try:
+        draft = service.get_draft(scenario_id)
+        if draft.revision != request.expected_revision:
+            raise ScenarioLifecycleError(
+                "SCENARIO_DRAFT_CONFLICT",
+                "The Scenario Draft revision changed before initialization preview",
+            )
+        definition = ScenarioDefinitionV2.model_validate(request.definition_document)
+        scenario = service.get_scenario(scenario_id)
+        published = None
+        if scenario.current_published_version_id is not None:
+            version = service.get_version(scenario_id, scenario.current_published_version_id)
+            published = ScenarioDefinitionV2.model_validate(version.snapshot_document)
+        return {
+            "revision": draft.revision,
+            "projection": initialization_projection(definition, request.definition_document),
+            "parity": bootstrap_parity(definition, published),
+        }
+    except ScenarioLifecycleError as exc:
         _raise_http(exc)
 
 

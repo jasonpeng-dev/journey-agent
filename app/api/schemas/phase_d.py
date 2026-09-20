@@ -243,6 +243,12 @@ class DraftRevisionRequest(ApiModel):
     expected_revision: int = Field(ge=1)
 
 
+class InitializationPreviewRequest(DraftRevisionRequest):
+    """A read-only projection request for the browser working document."""
+
+    definition_document: dict[str, Any]
+
+
 class DraftPublishRequest(DraftRevisionRequest):
     expected_content_hash: str | None = Field(default=None, min_length=64, max_length=64)
 
@@ -976,6 +982,7 @@ __all__ = [
     "GoalSubmissionRequest",
     "GoalSubmissionResponse",
     "GoalSubmissionStatus",
+    "InitializationPreviewRequest",
     "MissionRoadmapResponse",
     "MissionRoadmapStageResponse",
     "NewGameRequest",
