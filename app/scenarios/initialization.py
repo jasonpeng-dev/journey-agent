@@ -601,12 +601,34 @@ def initialization_projection(
 
     pools = [item for item in findings if item.identity.startswith("pool:")]
     region_items = [item for item in findings if item.identity.startswith("region-knowledge:")]
+    pool_by_identity = {
+        f"pool:{pool.pool_key}:{pool.resource_key}:{pool.region_key or 'global'}": pool
+        for pool in resource_pool_initial_states(definition)
+    }
+
+    def pool_context(item: BootstrapFinding) -> dict[str, object]:
+        pool = pool_by_identity.get(item.identity)
+        if pool is None:
+            return {}
+        return {
+            "pool_key": pool.pool_key,
+            "resource_key": pool.resource_key,
+            "region_key": pool.region_key,
+            "facility_key": pool.facility_key,
+        }
+
     resource_groups = [
         {
             "id": "resource-pools",
             "label": "Resource pools",
             "items": [
-                entity(item.identity, item.label, item.locator, [item.identity])
+                entity(
+                    item.identity,
+                    item.label,
+                    item.locator,
+                    [item.identity],
+                    context=pool_context(item),
+                )
                 for item in pools
                 if item.source == BootstrapValueSource.EXPLICIT
             ],
@@ -615,7 +637,13 @@ def initialization_projection(
             "id": "region-resource-knowledge",
             "label": "Region resource knowledge",
             "items": [
-                entity(item.identity, item.label, item.locator, [item.identity])
+                entity(
+                    item.identity,
+                    item.label,
+                    item.locator,
+                    [item.identity],
+                    context={"region_key": item.locator.get("object_key")},
+                )
                 for item in region_items
             ],
         },
@@ -623,7 +651,14 @@ def initialization_projection(
             "id": "compatibility-resources",
             "label": "Compatibility sources",
             "items": [
-                entity(item.identity, item.label, item.locator, [item.identity], readonly=True)
+                entity(
+                    item.identity,
+                    item.label,
+                    item.locator,
+                    [item.identity],
+                    readonly=True,
+                    context=pool_context(item),
+                )
                 for item in pools
                 if item.source == BootstrapValueSource.LEGACY_FALLBACK
             ],

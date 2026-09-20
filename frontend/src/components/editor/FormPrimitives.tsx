@@ -1,7 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 
 import { type ReferenceDomain } from "../../editor-registry";
-import { editorLabel, uiLabel } from "../../ui";
+import { displayEnumValue, editorLabel } from "../../ui";
 import { referenceOptions, type ReferenceOption } from "./ReferencePicker";
 import { fieldId } from "./FormUtils";
 
@@ -85,14 +85,15 @@ type SelectProps = Omit<FormFieldProps, "children"> & {
   onChange: (value: string) => void;
   options: readonly ReferenceOption[];
   placeholder?: string;
+  showMachineValue?: boolean;
 };
 
-export function OptionSelect({ value, onChange, options, label, path, help, error, machineValue, size = "standard", placeholder = "请选择…" }: SelectProps) {
+export function OptionSelect({ value, onChange, options, label, path, help, error, machineValue, size = "standard", placeholder = "请选择…", showMachineValue = true }: SelectProps) {
   const selected = typeof value === "string" ? value : "";
   return <FormField label={label} path={path} help={help} error={error} machineValue={machineValue} size={size}>
     <select className="editor-control" id={fieldId(path)} value={selected} onChange={(event) => onChange(event.target.value)}>
       <option value="">{placeholder}</option>
-      {options.map((option) => <option key={option.key} value={option.key}>{option.name} · {option.key}</option>)}
+      {options.map((option) => <option key={option.key} value={option.key}>{option.name}{showMachineValue ? ` · ${option.key}` : ""}</option>)}
       {selected && !options.some((option) => option.key === selected) && <option value={selected}>{selected}（当前引用无法解析）</option>}
     </select>
   </FormField>;
@@ -101,7 +102,7 @@ export function OptionSelect({ value, onChange, options, label, path, help, erro
 type EnumSelectProps = Omit<SelectProps, "options"> & { choices: readonly string[] };
 
 export function EnumSelect({ choices, ...props }: EnumSelectProps) {
-  return <OptionSelect {...props} options={choices.map((item) => ({ key: item, name: uiLabel(item) }))} />;
+  return <OptionSelect {...props} showMachineValue={false} options={choices.map((item) => ({ key: item, name: displayEnumValue("generic", item) }))} />;
 }
 
 type ReferencePickerProps = Omit<SelectProps, "options"> & {
@@ -244,7 +245,7 @@ export function AdvancedSection({ value, onChange, path, label, help, defaultExp
     }
   };
   return <section className={`advanced-json-field advanced-section${expanded ? " is-expanded" : ""}`}>
-    <button type="button" className="advanced-section-toggle" aria-expanded={expanded} aria-controls={panelId} onClick={() => setExpanded((current) => !current)}><span>{normalizedLabel(label)}</span><em>Advanced</em><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
+    <button type="button" className="advanced-section-toggle" aria-expanded={expanded} aria-controls={panelId} onClick={() => setExpanded((current) => !current)}><span>{normalizedLabel(label)}</span><em>高级结构</em><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
     {!expanded && <small className="typed-help">高级结构已折叠；未展开时保持原内容。</small>}
     {expanded && <div id={panelId} className="advanced-section-body"><label className="advanced-json-label" htmlFor={fieldId(path)}>{normalizedLabel(label)} JSON</label><textarea className="editor-control advanced-json-control" id={fieldId(path)} rows={Math.min(14, Math.max(4, text.split("\n").length))} value={text} onChange={(event) => setText(event.target.value)} onBlur={commit} />{help && <small className="typed-help">{help}</small>}{error && <small className="field-error" role="alert">{error}</small>}</div>}
   </section>;

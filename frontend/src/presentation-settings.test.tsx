@@ -107,14 +107,14 @@ describe("Presentation settings workstation", () => {
     expect(within(title).getByRole("heading", { name: "界面设置" })).toBeVisible();
     expect(within(summary).getByText(scenario.name)).toHaveClass("presentation-scenario-badge");
     expect(title.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(summary).getByTestId("presentation-save-state")).toHaveTextContent("CLEAN");
-    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("CLEAN");
+    expect(within(summary).getByTestId("presentation-save-state")).toHaveTextContent("未修改");
+    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("未修改");
     fireEvent.change(screen.getByTestId("presentation-template"), { target: { value: "compact" } });
-    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("DIRTY");
+    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("有未保存修改");
 
     fireEvent.click(screen.getByTestId("presentation-save-button"));
     await waitFor(() => expect(saved).toHaveBeenCalledWith("scenario-1", 2, expect.objectContaining({ template: "compact" })));
-    await waitFor(() => expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("CLEAN"));
+    await waitFor(() => expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("未修改"));
     expect(screen.getByText("修订 3")).toBeVisible();
   });
 
@@ -141,7 +141,7 @@ describe("Presentation settings workstation", () => {
     await screen.findByTestId("presentation-settings-panel");
     fireEvent.change(screen.getByTestId("presentation-template"), { target: { value: "detailed" } });
     fireEvent.click(screen.getByTestId("presentation-save-button"));
-    await waitFor(() => expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("CONFLICT"));
+    await waitFor(() => expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("存在冲突"));
     expect(screen.getByTestId("presentation-template")).toHaveValue("detailed");
   });
 
@@ -167,7 +167,7 @@ describe("Presentation settings workstation", () => {
       expect(screen.getByTestId(testId)).toHaveClass("action-button-centered");
     }
     fireEvent.click(screen.getByTestId("presentation-restore-default-button"));
-    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("CLEAN");
+    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("未修改");
 
     fireEvent.change(screen.getByTestId("presentation-template"), { target: { value: "compact" } });
     expect(screen.getByTestId("presentation-save-button")).toBeEnabled();
@@ -208,14 +208,14 @@ describe("Presentation settings workstation", () => {
 
     fireEvent.click(screen.getByTestId("presentation-restore-default-button"));
     expect(screen.getByTestId("presentation-template")).toHaveValue("standard");
-    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("DIRTY");
+    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("有未保存修改");
     expect(document.querySelector(".presentation-revision")).toHaveTextContent("修订 2");
     expect(saved).not.toHaveBeenCalled();
     expect(screen.getByTestId("settings-location")).toHaveTextContent("/scenarios/scenario-1/presentation");
 
     fireEvent.click(screen.getByTestId("presentation-discard-button"));
     expect(screen.getByTestId("presentation-template")).toHaveValue("detailed");
-    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("CLEAN");
+    expect(screen.getByTestId("presentation-save-state")).toHaveTextContent("未修改");
 
     fireEvent.click(screen.getByTestId("presentation-restore-default-button"));
     fireEvent.click(screen.getByTestId("presentation-save-button"));

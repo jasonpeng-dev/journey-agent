@@ -171,7 +171,7 @@ export function PresentationSettingsPanel({
   return (
     <div className={`presentation-settings-panel${compact ? " presentation-settings-panel--compact" : ""}`} data-testid="presentation-settings-panel">
       <section className="presentation-settings-card">
-        <div className="presentation-card-heading"><div><p className="eyebrow">PresentationProfile</p><h2>全局显示模板</h2></div><span className="presentation-effective">当前：{displayLabel(effective.template)} / {displayLabel(effective.density)}</span></div>
+        <div className="presentation-card-heading"><div><p className="eyebrow">显示配置</p><h2>全局显示模板</h2></div><span className="presentation-effective">当前：{displayLabel(effective.template)} / {displayLabel(effective.density)}</span></div>
         <div className="presentation-field-grid">
           <label className="presentation-field">
             <span>模板</span>
@@ -188,7 +188,7 @@ export function PresentationSettingsPanel({
       </section>
 
       <section className="presentation-settings-card">
-        <div className="presentation-card-heading"><div><p className="eyebrow">World entities</p><h2>世界与知识</h2></div><span className="presentation-effective">玩家边界不变</span></div>
+        <div className="presentation-card-heading"><div><p className="eyebrow">世界与知识</p><h2>世界与知识</h2></div><span className="presentation-effective">玩家边界不变</span></div>
         <div className="presentation-field-grid">
           <SelectField label="实体详情" testId="presentation-entity-detail" value={profile.world_entities?.entity_detail} values={PRESENTATION_OPTIONS.entityDetails} disabled={disabled} onChange={(value) => update("world_entities", "entity_detail", value)} />
           <SelectField label="知识层级" testId="presentation-knowledge-level" value={profile.world_entities?.knowledge_level} values={PRESENTATION_OPTIONS.knowledgeLevels} disabled={disabled} onChange={(value) => update("world_entities", "knowledge_level", value)} />
@@ -200,7 +200,7 @@ export function PresentationSettingsPanel({
       </section>
 
       <section className="presentation-settings-card">
-        <div className="presentation-card-heading"><div><p className="eyebrow">Actor team</p><h2>角色与团队</h2></div><span className="presentation-effective">仅显示安全字段</span></div>
+        <div className="presentation-card-heading"><div><p className="eyebrow">角色与团队</p><h2>角色与团队</h2></div><span className="presentation-effective">仅显示安全字段</span></div>
         <div className="presentation-actor-fields">
           <fieldset className="presentation-order"><legend>可见字段</legend><div className="presentation-checkbox-list">
             {actorFields.map((field) => <label key={field}><input type="checkbox" disabled={disabled} checked={visibleActorFields.includes(field)} onChange={(event) => {
@@ -215,7 +215,7 @@ export function PresentationSettingsPanel({
       </section>
 
       <section className="presentation-settings-card">
-        <div className="presentation-card-heading"><div><p className="eyebrow">Goal & execution</p><h2>目标、计划与时间线</h2></div><span className="presentation-effective">Agent 行为不变</span></div>
+        <div className="presentation-card-heading"><div><p className="eyebrow">目标与执行</p><h2>目标、计划与时间线</h2></div><span className="presentation-effective">智能体行为不变</span></div>
         <div className="presentation-field-grid">
           <SelectField label="目标路线图" testId="presentation-roadmap-detail" value={profile.goal_execution?.roadmap_detail} values={PRESENTATION_OPTIONS.entityDetails} disabled={disabled} onChange={(value) => update("goal_execution", "roadmap_detail", value)} />
           <SelectField label="计划默认展开" testId="presentation-plan-default" value={profile.goal_execution?.plan_default} values={PRESENTATION_OPTIONS.planDetails} disabled={disabled} onChange={(value) => update("goal_execution", "plan_default", value)} />

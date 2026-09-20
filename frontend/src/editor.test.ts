@@ -70,6 +70,11 @@ describe("editor draft helpers", () => {
     expect(referenceOptions(pickerDocument, "node")).toEqual([{ key: "central", name: "Central Node" }]);
   });
 
+  it("respects authored relation type names without changing their stable keys", () => {
+    const relationDocument = { world: { relation_types: [{ key: "supplies_power_to", name: "供电至" }] } };
+    expect(referenceOptions(relationDocument, "relation_type")).toEqual([{ key: "supplies_power_to", name: "供电至" }]);
+  });
+
   it("filters object lists by display name, stable key, and semantic kind", () => {
     const objects = sectionObjects({ world: { nodes: [{ key: "central", name: "Central Hospital", node_type_key: "facility" }, { key: "south_bridge", name: "South Bridge", node_type_key: "transport" }] } }, "world");
     expect(filterDraftObjects(objects, "hospital").map((item) => item.key)).toEqual(["central"]);

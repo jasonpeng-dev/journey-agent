@@ -229,9 +229,9 @@ describe("Editor section state ownership", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "初始化", level: 3 })).toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: /资源/ })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /资源/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Resource pools/ }));
+    fireEvent.click(screen.getByRole("button", { name: /资源池/ }));
     fireEvent.click(screen.getByRole("button", { name: /central_pool/ }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Resource pool · central_pool", level: 4 })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "中央区 · 救援物资", level: 4 })).toBeInTheDocument());
     expect(screen.getByLabelText(/数量/)).toBeInTheDocument();
     expect(screen.getByText("未修改")).toBeInTheDocument();
 
@@ -284,7 +284,7 @@ describe("Editor section state ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "验证当前草稿" }));
     fireEvent.click(await screen.findByText(/POOL_QUANTITY/));
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Resource pool · central_pool", level: 4 })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "中央区 · 救援物资", level: 4 })).toBeInTheDocument());
     expect(screen.getByLabelText(/数量/)).toBeInTheDocument();
   });
 
@@ -302,10 +302,10 @@ describe("Editor section state ownership", () => {
     renderEditor("/scenarios/scenario-1/edit/initialization");
     await waitFor(() => expect(screen.getByRole("button", { name: /资源/ })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /资源/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Resource pools/ }));
+    fireEvent.click(screen.getByRole("button", { name: /资源池/ }));
     await waitFor(() => expect(screen.getByRole("button", { name: /central_pool/ })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /central_pool/ }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Resource pool · central_pool", level: 4 })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "中央区 · 救援物资", level: 4 })).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "删除此资源池" }));
     expect(await screen.findByText("该集合项仍被其他配置引用，不能删除。请先移除相关引用。")).toBeInTheDocument();

@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { metadataForKind, rootFieldRegistry, type FieldMetadata } from "../editor-registry";
 import type { RootOwnerSelection } from "../editor-collections";
 import type { DraftObject, JsonObject } from "../editor";
-import { editorLabel, fieldLabel } from "../ui";
+import { displayEnumValue, editorLabel, fieldLabel } from "../ui";
 import {
   AdvancedSection,
   BooleanControl,
@@ -84,7 +84,7 @@ function FieldRow({ metadata, value, document, path, onChange }: { metadata: Fie
   const fieldPath = `${path}.${metadata.path}`;
   if (metadata.type === "json") return <AdvancedJsonField value={current} onChange={next} path={fieldPath} label={label} />;
   if (metadata.type === "enum") return <EnumSelect value={current} onChange={next as (value: string) => void} path={fieldPath} label={label} choices={metadata.enum ?? []} />;
-  if (metadata.type === "multi-enum") return <MultiValuePicker value={current} onChange={next as (value: string[]) => void} path={fieldPath} label={label} options={(metadata.enum ?? []).map((item) => ({ key: item, name: item }))} />;
+  if (metadata.type === "multi-enum") return <MultiValuePicker value={current} onChange={next as (value: string[]) => void} path={fieldPath} label={label} options={(metadata.enum ?? []).map((item) => ({ key: item, name: displayEnumValue("generic", item) }))} />;
   if (metadata.type === "reference") return <ReferencePicker value={current} onChange={next as (value: string) => void} domain={metadata.referenceDomain!} document={document} path={fieldPath} label={label} />;
   if (metadata.type === "multi-reference") return <MultiValuePicker value={current} onChange={next as (value: string[]) => void} path={fieldPath} label={label} options={referenceOptions(document, metadata.referenceDomain!)} />;
   if (metadata.type === "boolean") return <BooleanControl value={current} onChange={next} path={fieldPath} label={label} />;
@@ -101,10 +101,10 @@ function StringArrayEditor({ value, onChange, label, path }: { value: unknown; o
 function FactEditor({ value, document, path, initializationHref, onChange }: { value: JsonObject; document: JsonObject; path: string; initializationHref: string; onChange: (value: JsonObject) => void }) {
   const factType = typeof value.value_type === "string" ? value.value_type : "BOOLEAN";
   const allowed = Array.isArray(value.allowed_values) ? value.allowed_values : [];
-  return <article className="nested-editor"><header className="nested-object-header"><NestedObjectHeader typeLabel="FACT" identity={String(value.key ?? "未命名事实")} /></header><div className="typed-grid">
+return <article className="nested-editor"><header className="nested-object-header"><NestedObjectHeader typeLabel="FACT" identity={String(value.key ?? "未命名事实")} /></header><div className="typed-grid">
     {(["key", "name", "description"] as const).map((field) => <FieldRow key={field} metadata={{ path: field, type: field === "description" ? "textarea" : "text" }} value={value} document={document} path={path} onChange={onChange} />)}
     <FieldRow metadata={{ path: "value_type", type: "enum", enum: ["STRING", "ENUM", "INTEGER", "BOOLEAN"] }} value={value} document={document} path={path} onChange={onChange} />
-    <div className="bootstrap-handoff form-field-full"><span>开局 Truth / Knowledge</span><strong>{String(value.initial_value)} · {String(value.initial_visibility)}</strong><Link to={initializationHref}>前往初始化配置</Link></div>
+<div className="bootstrap-handoff form-field-full"><span>开局真实状态 / 玩家知识</span><strong>{String(value.initial_value)} · {displayEnumValue("visibility", String(value.initial_visibility ?? ""))}</strong><Link to={initializationHref}>前往初始化配置</Link></div>
     <FieldRow metadata={{ path: "presentation_role", type: "enum", enum: ["HEADER_PRIMARY", "HEADER_SECONDARY", "BODY_MAIN", "SUPPORTING", "REQUIREMENT_ONLY"] }} value={value} document={document} path={path} onChange={onChange} />
     {factType === "ENUM" && <AdvancedJsonField value={value.allowed_values ?? []} onChange={(next) => onChange({ ...value, allowed_values: next })} path={`${path}.allowed_values`} label="Allowed values" />}
     <ValueLabelList value={value.value_labels} valueType={factType} allowedValues={allowed} path={`${path}.value_labels`} onChange={(next) => onChange({ ...value, value_labels: next })} />
@@ -135,7 +135,7 @@ function EntityEditor({ entity, document, initializationHref, onChange, focusPat
       ? <StringArrayEditor key={field.path} value={nestedValue(value, field.path)} label={fieldLabel(field.path)} path={`${entity.kind}.${entity.key}.${field.path}`} onChange={(next) => onChange(withNestedValue(value, field.path, next))} />
       : <FieldRow key={field.path} metadata={field} value={value} document={document} path={`${entity.kind}.${entity.key}`} onChange={onChange} />)}
   </div>
-    {["node", "actor", "relation", "resource"].includes(entity.kind) && <div className="bootstrap-handoff"><span>开局配置由 Initialization Workspace 统一编辑</span><strong>{entity.kind === "node" ? `${String(value.initial_access)} · ${String(value.initial_visibility)}` : entity.kind === "actor" ? `${String(value.initial_node_key)} · ${String(value.command_reachability ?? "ONLINE")}` : entity.kind === "relation" ? String(value.initial_visibility ?? "VISIBLE") : `fallback ${String(value.initial_value)}`}</strong><Link to={`${initializationHref}?domain=${entity.kind === "node" ? "nodes" : entity.kind === "actor" ? "actors" : entity.kind === "relation" ? "relations" : "resources"}${entity.kind === "resource" ? "" : `&item=${encodeURIComponent(`${entity.kind}:${entity.key}`)}`}`}>前往初始化配置</Link></div>}
+{["node", "actor", "relation", "resource"].includes(entity.kind) && <div className="bootstrap-handoff"><span>开局配置由初始化工作区统一编辑</span><strong>{entity.kind === "node" ? `${displayEnumValue("access", String(value.initial_access ?? ""))} · ${displayEnumValue("visibility", String(value.initial_visibility ?? ""))}` : entity.kind === "actor" ? `${String(value.initial_node_key)} · ${displayEnumValue("reachability", String(value.command_reachability ?? "ONLINE"))}` : entity.kind === "relation" ? displayEnumValue("visibility", String(value.initial_visibility ?? "VISIBLE")) : `兼容回退 · ${String(value.initial_value)}`}</strong><Link to={`${initializationHref}?domain=${entity.kind === "node" ? "nodes" : entity.kind === "actor" ? "actors" : entity.kind === "relation" ? "relations" : "resources"}${entity.kind === "resource" ? "" : `&item=${encodeURIComponent(`${entity.kind}:${entity.key}`)}`}`}>前往初始化配置</Link></div>}
     {entity.kind === "node" && <FactList value={value.facts} document={document} path={`${entity.kind}.${entity.key}.facts`} initializationHref={`${initializationHref}?domain=nodes&item=${encodeURIComponent(`node:${entity.key}`)}`} onChange={(next) => onChange({ ...value, facts: next })} />}
     {metadata.nested?.map((nested) => <AdvancedJsonField key={nested} value={value[nested]} onChange={(next) => onChange({ ...value, [nested]: next })} path={`${entity.kind}.${entity.key}.${nested}`} label={fieldLabel(nested)} />)}
     <p className="typed-help">未在基础表单中展开的合法字段会保留在原始草稿中；复杂结构当前标记为高级结构，不会静默删除。</p>

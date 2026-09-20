@@ -2279,7 +2279,7 @@ export function GamePresentationSettingsModal({
           </div>
         </header>
         <div className="presentation-modal-body">
-          {loading && <p className="muted">正在加载当前 PresentationProfile……</p>}
+          {loading && <p className="muted">正在加载当前显示配置……</p>}
           {loadError && <p className="error">无法加载界面设置。</p>}
           {workingProfile && (
             <PresentationSettingsPanel profile={workingProfile} compact onChange={onChange} disabled={disabled} />
@@ -2550,7 +2550,7 @@ export function GamePage() {
   const saveGamePresentation = useMutation({
     mutationFn: () => {
       if (!savedPresentationProfile || !workingPresentationProfile) {
-        throw new Error("PresentationProfile 尚未加载");
+        throw new Error("显示配置尚未加载");
       }
       return api.savePresentation(
         presentationScenarioId,

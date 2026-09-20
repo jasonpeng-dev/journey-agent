@@ -14,6 +14,7 @@ import type {
   PresentationProfileDocument,
   PresentationProfileResponse,
 } from "../types";
+import { uiLabel } from "../ui";
 import { useUnsavedChangesGuard } from "../useUnsavedChangesGuard";
 
 type SaveState = "CLEAN" | "DIRTY" | "SAVING" | "CONFLICT" | "ERROR";
@@ -25,6 +26,14 @@ const presentationStatusLabels: Record<string, string> = {
   COMPACT: "紧凑",
   STANDARD: "标准",
   DETAILED: "详细",
+};
+
+const saveStateLabels: Record<SaveState, string> = {
+  CLEAN: "未修改",
+  DIRTY: "有未保存修改",
+  SAVING: "保存中",
+  CONFLICT: "存在冲突",
+  ERROR: "保存失败",
 };
 
 function errorMessage(error: unknown): string {
@@ -131,7 +140,7 @@ export function PresentationSettingsPage() {
 
   const saveMutation = useMutation({
     mutationFn: () => {
-      if (!savedProfile || !workingProfile) throw new Error("PresentationProfile 尚未加载");
+      if (!savedProfile || !workingProfile) throw new Error("显示配置尚未加载");
       return api.savePresentation(scenarioId, savedProfile.revision, workingProfile);
     },
     onMutate: () => setSaveState("SAVING"),
@@ -149,7 +158,7 @@ export function PresentationSettingsPage() {
 
   const restoreMutation = useMutation({
     mutationFn: (revision: number) => {
-      if (!savedProfile) throw new Error("PresentationProfile 尚未加载");
+      if (!savedProfile) throw new Error("显示配置尚未加载");
       return api.restorePresentation(scenarioId, savedProfile.revision, revision);
     },
     onMutate: () => setSaveState("SAVING"),
@@ -174,7 +183,7 @@ export function PresentationSettingsPage() {
     <main className="page presentation-settings-page">
       <header className="presentation-page-header">
         <div className="presentation-page-title" data-testid="presentation-page-title">
-          <p className="eyebrow">Scenario presentation</p>
+          <p className="eyebrow">场景显示配置</p>
           <h1>界面设置</h1>
         </div>
         <div className="presentation-page-summary" data-testid="presentation-page-summary">
@@ -183,7 +192,7 @@ export function PresentationSettingsPage() {
             <div className="presentation-page-status">
               <span>当前：{presentationStatusLabels[effectiveProfile.template]} / {presentationStatusLabels[effectiveProfile.density]}</span>
               <span className="presentation-revision">修订 {savedProfile.revision}</span>
-              <span className={`save-state ${effectiveState.toLowerCase()}`} data-testid="presentation-save-state">{effectiveState}</span>
+              <span className={`save-state ${effectiveState.toLowerCase()}`} data-testid="presentation-save-state">{saveStateLabels[effectiveState] ?? uiLabel(effectiveState)}</span>
             </div>
             <div className="presentation-page-action-buttons">
               <button type="button" className="primary-button action-button-centered" data-testid="presentation-save-button" disabled={!dirty || archived || saveMutation.isPending || restoreMutation.isPending || saveState === "CONFLICT"} onClick={() => saveMutation.mutate()}>{saveMutation.isPending ? "正在保存……" : "保存"}</button>
@@ -204,12 +213,12 @@ export function PresentationSettingsPage() {
           {effectiveState === "CONFLICT" && <button type="button" onClick={() => void reloadServerProfile()}>重新加载服务器版本</button>}
         </div>
       )}
-      {archived && <div className="presentation-alert"><strong>只读场景</strong><span>已归档场景不能修改 PresentationProfile。</span></div>}
+      {archived && <div className="presentation-alert"><strong>只读场景</strong><span>已归档场景不能修改显示配置。</span></div>}
 
       <PresentationSettingsPanel profile={workingProfile} onChange={setWorking} disabled={archived || saveMutation.isPending || restoreMutation.isPending} />
 
       <section className="presentation-history" data-testid="presentation-history">
-        <div className="presentation-card-heading"><div><p className="eyebrow">Revision history</p><h2>历史版本</h2></div><span className="presentation-effective">恢复会生成新的当前修订</span></div>
+        <div className="presentation-card-heading"><div><p className="eyebrow">修订历史</p><h2>历史版本</h2></div><span className="presentation-effective">恢复会生成新的当前修订</span></div>
         {history.isLoading && <p className="muted">正在加载历史……</p>}
         {history.error && <p className="error">无法加载历史版本。</p>}
         <div className="presentation-history-list">

@@ -208,17 +208,17 @@ world:
     description: ''
   relation_types:
   - key: contains
-    name: Contains
-    description: A World Node contains the target Node.
+    name: 包含
+    description: 世界节点包含目标节点。
   - key: endpoint
-    name: Endpoint
-    description: A Transport Node connects to the target Region.
+    name: 端点
+    description: 交通节点连接目标区域。
   - key: located_in
-    name: Located in
-    description: A Facility or Transport Node is located in the target Region.
+    name: 位于
+    description: 设施或交通节点位于目标区域。
   - key: supplies_power_to
-    name: Supplies power to
-    description: A power source can supply the target Facility.
+    name: 供电至
+    description: 电力来源可向目标设施供电。
   nodes:
   - key: central_district
     name: 中央城区
@@ -1901,8 +1901,8 @@ interactions:
   name: 可前往区域
   description: 作为 Travel 目标的区域。
 - key: logistics_hub
-  name: logistics_hub
-  description: logistics_hub
+  name: 物流枢纽
+  description: 物流枢纽能力。
 - key: external_relief_intake
   name: 外部援助接收点
   description: 可接收铁路外援物资的仓储设施
@@ -1910,8 +1910,8 @@ interactions:
   name: 持续物流控制点
   description: 可建立全城持续人道物流能力的配送设施
 - key: generation_control
-  name: generation_control
-  description: generation_control
+  name: 发电控制
+  description: 发电控制能力。
 actions:
 - key: clear_transport
   name: 清理交通通道
@@ -2252,7 +2252,7 @@ actions:
   - role: source_region
     value_type: REGION
     source: EXECUTION_START_ACTOR_REGION
-    description: Player-constrained origin Region; omitted origins remain a Planner choice.
+    description: 玩家约束的起始区域；未提供时由规划器选择起点。
 - key: travel
   name: 前往区域
   description: 让行动人员前往目标区域。

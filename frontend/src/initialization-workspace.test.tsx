@@ -35,20 +35,64 @@ const preview: InitializationPreview = {
   },
 };
 
+const resourceDocument: JsonObject = {
+  initialization: {
+    resource_pools: [
+      { pool_key: "west_general_stock", resource_key: "general_parts", region_key: "west_region", facility_key: null, quantity: 10, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false },
+      { pool_key: "unresolved_pool", resource_key: "missing_resource", region_key: "missing_region", facility_key: null, quantity: 1, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false },
+    ],
+    region_resource_knowledge: [{ region_key: "west_region", resource_inventory_visibility: "VISIBLE", resource_survey_completed: true }],
+  },
+  world: {
+    nodes: [{ key: "west_region", name: "西部物流区", node_type_key: "region" }],
+    resources: [{ key: "general_parts", name: "通用工程部件" }],
+  },
+};
+
+const resourcePreview: InitializationPreview = {
+  ...preview,
+  projection: {
+    ...preview.projection,
+    domains: preview.projection.domains.map((domain) => domain.id !== "resources" ? domain : {
+      ...domain,
+      groups: [
+        {
+          id: "resource-pools",
+          label: "Resource pools",
+          items: [
+            { id: "pool:west_general_stock:general_parts:west_region", label: "Resource pool · west_general_stock", locator: { section: "initialization", object_kind: "resource_pool", object_key: "west_general_stock", field_path: "initialization.resource_pools" }, field_ids: [], readonly: false, context: { pool_key: "west_general_stock", resource_key: "general_parts", region_key: "west_region", facility_key: null } },
+            { id: "pool:unresolved_pool:missing_resource:missing_region", label: "Resource pool · unresolved_pool", locator: { section: "initialization", object_kind: "resource_pool", object_key: "unresolved_pool", field_path: "initialization.resource_pools" }, field_ids: [], readonly: false, context: { pool_key: "unresolved_pool", resource_key: "missing_resource", region_key: "missing_region", facility_key: null } },
+          ],
+        },
+        {
+          id: "region-resource-knowledge",
+          label: "Region resource knowledge",
+          items: [{ id: "region-knowledge:west_region", label: "Region resource knowledge · west_region", locator: { section: "initialization", object_kind: "region_resource_knowledge", object_key: "west_region", field_path: "initialization.region_resource_knowledge" }, field_ids: [], readonly: false, context: { region_key: "west_region" } }],
+        },
+        { id: "compatibility-resources", label: "Compatibility sources", items: [] },
+      ],
+    }),
+  },
+};
+
 afterEach(cleanup);
 
-function renderWorkspace(onChange = vi.fn(), path = "/initialization") {
-  render(<MemoryRouter initialEntries={[path]}><InitializationWorkspace document={document} preview={preview} loading={false} error={null} scenarioId="scenario" onChange={onChange} onDeleteResourcePool={vi.fn()} /></MemoryRouter>);
+function renderWorkspace(onChange = vi.fn(), path = "/initialization", workspaceDocument = document, workspacePreview = preview) {
+  render(<MemoryRouter initialEntries={[path]}><InitializationWorkspace document={workspaceDocument} preview={workspacePreview} loading={false} error={null} scenarioId="scenario" onChange={onChange} onDeleteResourcePool={vi.fn()} /></MemoryRouter>);
   return onChange;
 }
 
 describe("InitializationWorkspace", () => {
   it("starts with four panels, no selection, and only the domain choices populated", () => {
     renderWorkspace();
-    const panels = ["初始化类别", "分类", "对象", "初始化配置"].map((name) => screen.getByRole("region", { name }));
+    const breadcrumb = screen.getByRole("navigation", { name: "初始化层级" });
+    expect(breadcrumb.closest("header")).toHaveClass("initialization-workspace-header");
+    expect(screen.getByText("配置当前版本的开局状态")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "类别" })).toBeInTheDocument();
+    const panels = ["类别", "分类", "对象", "初始化配置"].map((name) => screen.getByRole("region", { name }));
     expect(panels).toHaveLength(4);
     expect(within(panels[0]).getByRole("button", { name: /节点/ })).toBeInTheDocument();
-    expect(within(panels[1]).getByText("请选择一个初始化类别")).toBeInTheDocument();
+    expect(within(panels[1]).getByText("请选择一个类别")).toBeInTheDocument();
     expect(within(panels[2]).getByText("请选择一个分类")).toBeInTheDocument();
     expect(within(panels[3]).getByText("请选择一个对象以配置初始化状态")).toBeInTheDocument();
     expect(panels[0].querySelector('[aria-current="true"]')).toBeNull();
@@ -65,8 +109,8 @@ describe("InitializationWorkspace", () => {
     expect(screen.getByText("请选择一个对象以配置初始化状态")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /诊疗室/ }));
     expect(screen.getByRole("region", { name: "初始化配置" })).toHaveClass("mobile-active");
-    expect(screen.getByText("真实初始状态 · Truth")).toBeInTheDocument();
-    expect(screen.getByText("玩家初始知识 · Knowledge")).toBeInTheDocument();
+    expect(screen.getByText("真实初始状态")).toBeInTheDocument();
+    expect(screen.getByText("玩家初始知识")).toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
 
@@ -103,7 +147,7 @@ describe("InitializationWorkspace", () => {
 
   it("writes initialization edits directly to the canonical working document", () => {
     const onChange = renderWorkspace(vi.fn(), "/initialization?domain=nodes&item=node%3Aroom");
-    const access = screen.getByLabelText(/Node access/);
+    const access = screen.getByLabelText(/节点访问状态/);
     fireEvent.change(access, { target: { value: "LOCKED" } });
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({
       world: expect.objectContaining({ nodes: [expect.objectContaining({ key: "room", initial_access: "LOCKED" })] }),
@@ -118,14 +162,36 @@ describe("InitializationWorkspace", () => {
 
   it("renders derived Truth and Knowledge as readonly preview values", () => {
     renderWorkspace(vi.fn(), "/initialization?domain=derived&item=derived%3Areadiness");
-    expect(screen.getByText("UNAVAILABLE")).toBeInTheDocument();
-    expect(screen.getByText("UNKNOWN")).toBeInTheDocument();
+    expect(screen.getByText("不可用")).toBeInTheDocument();
+    expect(screen.getByText("未知")).toBeInTheDocument();
     expect(screen.getByText(/只读计算结果/)).toBeInTheDocument();
+  });
+
+  it("resolves Resource Pool labels from authored location and resource names", () => {
+    renderWorkspace(vi.fn(), "/initialization?domain=resources&group=resource-pools&item=pool%3Awest_general_stock%3Ageneral_parts%3Awest_region", resourceDocument, resourcePreview);
+    expect(screen.getByRole("heading", { name: "西部物流区 · 通用工程部件" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "初始化层级" })).toHaveTextContent("类别/资源/资源池/西部物流区 · 通用工程部件");
+    expect(screen.getAllByText("west_general_stock").length).toBeGreaterThan(0);
+    expect(screen.getByText("pool:west_general_stock")).toBeInTheDocument();
+    expect(screen.queryByText("资源池 · west_general_stock")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the stable pool key and resolves Region Knowledge names without a prefix", () => {
+    renderWorkspace(vi.fn(), "/initialization?domain=resources&group=resource-pools&item=pool%3Aunresolved_pool%3Amissing_resource%3Amissing_region", resourceDocument, resourcePreview);
+    expect(screen.getByRole("heading", { name: "unresolved_pool" })).toBeInTheDocument();
+    expect(screen.getByText("pool:unresolved_pool")).toBeInTheDocument();
+    expect(screen.queryByText("资源池 · unresolved_pool")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /区域资源知识/ }));
+    fireEvent.click(screen.getByRole("button", { name: /西部物流区/ }));
+    expect(screen.getByRole("heading", { name: "西部物流区" })).toBeInTheDocument();
+    expect(screen.getAllByText("west_region").length).toBeGreaterThan(0);
+    expect(screen.queryByText("区域资源知识 · west_region")).not.toBeInTheDocument();
   });
 
   it("marks exactly one drill-down panel active for narrow-screen CSS", () => {
     renderWorkspace();
-    const panels = ["初始化类别", "分类", "对象", "初始化配置"].map((name) => screen.getByRole("region", { name }));
+    const panels = ["类别", "分类", "对象", "初始化配置"].map((name) => screen.getByRole("region", { name }));
     expect(panels.filter((panel) => panel.classList.contains("mobile-active"))).toEqual([panels[0]]);
   });
 });

@@ -114,6 +114,19 @@ function readPath(value: unknown, path: string[]): unknown {
   return current;
 }
 
+/**
+ * Resolve an authored human label without ever deriving one from a stable key.
+ * The canonical V2 schema uses `name`; the other fields keep this display
+ * helper safe for compatible authored documents that expose a label variant.
+ */
+export function authoredDisplayName(value: JsonObject, fallback: string): string {
+  for (const field of ["display_name", "name", "label"] as const) {
+    const candidate = value[field];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return fallback;
+}
+
 export function objectIdentity(kind: EntityKind, value: JsonObject): string | null {
   if (kind === "relation") {
     const explicit = value.key;
@@ -149,7 +162,8 @@ export function ruleDisplayTitle(document: JsonObject, value: JsonObject): strin
 }
 
 function objectName(document: JsonObject, kind: EntityKind, value: JsonObject, key: string): string {
-  if (typeof value.name === "string" && value.name.trim()) return value.name;
+  const authoredName = authoredDisplayName(value, "");
+  if (authoredName) return authoredName;
   if (kind === "rule") return ruleDisplayTitle(document, value);
   if (kind === "relation") {
     const sourceKey = String(value.source_node_key ?? "");

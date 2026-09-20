@@ -1,5 +1,5 @@
 import { defaultArrayItem } from "../templates";
-import { fieldLabel, uiLabel } from "../ui";
+import { displayEnumValue, fieldLabel } from "../ui";
 
 const enums: Record<string, string[]> = {
   initial_access: ["LOCKED", "AVAILABLE"], access: ["LOCKED", "AVAILABLE"],
@@ -24,7 +24,7 @@ export function StructuredEditor({ value, onChange, field = "value", depth = 0, 
     return <div className={`structured-object depth-${Math.min(depth, 3)}`}>{Object.entries(value as Record<string, unknown>).map(([key, child]) => <label className="structured-field" key={key}><span title={key}>{fieldLabel(key)}</span><StructuredEditor field={resourceScope && key === "kind" ? "resource_scope_kind" : key} resourceScope={key === "resource_scope"} value={child} depth={depth + 1} onChange={(next) => onChange({ ...(value as Record<string, unknown>), [key]: next })} /></label>)}</div>;
   }
   const choices = enums[field];
-  if (choices && typeof value === "string") return <select value={value} onChange={(event) => onChange(event.target.value)}>{choices.map((item) => <option key={item} value={item}>{uiLabel(item)}</option>)}</select>;
+  if (choices && typeof value === "string") return <select value={value} onChange={(event) => onChange(event.target.value)}>{choices.map((item) => <option key={item} value={item}>{displayEnumValue("generic", item)}</option>)}</select>;
   if (typeof value === "boolean") return <input type="checkbox" checked={value} onChange={(event) => onChange(event.target.checked)} />;
   if (typeof value === "number") return <input type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} />;
   if (value === null) return <button className="small" onClick={() => onChange("")}>设置值</button>;

@@ -73,7 +73,7 @@ describe("shared editor form primitives", () => {
   it("keeps nested object type and identity on separate hierarchy levels", () => {
     render(<NestedObjectHeader typeLabel="FACT" identity="operational" />);
 
-    expect(screen.getByText("FACT")).toHaveClass("nested-object-type");
+    expect(screen.getByText("事实")).toHaveClass("nested-object-type");
     expect(screen.getByText("operational")).toHaveClass("nested-object-identity");
   });
 });

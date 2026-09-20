@@ -117,6 +117,16 @@ def test_projection_has_stable_variable_depth_hierarchy_and_owner_locators() -> 
     )
     assert patient["locator"]["section"] == "world-entities"
     assert patient["context"]["key"] == "patient_one"
+    pools = domains["resources"]["groups"][0]["items"]
+    clinic_pool = next(
+        item for item in pools if item["id"] == "pool:clinic_medicine:medicine:global"
+    )
+    assert clinic_pool["context"] == {
+        "pool_key": "clinic_medicine",
+        "resource_key": "medicine",
+        "region_key": None,
+        "facility_key": None,
+    }
     derived = domains["derived"]["groups"][0]["items"][0]
     assert derived["readonly"] is True
 
