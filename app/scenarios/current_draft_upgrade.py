@@ -1,22 +1,20 @@
-"""Narrow, idempotent upgrades for the current editable Linjiang Draft."""
+"""Generic, idempotent upgrades for a current editable Scenario Draft."""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
 
-LINJIANG_SCENARIO_KEY = "linjiang_infrastructure_recovery_v2_0"
-
 
 @dataclass(frozen=True, slots=True)
-class CurrentDraftUpgradeResult:
+class ScenarioDraftUpgradeResult:
     scenario_id: str
     changed: bool
     revision_before: int
@@ -27,35 +25,36 @@ class CurrentDraftUpgradeResult:
     objective_count: int
 
 
-def upgrade_current_linjiang_draft(
+def upgrade_scenario_draft_to_current_definition(
     db: Session,
     *,
+    target_scenario_id: UUID,
     expected_revision: int,
     canonical: ScenarioDefinitionV2,
-) -> CurrentDraftUpgradeResult:
-    """Apply only current authored catalogs while preserving all other Draft content."""
+) -> ScenarioDraftUpgradeResult:
+    """Apply current authored semantic catalogs to one explicitly selected Draft.
 
-    if canonical.metadata.key != LINJIANG_SCENARIO_KEY:
-        raise ScenarioLifecycleError(
-            "SCENARIO_DRAFT_UPGRADE_IDENTITY_MISMATCH",
-            "The canonical definition is not the Linjiang Scenario",
-        )
-    scenario = db.scalar(select(Scenario).where(Scenario.key == LINJIANG_SCENARIO_KEY))
+    The canonical definition supplies only the authored relation-type catalog and
+    quick inputs. The target Draft remains the source of truth for its identity,
+    relations, and all other scenario content.
+    """
+
+    scenario = db.get(Scenario, target_scenario_id)
     if scenario is None:
         raise ScenarioLifecycleError(
             "SCENARIO_NOT_FOUND",
-            "The Linjiang Scenario does not exist",
+            "The target Scenario does not exist",
         )
-    draft = db.get(ScenarioDraft, scenario.id)
+    draft = db.get(ScenarioDraft, target_scenario_id)
     if draft is None:
         raise ScenarioLifecycleError(
             "SCENARIO_DRAFT_NOT_FOUND",
-            "The Linjiang Scenario has no editable Draft",
+            "The target Scenario has no editable Draft",
         )
     if draft.revision != expected_revision:
         raise ScenarioLifecycleError(
             "SCENARIO_DRAFT_CONFLICT",
-            "The Linjiang Draft revision changed before the upgrade",
+            "The target Draft revision changed before the upgrade",
         )
 
     before = deepcopy(draft.definition_document)
@@ -65,7 +64,7 @@ def upgrade_current_linjiang_draft(
     if not isinstance(world, dict) or not isinstance(goal_resolution, dict):
         raise ScenarioLifecycleError(
             "SCENARIO_DRAFT_UPGRADE_SHAPE_INVALID",
-            "The Linjiang Draft lacks World or Goal Resolution authoring data",
+            "The Draft lacks World or Goal Resolution authoring data",
         )
 
     relation_instances = deepcopy(world.get("relations"))
@@ -73,7 +72,8 @@ def upgrade_current_linjiang_draft(
         item.model_dump(mode="json") for item in canonical.world.relation_types
     ]
     goal_resolution["quick_inputs"] = list(canonical.goal_resolution.quick_inputs)
-    document.pop("objectives", None)
+    if not canonical.objectives:
+        document.pop("objectives", None)
     if world.get("relations") != relation_instances:
         raise ScenarioLifecycleError(
             "SCENARIO_DRAFT_UPGRADE_RELATIONS_CHANGED",
@@ -83,24 +83,18 @@ def upgrade_current_linjiang_draft(
     # Fail before persistence if the exact transformed current document is not
     # valid. Historical snapshots are never passed to replace_draft.
     validated = ScenarioDefinitionV2.model_validate(document)
-    if validated.metadata.key != LINJIANG_SCENARIO_KEY:
-        raise ScenarioLifecycleError(
-            "SCENARIO_DRAFT_UPGRADE_IDENTITY_MISMATCH",
-            "The Draft document is not the Linjiang Scenario",
-        )
-
     changed = document != before
     revision_after = draft.revision
     if changed:
         draft = ScenarioService(db).replace_draft(
-            scenario.id,
+            target_scenario_id,
             expected_revision=expected_revision,
             definition_document=document,
         )
         revision_after = draft.revision
 
-    return CurrentDraftUpgradeResult(
-        scenario_id=str(scenario.id),
+    return ScenarioDraftUpgradeResult(
+        scenario_id=str(target_scenario_id),
         changed=changed,
         revision_before=expected_revision,
         revision_after=revision_after,
@@ -112,7 +106,6 @@ def upgrade_current_linjiang_draft(
 
 
 __all__ = [
-    "LINJIANG_SCENARIO_KEY",
-    "CurrentDraftUpgradeResult",
-    "upgrade_current_linjiang_draft",
+    "ScenarioDraftUpgradeResult",
+    "upgrade_scenario_draft_to_current_definition",
 ]
