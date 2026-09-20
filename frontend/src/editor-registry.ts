@@ -75,11 +75,11 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("node_type_key", "reference", { referenceDomain: "node_type" }), field("initial_access", "enum", { enum: V2_ENUMS.access }), field("initial_visibility", "enum", { enum: V2_ENUMS.visibility }), field("interaction_keys", "multi-reference", { referenceDomain: "interaction" })],
   },
   relation_type: {
-    kind: "relation_type", section: "relations", label: "关系类型", collectionPath: ["world", "relation_types"],
+    kind: "relation_type", section: "relation-types", label: "关系类型", collectionPath: ["world", "relation_types"],
     fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
   },
   relation: {
-    kind: "relation", section: "relations", label: "关系", collectionPath: ["world", "relations"],
+    kind: "relation", section: "relations", label: "关系实例", collectionPath: ["world", "relations"],
     fields: [field("key", "text"), field("source_node_key", "reference", { referenceDomain: "node" }), field("relation_type_key", "reference", { referenceDomain: "relation_type" }), field("target_node_key", "reference", { referenceDomain: "node" }), field("initial_visibility", "enum", { enum: V2_ENUMS.relationVisibility })],
   },
   resource: {

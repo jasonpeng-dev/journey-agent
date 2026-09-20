@@ -108,7 +108,8 @@ describe("Editor section state ownership", () => {
       overview: { category: "场景基础", label: "概览" },
       "node-types": { category: "世界模型", label: "节点类型" },
       "world-entities": { category: "世界模型", label: "世界实体" },
-      relations: { category: "世界模型", label: "关系" },
+      "relation-types": { category: "世界模型", label: "关系类型" },
+      relations: { category: "世界模型", label: "关系实例" },
       resources: { category: "世界模型", label: "资源定义" },
       roles: { category: "参与者与交互", label: "角色" },
       actors: { category: "参与者与交互", label: "参与者" },
@@ -291,7 +292,7 @@ describe("Editor section state ownership", () => {
     confirm.mockRestore();
   });
 
-  it("keeps public knowledge collection-only and groups relation kinds", async () => {
+  it("keeps public knowledge collection-only and splits relation authoring", async () => {
     renderEditor("/scenarios/scenario-1/edit/public-knowledge");
     await waitFor(() => expect(screen.getByRole("heading", { name: "公共知识" })).toBeInTheDocument());
     expect(screen.getByText("资源发现知识")).toBeInTheDocument();
@@ -305,24 +306,46 @@ describe("Editor section state ownership", () => {
     fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "relief" } });
     expect(screen.getByText("救援物资")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("link", { name: "关系" }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "关系" })).toBeInTheDocument());
-    expect(screen.getByRole("heading", { name: "关系类型" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "关系实例" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: "关系类型" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "关系类型" })).toBeInTheDocument());
+    expect(screen.getByText("位于", { selector: "span" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "＋ 新增关系类型" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("link", { name: "关系实例" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "关系实例" })).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "＋ 新增关系实例" })).toBeInTheDocument();
+    expect(screen.getByText("关系实例 · located_in")).toBeInTheDocument();
   });
 
-  it("uses kind-qualified relation identity and normalizes legacy links", async () => {
+  it("normalizes unqualified relation type links to the dedicated route", async () => {
     renderEditor("/scenarios/scenario-1/edit/relations/located_in");
-    await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("?kind=relation_type"));
+    await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/relation-types/located_in"));
     expect(screen.getAllByLabelText("显示名称").some((element) => (element as HTMLInputElement).value === "位于")).toBe(true);
     expect(screen.queryByLabelText("来源节点")).not.toBeInTheDocument();
+  });
 
-    cleanup();
+  it("normalizes a kind-qualified relation type link to the dedicated route", async () => {
+    renderEditor("/scenarios/scenario-1/edit/relations/located_in?kind=relation_type");
+    await waitFor(() => {
+      expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/relation-types/located_in");
+      expect(screen.getAllByLabelText("显示名称").some((element) => (element as HTMLInputElement).value === "位于")).toBe(true);
+    });
+    expect(screen.getByTestId("editor-location")).not.toHaveTextContent("kind=");
+  });
+
+  it("normalizes the legacy relation instance query without changing its route", async () => {
     renderEditor("/scenarios/scenario-1/edit/relations/located_in?kind=relation");
-    await waitFor(() => expect(screen.getByLabelText("来源节点")).toBeInTheDocument());
-    expect(screen.queryAllByLabelText("显示名称")).toHaveLength(0);
-    expect(screen.getByTestId("editor-location")).toHaveTextContent("?kind=relation");
+    await waitFor(() => {
+      expect(screen.getByLabelText("来源节点")).toBeInTheDocument();
+      expect(screen.queryAllByLabelText("显示名称")).toHaveLength(0);
+      expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/relations/located_in");
+      expect(screen.getByTestId("editor-location")).not.toHaveTextContent("kind=");
+    });
+  });
+
+  it("keeps the current relation type deep link canonical", async () => {
+    renderEditor("/scenarios/scenario-1/edit/relation-types/located_in");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "位于" })).toBeInTheDocument());
+    expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/relation-types/located_in");
   });
 });

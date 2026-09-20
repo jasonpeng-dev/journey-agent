@@ -8,6 +8,7 @@ const expectedModes: Record<SectionMode, string[]> = {
   COLLECTION: [
     "node-types",
     "world-entities",
+    "relation-types",
     "relations",
     "resources",
     "roles",
@@ -25,8 +26,8 @@ const expectedModes: Record<SectionMode, string[]> = {
 };
 
 describe("section structure registry", () => {
-  it("freezes the 18 routes into the five product modes", () => {
-    expect(Object.keys(sectionStructureRegistry)).toHaveLength(18);
+  it("freezes the 19 routes into the five product modes", () => {
+    expect(Object.keys(sectionStructureRegistry)).toHaveLength(19);
     for (const [mode, sections] of Object.entries(expectedModes)) {
       expect(Object.values(sectionStructureRegistry).filter((item) => item.mode === mode).map((item) => item.section)).toEqual(sections);
     }
@@ -34,7 +35,8 @@ describe("section structure registry", () => {
 
   it("derives owners from the existing schema and collection authorities", () => {
     expect(sectionStructure("overview").owners).toEqual({ rootPath: ["metadata"], entityKinds: [], rootCollections: [] });
-    expect(sectionStructure("relations").owners).toEqual({ rootPath: null, entityKinds: ["relation_type", "relation"], rootCollections: [] });
+    expect(sectionStructure("relation-types").owners).toEqual({ rootPath: null, entityKinds: ["relation_type"], rootCollections: [] });
+    expect(sectionStructure("relations").owners).toEqual({ rootPath: null, entityKinds: ["relation"], rootCollections: [] });
     expect(sectionStructure("initialization").owners).toEqual({
       rootPath: ["initialization"],
       entityKinds: [],

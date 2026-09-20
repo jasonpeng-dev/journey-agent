@@ -90,7 +90,8 @@ const labels: Record<string, string> = {
 export const sectionLabels: Record<string, string> = {
   "node-types": "节点类型",
   "world-entities": "世界实体",
-  relations: "关系",
+  "relation-types": "关系类型",
+  relations: "关系实例",
   resources: "资源定义",
   roles: "角色",
   interactions: "交互",
@@ -111,7 +112,7 @@ export const sectionLabels: Record<string, string> = {
 
 export const editorTaxonomyGroups = [
   { label: "场景基础", items: ["overview"] },
-  { label: "世界模型", items: ["world", "node-types", "world-entities", "relations", "resources"] },
+  { label: "世界模型", items: ["world", "node-types", "world-entities", "relation-types", "relations", "resources"] },
   { label: "参与者与交互", items: ["roles", "actors", "interactions"] },
   { label: "行动系统", items: ["actions", "rules"] },
   { label: "目标系统", items: ["derived-states", "goal-resolution"] },
@@ -129,7 +130,7 @@ export const editorSectionTaxonomy: Record<string, { category: string; label: st
 
 export const kindLabels: Record<string, string> = {
   relation_type: "关系类型",
-  relation: "关系",
+  relation: "关系实例",
   derived_state: "派生状态",
   public_reference: "公共引用",
   node_type: "节点类型",

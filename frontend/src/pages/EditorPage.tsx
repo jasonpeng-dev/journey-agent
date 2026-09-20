@@ -10,6 +10,7 @@ import {
   draftObjectIdentity,
   filterDraftObjects,
   nodeSemanticView,
+  objectByKindAndKey,
   objectIdentity,
   replaceObject,
   sectionForKind,
@@ -58,9 +59,29 @@ function rootEditorKey(section: EditorSection): string | null {
 
 function normalizeEditorNavigation(to: string, scenarioId: string): string {
   const legacyWorldObjectPrefix = `/scenarios/${scenarioId}/edit/world/`;
-  return to.startsWith(legacyWorldObjectPrefix)
-    ? `/scenarios/${scenarioId}/edit/world-entities/${to.slice(legacyWorldObjectPrefix.length)}`
-    : to;
+  if (to.startsWith(legacyWorldObjectPrefix)) {
+    return `/scenarios/${scenarioId}/edit/world-entities/${to.slice(legacyWorldObjectPrefix.length)}`;
+  }
+
+  const legacyRelationPrefix = `/scenarios/${scenarioId}/edit/relations/`;
+  if (!to.startsWith(legacyRelationPrefix)) return to;
+  const suffix = to.slice(legacyRelationPrefix.length);
+  const queryStart = suffix.indexOf("?");
+  if (queryStart < 0) return to;
+  const objectPath = suffix.slice(0, queryStart);
+  const query = new URLSearchParams(suffix.slice(queryStart + 1));
+  const kind = query.get("kind");
+  if (kind === "relation_type") {
+    query.delete("kind");
+    const serialized = query.toString();
+    return `/scenarios/${scenarioId}/edit/relation-types/${objectPath}${serialized ? `?${serialized}` : ""}`;
+  }
+  if (kind === "relation") {
+    query.delete("kind");
+    const serialized = query.toString();
+    return `/scenarios/${scenarioId}/edit/relations/${objectPath}${serialized ? `?${serialized}` : ""}`;
+  }
+  return to;
 }
 
 export function EditorPage() {
@@ -172,6 +193,21 @@ export function EditorPage() {
   const local = useMemo(() => serverDraft && workingDocument ? { ...serverDraft, definition_document: workingDocument } : null, [serverDraft, workingDocument]);
   const hasUnsavedChanges = workingCopyIsDirty(serverDraft, workingDocument);
   const topologyModeActive = structure.mode === "BROWSER";
+  const legacyRelationTarget = useMemo(() => {
+    if (requestedSection !== "relations" || !objectKey) return null;
+    if (requestedKind === "relation_type") return local ? "relation-types" as const : null;
+    if (requestedKind === "relation") return local ? "relations" as const : null;
+    if (requestedKind || !local) return null;
+    if (objectByKindAndKey(local.definition_document, "relation_type", objectKey)) return "relation-types" as const;
+    return null;
+  }, [local, objectKey, requestedKind, requestedSection]);
+  useEffect(() => {
+    if (!legacyRelationTarget || !objectKey) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("kind");
+    const query = next.toString();
+    navigateRouter(`/scenarios/${scenarioId}/edit/${legacyRelationTarget}/${encodeURIComponent(objectKey)}${query ? `?${query}` : ""}`, { replace: true });
+  }, [legacyRelationTarget, navigateRouter, objectKey, scenarioId, searchParams]);
   useEffect(() => {
     if (topologyModeActive && topologySelection) setInspectorOpen(true);
   }, [topologyModeActive, topologySelection]);
@@ -213,12 +249,6 @@ export function EditorPage() {
     : null;
   const selectedSingletonOwner = collectionSelection?.owner === "singleton" ? singletonOwner : null;
   const selected = objects.find((item) => item.key === objectKey && (!routeKind || item.kind === routeKind)) ?? null;
-  useEffect(() => {
-    if (section !== "relations" || !objectKey || routeKind || !selected) return;
-    const next = new URLSearchParams(searchParams);
-    next.set("kind", selected.kind);
-    setSearchParams(next, { replace: true });
-  }, [objectKey, routeKind, searchParams, section, selected, setSearchParams]);
   const focusPath = searchParams.get("focus_path");
   const editorFocusPath = focusPath ? `${selected ? `${selected.kind}.${selected.key}` : rootEditorKey(section) ?? ""}.${focusPath}` : null;
   const usedBy = refsQuery.data?.references.filter((edge) => edge.target.object_kind === selected?.kind && edge.target.object_key === selected?.key) ?? [];
@@ -483,7 +513,7 @@ export function EditorPage() {
         {structure.master.visible && <aside className="object-list object-panel">
           <header className="object-panel-header"><div><p className="panel-kicker">{structure.mode === "BROWSER" ? "世界结构" : structure.mode === "HYBRID" ? "配置导航" : "内容导航"}</p><div className="object-panel-title">{sectionLabels[section] ?? section}</div></div><span className="object-count">{masterCount}</span></header>
           {structure.master.source === "topology" && <div className="segmented-control world-filter-tabs" role="tablist" aria-label="World 对象筛选">{(["all", "regions", "facilities", "transports"] as WorldView[]).map((item) => <button type="button" className={worldView === item ? "selected" : ""} aria-pressed={worldView === item} key={item} onClick={() => setWorldView(item)}><span>{worldViewLabels[item]}</span><small>{nodeSemanticView(local.definition_document, item).length}</small></button>)}</div>}
-          <div className="object-panel-tools">{structure.master.searchable && <label className="object-search">搜索<input value={objectSearch} placeholder={usesRootCollections ? "名称、代码或标识" : "名称或稳定键"} onChange={(event) => setObjectSearch(event.target.value)} /></label>}{structure.master.source === "entities" && availableKinds.length > 1 && !structure.master.grouped && <label className="object-filter">对象类型<select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">全部类型</option>{availableKinds.map((kind) => <option key={kind} value={kind}>{kindLabels[kind] ?? kind}</option>)}</select></label>}{structure.master.create === "entity" && !structure.master.grouped && <div className="object-list-actions">{(kindsBySection[section] ?? []).map((kind) => <button type="button" className="editor-button editor-button-secondary add-object" key={kind} onClick={() => createObject(kind)}>＋ {kindLabels[kind] ?? kind}</button>)}</div>}</div>
+          <div className="object-panel-tools">{structure.master.searchable && <label className="object-search">搜索<input value={objectSearch} placeholder={usesRootCollections ? "名称、代码或标识" : "名称或稳定键"} onChange={(event) => setObjectSearch(event.target.value)} /></label>}{structure.master.source === "entities" && availableKinds.length > 1 && !structure.master.grouped && <label className="object-filter">对象类型<select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">全部类型</option>{availableKinds.map((kind) => <option key={kind} value={kind}>{kindLabels[kind] ?? kind}</option>)}</select></label>}{structure.master.create === "entity" && !structure.master.grouped && <div className="object-list-actions">{(kindsBySection[section] ?? []).map((kind) => <button type="button" className="editor-button editor-button-secondary add-object" key={kind} onClick={() => createObject(kind)}>＋ {kind === "relation_type" ? "新增关系类型" : kind === "relation" ? "新增关系实例" : kindLabels[kind] ?? kind}</button>)}</div>}</div>
           <div className="object-list-scroll">
             {usesRootCollections ? <div className="collection-list-groups">
               {singletonOwner && <section className="collection-list-group">

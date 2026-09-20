@@ -32,7 +32,8 @@ describe("editor draft helpers", () => {
 
   it("registers every V2 authoring section without adding semantic collections", () => {
     expect(sectionRegistry.map((item) => item.id)).toEqual([...sections]);
-    expect(sectionRegistry.find((item) => item.id === "relations")?.entityKinds).toEqual(["relation_type", "relation"]);
+    expect(sectionRegistry.find((item) => item.id === "relation-types")?.entityKinds).toEqual(["relation_type"]);
+    expect(sectionRegistry.find((item) => item.id === "relations")?.entityKinds).toEqual(["relation"]);
     expect(kindsBySection.roles).toEqual(["role"]);
     expect(kindsBySection.actors).toEqual(["actor"]);
     expect(sectionDefinition("world")?.entityKinds).toEqual(["node_type", "node", "relation_type", "relation", "resource"]);
@@ -77,6 +78,22 @@ describe("editor draft helpers", () => {
     expect(filterDraftObjects(objects, "", "relation")).toHaveLength(0);
   });
 
+  it("searches relation instances by authored endpoint and relation type names", () => {
+    const relationDocument = {
+      world: {
+        nodes: [{ key: "north_a", name: "北部设施" }, { key: "north", name: "北部范围" }],
+        relation_types: [{ key: "belongs_to", name: "归属", description: "设施归属范围" }],
+        relations: [{ key: "north_a__belongs_to__north", source_node_key: "north_a", relation_type_key: "belongs_to", target_node_key: "north" }],
+      },
+    };
+    const objects = sectionObjects(relationDocument, "relations");
+    expect(objects[0].name).toBe("北部设施 → 北部范围 · 归属");
+    expect(filterDraftObjects(objects, "北部设施")).toHaveLength(1);
+    expect(filterDraftObjects(objects, "归属")).toHaveLength(1);
+    expect(filterDraftObjects(objects, "belongs_to")).toHaveLength(1);
+    expect(filterDraftObjects(sectionObjects(relationDocument, "relation-types"), "设施归属范围")).toHaveLength(1);
+  });
+
   it("projects Rule titles from authored action, phase, trigger, and effects", () => {
     const ruleDocument = { actions: [{ key: "repair", name: "修复设施" }] };
     expect(ruleDisplayTitle(ruleDocument, { action_key: "repair", phase: "PREFLIGHT", trigger: "ACTION", effects: [{ kind: "EMIT_FAILURE" }] })).toBe("修复设施 · 前置校验");
@@ -101,7 +118,7 @@ describe("editor draft helpers", () => {
       relations: [{ key: "same", source_node_key: "a", relation_type_key: "same", target_node_key: "b" }],
     } };
     const changed = replaceObject(original, "relations", "same", { key: "same", source_node_key: "b", relation_type_key: "same", target_node_key: "a" }, "relation");
-    expect(sectionObjects(changed, "relations").find((item) => item.kind === "relation_type")?.value.name).toBe("Same type");
+    expect(sectionObjects(changed, "relation-types").find((item) => item.kind === "relation_type")?.value.name).toBe("Same type");
     expect(sectionObjects(changed, "relations").find((item) => item.kind === "relation")?.value.source_node_key).toBe("b");
   });
 

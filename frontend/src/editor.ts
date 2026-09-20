@@ -4,6 +4,7 @@ export const sections = [
   "overview",
   "node-types",
   "world-entities",
+  "relation-types",
   "relations",
   "resources",
   "roles",
@@ -57,7 +58,8 @@ export const sectionRegistry: SectionDefinition[] = [
   { id: "overview", labelKey: "overview", rootPath: ["metadata"] },
   { id: "node-types", labelKey: "node_types", entityKinds: ["node_type"] },
   { id: "world-entities", labelKey: "world_entities", entityKinds: ["node"] },
-  { id: "relations", labelKey: "relations", entityKinds: ["relation_type", "relation"] },
+  { id: "relation-types", labelKey: "relation_types", entityKinds: ["relation_type"] },
+  { id: "relations", labelKey: "relations", entityKinds: ["relation"] },
   { id: "resources", labelKey: "resources", entityKinds: ["resource"] },
   { id: "roles", labelKey: "roles", entityKinds: ["role"] },
   { id: "actors", labelKey: "actors", entityKinds: ["actor"] },
@@ -149,7 +151,16 @@ export function ruleDisplayTitle(document: JsonObject, value: JsonObject): strin
 function objectName(document: JsonObject, kind: EntityKind, value: JsonObject, key: string): string {
   if (typeof value.name === "string" && value.name.trim()) return value.name;
   if (kind === "rule") return ruleDisplayTitle(document, value);
-  if (kind === "relation") return `${String(value.source_node_key ?? "")} → ${String(value.target_node_key ?? "")}`;
+  if (kind === "relation") {
+    const sourceKey = String(value.source_node_key ?? "");
+    const targetKey = String(value.target_node_key ?? "");
+    const relationTypeKey = String(value.relation_type_key ?? "");
+    const source = objectsAt(document, "node").find((item) => item.key === sourceKey);
+    const target = objectsAt(document, "node").find((item) => item.key === targetKey);
+    const relationType = objectsAt(document, "relation_type").find((item) => item.key === relationTypeKey);
+    const endpoints = `${source?.name ?? sourceKey} → ${target?.name ?? targetKey}`;
+    return relationType?.name ? `${endpoints} · ${relationType.name}` : endpoints;
+  }
   if (kind === "public_reference" && typeof value.term === "string") return value.term;
   return key;
 }
@@ -197,7 +208,13 @@ export function filterDraftObjects(objects: DraftObject[], search: string, kind 
   return objects.filter((item) => {
     if (kind !== "all" && item.kind !== kind) return false;
     if (!query) return true;
-    return [item.name, item.key, item.kind].some((value) => value.toLocaleLowerCase().includes(query));
+    const description = typeof item.value.description === "string" ? item.value.description : "";
+    const relationKeys = item.kind === "relation"
+      ? [item.value.source_node_key, item.value.relation_type_key, item.value.target_node_key]
+      : [];
+    return [item.name, item.key, item.kind, description, ...relationKeys]
+      .filter((value): value is string => typeof value === "string")
+      .some((value) => value.toLocaleLowerCase().includes(query));
   });
 }
 

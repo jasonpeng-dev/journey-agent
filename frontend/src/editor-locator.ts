@@ -65,9 +65,10 @@ export function editorLocatorHref(locator: EditorLocator, scenarioId: string): s
     query.set("collection", locator.collection);
     query.set("item", locator.identity);
   }
-  if (locator.owner === "entity" && (locator.section === "relations" || locator.kind === "public_reference")) {
+  if (locator.owner === "entity" && locator.kind === "public_reference") {
     query.set("kind", locator.kind);
   }
   const objectPath = locator.owner === "entity" ? `/${encodeURIComponent(locator.objectKey)}` : "";
-  return `/scenarios/${scenarioId}/edit/${locator.section}${objectPath}${query.size ? `?${query}` : ""}`;
+  const section = locator.owner === "entity" && locator.kind === "relation_type" ? "relation-types" : locator.section;
+  return `/scenarios/${scenarioId}/edit/${section}${objectPath}${query.size ? `?${query}` : ""}`;
 }

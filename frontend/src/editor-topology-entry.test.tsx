@@ -82,10 +82,10 @@ describe("world topology overview entry", () => {
     expect(api.saveDraft).not.toHaveBeenCalled();
   });
 
-  it("keeps Relations as the relation authoring route", async () => {
+  it("keeps relation instances as the relation authoring route", async () => {
     renderEditor("relations");
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "关系" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "关系实例" })).toBeInTheDocument());
     expect(screen.queryByRole("region", { name: "分层拓扑浏览器" })).not.toBeInTheDocument();
   });
 
