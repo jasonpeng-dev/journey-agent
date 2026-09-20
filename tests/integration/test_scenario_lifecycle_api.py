@@ -67,6 +67,39 @@ def test_blank_draft_is_editable_but_cannot_publish(client: TestClient) -> None:
     assert publish.json()["error"]["code"] == "SCENARIO_DRAFT_INVALID"
 
 
+def test_initialization_preview_is_readonly_and_uses_the_working_document(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="initialization_preview")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    working = deepcopy(draft["definition_document"])
+    working["world"]["nodes"][0]["initial_access"] = "LOCKED"
+
+    response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/initialization-preview",
+        json={
+            "expected_revision": draft["revision"],
+            "definition_document": working,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert [item["id"] for item in payload["projection"]["domains"]] == [
+        "basic",
+        "nodes",
+        "actors",
+        "resources",
+        "relations",
+        "derived",
+    ]
+    assert payload["projection"]["summary"]["nodes"] == 41
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == draft["revision"]
+    assert persisted["definition_document"] == draft["definition_document"]
+
+
 def test_publish_versions_restore_clone_and_archive_are_isolated(
     client: TestClient,
     session: Session,

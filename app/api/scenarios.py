@@ -7,6 +7,7 @@ from typing import Any, Never
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -245,6 +246,13 @@ def preview_initialization(
             "projection": initialization_projection(definition, request.definition_document),
             "parity": bootstrap_parity(definition, published),
         }
+    except ValidationError as exc:
+        raise AppError(
+            code="SCENARIO_INITIALIZATION_PREVIEW_INVALID",
+            message="The working document cannot produce an initialization preview",
+            status_code=422,
+            details={"issues": exc.errors(include_url=False)},
+        ) from exc
     except ScenarioLifecycleError as exc:
         _raise_http(exc)
 

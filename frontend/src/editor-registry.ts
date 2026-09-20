@@ -72,7 +72,7 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
   },
   node: {
     kind: "node", section: "world-entities", label: "节点", collectionPath: ["world", "nodes"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("node_type_key", "reference", { referenceDomain: "node_type" }), field("initial_access", "enum", { enum: V2_ENUMS.access }), field("initial_visibility", "enum", { enum: V2_ENUMS.visibility }), field("interaction_keys", "multi-reference", { referenceDomain: "interaction" })],
+    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("node_type_key", "reference", { referenceDomain: "node_type" }), field("interaction_keys", "multi-reference", { referenceDomain: "interaction" })],
   },
   relation_type: {
     kind: "relation_type", section: "relation-types", label: "关系类型", collectionPath: ["world", "relation_types"],
@@ -80,11 +80,11 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
   },
   relation: {
     kind: "relation", section: "relations", label: "关系实例", collectionPath: ["world", "relations"],
-    fields: [field("key", "text"), field("source_node_key", "reference", { referenceDomain: "node" }), field("relation_type_key", "reference", { referenceDomain: "relation_type" }), field("target_node_key", "reference", { referenceDomain: "node" }), field("initial_visibility", "enum", { enum: V2_ENUMS.relationVisibility })],
+    fields: [field("key", "text"), field("source_node_key", "reference", { referenceDomain: "node" }), field("relation_type_key", "reference", { referenceDomain: "relation_type" }), field("target_node_key", "reference", { referenceDomain: "node" })],
   },
   resource: {
     kind: "resource", section: "resources", label: "资源", collectionPath: ["world", "resources"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("initial_value", "integer"), field("minimum", "integer"), field("maximum", "integer"), field("reservation_supported", "boolean"), field("unit", "text"), field("display_unit", "text")],
+    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("minimum", "integer"), field("maximum", "integer"), field("reservation_supported", "boolean"), field("unit", "text"), field("display_unit", "text")],
   },
   role: {
     kind: "role", section: "roles", label: "角色", collectionPath: ["actors", "roles"],
@@ -92,7 +92,7 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
   },
   actor: {
     kind: "actor", section: "actors", label: "参与者档案", collectionPath: ["actors", "actor_profiles"],
-    fields: [field("key", "text"), field("name", "text"), field("role_key", "reference", { referenceDomain: "role" }), field("persona", "textarea"), field("initial_node_key", "reference", { referenceDomain: "node" }), field("allowed_action_keys", "multi-reference", { referenceDomain: "action" }), field("command_reachability", "enum", { enum: ["ONLINE", "DISCONNECTED"] })],
+    fields: [field("key", "text"), field("name", "text"), field("role_key", "reference", { referenceDomain: "role" }), field("persona", "textarea"), field("allowed_action_keys", "multi-reference", { referenceDomain: "action" })],
     nested: ["doctrine", "authority_policy"],
   },
   interaction: {

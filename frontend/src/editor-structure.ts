@@ -5,7 +5,7 @@ export type SectionMode = "SINGLETON" | "COLLECTION" | "HYBRID" | "BROWSER" | "W
 export type MasterSource = "none" | "entities" | "root-collections" | "topology";
 export type CreateCapability = "none" | "entity" | "root-collection-item";
 export type SelectionStrategy = "none" | "route-object" | "root-owner" | "topology" | "workflow";
-export type WorkspaceRenderer = "root" | "entity" | "root-collection" | "hybrid" | "topology" | "workflow";
+export type WorkspaceRenderer = "root" | "entity" | "root-collection" | "hybrid" | "topology" | "workflow" | "initialization";
 export type AdvancedJsonCapability = "none" | "nested-only" | "unknown-variant";
 export type LocatorStrategy = "singleton" | "entity" | "root-collection" | "mixed-entity" | "browser" | "workflow";
 
@@ -108,11 +108,11 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
   "derived-states": declaration("derived-states", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "unknown-variant" }, "entity"),
   initialization: declaration(
     "initialization",
-    "HYBRID",
-    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-identity" },
-    { renderer: "hybrid", title: "section", selection: "root-owner" },
-    { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
-    "root-collection",
+    "BROWSER",
+    { visible: false, source: "none", label: "structure", searchable: false, create: "none", grouped: false, itemIdentity: "none" },
+    { renderer: "initialization", title: "section", selection: "none" },
+    { create: false, rename: false, delete: false, inspector: false, advancedJson: "none" },
+    "browser",
   ),
   "goal-resolution": declaration(
     "goal-resolution",

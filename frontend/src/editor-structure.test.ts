@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { sectionStructure, sectionStructureRegistry, type SectionMode } from "./editor-structure";
-import { rootFieldRegistry } from "./editor-registry";
+import { entityRegistry, rootFieldRegistry } from "./editor-registry";
 
 const expectedModes: Record<SectionMode, string[]> = {
   SINGLETON: ["overview", "goal-resolution"],
@@ -20,8 +20,8 @@ const expectedModes: Record<SectionMode, string[]> = {
     "public-knowledge",
     "public-references",
   ],
-  HYBRID: ["initialization", "planning"],
-  BROWSER: ["world"],
+  HYBRID: ["planning"],
+  BROWSER: ["world", "initialization"],
   WORKFLOW: ["validation"],
 };
 
@@ -53,6 +53,11 @@ describe("section structure registry", () => {
       master: { source: "topology", create: "none" },
       workspace: { renderer: "topology" },
     });
+    expect(sectionStructure("initialization")).toMatchObject({
+      mode: "BROWSER",
+      master: { visible: false, source: "none", create: "none" },
+      workspace: { renderer: "initialization" },
+    });
     expect(sectionStructure("public-knowledge")).toMatchObject({
       mode: "COLLECTION",
       master: { source: "root-collections" },
@@ -65,5 +70,12 @@ describe("section structure registry", () => {
     expect(sectionStructure("actions").capabilities.advancedJson).toBe("nested-only");
     expect(sectionStructure("rules").capabilities.advancedJson).toBe("unknown-variant");
     expect(Object.values(rootFieldRegistry).flat().filter((field) => field.type === "json" || field.advanced)).toEqual([]);
+  });
+
+  it("removes initialization-only controls from design registries", () => {
+    expect(entityRegistry.node.fields.map((field) => field.path)).not.toEqual(expect.arrayContaining(["initial_access", "initial_visibility"]));
+    expect(entityRegistry.actor.fields.map((field) => field.path)).not.toEqual(expect.arrayContaining(["initial_node_key", "command_reachability"]));
+    expect(entityRegistry.relation.fields.map((field) => field.path)).not.toContain("initial_visibility");
+    expect(entityRegistry.resource.fields.map((field) => field.path)).not.toContain("initial_value");
   });
 });

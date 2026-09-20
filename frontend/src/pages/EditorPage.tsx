@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 
 import { api, ApiError } from "../api";
 import { TypedEditor, TypedEntityEditor } from "../components/TypedEditor";
+import { InitializationWorkspace } from "../components/InitializationWorkspace";
 import { WorldGraph, type TopologyContext, type TopologySelection } from "../components/WorldGraph";
 import {
   addObject,
@@ -30,7 +31,7 @@ import { sectionStructure } from "../editor-structure";
 import { editorLocatorFromValidation, editorLocatorHref } from "../editor-locator";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
-import type { Draft, DraftSandboxResult, ValidationResult } from "../types";
+import type { Draft, DraftSandboxResult, InitializationPreview, ValidationResult } from "../types";
 import { diagnosticMessage, editorSectionTaxonomy, editorTaxonomyGroups, errorText, kindLabels, sectionLabels, uiLabel } from "../ui";
 
 type SaveState = WorkingCopySaveState;
@@ -189,6 +190,13 @@ export function EditorPage() {
     queryKey: ["working-copy-references", scenarioId, serverDraft?.revision, workingDocument],
     queryFn: () => api.analyzeWorkingCopyReferences(scenarioId, serverDraft!.revision, workingDocument!),
     enabled: Boolean(serverDraft && workingDocument && saveState !== "CONFLICT"),
+  });
+  const initializationPreviewQuery = useQuery({
+    queryKey: ["initialization-preview", scenarioId, serverDraft?.revision, workingDocument],
+    queryFn: () => api.initializationPreview(scenarioId, serverDraft!.revision, workingDocument!),
+    enabled: Boolean(serverDraft && workingDocument && saveState !== "CONFLICT" && (section === "initialization" || section === "validation")),
+    retry: false,
+    placeholderData: (previous) => previous,
   });
   const local = useMemo(() => serverDraft && workingDocument ? { ...serverDraft, definition_document: workingDocument } : null, [serverDraft, workingDocument]);
   const hasUnsavedChanges = workingCopyIsDirty(serverDraft, workingDocument);
@@ -373,6 +381,22 @@ export function EditorPage() {
     editDocument(updateSectionRoot(local.definition_document, section, result.root));
     setCollectionSelection(result.selection);
   };
+  const deleteInitializationResourcePool = (poolKey: string) => {
+    const initialization = local.definition_document.initialization;
+    if (!initialization || typeof initialization !== "object" || Array.isArray(initialization)) return;
+    const pools = Array.isArray((initialization as JsonObject).resource_pools) ? (initialization as JsonObject).resource_pools as JsonObject[] : [];
+    const pool = pools.find((item) => item.pool_key === poolKey);
+    if (!pool) return;
+    const referencePath = rootCollectionReferencePath("resource_pools", pool);
+    const references = refsQuery.data?.references.filter((edge) => edge.target.object_kind === "initialization" && edge.target.field_path === referencePath) ?? [];
+    if (references.length > 0) {
+      setMessage("该集合项仍被其他配置引用，不能删除。请先移除相关引用。");
+      return;
+    }
+    if (!window.confirm("确定删除当前资源池吗？")) return;
+    setMessage("");
+    editDocument(updateSectionRoot(local.definition_document, "initialization", { ...(initialization as JsonObject), resource_pools: pools.filter((item) => item !== pool) }));
+  };
 
   const rename = async () => {
     if (!selected) return;
@@ -432,6 +456,18 @@ export function EditorPage() {
       setMessage(`无法自动定位此诊断，请按原始路径查看：${issue.path}`);
       return;
     }
+    if (locator.object_kind === "initialization") {
+      const match = locator.field_path?.match(/^resource_pools\.(\d+)/);
+      const poolIndex = match ? Number(match[1]) : -1;
+      const initialization = local.definition_document.initialization;
+      const pools = initialization && typeof initialization === "object" && !Array.isArray(initialization) && Array.isArray((initialization as JsonObject).resource_pools) ? (initialization as JsonObject).resource_pools as JsonObject[] : [];
+      const poolKey = typeof pools[poolIndex]?.pool_key === "string" ? pools[poolIndex].pool_key as string : null;
+      const item = poolKey ? initializationPreviewQuery.data?.projection.domains.flatMap((domain) => domain.groups).flatMap((group) => group.items).find((candidate) => candidate.id.startsWith(`pool:${poolKey}:`)) : null;
+      if (item) {
+        navigate(`/scenarios/${scenarioId}/edit/initialization?domain=resources&group=resource-pools&item=${encodeURIComponent(item.id)}`);
+        return;
+      }
+    }
     const target = editorLocatorFromValidation(locator, local.definition_document);
     if (!target) {
       setMessage(`无法精确定位此诊断，请按原始路径查看：${issue.path}`);
@@ -452,6 +488,8 @@ export function EditorPage() {
       : objects.length;
   const workspaceTitle = showWorldTopology
     ? "世界拓扑"
+    : structure.workspace.renderer === "initialization"
+      ? "初始化"
     : selected
       ? objectDisplayValue(selected.value, selected.name)
       : selectedCollectionItem
@@ -461,6 +499,8 @@ export function EditorPage() {
         : sectionLabels[section] ?? section;
   const workspaceSubtitle = showWorldTopology
     ? "浏览范围、实体与关系；编辑请进入对应的世界模型页面"
+    : structure.workspace.renderer === "initialization"
+      ? "配置当前版本的开局状态"
     : selected
       ? `${kindLabels[selected.kind] ?? selected.kind} · 可编辑对象`
       : selectedCollectionItem
@@ -538,7 +578,7 @@ export function EditorPage() {
             </>}
           </div>
         </aside>}
-         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} onChange={updateSelectedEntity} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel validation={validation} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
+         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-initialization" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-body-initialization" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "initialization" && <InitializationWorkspace document={local.definition_document} preview={initializationPreviewQuery.data ?? null} loading={initializationPreviewQuery.isPending} error={initializationPreviewQuery.error ? errorText(initializationPreviewQuery.error) : null} scenarioId={scenarioId} onChange={editDocument} onDeleteResourcePool={deleteInitializationResourcePool} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} initializationHref={`/scenarios/${scenarioId}/edit/initialization`} onChange={updateSelectedEntity} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel validation={validation} initializationPreview={initializationPreviewQuery.data ?? null} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
         {structure.capabilities.inspector && <aside className={`inspector inspector-new${inspectorOpen ? " is-open" : " is-collapsed"}`}><div className="inspector-heading"><div><p className="panel-kicker">详情</p><h3>{showWorldTopology ? "拓扑检查器" : "检查器"}</h3></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen(false)}>收起</button></div><div className="inspector-scroll">
           {showWorldTopology ? <>
             {!topologySelection && <div className="inspector-empty"><strong>未选择拓扑对象</strong><p className="muted">单击范围或实体查看摘要，双击进入下一层。</p></div>}
@@ -553,8 +593,8 @@ export function EditorPage() {
   </main>;
 }
 
-function ValidationPanel({ validation, sandboxGoal, sandbox, setSandboxGoal, onValidate, onPublish, onTest, onIssue }: { validation: ValidationResult | null; sandboxGoal: string; sandbox: DraftSandboxResult | null; setSandboxGoal: (value: string) => void; onValidate: () => void; onPublish: () => void; onTest: () => void; onIssue: (issue: ValidationResult["issues"][number]) => void }) {
-  return <div className="validation-panel"><section className="validation-section validation-actions"><h4>草稿检查与发布</h4><p className="muted">先验证当前草稿；只有通过验证的已保存版本可以发布。</p><div className="button-row"><button onClick={onValidate}>验证当前草稿</button><button disabled={!validation?.publish_ready} onClick={onPublish}>发布不可变版本</button></div></section><section className="validation-section validation-readiness"><h4>运行准备度</h4>{validation ? validation.readiness.map((item) => <div className={`readiness ${item.passed ? "pass" : "fail"}`} key={item.level}>{item.passed ? "✓" : "×"} {uiLabel(item.level)}</div>) : <p className="muted">验证后将在这里显示各级运行准备度。</p>}</section><section className="validation-section validation-issues"><h4>问题</h4>{!validation ? <p className="muted">尚未验证当前草稿。</p> : validation.issues.length === 0 ? <p>没有发现问题。</p> : validation.issues.map((issue) => <article className={`issue ${issue.severity.toLowerCase()}`} role="button" tabIndex={0} onClick={() => onIssue(issue)} key={`${issue.code}:${issue.path}`}><strong>{uiLabel(issue.severity)} · {issue.code}</strong><p>{diagnosticMessage(issue.code, issue.message)}</p><code>{issue.path}</code>{issue.locator && <small>点击定位到字段</small>}</article>)}</section>
+function ValidationPanel({ validation, initializationPreview, sandboxGoal, sandbox, setSandboxGoal, onValidate, onPublish, onTest, onIssue }: { validation: ValidationResult | null; initializationPreview: InitializationPreview | null; sandboxGoal: string; sandbox: DraftSandboxResult | null; setSandboxGoal: (value: string) => void; onValidate: () => void; onPublish: () => void; onTest: () => void; onIssue: (issue: ValidationResult["issues"][number]) => void }) {
+  return <div className="validation-panel"><section className="validation-section validation-actions"><h4>草稿检查与发布</h4><p className="muted">先验证当前草稿；只有通过验证的已保存版本可以发布。</p><div className="button-row"><button onClick={onValidate}>验证当前草稿</button><button disabled={!validation?.publish_ready} onClick={onPublish}>发布不可变版本</button></div></section><section className="validation-section validation-bootstrap"><h4>Bootstrap Readiness · Draft vs Published</h4>{initializationPreview ? <><p>初始化警告 {initializationPreview.projection.summary.warnings} 项</p><p>Publish 后开局变化 {initializationPreview.parity.initialization_changes.length} 项 · Design 变化 {initializationPreview.parity.design_changes.length} 组</p><Link to="../initialization" className="editor-button editor-button-secondary">打开初始化配置</Link></> : <p className="muted">正在生成开局完整度和版本差异。</p>}</section><section className="validation-section validation-readiness"><h4>运行准备度</h4>{validation ? validation.readiness.map((item) => <div className={`readiness ${item.passed ? "pass" : "fail"}`} key={item.level}>{item.passed ? "✓" : "×"} {uiLabel(item.level)}</div>) : <p className="muted">验证后将在这里显示各级运行准备度。</p>}</section><section className="validation-section validation-issues"><h4>问题</h4>{!validation ? <p className="muted">尚未验证当前草稿。</p> : validation.issues.length === 0 ? <p>没有发现问题。</p> : validation.issues.map((issue) => <article className={`issue ${issue.severity.toLowerCase()}`} role="button" tabIndex={0} onClick={() => onIssue(issue)} key={`${issue.code}:${issue.path}`}><strong>{uiLabel(issue.severity)} · {issue.code}</strong><p>{diagnosticMessage(issue.code, issue.message)}</p><code>{issue.path}</code>{issue.locator && <small>点击定位到字段</small>}</article>)}</section>
     <section className="sandbox-panel"><h4>预览/测试当前草稿</h4><p className="muted">在一次性隔离沙盒中运行，不会创建正式游戏。</p><label htmlFor="sandbox-goal">可选目标<input id="sandbox-goal" value={sandboxGoal} onChange={(event) => setSandboxGoal(event.target.value)} placeholder="输入精确版本中定义的目标别名" /></label><button onClick={onTest}>启动隔离测试</button>{sandbox && <div className={sandbox.sandbox_started ? "sandbox-result pass" : "sandbox-result fail"}><strong>{sandbox.sandbox_started ? "沙盒已启动" : "草稿无效，未启动沙盒"}</strong>{sandbox.goal_status && <p>目标解析：{uiLabel(sandbox.goal_status)}</p>}{sandbox.task && <p>任务状态：{uiLabel(sandbox.task.status)}</p>}{sandbox.issues.map((issue) => <p key={`${issue.code}:${issue.path}`}>{uiLabel(issue.severity)} · {diagnosticMessage(issue.code, issue.message)}</p>)}</div>}</section>
   </div>;
 }

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
 import { EditorPage } from "./pages/EditorPage";
+import type { InitializationPreview } from "./types";
 import { editorSectionTaxonomy } from "./ui";
 
 vi.mock("./api", () => ({
@@ -18,6 +19,7 @@ vi.mock("./api", () => ({
     analyzeWorkingCopyReferences: vi.fn(),
     saveDraft: vi.fn(),
     validateDraft: vi.fn(),
+    initializationPreview: vi.fn(),
   },
 }));
 
@@ -58,6 +60,25 @@ const draft = {
   updated_at: "2026-09-15T00:00:00Z",
 };
 
+const initializationPreview: InitializationPreview = {
+  revision: 1,
+  parity: { published: false, initialization_changes: [], design_changes: [] },
+  projection: {
+    summary: { nodes: 1, actors: 1, resource_pools: 2, relations: 1, derived_states: 0, warnings: 1 },
+    findings: [
+      { identity: "pool:central_pool:relief:central", label: "Resource pool · central_pool", canonical_path: "initialization.resource_pools[]", owner: "INITIALIZATION_ONLY", source: "EXPLICIT", severity: "INFO", value: { quantity: 10 }, locator: { section: "initialization", object_kind: "resource_pool", object_key: "central_pool", field_path: "initialization.resource_pools" }, message: "" },
+    ],
+    domains: [
+      { id: "basic", label: "Basic configuration", groups: [{ id: "entry", label: "Bootstrap entry", items: [{ id: "bootstrap-entry", label: "Start node & primary actor", locator: { section: "initialization", object_kind: null, object_key: null, field_path: null }, field_ids: [], readonly: false, context: {} }] }] },
+      { id: "nodes", label: "Nodes", groups: [{ id: "node-type:region", label: "区域", items: [{ id: "node:central", label: "中央区", locator: { section: "world-entities", object_kind: "node", object_key: "central", field_path: null }, field_ids: [], readonly: false, context: {} }] }] },
+      { id: "actors", label: "Actors", groups: [] },
+      { id: "resources", label: "Resources", groups: [{ id: "resource-pools", label: "Resource pools", items: [{ id: "pool:central_pool:relief:central", label: "Resource pool · central_pool", locator: { section: "initialization", object_kind: "resource_pool", object_key: "central_pool", field_path: "initialization.resource_pools" }, field_ids: ["pool:central_pool:relief:central"], readonly: false, context: {} }] }, { id: "region-resource-knowledge", label: "Region resource knowledge", items: [] }, { id: "compatibility-resources", label: "Compatibility sources", items: [] }] },
+      { id: "relations", label: "Relations", groups: [] },
+      { id: "derived", label: "Derived state preview", groups: [] },
+    ],
+  },
+};
+
 function HistoryControls() {
   const navigate = useNavigate();
   return <><button type="button" onClick={() => navigate(-1)}>测试后退</button><button type="button" onClick={() => navigate(1)}>测试前进</button></>;
@@ -73,6 +94,7 @@ beforeEach(() => {
   vi.mocked(api.analyzeWorkingCopyReferences).mockResolvedValue({ scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [] });
   vi.mocked(api.saveDraft).mockResolvedValue(draft);
   vi.mocked(api.validateDraft).mockResolvedValue({ scenario_id: "scenario-1", revision: 1, content_hash: null, publish_ready: false, issues: [], readiness: [] });
+  vi.mocked(api.initializationPreview).mockResolvedValue(initializationPreview);
 });
 
 afterEach(cleanup);
@@ -202,18 +224,15 @@ describe("Editor section state ownership", () => {
     expect(screen.getByRole("heading", { name: "预览/测试当前草稿" })).toBeInTheDocument();
   });
 
-  it("uses one active owner for hybrid sections and keeps selection clean", async () => {
+  it("uses the initialization hierarchy and keeps navigation clean", async () => {
     renderEditor("/scenarios/scenario-1/edit/initialization");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "初始化入口", level: 3 })).toBeInTheDocument());
-    expect(screen.getByRole("heading", { name: "基础配置", level: 4 })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "资源初始状态", level: 4 })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "资源池", level: 4 })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "区域资源知识", level: 4 })).toBeInTheDocument();
-    expect(screen.getByLabelText("起始节点")).toBeInTheDocument();
-
+    await waitFor(() => expect(screen.getByRole("heading", { name: "初始化", level: 3 })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: /资源/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /资源/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Resource pools/ }));
     fireEvent.click(screen.getByRole("button", { name: /central_pool/ }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "central_pool", level: 3 })).toBeInTheDocument());
-    expect(screen.queryByLabelText("起始节点")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Resource pool · central_pool", level: 4 })).toBeInTheDocument());
+    expect(screen.getByLabelText(/数量/)).toBeInTheDocument();
     expect(screen.getByText("未修改")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "规划" }));
@@ -265,8 +284,8 @@ describe("Editor section state ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "验证当前草稿" }));
     fireEvent.click(await screen.findByText(/POOL_QUANTITY/));
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "central_pool", level: 3 })).toBeInTheDocument());
-    expect(screen.getByLabelText("数量")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Resource pool · central_pool", level: 4 })).toBeInTheDocument());
+    expect(screen.getByLabelText(/数量/)).toBeInTheDocument();
   });
 
   it("guards deletion of a referenced resource pool", async () => {
@@ -281,11 +300,14 @@ describe("Editor section state ownership", () => {
     });
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderEditor("/scenarios/scenario-1/edit/initialization");
+    await waitFor(() => expect(screen.getByRole("button", { name: /资源/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /资源/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Resource pools/ }));
     await waitFor(() => expect(screen.getByRole("button", { name: /central_pool/ })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /central_pool/ }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "central_pool", level: 3 })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Resource pool · central_pool", level: 4 })).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "删除此项" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除此资源池" }));
     expect(await screen.findByText("该集合项仍被其他配置引用，不能删除。请先移除相关引用。")).toBeInTheDocument();
     expect(confirm).not.toHaveBeenCalled();
     expect(screen.getByText("未修改")).toBeInTheDocument();

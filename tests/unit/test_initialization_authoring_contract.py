@@ -1,6 +1,18 @@
 from copy import deepcopy
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.domain.resources import resource_state_key
 from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.infrastructure.db.models import (
+    GameInstanceActor,
+    GameInstanceFactState,
+    GameInstanceNodeState,
+    GameInstanceRelationKnowledge,
+    GameInstanceResourceState,
+    Player,
+)
 from app.scenarios.initialization import (
     BootstrapValueSource,
     FieldUiOwner,
@@ -11,6 +23,8 @@ from app.scenarios.initialization import (
     initialization_projection,
     schema_field_ownership,
 )
+from app.services.runtime_initialization import RuntimeInitializationService
+from app.services.scenarios import ScenarioService
 from tests.scenario_fixtures import GENERIC_TEST
 
 
@@ -123,3 +137,65 @@ def test_semantic_parity_separates_bootstrap_and_design_changes() -> None:
     assert parity["published"] is True
     assert any("command_reachability" in item for item in parity["initialization_changes"])
     assert "derived_states" in parity["design_changes"]
+
+
+def test_exact_published_version_bootstraps_non_default_semantics_immutably(
+    session: Session,
+) -> None:
+    definition, document = _synthetic_definition()
+    document["metadata"]["key"] = "bootstrap_contract"
+    document["world"]["key"] = "bootstrap_contract"
+    document["world"]["nodes"][0]["initial_access"] = "LOCKED"
+    document["world"]["nodes"][0]["initial_visibility"] = "HIDDEN"
+    definition = ScenarioDefinitionV2.model_validate(document)
+    service = ScenarioService(session)
+    scenario = service.create_from_definition(
+        key="bootstrap_contract",
+        name="Bootstrap Contract",
+        definition=definition,
+    )
+    version = service.publish_draft(scenario.id, expected_revision=1).version
+    player = Player(name="bootstrap-contract-player")
+    session.add(player)
+    session.flush()
+
+    first = RuntimeInitializationService(session).create(
+        player_id=player.id,
+        scenario_version_id=version.id,
+        creation_key="bootstrap-contract-first",
+    )
+    node = session.get(GameInstanceNodeState, (first.instance.id, "medicine_cabinet"))
+    fact = session.get(GameInstanceFactState, (first.instance.id, "patient_one", "stable"))
+    actor = session.get(GameInstanceActor, (first.instance.id, "doctor_lee"))
+    resource = session.get(
+        GameInstanceResourceState,
+        (first.instance.id, resource_state_key("medicine", None, "clinic_medicine")),
+    )
+    relation = session.scalar(
+        select(GameInstanceRelationKnowledge).where(
+            GameInstanceRelationKnowledge.game_instance_id == first.instance.id
+        )
+    )
+    assert node is not None and node.status == "LOCKED" and node.visibility == "HIDDEN"
+    assert fact is not None and fact.truth_value is False
+    assert actor is not None and actor.command_reachability == "DISCONNECTED"
+    assert resource is not None and resource.value == 4 and resource.reserved_value == 1
+    assert relation is not None and relation.visibility == "HIDDEN"
+
+    changed = deepcopy(document)
+    changed["world"]["nodes"][0]["initial_access"] = "AVAILABLE"
+    service.replace_draft(
+        scenario.id,
+        expected_revision=1,
+        definition_document=changed,
+    )
+    second = RuntimeInitializationService(session).create(
+        player_id=player.id,
+        scenario_version_id=version.id,
+        creation_key="bootstrap-contract-second",
+    )
+    old_version_node = session.get(
+        GameInstanceNodeState,
+        (second.instance.id, "medicine_cabinet"),
+    )
+    assert old_version_node is not None and old_version_node.status == "LOCKED"

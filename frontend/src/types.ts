@@ -91,6 +91,43 @@ export type GlobalPresentationOverrides = {
   summary_slot?: PresentationSummarySlot;
   semantic_order?: PresentationSemanticSlot[];
 };
+
+export type InitializationFinding = {
+  identity: string;
+  label: string;
+  canonical_path: string;
+  owner: "DESIGN_ONLY" | "INITIALIZATION_ONLY" | "SHARED_CONTEXT_READONLY" | "SYSTEM" | "LEGACY" | "DERIVED_READONLY";
+  source: "EXPLICIT" | "DEFAULT" | "LEGACY_FALLBACK" | "ENGINE" | "DERIVED" | "MISSING" | "INVALID";
+  severity: "INFO" | "WARNING" | "BLOCKING";
+  value: unknown;
+  locator: { section: string; object_kind: string | null; object_key: string | null; field_path: string | null };
+  message: string;
+};
+
+export type InitializationProjectionItem = {
+  id: string;
+  label: string;
+  locator: InitializationFinding["locator"];
+  field_ids: string[];
+  readonly: boolean;
+  context: Record<string, unknown>;
+};
+
+export type InitializationProjection = {
+  domains: Array<{
+    id: string;
+    label: string;
+    groups: Array<{ id: string; label: string; items: InitializationProjectionItem[] }>;
+  }>;
+  findings: InitializationFinding[];
+  summary: { nodes: number; actors: number; resource_pools: number; relations: number; derived_states: number; warnings: number };
+};
+
+export type InitializationPreview = {
+  revision: number;
+  projection: InitializationProjection;
+  parity: { published: boolean; initialization_changes: string[]; design_changes: string[] };
+};
 export type WorldPresentationOverrides = {
   entity_detail?: PresentationEntityDetail;
   knowledge_level?: PresentationKnowledgeLevel;

@@ -524,6 +524,7 @@ def initialization_projection(
     node_types = {item.key: item for item in definition.world.node_types}
     roles = {item.key: item for item in definition.actors.roles}
     relation_types = {item.key: item for item in definition.world.relation_types}
+    nodes = {item.key: item for item in definition.world.nodes}
 
     def entity(
         identity: str,
@@ -640,7 +641,10 @@ def initialization_projection(
             items.append(
                 entity(
                     f"relation:{key}",
-                    f"{relation.source_node_key} → {relation.target_node_key}",
+                    (
+                        f"{nodes[relation.source_node_key].name}"
+                        f" → {nodes[relation.target_node_key].name}"
+                    ),
                     _locator(section="relations", kind="relation", key=key),
                     [f"relation:{key}:initial_visibility"],
                     context={
@@ -732,8 +736,37 @@ def bootstrap_parity(
         for key in before_bootstrap.keys() | after_bootstrap.keys()
         if before_bootstrap.get(key) != after_bootstrap.get(key)
     )
-    before = published.model_dump(mode="json", exclude_none=True)
-    after = draft.model_dump(mode="json", exclude_none=True)
+
+    def design_document(definition: ScenarioDefinitionV2) -> dict[str, object]:
+        document = definition.model_dump(mode="json", exclude_none=True)
+        document.pop("initialization", None)
+        world = document.get("world")
+        if isinstance(world, dict):
+            for node in world.get("nodes", []):
+                if not isinstance(node, dict):
+                    continue
+                node.pop("initial_access", None)
+                node.pop("initial_visibility", None)
+                for fact in node.get("facts", []):
+                    if isinstance(fact, dict):
+                        fact.pop("initial_value", None)
+                        fact.pop("initial_visibility", None)
+            for relation in world.get("relations", []):
+                if isinstance(relation, dict):
+                    relation.pop("initial_visibility", None)
+            for resource in world.get("resources", []):
+                if isinstance(resource, dict):
+                    resource.pop("initial_value", None)
+        actors = document.get("actors")
+        if isinstance(actors, dict):
+            for actor in actors.get("actor_profiles", []):
+                if isinstance(actor, dict):
+                    actor.pop("initial_node_key", None)
+                    actor.pop("command_reachability", None)
+        return document
+
+    before = design_document(published)
+    after = design_document(draft)
     design_changes = []
     for root in (
         "metadata",
