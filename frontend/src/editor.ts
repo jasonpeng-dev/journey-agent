@@ -136,8 +136,24 @@ export function objectIdentity(kind: EntityKind, value: JsonObject): string | nu
   return typeof key === "string" && key.length > 0 ? key : null;
 }
 
-function objectName(kind: EntityKind, value: JsonObject, key: string): string {
+function ruleQualifier(value: JsonObject): string {
+  if (value.phase === "PREFLIGHT") return "前置校验";
+  const effects = Array.isArray(value.effects) ? value.effects : [];
+  if (effects.some((effect) => effect && typeof effect === "object" && (effect as JsonObject).kind === "EMIT_FAILURE")) return "失败处理";
+  if (effects.some((effect) => effect && typeof effect === "object" && (effect as JsonObject).kind === "EMIT_OUTCOME")) return "完成处理";
+  return value.trigger === "STATE" ? "状态处理" : "执行规则";
+}
+
+export function ruleDisplayTitle(document: JsonObject, value: JsonObject): string {
+  const actionKey = typeof value.action_key === "string" ? value.action_key : "";
+  const action = actionKey ? objectsAt(document, "action").find((item) => item.key === actionKey) : null;
+  const owner = action?.name ?? (value.trigger === "STATE" ? "状态规则" : "规则");
+  return `${owner} · ${ruleQualifier(value)}`;
+}
+
+function objectName(document: JsonObject, kind: EntityKind, value: JsonObject, key: string): string {
   if (typeof value.name === "string" && value.name.trim()) return value.name;
+  if (kind === "rule") return ruleDisplayTitle(document, value);
   if (kind === "relation") return `${String(value.source_node_key ?? "")} → ${String(value.target_node_key ?? "")}`;
   if (kind === "public_reference" && typeof value.term === "string") return value.term;
   return key;
@@ -160,7 +176,7 @@ function objectsAt(document: JsonObject, kind: EntityKind): DraftObject[] {
     return [{
       kind,
       key,
-      name: objectName(kind, value, key),
+      name: objectName(document, kind, value, key),
       value,
       path: [...COLLECTION_PATHS[kind], String(index)],
     }];

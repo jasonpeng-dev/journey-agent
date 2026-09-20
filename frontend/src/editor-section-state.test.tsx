@@ -96,7 +96,7 @@ function renderEditor(initialEntry = "/scenarios/scenario-1/edit/public-referenc
 function expectSection({ heading, item, kind, count, createButton }: { heading: string; item: string; kind: string; count: string; createButton: string }) {
   expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
   expect(screen.getByText(item)).toBeInTheDocument();
-  expect(screen.getByText(new RegExp(`${kind} ·`))).toBeInTheDocument();
+  expect(screen.getByText(new RegExp(`${kind} ·`), { selector: "code" })).toBeInTheDocument();
   expect(document.querySelector(".object-panel-header .object-count")).toHaveTextContent(count);
   expect(screen.getByRole("button", { name: new RegExp(createButton) })).toBeInTheDocument();
   expect(screen.getByText("未修改")).toBeInTheDocument();
@@ -145,7 +145,7 @@ describe("Editor section state ownership", () => {
 
     fireEvent.click(screen.getByRole("link", { name: "规则" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "规则" })).toBeInTheDocument());
-    expectSection({ heading: "规则", item: "stabilize", kind: "规则", count: "1", createButton: "规则" });
+    expectSection({ heading: "规则", item: "状态规则 · 状态处理", kind: "规则", count: "1", createButton: "规则" });
 
     fireEvent.click(screen.getByRole("link", { name: "参与者" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "参与者" })).toBeInTheDocument());
@@ -175,7 +175,8 @@ describe("Editor section state ownership", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "测试前进" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "规则" })).toBeInTheDocument());
-    expect(screen.getByText("stabilize")).toBeInTheDocument();
+    expect(screen.getByText("状态规则 · 状态处理")).toBeInTheDocument();
+    expect(screen.getByText("规则 · stabilize")).toBeInTheDocument();
     expect(screen.getByText("未修改")).toBeInTheDocument();
   });
 
@@ -293,7 +294,15 @@ describe("Editor section state ownership", () => {
     renderEditor("/scenarios/scenario-1/edit/public-knowledge");
     await waitFor(() => expect(screen.getByRole("heading", { name: "公共知识" })).toBeInTheDocument());
     expect(screen.getByText("资源发现知识")).toBeInTheDocument();
+    expect(screen.getByText("救援物资")).toBeInTheDocument();
+    expect(screen.getByText("主要来源：中央区")).toBeInTheDocument();
+    expect(screen.getByText("资源 · relief")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "公共知识配置" })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "救援物资" } });
+    expect(screen.getByText("资源 · relief")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "relief" } });
+    expect(screen.getByText("救援物资")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "关系" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "关系" })).toBeInTheDocument());

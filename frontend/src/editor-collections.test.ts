@@ -7,6 +7,7 @@ import {
   rootCollectionIdentity,
   rootCollectionIdentityLabel,
   rootCollectionItem,
+  rootCollectionItems,
   rootCollectionSelectionForPath,
   type RootCollectionKey,
 } from "./editor-collections";
@@ -31,6 +32,17 @@ describe("root collection durable identity", () => {
     expect(rootCollectionIdentityLabel("resource_initial_states", { resource_key: "water", scope_node_key: null }))
       .toBe("资源 · water / 作用域 · 全局");
     expect(rootCollectionIdentityLabel("resource_pools", { pool_key: "north_water" })).toBe("资源池 · north_water");
+  });
+
+  it("resolves Public Knowledge titles through Resource and Region names with safe fallback", () => {
+    const root = { resource_source_hints: [
+      { resource_key: "water", primary_region_key: "north", candidate_region_keys: [] },
+      { resource_key: "missing", primary_region_key: "unknown", candidate_region_keys: [] },
+    ] };
+    const document = { world: { resources: [{ key: "water", name: "应急用水" }], nodes: [{ key: "north", name: "北部工业区" }] } };
+    const items = rootCollectionItems("public-knowledge", root, document);
+    expect(items[0]).toMatchObject({ title: "应急用水", summary: "主要来源：北部工业区", identityLabel: "资源 · water" });
+    expect(items[1]).toMatchObject({ title: "missing", summary: "主要来源：unknown", identityLabel: "资源 · missing" });
   });
 
   it("keeps selection on the same item after reorder and removal before it", () => {

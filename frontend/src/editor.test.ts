@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { referenceOptions } from "./components/editor/ReferencePicker";
-import { addObject as addEditorObject, filterDraftObjects, nodeSemanticView, objectIdentity, replaceObject, sectionDefinition, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
+import { addObject as addEditorObject, filterDraftObjects, nodeSemanticView, objectIdentity, replaceObject, ruleDisplayTitle, sectionDefinition, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
 import { entityRegistry, factInitialValueMetadata } from "./editor-registry";
 import { addObject, defaultArrayItem, kindsBySection } from "./templates";
 
@@ -75,6 +75,24 @@ describe("editor draft helpers", () => {
     expect(filterDraftObjects(objects, "south_bridge").map((item) => item.key)).toEqual(["south_bridge"]);
     expect(filterDraftObjects(objects, "", "node")).toHaveLength(2);
     expect(filterDraftObjects(objects, "", "relation")).toHaveLength(0);
+  });
+
+  it("projects Rule titles from authored action, phase, trigger, and effects", () => {
+    const ruleDocument = { actions: [{ key: "repair", name: "修复设施" }] };
+    expect(ruleDisplayTitle(ruleDocument, { action_key: "repair", phase: "PREFLIGHT", trigger: "ACTION", effects: [{ kind: "EMIT_FAILURE" }] })).toBe("修复设施 · 前置校验");
+    expect(ruleDisplayTitle(ruleDocument, { action_key: "repair", phase: "RESOLVE", trigger: "ACTION", effects: [{ kind: "EMIT_OUTCOME" }] })).toBe("修复设施 · 完成处理");
+    expect(ruleDisplayTitle(ruleDocument, { phase: "RESOLVE", trigger: "STATE", effects: [{ kind: "SET_FACT" }] })).toBe("状态规则 · 状态处理");
+    expect(ruleDisplayTitle(ruleDocument, { action_key: "missing", phase: "RESOLVE", trigger: "ACTION", effects: [{ kind: "EMIT_FAILURE" }] })).toBe("规则 · 失败处理");
+  });
+
+  it("searches Rule semantic titles while preserving machine identity", () => {
+    const objects = sectionObjects({
+      actions: [{ key: "repair", name: "修复设施" }],
+      rules: [{ key: "repair_preflight", action_key: "repair", phase: "PREFLIGHT", trigger: "ACTION", effects: [{ kind: "EMIT_FAILURE" }] }],
+    }, "rules");
+    expect(objects[0]).toMatchObject({ name: "修复设施 · 前置校验", key: "repair_preflight" });
+    expect(filterDraftObjects(objects, "修复设施")).toHaveLength(1);
+    expect(filterDraftObjects(objects, "repair_preflight")).toHaveLength(1);
   });
 
   it("keeps sibling relation kinds distinct when their identities match", () => {

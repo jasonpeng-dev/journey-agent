@@ -184,7 +184,7 @@ export function EditorPage() {
   const filteredObjects = useMemo(() => filterDraftObjects(objects, objectSearch, kindFilter), [objects, objectSearch, kindFilter]);
   const sectionValue = local ? sectionRoot(local.definition_document, section) : null;
   const collectionDefinitions = useMemo(() => rootCollectionDefinitions(section), [section]);
-  const collectionItems = useMemo(() => rootCollectionItems(section, sectionValue), [section, sectionValue]);
+  const collectionItems = useMemo(() => rootCollectionItems(section, sectionValue, local?.definition_document), [local?.definition_document, section, sectionValue]);
   const collectionSelection = collectionSelectionState?.section === section ? collectionSelectionState.selection : null;
   useEffect(() => {
     const owner = searchParams.get("owner");
@@ -203,7 +203,7 @@ export function EditorPage() {
   }, [collectionDefinitions, collectionItems, searchParams, section, singletonOwner]);
   const filteredCollectionItems = useMemo(() => {
     const query = objectSearch.trim().toLocaleLowerCase();
-    return collectionItems.filter((item) => !query || [item.title, item.summary, item.collection].some((value) => value.toLocaleLowerCase().includes(query)));
+    return collectionItems.filter((item) => !query || [item.title, item.summary, item.identityLabel, item.collection].some((value) => value.toLocaleLowerCase().includes(query)));
   }, [collectionItems, objectSearch]);
   const singletonOwnerVisible = singletonOwner
     ? !objectSearch.trim() || [singletonOwner.label, singletonOwner.summary].some((value) => value.toLocaleLowerCase().includes(objectSearch.trim().toLocaleLowerCase()))

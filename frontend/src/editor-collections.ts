@@ -162,6 +162,18 @@ function compact(value: unknown, fallback: string): string {
   return value.trim();
 }
 
+function collectionName(document: JsonObject | undefined, path: string[], key: unknown): string | null {
+  if (!document || typeof key !== "string") return null;
+  let current: unknown = document;
+  for (const part of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return null;
+    current = (current as JsonObject)[part];
+  }
+  if (!Array.isArray(current)) return null;
+  const match = current.find((item) => item && typeof item === "object" && !Array.isArray(item) && (item as JsonObject).key === key) as JsonObject | undefined;
+  return match && typeof match.name === "string" && match.name.trim() ? match.name.trim() : null;
+}
+
 function itemTitle(collection: RootCollectionKey, value: JsonObject, index: number): string {
   if (collection === "resource_source_hints") return compact(value.resource_key, `未命名来源提示 ${index + 1}`);
   if (collection === "recovery_hints") return compact(value.failure_code, `未命名恢复提示 ${index + 1}`);
@@ -197,21 +209,29 @@ export function rootCollectionDefinitions(section: string): RootCollectionDefini
   return definitions[section as EditorSection] ?? [];
 }
 
-export function rootCollectionItems(section: string, value: unknown): RootCollectionItem[] {
+export function rootCollectionItems(section: string, value: unknown, document?: JsonObject): RootCollectionItem[] {
   const root = objectValue(value);
   if (!root) return [];
   return rootCollectionDefinitions(section).flatMap((definition) => {
     const values: unknown[] = Array.isArray(root[definition.key]) ? root[definition.key] as unknown[] : [];
     return values.flatMap((item, index) => {
       const object = objectValue(item);
+      const resourceName = definition.key === "resource_source_hints"
+        ? collectionName(document, ["world", "resources"], object?.resource_key)
+        : null;
+      const primaryRegionName = definition.key === "resource_source_hints"
+        ? collectionName(document, ["world", "nodes"], object?.primary_region_key)
+        : null;
       return object ? [{
         owner: "collection",
         collection: definition.key,
         identity: rootCollectionIdentity(definition.key, object) ?? JSON.stringify(["invalid", definition.key, object]),
         index,
         value: object,
-        title: itemTitle(definition.key, object, index),
-        summary: itemSummary(definition.key, object),
+        title: resourceName ?? itemTitle(definition.key, object, index),
+        summary: definition.key === "resource_source_hints" && object.primary_region_key
+          ? `主要来源：${primaryRegionName ?? String(object.primary_region_key)}`
+          : itemSummary(definition.key, object),
         identityLabel: rootCollectionIdentityLabel(definition.key, object),
       }] : [];
     });
