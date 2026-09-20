@@ -168,6 +168,8 @@ export function ScalarListEditor({ value, onChange, label, path, help, error }: 
     {items.length === 0 && <p className="muted">暂无内容。</p>}
     {items.map((item, index) => <div className="typed-array-row" key={`${path}.${index}`}>
       {typeof item === "boolean" ? <BooleanControl label={`${label} ${index + 1}`} path={`${path}.${index}`} value={item} onChange={(next) => onChange(items.map((old, oldIndex) => oldIndex === index ? next : old))} /> : typeof item === "number" ? <NumberInput label={`${label} ${index + 1}`} path={`${path}.${index}`} value={item} onChange={(next) => onChange(items.map((old, oldIndex) => oldIndex === index ? next ?? 0 : old))} /> : <TextInput label={`${label} ${index + 1}`} path={`${path}.${index}`} value={item} onChange={(next) => onChange(items.map((old, oldIndex) => oldIndex === index ? next : old))} />}
+      <button type="button" className="small" aria-label={`${normalizedLabel(label)} ${index + 1} 上移`} disabled={index === 0} onClick={() => onChange(items.map((old, oldIndex) => oldIndex === index - 1 ? item : oldIndex === index ? items[index - 1] : old))}>↑</button>
+      <button type="button" className="small" aria-label={`${normalizedLabel(label)} ${index + 1} 下移`} disabled={index === items.length - 1} onClick={() => onChange(items.map((old, oldIndex) => oldIndex === index + 1 ? item : oldIndex === index ? items[index + 1] : old))}>↓</button>
       <button type="button" className="small danger" onClick={() => onChange(items.filter((_, oldIndex) => oldIndex !== index))}>移除</button>
     </div>)}
     {help && <small className="typed-help">{help}</small>}

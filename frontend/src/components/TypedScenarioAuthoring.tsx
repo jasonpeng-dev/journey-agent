@@ -90,12 +90,12 @@ function ScalarListField({ value, onChange, path, label }: { value: unknown; onC
   return <ScalarListEditor value={value} onChange={onChange} path={path} label={label} />;
 }
 
-function StringListField({ value, onChange, path, label }: { value: unknown; onChange: (value: string[]) => void; path: string; label: string }) {
+function StringListField({ value, onChange, path, label, help }: { value: unknown; onChange: (value: string[]) => void; path: string; label: string; help?: ReactNode }) {
   const authoringDocument = useContext(AuthoringDocumentContext);
   if (path.includes(".prerequisites.") && path.endsWith(".requirements")) {
     return <RequirementListEditor value={value} document={authoringDocument} path={path} onChange={(next) => (onChange as unknown as (value: JsonObject[]) => void)(next)} />;
   }
-  return <ScalarListEditor value={stringsOf(value)} onChange={(next) => onChange(next.filter((item): item is string => typeof item === "string"))} path={path} label={label} />;
+  return <ScalarListEditor value={stringsOf(value)} onChange={(next) => onChange(next.filter((item): item is string => typeof item === "string"))} path={path} label={label} help={help} />;
 }
 
 function AdvancedJson({ value, onChange, path, label }: { value: unknown; onChange: (value: unknown) => void; path: string; label: string }) {
@@ -339,7 +339,7 @@ function PlanningEditor({ value, onChange }: { value: JsonObject; onChange: Chan
 }
 
 function GoalResolutionEditor({ value, onChange }: { value: JsonObject; onChange: Change }) {
-  return <div className="typed-specialized-editor"><BooleanField value={value.allow_llm_fallback} onChange={(next) => onChange(setField(value, "allow_llm_fallback", next))} path="goal_resolution.allow_llm_fallback" label="Allow LLM fallback" /><TextField value={value.clarification_prompt} onChange={(next) => onChange(setField(value, "clarification_prompt", next))} path="goal_resolution.clarification_prompt" label="Clarification prompt" multiline /><BooleanField value={value.world_goal_state_catalog} onChange={(next) => onChange(setField(value, "world_goal_state_catalog", next))} path="goal_resolution.world_goal_state_catalog" label="World goal state catalog" /></div>;
+  return <div className="typed-specialized-editor"><BooleanField value={value.allow_llm_fallback} onChange={(next) => onChange(setField(value, "allow_llm_fallback", next))} path="goal_resolution.allow_llm_fallback" label="Allow LLM fallback" /><TextField value={value.clarification_prompt} onChange={(next) => onChange(setField(value, "clarification_prompt", next))} path="goal_resolution.clarification_prompt" label="Clarification prompt" multiline /><StringListField value={value.quick_inputs} onChange={(next) => onChange(setField(value, "quick_inputs", next))} path="goal_resolution.quick_inputs" label="Quick inputs" help="仅用于填充玩家的目标输入；玩家仍可编辑，提交后仍由 Goal Resolver 解析。" /><BooleanField value={value.world_goal_state_catalog} onChange={(next) => onChange(setField(value, "world_goal_state_catalog", next))} path="goal_resolution.world_goal_state_catalog" label="World goal state catalog" /></div>;
 }
 
 function PublicKnowledgeEditor({ value, document, onChange }: { value: JsonObject; document: JsonObject; onChange: Change }) {

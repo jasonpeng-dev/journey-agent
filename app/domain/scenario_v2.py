@@ -19,6 +19,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    field_validator,
     model_validator,
 )
 
@@ -1525,10 +1526,25 @@ class ObjectiveDefinitionV2(FrozenDefinitionModel):
 class GoalResolutionV2(FrozenDefinitionModel):
     allow_llm_fallback: bool = True
     clarification_prompt: str = Field(min_length=1, max_length=2000)
+    quick_inputs: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     # When enabled, current authored Objective rows are compatibility
     # metadata only; player text resolves through the public World Goal State
     # catalog instead of the legacy Objective shortcut.
     world_goal_state_catalog: bool = Field(default=False, exclude_if=lambda value: not value)
+
+    @field_validator("quick_inputs", mode="before")
+    @classmethod
+    def normalize_quick_inputs(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            return value
+        normalized: list[object] = [
+            item.strip() if isinstance(item, str) else item for item in value
+        ]
+        if any(item == "" for item in normalized):
+            raise ValueError("Goal Resolution quick inputs cannot be blank")
+        folded = [item.casefold() for item in normalized if isinstance(item, str)]
+        _require_unique(folded, "Goal Resolution quick inputs")
+        return tuple(normalized)
 
 
 class RecoveryHintV2(FrozenDefinitionModel):

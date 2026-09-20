@@ -2115,7 +2115,7 @@ export function GoalComposer({
   feedback = null,
   readyDraft = null,
   confirming = false,
-  goalPresets = [],
+  quickInputs = [],
   presetsLoaded = false,
   onGoalChange,
   onSubmit,
@@ -2129,18 +2129,13 @@ export function GoalComposer({
   feedback?: string | null;
   readyDraft?: PublicResolvedGoalDraft | null;
   confirming?: boolean;
-  goalPresets?: string[];
+  quickInputs?: string[];
   presetsLoaded?: boolean;
   onGoalChange: (value: string) => void;
   onSubmit: () => void;
   onConfirm?: (draftId: string) => void;
 }) {
-  const [selectedPresetText, setSelectedPresetText] = useState("");
   const displayedGoal = resolving ? pendingGoal ?? goal : goal;
-  const handlePresetChange = (value: string) => {
-    setSelectedPresetText(value);
-    if (value) onGoalChange(value);
-  };
   return (
     <section className="command-panel goal-composer-panel" data-testid="goal-composer">
       <header className="command-panel-heading">
@@ -2163,10 +2158,7 @@ export function GoalComposer({
             id="goal"
             rows={2}
             value={displayedGoal}
-            onChange={(event) => {
-              setSelectedPresetText("");
-              onGoalChange(event.target.value);
-            }}
+            onChange={(event) => onGoalChange(event.target.value)}
             placeholder="描述你希望达成的目标，例如“修复中央隧道”……"
             disabled={resolving}
           />
@@ -2174,18 +2166,12 @@ export function GoalComposer({
             {resolving ? "解析中…" : "解析目标"}
           </button>
         </div>
-        <select
-          id="goal-preset-select"
-          aria-label="选择快捷目标"
-          value={presetsLoaded ? selectedPresetText : ""}
-          onChange={(event) => handlePresetChange(event.target.value)}
-          disabled={resolving || !presetsLoaded}
-        >
-          <option value="">{presetsLoaded ? '选择快捷目标……' : '正在加载快捷目标……'}</option>
-          {goalPresets.map((preset) => (
-            <option key={preset} value={preset}>{preset}</option>
+        <div className="goal-quick-inputs" aria-label="快捷输入">
+          {!presetsLoaded && <span className="muted">正在加载快捷输入……</span>}
+          {presetsLoaded && quickInputs.map((input) => (
+            <button type="button" className="small" key={input} disabled={resolving} onClick={() => onGoalChange(input)}>{input}</button>
           ))}
-        </select>
+        </div>
         {readyDraft && (
           <div className="goal-confirmation-feedback" data-testid="goal-confirmation-feedback" role="status">
             <span>{readyDraft.presentation_text}</span>
@@ -2215,15 +2201,13 @@ export function GoalComposer({
   );
 }
 
-function scenarioGoalPresets(
+function scenarioQuickInputs(
   metadata: PlayerGameState["scenario_metadata"] | undefined,
 ): string[] {
-  return (metadata?.goal_presets ?? []).flatMap((item) => {
-    if (!item.name.trim()) {
-      return [];
-    }
-    return [item.name];
-  });
+  const quickInputs = metadata?.quick_inputs;
+  return Array.isArray(quickInputs)
+    ? quickInputs.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+    : [];
 }
 
 export function MissionLogPanel({ children }: { children: ReactNode }) {
@@ -2611,7 +2595,7 @@ export function GamePage() {
     ? resolvePresentationProfilePreview(workingPresentationProfile, savedPresentationProfile.revision)
     : null;
   const effectivePresentation = localPresentation ?? play.data.presentation;
-  const goalPresets = scenarioGoalPresets(play.data.scenario_metadata);
+  const quickInputs = scenarioQuickInputs(play.data.scenario_metadata);
   const roadmapNodeNames = {
     ...Object.fromEntries(play.data.visible_nodes.map((node) => [node.key, node.name])),
   };
@@ -2913,7 +2897,7 @@ export function GamePage() {
               feedback={goalSubmissionFeedback}
               readyDraft={readyGoalDraft}
               confirming={confirmGoal.isPending}
-              goalPresets={goalPresets}
+              quickInputs={quickInputs}
               presetsLoaded={play.isFetched}
               onGoalChange={setGoal}
               onSubmit={() => submit.mutate()}

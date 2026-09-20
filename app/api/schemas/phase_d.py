@@ -868,15 +868,11 @@ class PublicActorResponse(ApiModel):
     command_reachability: Literal["ONLINE", "DISCONNECTED"] = "ONLINE"
 
 
-class PublicGoalPresetResponse(ApiModel):
-    """Minimal goal picker metadata; formal objective definitions stay server-side."""
-
-    key: str
-    name: str
-
-
 class PublicScenarioMetadataResponse(ApiModel):
-    goal_presets: list[PublicGoalPresetResponse] = Field(default_factory=list)
+    quick_inputs: list[str] = Field(default_factory=list)
+    # Compatibility for older clients and serialized snapshots. Current
+    # projection no longer derives suggestions from Objective definitions.
+    goal_presets: list[dict[str, str]] = Field(default_factory=list)
 
 
 class PublicPresentationResponse(ApiModel):

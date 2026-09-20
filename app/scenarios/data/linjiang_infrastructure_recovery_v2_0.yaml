@@ -7834,6 +7834,13 @@ derived_states:
 goal_resolution:
   allow_llm_fallback: true
   clarification_prompt: 请说明希望恢复的基础设施或公共服务。
+  quick_inputs:
+  - 恢复中央通信能力
+  - 恢复东部应急供电网络
+  - 恢复东部应急供水
+  - 恢复北部基础工程支援
+  - 建立全城灾后持续应急保障网络
+  - 建立持续应急发电保障
   world_goal_state_catalog: true
 public_references:
 - term: 中区

@@ -1214,18 +1214,16 @@ describe("Formal Play player projections", () => {
         startedAt={null}
         busy={false}
         presetsLoaded
-        goalPresets={["恢复东部应急供电网络"]}
+        quickInputs={["恢复东部应急供电网络"]}
         onGoalChange={onGoalChange}
         onSubmit={onSubmit}
       />,
     );
 
-    const presetSelect = screen.getByRole("combobox", { name: "选择快捷目标" });
-    expect(presetSelect).toBeVisible();
+    const quickInput = screen.getByRole("button", { name: "恢复东部应急供电网络" });
+    expect(quickInput).toBeVisible();
     expect(screen.getByLabelText("目标内容")).toBeVisible();
-    fireEvent.change(presetSelect, {
-      target: { value: "恢复东部应急供电网络" },
-    });
+    fireEvent.click(quickInput);
     expect(onGoalChange).toHaveBeenLastCalledWith("恢复东部应急供电网络");
     expect(screen.getByLabelText("目标内容")).toHaveValue("恢复东部应急供电网络");
     fireEvent.change(screen.getByLabelText("目标内容"), {

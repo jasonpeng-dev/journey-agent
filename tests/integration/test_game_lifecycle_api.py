@@ -64,9 +64,10 @@ def test_games_bind_exact_version_and_instances_are_isolated(
     assert player_state.status_code == 200
     payload = player_state.json()
     assert payload["game"]["scenario_name"] == GENERIC_TEST.metadata.name
-    assert payload["scenario_metadata"]["goal_presets"] == [
-        {"key": item.key, "name": item.name} for item in GENERIC_TEST.objectives
-    ]
+    assert payload["scenario_metadata"]["quick_inputs"] == list(
+        GENERIC_TEST.goal_resolution.quick_inputs
+    )
+    assert payload["scenario_metadata"]["goal_presets"] == []
     assert "definition_document" not in payload
     assert "world" not in payload
     assert "actions" not in payload

@@ -179,8 +179,13 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }] }} document={document} onChange={vi.fn()} />);
     expect(screen.getByDisplayValue("Plan safely")).toBeInTheDocument();
     cleanup();
-    render(<TypedEditor section="goal-resolution" value={{ allow_llm_fallback: true, clarification_prompt: "Clarify", world_goal_state_catalog: true }} document={document} onChange={vi.fn()} />);
+    const onGoalResolutionChange = vi.fn();
+    render(<TypedEditor section="goal-resolution" value={{ allow_llm_fallback: true, clarification_prompt: "Clarify", quick_inputs: ["First", "Second"], world_goal_state_catalog: true }} document={document} onChange={onGoalResolutionChange} />);
     expect(screen.getByLabelText("澄清提示")).toHaveValue("Clarify");
+    expect(screen.getByDisplayValue("First")).toBeInTheDocument();
+    expect(screen.getByText(/仅用于填充玩家的目标输入/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "快捷输入 2 上移" }));
+    expect(onGoalResolutionChange).toHaveBeenLastCalledWith(expect.objectContaining({ quick_inputs: ["Second", "First"] }));
     cleanup();
     render(<TypedEditor section="public-knowledge" value={{ resource_source_hints: [{ resource_key: "fuel", primary_region_key: "target", candidate_region_keys: [] }] }} document={document} onChange={vi.fn()} />);
     expandNestedCards();

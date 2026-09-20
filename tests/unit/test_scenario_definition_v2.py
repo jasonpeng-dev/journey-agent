@@ -184,6 +184,31 @@ def _contract_scenario_document() -> dict[str, Any]:
     }
 
 
+def test_goal_resolution_quick_inputs_round_trip_and_legacy_default() -> None:
+    document = _contract_scenario_document()
+    document["goal_resolution"]["quick_inputs"] = ["  Stabilize the patient  ", "Find medicine"]
+
+    parsed = ScenarioDefinitionV2.model_validate(document)
+
+    assert parsed.goal_resolution.quick_inputs == ("Stabilize the patient", "Find medicine")
+    dumped = parsed.model_dump(mode="json")
+    assert dumped["goal_resolution"]["quick_inputs"] == ["Stabilize the patient", "Find medicine"]
+
+    legacy = _contract_scenario_document()
+    assert ScenarioDefinitionV2.model_validate(legacy).goal_resolution.quick_inputs == ()
+
+
+@pytest.mark.parametrize("quick_inputs", [[""], ["Goal", " goal "]])
+def test_goal_resolution_quick_inputs_reject_blank_or_normalized_duplicate(
+    quick_inputs: list[str],
+) -> None:
+    document = _contract_scenario_document()
+    document["goal_resolution"]["quick_inputs"] = quick_inputs
+
+    with pytest.raises(ValidationError, match="Goal Resolution quick inputs"):
+        ScenarioDefinitionV2.model_validate(document)
+
+
 def test_public_references_validate_canonical_identity_and_affect_hash_canonically() -> None:
     first = _contract_scenario_document()
     first["public_references"] = [

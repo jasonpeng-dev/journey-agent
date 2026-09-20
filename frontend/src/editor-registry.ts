@@ -129,7 +129,7 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
 
 export const rootFieldRegistry: Record<string, readonly FieldMetadata[]> = {
   metadata: [field("key", "text"), field("name", "text"), field("description", "textarea")],
-  goal_resolution: [field("allow_llm_fallback", "boolean"), field("clarification_prompt", "textarea"), field("world_goal_state_catalog", "boolean")],
+  goal_resolution: [field("allow_llm_fallback", "boolean"), field("clarification_prompt", "textarea"), field("quick_inputs", "text"), field("world_goal_state_catalog", "boolean")],
   planning: [field("instructions", "text")],
   public_knowledge: [],
   initialization: [field("start_node_key", "reference", { referenceDomain: "node" }), field("primary_actor_key", "reference", { referenceDomain: "actor" })],

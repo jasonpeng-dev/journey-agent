@@ -155,6 +155,14 @@ def test_linjiang_final_goal_vocabulary_has_five_derived_states_and_task1_fact()
     assert task1_requirement.fact_key == "operational"
     assert task1_requirement.accepted_values == (True,)
     assert LINJIANG_V2_TEST.goal_resolution.world_goal_state_catalog is True
+    assert LINJIANG_V2_TEST.goal_resolution.quick_inputs == (
+        "恢复中央通信能力",
+        "恢复东部应急供电网络",
+        "恢复东部应急供水",
+        "恢复北部基础工程支援",
+        "建立全城灾后持续应急保障网络",
+        "建立持续应急发电保障",
+    )
     assert task1.key not in task1.goal_aliases
     for goal in (task1.name, *task1.goal_aliases):
         resolution = resolver.resolve(goal, LINJIANG_V2_TEST)

@@ -24,7 +24,6 @@ from app.api.schemas.phase_d import (
     PublicExecutionPhase,
     PublicFactResponse,
     PublicGameStatus,
-    PublicGoalPresetResponse,
     PublicGoalRequirementResponse,
     PublicKnowledgeChangeResponse,
     PublicNodeResponse,
@@ -258,11 +257,7 @@ class PlayerProjectionService:
         return PlayerGameStateResponse(
             game=self._game_summary(game, active_task),
             scenario_metadata=PublicScenarioMetadataResponse(
-                goal_presets=[
-                    PublicGoalPresetResponse(key=item.key, name=item.name)
-                    for item in definition.objectives
-                    if item.name.strip()
-                ]
+                quick_inputs=list(definition.goal_resolution.quick_inputs),
             ),
             presentation=PublicPresentationResponse(
                 **presentation.public_document(revision=presentation_revision)
