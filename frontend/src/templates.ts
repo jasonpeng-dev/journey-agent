@@ -16,7 +16,6 @@ export function addObject(document: JsonObject, kind: EntityKind): { document: J
 export function defaultArrayItem(field: string): unknown {
   if (field === "conditions") return { kind: "FACT_EQUALS", node: { kind: "EXPLICIT", node_key: "" }, fact_key: "", value: true };
   if (field === "effects") return { kind: "EMIT_OUTCOME", outcome_code: "Success", retryable: false };
-  if (field.includes("requirements")) return { key: "requirement", node_key: "node", fact_key: "fact", accepted_values: [true], description: "" };
   if (field === "facts") return { key: "new_fact", name: "New fact", description: "", value_type: "BOOLEAN", initial_value: false, initial_visibility: "KNOWN", allowed_values: [] };
   if (field === "relations") return { key: "new_relation", source_node_key: "", relation_type_key: "", target_node_key: "", initial_visibility: "VISIBLE" };
   if (field === "parameters") return { key: "parameter", name: "Parameter", value_type: "STRING", required: true, allowed_values: [] };

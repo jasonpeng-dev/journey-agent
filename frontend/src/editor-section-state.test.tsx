@@ -115,14 +115,15 @@ describe("Editor section state ownership", () => {
       interactions: { category: "参与者与交互", label: "交互" },
       actions: { category: "行动系统", label: "行动" },
       rules: { category: "行动系统", label: "规则" },
-      objectives: { category: "目标系统", label: "目标" },
       "derived-states": { category: "目标系统", label: "派生状态" },
       "public-knowledge": { category: "公开信息", label: "公共知识" },
       "public-references": { category: "公开信息", label: "公共引用" },
     });
+    expect(editorSectionTaxonomy).not.toHaveProperty("objectives");
 
     renderEditor();
     const heading = await screen.findByTestId("editor-taxonomy-heading");
+    expect(screen.queryByRole("link", { name: "目标" })).not.toBeInTheDocument();
     expect(heading).toHaveTextContent("公开信息/公共引用");
     expect(screen.queryByText("Working copy")).not.toBeInTheDocument();
     expect(document.querySelector(".editor-toolbar-subtitle")).not.toBeInTheDocument();

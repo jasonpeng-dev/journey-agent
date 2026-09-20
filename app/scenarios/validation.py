@@ -80,14 +80,6 @@ class ScenarioDefinitionValidator:
 
 def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidationIssue, ...]:
     issues: list[ScenarioValidationIssue] = []
-    if not definition.objectives:
-        issues.append(
-            ScenarioValidationIssue(
-                code="SCENARIO_OBJECTIVE_REQUIRED",
-                path="objectives",
-                message="A publishable Scenario needs at least one Objective",
-            )
-        )
     if not definition.actions:
         issues.append(
             ScenarioValidationIssue(
@@ -100,8 +92,13 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
         rule.action_key for rule in definition.rules if rule.phase.value == "RESOLVE"
         and rule.action_key is not None
     }
-    objective_facts: set[tuple[str, str]] = set()
-    objective_resources: set[tuple[str, str]] = set()
+    goal_facts: set[tuple[str, str]] = {
+        (node.key, fact.key)
+        for node in definition.world.nodes
+        for fact in node.facts
+        if fact.goal_addressable
+    }
+    goal_resources: set[tuple[str, str]] = set()
     visited_derived: set[str] = set()
 
     def collect_derived_dependencies(derived_key: str) -> None:
@@ -114,21 +111,27 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
         for dependency in state.dependencies:
             if dependency.kind == DerivedDependencyKind.FACT:
                 assert dependency.node_key is not None and dependency.fact_key is not None
-                objective_facts.add((dependency.node_key, dependency.fact_key))
+                goal_facts.add((dependency.node_key, dependency.fact_key))
             elif dependency.kind == DerivedDependencyKind.RESOURCE_AT_LEAST:
                 assert dependency.region_key is not None and dependency.resource_key is not None
-                objective_resources.add((dependency.region_key, dependency.resource_key))
+                goal_resources.add((dependency.region_key, dependency.resource_key))
             elif dependency.kind == DerivedDependencyKind.DERIVED_STATE:
                 assert dependency.derived_key is not None
                 collect_derived_dependencies(dependency.derived_key)
 
+    for state in definition.derived_states:
+        if state.goal_addressable:
+            collect_derived_dependencies(state.key)
+
+    # Legacy Objective requirements remain part of readiness validation for
+    # immutable historical ScenarioVersion documents.
     for objective in definition.objectives:
         for requirement in objective.completion_requirements:
             if requirement.fact_ref is not None:
-                objective_facts.add(requirement.fact_ref)
+                goal_facts.add(requirement.fact_ref)
             if requirement.kind.value == "RESOURCE_AT_LEAST":
                 assert requirement.region_key is not None and requirement.resource_key is not None
-                objective_resources.add((requirement.region_key, requirement.resource_key))
+                goal_resources.add((requirement.region_key, requirement.resource_key))
             if requirement.derived_ref is not None:
                 collect_derived_dependencies(requirement.derived_ref)
     projected_facts = {
@@ -192,15 +195,15 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
                     # its target Region; the runtime resolves the concrete target.
                     projected_resource_effects.update(
                         (region_key, effect.resource_key)
-                        for region_key, _resource_key in objective_resources
+                        for region_key, _resource_key in goal_resources
                         if _resource_key == effect.resource_key
                     )
     if (
         definition.actions
-        and definition.objectives
+        and (goal_facts or goal_resources)
         and not (
-            objective_facts.intersection(projected_facts)
-            or objective_resources.intersection(projected_resource_effects)
+            goal_facts.intersection(projected_facts)
+            or goal_resources.intersection(projected_resource_effects)
         )
     ):
         issues.append(
@@ -208,7 +211,7 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
                 code="SCENARIO_MINIMUM_PLAYABLE_REQUIRED",
                 path="actions",
                 message=(
-                    "No resolved Action planning projection advances an Objective requirement"
+                    "No resolved Action planning projection advances a public Goal requirement"
                 ),
             )
         )

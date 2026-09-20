@@ -172,8 +172,9 @@ def _canonical_v2_payload(
             item["key"],
         )
     )
-    normalized["objectives"].sort(key=lambda item: item["key"])
-    for objective in normalized["objectives"]:
+    objectives = normalized.get("objectives", [])
+    objectives.sort(key=lambda item: item["key"])
+    for objective in objectives:
         objective["completion_requirements"].sort(key=lambda item: item["key"])
         for requirement in objective["completion_requirements"]:
             requirement.get("accepted_values", []).sort(key=_scalar_sort_key)

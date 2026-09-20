@@ -111,7 +111,6 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
   interactions: declaration("interactions", "COLLECTION", entityMaster, entityWorkspace, entityCapabilities, "entity"),
   actions: declaration("actions", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "nested-only" }, "entity"),
   rules: declaration("rules", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "unknown-variant" }, "entity"),
-  objectives: declaration("objectives", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "unknown-variant" }, "entity"),
   "derived-states": declaration("derived-states", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, advancedJson: "unknown-variant" }, "entity"),
   initialization: declaration(
     "initialization",

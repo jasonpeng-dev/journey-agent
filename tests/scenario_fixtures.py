@@ -20,9 +20,29 @@ def load_test_scenario(path: Path) -> ScenarioDefinitionV2:
 
 
 GENERIC_TEST = load_test_scenario(Path(__file__).with_name("fixtures") / "generic_contract.yaml")
-LINJIANG_V2_TEST = load_test_scenario(
+LINJIANG_CURRENT_TEST = load_test_scenario(
     _ROOT / "app" / "scenarios" / "data" / "linjiang_infrastructure_recovery_v2_0.yaml"
 )
+
+
+def _linjiang_legacy_objectives_test() -> ScenarioDefinitionV2:
+    """Rehydrate the retired Objective wrappers only for legacy runtime tests."""
+
+    fixture_path = Path(__file__).with_name("fixtures") / "linjiang_legacy_objectives.yaml"
+    legacy_payload: Any = yaml.safe_load(fixture_path.read_text(encoding="utf-8"))
+    if not isinstance(legacy_payload, dict) or not isinstance(
+        legacy_payload.get("objectives"), list
+    ):
+        raise ValueError("Legacy Linjiang Objective fixture must contain objectives")
+    document = LINJIANG_CURRENT_TEST.model_dump(mode="json")
+    document["objectives"] = legacy_payload["objectives"]
+    return ScenarioDefinitionV2.model_validate(document)
+
+
+LINJIANG_LEGACY_OBJECTIVES_TEST = _linjiang_legacy_objectives_test()
+# Compatibility alias for older tests that explicitly exercise the historical
+# predefined Objective planning/runtime contract.
+LINJIANG_V2_TEST = LINJIANG_LEGACY_OBJECTIVES_TEST
 
 
 def create_test_scenario(
@@ -62,6 +82,8 @@ def predefined_goal_resolution(objective_key: str) -> GenericGoalResolution:
 
 __all__ = [
     "GENERIC_TEST",
+    "LINJIANG_CURRENT_TEST",
+    "LINJIANG_LEGACY_OBJECTIVES_TEST",
     "LINJIANG_V2_TEST",
     "create_test_scenario",
     "load_test_scenario",

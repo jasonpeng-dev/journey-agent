@@ -49,13 +49,13 @@ from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.player_projection import PlayerProjectionService, _task_explanation, _task_status
 from app.services.runtime_initialization import RuntimeInitializationService
 from app.services.spatial_projection import SpatialDisplayProjector
-from tests.scenario_fixtures import predefined_goal_resolution
+from tests.scenario_fixtures import LINJIANG_V2_TEST, predefined_goal_resolution
 
 
 def _runtime_task(
     session: Session,
     key: str,
-    definition=LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
+    definition=LINJIANG_V2_TEST,
     *,
     goal: str = "restore central communications",
 ):  # type: ignore[no-untyped-def]
@@ -811,7 +811,7 @@ def test_legacy_plan_does_not_absorb_failed_cycle_timeline(session: Session) -> 
 def test_relay_projection_uses_target_actor_plan_time_region_and_name(
     session: Session,
 ) -> None:
-    definition = load_builtin_scenario("linjiang_infrastructure_recovery_v2_0.yaml")
+    definition = LINJIANG_V2_TEST
     runtime, task = _runtime_task(
         session,
         "player-projection-relay-subtitle",

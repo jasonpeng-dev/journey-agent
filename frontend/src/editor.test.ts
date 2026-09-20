@@ -25,10 +25,9 @@ describe("editor draft helpers", () => {
     expect(sectionObjects(changed, "world")[0].name).toBe("Harbor");
   });
 
-  it("creates engine-supported AST and objective requirement shapes", () => {
+  it("creates engine-supported AST shapes", () => {
     expect(defaultArrayItem("conditions")).toMatchObject({ kind: "FACT_EQUALS" });
     expect(defaultArrayItem("effects")).toMatchObject({ kind: "EMIT_OUTCOME" });
-    expect(defaultArrayItem("completion_requirements")).toMatchObject({ node_key: "node", fact_key: "fact" });
   });
 
   it("registers every V2 authoring section without adding semantic collections", () => {
@@ -38,6 +37,7 @@ describe("editor draft helpers", () => {
     expect(kindsBySection.actors).toEqual(["actor"]);
     expect(sectionDefinition("world")?.entityKinds).toEqual(["node_type", "node", "relation_type", "relation", "resource"]);
     expect(entityRegistry.node.collectionPath).toEqual(["world", "nodes"]);
+    expect(sectionRegistry.map((item) => String(item.id))).not.toContain("objectives");
   });
 
   it("keeps Region, Facility, and Transport as Node semantic views", () => {

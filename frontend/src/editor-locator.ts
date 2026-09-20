@@ -20,7 +20,7 @@ const rootSections: Record<string, EditorSection> = {
 
 const entityKinds = new Set<EntityKind>([
   "node_type", "node", "relation_type", "relation", "resource", "role", "actor",
-  "interaction", "action", "rule", "objective", "derived_state", "public_reference",
+  "interaction", "action", "rule", "derived_state", "public_reference",
 ]);
 
 export function editorLocatorFromValidation(locator: Locator, document: JsonObject): EditorLocator | null {

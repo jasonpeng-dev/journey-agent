@@ -49,7 +49,6 @@ _COLLECTIONS: dict[str, tuple[str, ...]] = {
     "interaction": ("interactions",),
     "action": ("actions",),
     "rule": ("rules",),
-    "objective": ("objectives",),
     "derived_state": ("derived_states",),
     "public_reference": ("public_references",),
 }
@@ -65,7 +64,6 @@ _KEY_FIELDS = {
     "interaction": "key",
     "action": "key",
     "rule": "key",
-    "objective": "key",
     "derived_state": "key",
 }
 
@@ -97,7 +95,6 @@ _RESOURCE_REFERENCE_FIELDS = {"resource_key"}
 _DERIVED_REFERENCE_FIELDS = {"derived_key"}
 _RELATION_REFERENCE_FIELDS = {"relation_key"}
 _RELATION_TYPE_REFERENCE_FIELDS = {"relation_type_key"}
-_OBJECTIVE_REFERENCE_FIELDS = {"subsumes"}
 _NODE_TYPE_REFERENCE_FIELDS = {
     "node_type_key",
     "target_node_type_key",
@@ -110,7 +107,6 @@ _LIST_REFERENCE_FIELDS = {
     "allowed_action_keys": "action",
     "target_node_type_keys": "node_type",
     "candidate_region_keys": "node",
-    "subsumes": "objective",
     "goal_required_slots": None,  # semantic slot identities, not catalog keys
 }
 
@@ -288,8 +284,6 @@ def _reference_target(
         return ObjectLocator("node_type", value)
     if list_kind == "node":
         return ObjectLocator("node", value)
-    if list_kind == "objective":
-        return ObjectLocator("objective", value)
     if field in _NODE_REFERENCE_FIELDS:
         return ObjectLocator("node", value)
     if field in _NODE_TYPE_REFERENCE_FIELDS:

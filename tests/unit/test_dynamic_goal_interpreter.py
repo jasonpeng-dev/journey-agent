@@ -41,14 +41,12 @@ from app.domain.formal_goal import (
     AdHocGoalCandidateSetV2,
     FormalGoalError,
     FormalGoalSourceKind,
-    compile_predefined_formal_goal,
 )
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ObjectiveRequirementKind, RelationDefinitionV2
 from app.domain.world import Visibility
 from app.infrastructure.db.models import GameInstanceFactState, GameInstanceResourceState, Player
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0, require_builtin_v2_version
-from app.scenarios.versions import ScenarioVersionRepository
 from app.services.formal_goal import load_formal_goal_for_task
 from app.services.game_instances import GameInstanceService
 from app.services.play import PlayOrchestrator
@@ -1526,10 +1524,10 @@ def test_entity_grounding_cannot_invent_a_public_entity_key() -> None:
 
 
 def test_canonical_task5_goal_routes_to_public_derived_capability() -> None:
-    objective = next(
+    state = next(
         item
-        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives
-        if item.key == "establish_citywide_sustained_emergency_support"
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.derived_states
+        if item.key == "citywide_sustained_emergency_support"
     )
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.DERIVED_STATE,
@@ -1539,7 +1537,7 @@ def test_canonical_task5_goal_routes_to_public_derived_capability() -> None:
     provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(candidate,)))
 
     resolution = GenericGoalResolver(provider=provider).resolve(
-        objective.name,
+        state.name,
         LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
     )
 
@@ -1556,13 +1554,11 @@ def test_canonical_task5_goal_routes_to_public_derived_capability() -> None:
     assert len(provider.requests) == 1
 
 
-def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
-    session,
-) -> None:
-    objective = next(
+def test_canonical_task6_goal_and_alias_keep_hidden_semantics() -> None:
+    state = next(
         item
-        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives
-        if item.key == "establish_sustained_emergency_generation"
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.derived_states
+        if item.key == "southeast_sustained_emergency_generation"
     )
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.DERIVED_STATE,
@@ -1572,7 +1568,7 @@ def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
     provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(candidate,)))
     resolver = GenericGoalResolver(provider=provider)
 
-    for goal in (objective.name, *objective.goal_aliases):
+    for goal in (state.name, *state.goal_aliases):
         resolution = resolver.resolve(goal, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
         assert resolution.status == "RESOLVED"
         assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
@@ -1583,20 +1579,9 @@ def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
             "southeast_sustained_emergency_generation"
         )
 
-    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
-    assert version is not None
-    contract = compile_predefined_formal_goal(
-        ScenarioVersionRepository(session).load(version.id),
-        (objective,),
-    )
-    assert contract.source_kind == FormalGoalSourceKind.PREDEFINED
-    requirement = contract.completion_requirements[0].requirement
-    assert requirement.kind == ObjectiveRequirementKind.DERIVED_STATE
-    assert requirement.derived_key == "southeast_sustained_emergency_generation"
-    derived = ScenarioVersionRepository(session).load(version.id).definition
     assert any(
         item.knowledge_gate is not None
-        for item in derived.derived_state_definitions[
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.derived_state_definitions[
             "southeast_sustained_emergency_generation"
         ].dependencies
     )

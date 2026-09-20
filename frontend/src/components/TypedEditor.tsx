@@ -22,14 +22,12 @@ import { ValueLabelList } from "./editor/ValueLabelEditor";
 import {
   ActionAuthorityPolicyEditor,
   ActionEditor,
-  AuthoringDocumentProvider,
   DerivedStateEditor,
   GoalResolutionEditor,
   InitializationEditor,
   MasterDetailInitializationEditor,
   MasterDetailPlanningEditor,
   MasterDetailPublicKnowledgeEditor,
-  ObjectiveEditor,
   PlanningEditor,
   PublicKnowledgeEditor,
   PublicReferenceEditor,
@@ -131,7 +129,6 @@ function EntityEditor({ entity, document, onChange, focusPath }: { entity: Draft
   }, [focusPath]);
   if (entity.kind === "action") return <><ActionEditor entity={entity} document={document} onChange={onChange} /><ActionAuthorityPolicyEditor value={value.authority_policy ?? {}} path={`${entity.kind}.${entity.key}.authority_policy`} onChange={(next) => onChange({ ...value, authority_policy: next })} /></>;
   if (entity.kind === "rule") return <RuleEditor entity={entity} document={document} onChange={onChange} />;
-  if (entity.kind === "objective") return <AuthoringDocumentProvider document={document}><ObjectiveEditor entity={entity} document={document} onChange={onChange} /></AuthoringDocumentProvider>;
   if (entity.kind === "derived_state") return <DerivedStateEditor entity={entity} document={document} onChange={onChange} />;
   if (entity.kind === "public_reference") return <PublicReferenceEditor entity={entity} document={document} onChange={onChange} />;
   return <div className="typed-entity-editor"><div className="typed-grid">

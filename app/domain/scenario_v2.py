@@ -1624,7 +1624,11 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     interactions: tuple[InteractionDefinitionV2, ...]
     actions: tuple[ActionDefinitionV2, ...]
     rules: tuple[RuleDefinitionV2, ...]
-    objectives: tuple[ObjectiveDefinitionV2, ...]
+    # Historical ScenarioVersion compatibility only. Current authoring omits
+    # this field and resolves public goals from Fact/Derived State metadata.
+    objectives: tuple[ObjectiveDefinitionV2, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     derived_states: tuple[DerivedStateDefinitionV2, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )

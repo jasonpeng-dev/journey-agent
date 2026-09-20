@@ -15,7 +15,6 @@ const expectedModes: Record<SectionMode, string[]> = {
     "interactions",
     "actions",
     "rules",
-    "objectives",
     "derived-states",
     "public-knowledge",
     "public-references",
@@ -26,8 +25,8 @@ const expectedModes: Record<SectionMode, string[]> = {
 };
 
 describe("section structure registry", () => {
-  it("freezes the 19 routes into the five product modes", () => {
-    expect(Object.keys(sectionStructureRegistry)).toHaveLength(19);
+  it("freezes the 18 routes into the five product modes", () => {
+    expect(Object.keys(sectionStructureRegistry)).toHaveLength(18);
     for (const [mode, sections] of Object.entries(expectedModes)) {
       expect(Object.values(sectionStructureRegistry).filter((item) => item.mode === mode).map((item) => item.section)).toEqual(sections);
     }

@@ -21,7 +21,6 @@ const document: JsonObject = {
   },
   interactions: [{ key: "inspect", name: "Inspect" }],
   actions: [{ key: "repair", name: "Repair" }],
-  objectives: [{ key: "objective", name: "Objective" }],
   derived_states: [{ key: "derived", name: "Derived" }],
   initialization: { resource_pools: [{ pool_key: "fuel_pool" }] },
 };
@@ -100,19 +99,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Repair updated", unknown_extension: { keep: true } }));
   });
 
-  it("keeps Objective prerequisites and Derived dependencies typed", () => {
-    render(<EntityHarness initial={entity("objective", {
-      key: "objective",
-      name: "Objective",
-      description: "Complete objective",
-      completion_requirements: [{ key: "complete", kind: "FACT", node_key: "target", fact_key: "operational", accepted_values: [true], description: "Target is operational" }],
-      prerequisites: [{ key: "precondition", description: "Precondition", requirements: [{ key: "pre_req", kind: "FACT", node_key: "target", fact_key: "operational", accepted_values: [true], description: "Known requirement" }] }],
-      subsumes: [],
-    })} />);
-    expandNestedCards();
-    expect(screen.getByDisplayValue("pre_req")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "完成要求" })).toBeInTheDocument();
-
+  it("keeps Derived dependencies typed", () => {
     render(<EntityHarness initial={entity("derived_state", {
       key: "derived",
       name: "Derived",

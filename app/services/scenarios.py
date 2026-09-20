@@ -585,7 +585,6 @@ def _blank_document(*, key: str, name: str) -> dict[str, Any]:
         "interactions": [],
         "actions": [],
         "rules": [],
-        "objectives": [],
         "goal_resolution": {
             "allow_llm_fallback": True,
             "clarification_prompt": "Please clarify the intended objective.",

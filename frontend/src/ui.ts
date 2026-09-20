@@ -104,7 +104,6 @@ export const sectionLabels: Record<string, string> = {
   actors: "参与者",
   actions: "行动",
   rules: "规则",
-  objectives: "目标",
   planning: "规划",
   "initial-state": "初始状态",
   validation: "验证与发布",
@@ -115,7 +114,7 @@ export const editorTaxonomyGroups = [
   { label: "世界模型", items: ["world", "node-types", "world-entities", "relations", "resources"] },
   { label: "参与者与交互", items: ["roles", "actors", "interactions"] },
   { label: "行动系统", items: ["actions", "rules"] },
-  { label: "目标系统", items: ["objectives", "derived-states", "goal-resolution"] },
+  { label: "目标系统", items: ["derived-states", "goal-resolution"] },
   { label: "运行配置", items: ["initialization", "planning"] },
   { label: "公开信息", items: ["public-knowledge", "public-references"] },
   { label: "发布", items: ["validation"] },
@@ -141,7 +140,6 @@ export const kindLabels: Record<string, string> = {
   actor: "参与者",
   action: "行动",
   rule: "规则",
-  objective: "目标",
 };
 
 const fieldLabels: Record<string, string> = {
@@ -227,7 +225,6 @@ const fieldLabels: Record<string, string> = {
   actor_profiles: "参与者",
   actions: "行动",
   rules: "规则",
-  objectives: "目标",
   initialization: "初始化",
   allow_llm_fallback: "允许模型辅助解析",
   clarification_prompt: "澄清提示",
@@ -316,7 +313,6 @@ const editorLabels: Record<string, string> = {
   "Completion requirements": "完成要求",
   "Prerequisites": "前置条件",
   "Requirements (Advanced identity list)": "要求（高级身份列表）",
-  "Subsumed objectives": "包含的目标",
   "Goal aliases": "目标别名",
   "Goal examples": "目标示例",
   "Dependency kind": "依赖类型",
@@ -328,7 +324,6 @@ const editorLabels: Record<string, string> = {
   "Add actor": "添加参与者",
   "Add action": "添加行动",
   "Add rule": "添加规则",
-  "Add objective": "添加目标",
   "Add derived state": "添加派生状态",
   "Add binding": "添加绑定",
   "Add dependency": "添加依赖",

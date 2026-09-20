@@ -1,4 +1,4 @@
-import { createContext, useContext, type ReactNode } from "react";
+import { type ReactNode } from "react";
 
 import { V2_ENUMS, type ReferenceDomain } from "../editor-registry";
 import { rootCollectionItem, rootCollectionLabel, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
@@ -22,7 +22,6 @@ import { ValueLabelList } from "./editor/ValueLabelEditor";
 import { editorLabel, uiLabel } from "../ui";
 
 type Change = (value: JsonObject) => void;
-const AuthoringDocumentContext = createContext<JsonObject>({});
 
 const EFFECT_KINDS = V2_ENUMS.effectKind;
 const CONDITION_KINDS = V2_ENUMS.conditionKind;
@@ -91,10 +90,6 @@ function ScalarListField({ value, onChange, path, label }: { value: unknown; onC
 }
 
 function StringListField({ value, onChange, path, label, help }: { value: unknown; onChange: (value: string[]) => void; path: string; label: string; help?: ReactNode }) {
-  const authoringDocument = useContext(AuthoringDocumentContext);
-  if (path.includes(".prerequisites.") && path.endsWith(".requirements")) {
-    return <RequirementListEditor value={value} document={authoringDocument} path={path} onChange={(next) => (onChange as unknown as (value: JsonObject[]) => void)(next)} />;
-  }
   return <ScalarListEditor value={stringsOf(value)} onChange={(next) => onChange(next.filter((item): item is string => typeof item === "string"))} path={path} label={label} help={help} />;
 }
 
@@ -276,28 +271,6 @@ function RuleEditor({ entity, document, onChange }: { entity: DraftObject; docum
   return <div className="typed-specialized-editor"><div className="typed-grid"><TextField value={value.key} onChange={(next) => update("key", next)} path={`${entity.kind}.${entity.key}.key`} label="Key" /><EnumField value={value.phase} onChange={(next) => update("phase", next)} path={`${entity.kind}.${entity.key}.phase`} label="Phase" choices={V2_ENUMS.phase} /><EnumField value={trigger} onChange={(next) => update("trigger", next)} path={`${entity.kind}.${entity.key}.trigger`} label="Trigger" choices={V2_ENUMS.trigger} />{trigger === "ACTION" && <ReferenceField value={value.action_key} onChange={(next) => update("action_key", next)} path={`${entity.kind}.${entity.key}.action_key`} label="Action" domain="action" document={document} />}{trigger === "STATE" && hasActionKey && <p className="field-error">STATE rules must not contain action_key; remove it before validation.</p>}<NumberField value={value.priority} onChange={(next) => update("priority", next)} path={`${entity.kind}.${entity.key}.priority`} label="Priority" /></div><section className="nested-list"><div className="typed-array-heading"><h4>{editorLabel("Condition AST")}</h4>{hasCondition ? <button type="button" className="small danger" onClick={() => update("condition", null)}>{editorLabel("Remove condition")}</button> : <button type="button" className="small" onClick={() => update("condition", defaultCondition("FACT_EQUALS"))}>＋ {editorLabel("Add condition")}</button>}</div>{hasCondition && <ConditionEditor value={clone(value.condition)} document={document} path={`${entity.kind}.${entity.key}.condition`} onChange={(next) => update("condition", next)} />}</section><section className="nested-list"><div className="typed-array-heading"><h4>{editorLabel("Effects")}</h4><button type="button" className="small" onClick={() => update("effects", [...effects, defaultEffect("EMIT_OUTCOME")])}>＋ {editorLabel("Add effect")}</button></div>{effects.map((item, index) => <EffectEditor key={`${entity.key}.effects.${index}`} value={item} document={document} path={`${entity.kind}.${entity.key}.effects.${index}`} onChange={(next) => update("effects", effects.map((old, oldIndex) => oldIndex === index ? next : old))} onRemove={() => update("effects", effects.filter((_, oldIndex) => oldIndex !== index))} />)}</section><p className="typed-help">当前所有 ConditionV2 和 EffectV2 变体都使用结构化控件；未知的未来变体仍由服务端校验，并应通过高级回退结构编辑。</p></div>;
 }
 
-function RequirementEditor({ value, document, path, onChange, onRemove }: { value: JsonObject; document: JsonObject; path: string; onChange: Change; onRemove: () => void }) {
-  const kind = typeof value.kind === "string" ? value.kind : "FACT";
-  if (!(V2_ENUMS.requirementKind as readonly string[]).includes(kind)) {
-    return <ListCard title={`未知要求 · ${kind}`} onRemove={onRemove}><AdvancedJson value={value} onChange={(next) => onChange(clone(next))} path={path} label="未知要求 JSON" /></ListCard>;
-  }
-  const update = (key: string, next: unknown) => onChange(setField(value, key, next));
-  return <ListCard title={`Requirement · ${String(value.key ?? "")}`} onRemove={onRemove}><TextField value={value.key} onChange={(next) => update("key", next)} path={`${path}.key`} label="Key" /><EnumField value={kind} onChange={(next) => onChange({ key: value.key, description: value.description, kind: next, ...(next === "FACT" ? { node_key: "", fact_key: "", accepted_values: [true] } : next === "RESOURCE_AT_LEAST" ? { region_key: "", resource_key: "", minimum: 0 } : { derived_key: "", accepted_values: [true] })})} path={`${path}.kind`} label="Requirement kind" choices={V2_ENUMS.requirementKind} />{kind === "FACT" && <><ReferenceField value={value.node_key} onChange={(next) => update("node_key", next)} path={`${path}.node_key`} label="Node" domain="node" document={document} /><FactKeyField value={value.fact_key} onChange={(next) => update("fact_key", next)} path={`${path}.fact_key`} label="Fact" document={document} nodeKey={typeof value.node_key === "string" ? value.node_key : undefined} /><ScalarListField value={value.accepted_values} onChange={(next) => update("accepted_values", next)} path={`${path}.accepted_values`} label="Accepted values" /></>}{kind === "RESOURCE_AT_LEAST" && <><ReferenceField value={value.region_key} onChange={(next) => update("region_key", next)} path={`${path}.region_key`} label="Region" domain="node" document={document} /><ReferenceField value={value.resource_key} onChange={(next) => update("resource_key", next)} path={`${path}.resource_key`} label="Resource" domain="resource" document={document} /><NumberField value={value.minimum} onChange={(next) => update("minimum", next)} path={`${path}.minimum`} label="Minimum" /></>}{kind === "DERIVED_STATE" && <><ReferenceField value={value.derived_key} onChange={(next) => update("derived_key", next)} path={`${path}.derived_key`} label="Derived state" domain="derived_state" document={document} /><ScalarListField value={value.accepted_values} onChange={(next) => update("accepted_values", next)} path={`${path}.accepted_values`} label="Accepted values" /></>}<TextField value={value.description} onChange={(next) => update("description", next)} path={`${path}.description`} label="Description" multiline />{value.knowledge_gate ? <KnowledgeGateEditor value={clone(value.knowledge_gate)} document={document} path={`${path}.knowledge_gate`} onChange={(next) => update("knowledge_gate", next)} onRemove={() => update("knowledge_gate", null)} /> : <button type="button" className="small" onClick={() => update("knowledge_gate", { node_key: "", fact_key: "", accepted_values: [true] })}>＋ {editorLabel("Add knowledge gate")}</button>}</ListCard>;
-}
-
-function RequirementListEditor({ value, document, path, onChange }: { value: unknown; document: JsonObject; path: string; onChange: (value: JsonObject[]) => void }) {
-  const requirements = arrayOf(value);
-  return <section className="nested-list"><div className="typed-array-heading"><h4>{editorLabel("Requirements")}</h4><button type="button" className="small" onClick={() => onChange([...requirements, { key: "requirement", kind: "FACT", node_key: "", fact_key: "", accepted_values: [true], description: "Requirement" }])}>＋ {editorLabel("Add requirement")}</button></div>{requirements.map((item, index) => <RequirementEditor key={`${path}.${index}`} value={item} document={document} path={`${path}.${index}`} onChange={(next) => onChange(requirements.map((old, oldIndex) => oldIndex === index ? next : old))} onRemove={() => onChange(requirements.filter((_, oldIndex) => oldIndex !== index))} />)}</section>;
-}
-
-function ObjectiveEditor({ entity, document, onChange }: { entity: DraftObject; document: JsonObject; onChange: Change }) {
-  const value = entity.value;
-  const update = (key: string, next: unknown) => onChange(setField(value, key, next));
-  const requirements = arrayOf(value.completion_requirements);
-  const prerequisites = arrayOf(value.prerequisites);
-  return <div className="typed-specialized-editor"><div className="typed-grid"><TextField value={value.key} onChange={(next) => update("key", next)} path={`${entity.kind}.${entity.key}.key`} label="Key" /><TextField value={value.name} onChange={(next) => update("name", next)} path={`${entity.kind}.${entity.key}.name`} label="Name" /><TextField value={value.description} onChange={(next) => update("description", next)} path={`${entity.kind}.${entity.key}.description`} label="Description" multiline /><TextField value={value.planning_guidance} onChange={(next) => update("planning_guidance", next)} path={`${entity.kind}.${entity.key}.planning_guidance`} label="Planning guidance" multiline /></div><section className="nested-list"><div className="typed-array-heading"><h4>{editorLabel("Completion requirements")}</h4><button type="button" className="small" onClick={() => update("completion_requirements", [...requirements, { key: "requirement", kind: "FACT", node_key: "", fact_key: "", accepted_values: [true], description: "Requirement" }])}>＋ {editorLabel("Add requirement")}</button></div>{requirements.map((item, index) => <RequirementEditor key={`${entity.key}.completion_requirements.${index}`} value={item} document={document} path={`${entity.kind}.${entity.key}.completion_requirements.${index}`} onChange={(next) => update("completion_requirements", requirements.map((old, oldIndex) => oldIndex === index ? next : old))} onRemove={() => update("completion_requirements", requirements.filter((_, oldIndex) => oldIndex !== index))} />)}</section><section className="nested-list"><div className="typed-array-heading"><h4>{editorLabel("Prerequisites")}</h4><button type="button" className="small" onClick={() => update("prerequisites", [...prerequisites, { key: "prerequisite", description: "Prerequisite", requirements: [] }])}>＋ {editorLabel("Add prerequisite")}</button></div>{prerequisites.map((item, index) => <ListCard key={`${entity.key}.prerequisites.${index}`} title={`Prerequisite · ${String(item.key ?? "")}`} onRemove={() => update("prerequisites", prerequisites.filter((_, oldIndex) => oldIndex !== index))}><TextField value={item.key} onChange={(next) => update("prerequisites", prerequisites.map((old, oldIndex) => oldIndex === index ? setField(item, "key", next) : old))} path={`${entity.kind}.${entity.key}.prerequisites.${index}.key`} label="Key" /><TextField value={item.description} onChange={(next) => update("prerequisites", prerequisites.map((old, oldIndex) => oldIndex === index ? setField(item, "description", next) : old))} path={`${entity.kind}.${entity.key}.prerequisites.${index}.description`} label="Description" multiline /><StringListField value={item.requirements} onChange={(next) => update("prerequisites", prerequisites.map((old, oldIndex) => oldIndex === index ? setField(item, "requirements", next) : old))} path={`${entity.kind}.${entity.key}.prerequisites.${index}.requirements`} label="Requirements (Advanced identity list)" /></ListCard>)}</section><MultiReferenceField value={value.subsumes} onChange={(next) => update("subsumes", next)} path={`${entity.kind}.${entity.key}.subsumes`} label="Subsumed objectives" domain="objective" document={document} /><StringListField value={value.goal_aliases} onChange={(next) => update("goal_aliases", next)} path={`${entity.kind}.${entity.key}.goal_aliases`} label="Goal aliases" /><StringListField value={value.goal_examples} onChange={(next) => update("goal_examples", next)} path={`${entity.kind}.${entity.key}.goal_examples`} label="Goal examples" /></div>;
-}
-
 function DependencyEditor({ value, document, path, onChange, onRemove }: { value: JsonObject; document: JsonObject; path: string; onChange: Change; onRemove: () => void }) {
   const kind = typeof value.kind === "string" ? value.kind : "FACT";
   if (!(V2_ENUMS.derivedDependency as readonly string[]).includes(kind)) {
@@ -400,10 +373,6 @@ function ActionAuthorityPolicyEditor({ value, path, onChange }: { value: unknown
   return <AdvancedJson value={value} onChange={onChange} path={path} label="Authority policy" />;
 }
 
-function AuthoringDocumentProvider({ document, children }: { document: JsonObject; children: ReactNode }) {
-  return <AuthoringDocumentContext.Provider value={document}>{children}</AuthoringDocumentContext.Provider>;
-}
-
 export function ScenarioOverviewEditor({ value, document, onChange }: { value: JsonObject; document: JsonObject; onChange: Change }) {
   const locality = clone(value.locality);
   const update = (key: string, next: unknown) => onChange(setField(value, key, next));
@@ -434,11 +403,9 @@ export function ScenarioOverviewEditor({ value, document, onChange }: { value: J
 export {
   ActionEditor,
   ActionAuthorityPolicyEditor,
-  AuthoringDocumentProvider,
   DerivedStateEditor,
   GoalResolutionEditor,
   InitializationEditor,
-  ObjectiveEditor,
   PlanningEditor,
   PublicKnowledgeEditor,
   PublicReferenceEditor,

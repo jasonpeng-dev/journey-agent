@@ -16,7 +16,7 @@ from app.domain.formal_goal import FormalGoalSourceKind
 from app.domain.scenario_v2 import ObjectiveRequirementKind
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from tests.dynamic_goal_helpers import dynamic_candidate as AdHocGoalRequirementCandidateV1
-from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_V2_TEST
+from tests.scenario_fixtures import GENERIC_TEST, LINJIANG_CURRENT_TEST, LINJIANG_V2_TEST
 
 
 class _BuiltinDynamicProvider:
@@ -102,6 +102,21 @@ def test_current_builtin_preserves_stable_keys_and_player_names() -> None:
     assert all(resources)
     assert all(name for name in actions.values())
     assert all(name for name in resources.values())
+    assert LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives == ()
+    assert LINJIANG_CURRENT_TEST.objectives == ()
+    assert "objectives" not in LINJIANG_CURRENT_TEST.model_dump(mode="json")
+
+
+def test_current_linjiang_quick_inputs_resolve_only_through_dynamic_goal_authority() -> None:
+    resolver = GenericGoalResolver(provider=_BuiltinDynamicProvider())
+
+    for goal in LINJIANG_CURRENT_TEST.goal_resolution.quick_inputs:
+        resolution = resolver.resolve(goal, LINJIANG_CURRENT_TEST)
+
+        assert resolution.status == "RESOLVED"
+        assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
+        assert resolution.objective_keys == ()
+        assert len(resolution.dynamic_requirements) == 1
 
 
 def test_author_content_is_not_implicitly_translated() -> None:

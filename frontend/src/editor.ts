@@ -11,7 +11,6 @@ export const sections = [
   "interactions",
   "actions",
   "rules",
-  "objectives",
   "derived-states",
   "initialization",
   "goal-resolution",
@@ -36,7 +35,6 @@ export type EntityKind =
   | "interaction"
   | "action"
   | "rule"
-  | "objective"
   | "derived_state"
   | "public_reference";
 
@@ -66,7 +64,6 @@ export const sectionRegistry: SectionDefinition[] = [
   { id: "interactions", labelKey: "interactions", entityKinds: ["interaction"] },
   { id: "actions", labelKey: "actions", entityKinds: ["action"] },
   { id: "rules", labelKey: "rules", entityKinds: ["rule"] },
-  { id: "objectives", labelKey: "objectives", entityKinds: ["objective"] },
   { id: "derived-states", labelKey: "derived_states", entityKinds: ["derived_state"] },
   { id: "initialization", labelKey: "initialization", rootPath: ["initialization"] },
   { id: "goal-resolution", labelKey: "goal_resolution", rootPath: ["goal_resolution"] },
@@ -87,7 +84,6 @@ const COLLECTION_PATHS: Record<EntityKind, string[]> = {
   interaction: ["interactions"],
   action: ["actions"],
   rule: ["rules"],
-  objective: ["objectives"],
   derived_state: ["derived_states"],
   public_reference: ["public_references"],
 };
@@ -103,7 +99,6 @@ const KEY_FIELDS: Record<EntityKind, string> = {
   interaction: "key",
   action: "key",
   rule: "key",
-  objective: "key",
   derived_state: "key",
   public_reference: "ref_key",
 };
@@ -280,7 +275,6 @@ export function collectionDefaults(kind: EntityKind): JsonObject {
     interaction: { key: "new_interaction", name: "New interaction", description: "" },
     action: { key: "new_action", name: "New action", description: "", required_interaction_key: "", execution_mode: "IMMEDIATE", parameters: [], allowed_actor_capabilities: ["EXECUTE_ACTION"], expected_outcomes: [{ code: "Success", name: "Success", success: true }], planning: { terminal_effects: [], supporting_effects: [], success_outcome_codes: ["Success"], wait_success_outcome_codes: [], hints: [] } },
     rule: { key: "new_rule", phase: "RESOLVE", trigger: "ACTION", action_key: "", priority: 0, condition: null, effects: [{ kind: "EMIT_OUTCOME", outcome_code: "Success", retryable: false }] },
-    objective: { key: "new_objective", name: "New objective", description: "", completion_requirements: [], prerequisites: [], subsumes: [], goal_aliases: [], goal_examples: [] },
     derived_state: { key: "new_derived_state", name: "New derived state", description: "", value_type: "BOOLEAN", available_value: true, unavailable_value: false, dependencies: [] },
     public_reference: { term: "New reference", ref_type: "NODE", ref_key: "" },
   };

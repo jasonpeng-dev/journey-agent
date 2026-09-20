@@ -218,7 +218,9 @@ def test_builtin_action_authoring_change_publishes_without_mutating_predecessor(
 
 
 def _linjiang_v4_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
-    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
+    # These tests intentionally exercise the historical PREDEFINED Objective
+    # runtime against an exact legacy snapshot.
+    version = require_builtin_v2_version(session, LINJIANG_V2_TEST)
     player = Player(name=key)
     session.add(player)
     session.flush()

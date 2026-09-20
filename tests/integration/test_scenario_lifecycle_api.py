@@ -331,7 +331,7 @@ def test_generic_editor_round_trip_remains_engine_parseable(
     document = draft["definition_document"]
     document["actions"][0]["description"] = "Edited through the generic Action builder."
     document["planning"]["instructions"].append("Prefer visible, accessible targets.")
-    document["objectives"][0]["description"] += " Edited through the Objective builder."
+    document["derived_states"][0]["description"] += " Edited through the Derived State builder."
 
     saved = client.put(
         f"/api/v1/scenarios/{scenario_id}/draft",

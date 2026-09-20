@@ -13,7 +13,6 @@ export type ReferenceDomain =
   | "actor"
   | "interaction"
   | "action"
-  | "objective"
   | "derived_state"
   | "relation";
 
@@ -61,7 +60,6 @@ export const V2_ENUMS = {
   relationDirection: ["SOURCE", "TARGET"],
   resourceScope: ["EXPLICIT", "ACTOR_CURRENT_REGION", "CURRENT_TARGET_REGION"],
   derivedDependency: ["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"],
-  requirementKind: ["FACT", "RESOURCE_AT_LEAST", "DERIVED_STATE"],
   publicReferenceType: ["NODE", "REGION", "RESOURCE", "DERIVED_STATE", "ACTION", "ACTOR"],
 } as const;
 
@@ -110,11 +108,6 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
     kind: "rule", section: "rules", label: "规则", collectionPath: ["rules"],
     fields: [field("key", "text"), field("phase", "enum", { enum: V2_ENUMS.phase }), field("trigger", "enum", { enum: V2_ENUMS.trigger }), field("action_key", "reference", { referenceDomain: "action" }), field("priority", "integer")],
     nested: ["condition", "effects"],
-  },
-  objective: {
-    kind: "objective", section: "objectives", label: "目标", collectionPath: ["objectives"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("goal_aliases", "text"), field("goal_examples", "text"), field("planning_guidance", "textarea")],
-    nested: ["completion_requirements", "prerequisites", "subsumes"],
   },
   derived_state: {
     kind: "derived_state", section: "derived-states", label: "派生状态", collectionPath: ["derived_states"],
