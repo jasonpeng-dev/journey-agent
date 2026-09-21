@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
+import { MemoryRouter } from "react-router-dom";
 
 import type { DraftObject, JsonObject } from "./editor";
 import { TypedEditor, TypedEntityEditor } from "./components/TypedEditor";
@@ -150,6 +151,23 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expect(screen.getByLabelText("归属关系类型")).toHaveValue("contains");
   });
 
+  it("shows scoped Fact deletion and locality-only NodeType semantics", () => {
+    const onDeleteFact = vi.fn();
+    render(<MemoryRouter><TypedEntityEditor entity={entity("node", { key: "target", name: "Target", facts: [{ key: "operational", name: "Operational", value_type: "BOOLEAN", initial_value: false }] })} document={document} onDeleteFact={onDeleteFact} onChange={vi.fn()} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "删除事实" }));
+    expect(onDeleteFact).toHaveBeenCalledWith("target", "operational");
+
+    cleanup();
+    const syntheticDocument = { ...document, metadata: { locality: { enabled: true, facility_node_type_key: "hospital_like_name" } } };
+    render(<MemoryRouter><TypedEntityEditor entity={entity("node_type", { key: "hospital_like_name", name: "Hospital-like name" })} document={syntheticDocument} onChange={vi.fn()} scenarioId="scenario-1" /></MemoryRouter>);
+    expect(screen.getByText("设施")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "配置空间语义" })).toHaveAttribute("href", "/scenarios/scenario-1/edit/overview?focus_path=locality");
+
+    cleanup();
+    render(<MemoryRouter><TypedEntityEditor entity={entity("node_type", { key: "facility", name: "Facility" })} document={document} onChange={vi.fn()} /></MemoryRouter>);
+    expect(screen.getByText("通用节点")).toBeInTheDocument();
+  });
+
   it("authors initialization availability requirements and root planning/goal/public sections", () => {
     render(<TypedEditor section="initialization" value={{
       start_node_key: "target",
@@ -171,7 +189,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expect(screen.getByLabelText("澄清提示")).toHaveValue("Clarify");
     expect(screen.getByDisplayValue("First")).toBeInTheDocument();
     expect(screen.getByText(/仅用于填充玩家的目标输入/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "快捷输入 2 上移" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "上移" })[1]);
     expect(onGoalResolutionChange).toHaveBeenLastCalledWith(expect.objectContaining({ quick_inputs: ["Second", "First"] }));
     cleanup();
     render(<TypedEditor section="public-knowledge" value={{ resource_source_hints: [{ resource_key: "fuel", primary_region_key: "target", candidate_region_keys: [] }] }} document={document} onChange={vi.fn()} />);
@@ -183,7 +201,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     const onCollectionChange = vi.fn();
     render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }, { failure_code: "RETRY", hint: "Try again" }] }} document={document} collectionSelection={{ owner: "collection", collection: "recovery_hints", identity: JSON.stringify(["BLOCKED"]) }} onChange={vi.fn()} onCollectionChange={onCollectionChange} onCollectionRemove={vi.fn()} />);
 
-    expect(screen.getByRole("heading", { name: "恢复提示" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "失败恢复策略" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("BLOCKED")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Inspect again")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("RETRY")).not.toBeInTheDocument();

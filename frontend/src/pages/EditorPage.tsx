@@ -5,6 +5,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, ApiError } from "../api";
 import { TypedEditor, TypedEntityEditor } from "../components/TypedEditor";
 import { InitializationWorkspace } from "../components/InitializationWorkspace";
+import { FactDeleteDialog, type FactDeleteDialogState, type FactDeleteReference } from "../components/editor/FactDeleteDialog";
 import { WorldGraph, type TopologyContext, type TopologySelection } from "../components/WorldGraph";
 import {
   addObject,
@@ -26,16 +27,16 @@ import {
   type JsonObject,
 } from "../editor";
 import { kindsBySection } from "../templates";
-import { appendRootCollectionItem, removeRootCollectionItem, replaceRootCollectionItem, rootCollectionDefinitions, rootCollectionIdentity, rootCollectionItems, rootCollectionReferencePath, rootSingletonOwner, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
+import { appendRootCollectionItem, moveRootCollectionItem, removeRootCollectionItem, replaceRootCollectionItem, rootCollectionDefinitions, rootCollectionIdentity, rootCollectionItems, rootCollectionReferencePath, rootSingletonOwner, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
 import { sectionStructure } from "../editor-structure";
 import { editorLocatorFromValidation, editorLocatorHref } from "../editor-locator";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
-import type { Draft, DraftSandboxResult, InitializationPreview, ValidationResult } from "../types";
+import type { Draft, DraftSandboxResult, InitializationPreview, ScenarioVersionDetail, ValidationResult } from "../types";
 import { diagnosticMessage, editorSectionTaxonomy, editorTaxonomyGroups, errorText, kindLabels, sectionLabels, uiLabel } from "../ui";
 
 type SaveState = WorkingCopySaveState;
-const saveLabels: Record<SaveState, string> = { UNCHANGED: "未修改", DIRTY: "有未保存修改", SAVING: "保存中", CONFLICT: "版本冲突", ERROR: "保存失败" };
+const saveLabels: Record<SaveState, string> = { UNCHANGED: "未修改", DIRTY: "有未保存修改", SAVING: "保存中", CONFLICT: "草稿冲突", ERROR: "保存失败" };
 type WorldView = "all" | "regions" | "facilities" | "transports";
 const worldViewLabels: Record<WorldView, string> = { all: "全部节点", regions: "区域", facilities: "设施", transports: "交通" };
 type ScopedCollectionSelection = { section: EditorSection; selection: RootOwnerSelection };
@@ -48,6 +49,94 @@ function objectDisplayValue(value: JsonObject, fallback: string): string {
   if (typeof value.name === "string" && value.name.trim()) return value.name;
   if (typeof value.term === "string" && value.term.trim()) return value.term;
   return fallback;
+}
+
+function authoredReferenceDetails(document: JsonObject, locator: { object_kind: string; object_key: string | null; field_path: string | null }): Omit<FactDeleteReference, "href"> {
+  const entityKinds = ["node_type", "node", "relation_type", "relation", "resource", "role", "actor", "interaction", "action", "rule", "derived_state", "public_reference"];
+  const object = locator.object_key && entityKinds.includes(locator.object_kind)
+    ? objectByKindAndKey(document, locator.object_kind as EntityKind, locator.object_key)
+    : null;
+  const name = object ? objectDisplayValue(object.value, locator.object_key ?? "(root)") : locator.object_key ?? "(root)";
+  const type = kindLabels[locator.object_kind] ?? locator.object_kind;
+  return { type, name, path: locator.field_path ?? "(object)" };
+}
+
+function authoredReferenceHref(scenarioId: string, locator: { object_kind: string; object_key: string | null; field_path: string | null }): string | null {
+  const entityKinds = ["node_type", "node", "relation_type", "relation", "resource", "role", "actor", "interaction", "action", "rule", "derived_state", "public_reference"];
+  if (locator.object_key && entityKinds.includes(locator.object_kind)) {
+    return editorLocatorHref({ owner: "entity", section: sectionForKind(locator.object_kind), kind: locator.object_kind as EntityKind, objectKey: locator.object_key, fieldPath: locator.field_path }, scenarioId);
+  }
+  if (locator.object_kind === "metadata" && locator.field_path?.startsWith("locality")) return `/scenarios/${scenarioId}/edit/overview?focus_path=${encodeURIComponent(locator.field_path)}`;
+  return null;
+}
+
+function authoredFactName(document: JsonObject, nodeKey: string, factKey: string): string {
+  const node = objectByKindAndKey(document, "node", nodeKey);
+  const facts = node?.value.facts;
+  const fact = Array.isArray(facts) ? facts.find((item) => item && typeof item === "object" && !Array.isArray(item) && (item as JsonObject).key === factKey) as JsonObject | undefined : undefined;
+  return typeof fact?.name === "string" && fact.name.trim() ? fact.name : factKey;
+}
+
+function factDeletePreflightError(error: unknown): { reason: string; code?: string } {
+  if (error instanceof ApiError) {
+    const details = error.details && typeof error.details === "object" && !Array.isArray(error.details)
+      ? error.details as Record<string, unknown>
+      : null;
+    const issues = details && Array.isArray(details.errors)
+      ? details.errors
+      : details && Array.isArray(details.issues)
+        ? details.issues
+        : [];
+    const firstIssue = issues.find((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)));
+    if (firstIssue) {
+      const rawPath = firstIssue.path ?? firstIssue.loc;
+      const path = Array.isArray(rawPath)
+        ? rawPath.filter((part) => part !== "body").map(String).join(".")
+        : typeof rawPath === "string" ? rawPath : "";
+      const message = typeof firstIssue.message === "string" ? firstIssue.message : typeof firstIssue.msg === "string" ? firstIssue.msg : "请求字段不符合接口要求";
+      return {
+        code: error.code,
+        reason: `接口校验未通过${path ? `（${path}）` : ""}：${message}`,
+      };
+    }
+    if (error.code === "SCENARIO_DRAFT_CONFLICT") {
+      return { code: error.code, reason: "服务器上的草稿版本已变化，请重新加载后再试。" };
+    }
+    const message = error.message && error.message !== "Request validation failed" ? `：${error.message}` : "。请检查当前工作副本后重试。";
+    return { code: error.code, reason: `${error.code === "VALIDATION_ERROR" ? "接口校验失败" : uiLabel(error.code)}（${error.code}）${message}` };
+  }
+  if (error instanceof Error && error.message) return { reason: error.message };
+  return { reason: "服务端未能完成删除预检，请稍后重试。" };
+}
+
+function documentDifferenceCount(left: unknown, right: unknown): number {
+  if (Object.is(left, right)) return 0;
+  if (Array.isArray(left) && Array.isArray(right)) {
+    const shared = Math.min(left.length, right.length);
+    return Math.abs(left.length - right.length) + Array.from({ length: shared }, (_, index) => documentDifferenceCount(left[index], right[index])).reduce((sum, value) => sum + value, 0);
+  }
+  if (left && right && typeof left === "object" && typeof right === "object" && !Array.isArray(left) && !Array.isArray(right)) {
+    const keys = new Set([...Object.keys(left as object), ...Object.keys(right as object)]);
+    return Array.from(keys).reduce((sum, key) => sum + documentDifferenceCount((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]), 0);
+  }
+  return 1;
+}
+
+function validationStatusLabel(status: string): string {
+  if (status === "FAILED") return "验证失败";
+  if (status === "PASSED" || status === "VALID" || status === "VALIDATED") return "已验证";
+  return "未验证";
+}
+
+function VersionStatusBadges({ draft, published, saveState }: { draft: Draft; published: ScenarioVersionDetail | null; saveState: SaveState }) {
+  const differenceCount = published ? documentDifferenceCount(draft.definition_document, published.definition_document) : null;
+  const draftAhead = differenceCount !== null && differenceCount > 0;
+  const draftConflict = saveState === "CONFLICT";
+  const draftTitle = draftConflict ? "当前草稿与服务器版本发生冲突。" : draftAhead ? "当前草稿与最新已发布版本不同。" : "当前保存的草稿版本。";
+  return <span className="version-badges" aria-label="版本状态">
+    <span className={`version-badge version-badge-draft${draftConflict ? " conflict" : draftAhead ? " warning" : ""}`} title={draftTitle}>{draftConflict ? "草稿冲突" : `草稿 r${draft.revision} · ${validationStatusLabel(draft.validation_status)}`}</span>
+    <span className={`version-badge version-badge-published${published ? "" : " empty"}`} title={published ? `最新已发布版本 v${published.version_number}` : "当前没有已发布版本。"}>{published ? `已发布 v${published.version_number}` : "暂无发布版本"}</span>
+  </span>;
 }
 
 function rootEditorKey(section: EditorSection): string | null {
@@ -98,10 +187,14 @@ export function EditorPage() {
   const routeKind = structure.owners.entityKinds.includes(requestedKind as EntityKind) ? requestedKind as EntityKind : null;
   const queryClient = useQueryClient();
   const draftQuery = useQuery({ queryKey: ["draft", scenarioId], queryFn: () => api.draft(scenarioId) });
+  const scenarioQuery = useQuery({ queryKey: ["scenario", scenarioId], queryFn: () => api.scenario(scenarioId), enabled: Boolean(scenarioId && typeof api.scenario === "function"), retry: false });
+  const publishedVersionId = scenarioQuery.data?.current_published_version_id ?? null;
+  const publishedVersionQuery = useQuery({ queryKey: ["scenario-version", scenarioId, publishedVersionId], queryFn: () => api.scenarioVersion(scenarioId, publishedVersionId!), enabled: Boolean(publishedVersionId && typeof api.scenarioVersion === "function"), retry: false });
   const [serverDraft, setServerDraft] = useState<Draft | null>(null);
   const [workingDocument, setWorkingDocument] = useState<Record<string, unknown> | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("UNCHANGED");
   const [message, setMessage] = useState("");
+  const [factDeleteDialog, setFactDeleteDialog] = useState<FactDeleteDialogState | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [sandboxGoal, setSandboxGoal] = useState("");
   const [sandbox, setSandbox] = useState<DraftSandboxResult | null>(null);
@@ -140,6 +233,7 @@ export function EditorPage() {
     setValidation(null);
     setSandbox(null);
     setMessage("");
+    setFactDeleteDialog(null);
   };
 
   useEffect(() => {
@@ -287,6 +381,7 @@ export function EditorPage() {
     setSaveState(deriveWorkingCopySaveState(serverDraftRef.current, next));
     setValidation(null);
     setSandbox(null);
+    setFactDeleteDialog(null);
   };
   const saveWorkingCopy = () => {
     const draft = serverDraftRef.current;
@@ -352,6 +447,18 @@ export function EditorPage() {
       return;
     }
     const result = replaceRootCollectionItem(root, selection, item);
+    if (!result.ok) { setMessage(result.reason); return; }
+    setMessage("");
+    editDocument(updateSectionRoot(local.definition_document, section, result.root));
+    setCollectionSelection(result.selection, true);
+  };
+  const moveCollectionItem = (selection: RootCollectionSelection, direction: "up" | "down") => {
+    if (!(selection.collection === "resource_source_hints" || selection.collection === "recovery_hints")) {
+      setMessage("当前集合按身份展示，不能通过排序改变其语义。");
+      return;
+    }
+    const root = structuredClone(sectionValue) as JsonObject;
+    const result = moveRootCollectionItem(root, selection, direction);
     if (!result.ok) { setMessage(result.reason); return; }
     setMessage("");
     editDocument(updateSectionRoot(local.definition_document, section, result.root));
@@ -432,6 +539,65 @@ export function EditorPage() {
     } catch (error) { setSaveState(error instanceof ApiError && error.code === "SCENARIO_DRAFT_CONFLICT" ? "CONFLICT" : "ERROR"); setMessage(errorText(error, "删除失败，该对象可能仍被引用。")); }
   };
 
+  const deleteFact = async (nodeKey: string, factKey: string) => {
+    const document = workingDocumentRef.current;
+    const draft = serverDraftRef.current;
+    if (!document || !draft) return;
+    const factName = authoredFactName(document, nodeKey, factKey);
+    const snapshot = cloneWorkingDocument(document);
+    setFactDeleteDialog(null);
+    try {
+      const transformed = await api.transformWorkingCopy(scenarioId, draft.revision, snapshot, { kind: "DELETE_FACT", object_kind: "node", node_key: nodeKey, fact_key: factKey });
+      if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
+        setMessage("工作副本在删除预检期间发生了新修改，请重试该操作。");
+        return;
+      }
+      setMessage("");
+      setFactDeleteDialog({ kind: "confirm", factName, nodeKey, factKey, document: snapshot, transformedDocument: cloneWorkingDocument(transformed.definition_document) });
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "SCENARIO_FACT_REFERENCED") {
+        if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
+          setMessage("工作副本在删除预检期间发生了新修改，请重试该操作。");
+          return;
+        }
+        const details = error.details && typeof error.details === "object" && !Array.isArray(error.details) ? error.details as { references?: unknown } : {};
+        const references = Array.isArray(details.references) ? details.references : [];
+        const referenceItems = references.flatMap((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+          const source = (item as { source?: unknown }).source;
+          if (!source || typeof source !== "object" || Array.isArray(source)) return [];
+          const locator = source as { object_kind?: unknown; object_key?: unknown; field_path?: unknown };
+          const authoredLocator = {
+            object_kind: typeof locator.object_kind === "string" ? locator.object_kind : "unknown",
+            object_key: typeof locator.object_key === "string" ? locator.object_key : null,
+            field_path: typeof locator.field_path === "string" ? locator.field_path : null,
+          };
+          return [{ ...authoredReferenceDetails(snapshot, authoredLocator), href: authoredReferenceHref(scenarioId, authoredLocator) }];
+        });
+        setMessage("");
+        setFactDeleteDialog({ kind: "blocked", factName, nodeKey, factKey, references: referenceItems });
+        return;
+      }
+      if (error instanceof ApiError && error.code === "SCENARIO_DRAFT_CONFLICT") setSaveState("CONFLICT");
+      if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
+        setMessage("工作副本在删除预检期间发生了新修改，请重试该操作。");
+        return;
+      }
+      const preflightError = factDeletePreflightError(error);
+      setMessage("");
+      setFactDeleteDialog({ kind: "error", factName, nodeKey, factKey, ...preflightError });
+    }
+  };
+  const confirmFactDelete = () => {
+    if (!factDeleteDialog || factDeleteDialog.kind !== "confirm") return;
+    if (!workingDocumentsEqual(workingDocumentRef.current, factDeleteDialog.document)) {
+      setFactDeleteDialog(null);
+      setMessage("工作副本在确认删除前发生了新修改，请重试该操作。");
+      return;
+    }
+    setFactDeleteDialog(null);
+    editDocument(factDeleteDialog.transformedDocument as JsonObject);
+  };
   const validate = async () => {
     const draft = serverDraftRef.current;
     if (!draft || saveState !== "UNCHANGED") { setMessage("请先保存当前工作副本后再验证。"); return; }
@@ -547,8 +713,9 @@ export function EditorPage() {
       <nav className="editor-section-nav" aria-label="编辑器导航">{editorTaxonomyGroups.map((group) => <div className="editor-nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => <Link className={item === section ? "active" : ""} key={item} to={`/scenarios/${scenarioId}/edit/${item}`} onClick={(event) => { if (hasUnsavedChanges) { event.preventDefault(); guardedNavigate(`/scenarios/${scenarioId}/edit/${item}`); } }}>{sectionLabels[item] ?? item}</Link>)}</div>)}</nav>
     </aside>
     <section className="editor-main">
-      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span><button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={() => discardWorkingCopy()}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
+      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span>{serverDraft && <VersionStatusBadges draft={serverDraft} published={publishedVersionQuery.data ?? null} saveState={saveState} />}<button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={() => discardWorkingCopy()}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
       {message && <div className="conflict-banner"><p>{message}</p>{saveState === "CONFLICT" && <button type="button" className="editor-button editor-button-secondary" onClick={() => void reloadServerDraft()}>重新加载服务器草稿</button>}</div>}
+      {factDeleteDialog && <FactDeleteDialog state={factDeleteDialog} onClose={() => setFactDeleteDialog(null)} onConfirm={confirmFactDelete} />}
       <div className={`editor-columns${structure.master.visible ? "" : " master-hidden"}${inspectorOpen ? "" : " inspector-collapsed"}`}>
         {structure.master.visible && <aside className="object-list object-panel">
           <header className="object-panel-header"><div><p className="panel-kicker">{structure.mode === "BROWSER" ? "世界结构" : structure.mode === "HYBRID" ? "配置导航" : "内容导航"}</p><div className="object-panel-title">{sectionLabels[section] ?? section}</div></div><span className="object-count">{masterCount}</span></header>
@@ -578,7 +745,7 @@ export function EditorPage() {
             </>}
           </div>
         </aside>}
-         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-initialization" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-body-initialization" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "initialization" && <InitializationWorkspace document={local.definition_document} preview={initializationPreviewQuery.data ?? null} loading={initializationPreviewQuery.isPending} error={initializationPreviewQuery.error ? errorText(initializationPreviewQuery.error) : null} scenarioId={scenarioId} onChange={editDocument} onDeleteResourcePool={deleteInitializationResourcePool} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} initializationHref={`/scenarios/${scenarioId}/edit/initialization`} onChange={updateSelectedEntity} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel validation={validation} initializationPreview={initializationPreviewQuery.data ?? null} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
+         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-initialization" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-body-initialization" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "initialization" && <InitializationWorkspace document={local.definition_document} preview={initializationPreviewQuery.data ?? null} loading={initializationPreviewQuery.isPending} error={initializationPreviewQuery.error ? errorText(initializationPreviewQuery.error) : null} scenarioId={scenarioId} onChange={editDocument} onDeleteResourcePool={deleteInitializationResourcePool} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} initializationHref={`/scenarios/${scenarioId}/edit/initialization`} onDeleteFact={deleteFact} scenarioId={scenarioId} onChange={updateSelectedEntity} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} onCollectionMove={(direction) => { if (collectionSelection?.owner === "collection") moveCollectionItem(collectionSelection, direction); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel draft={serverDraft} published={publishedVersionQuery.data ?? null} validation={validation} initializationPreview={initializationPreviewQuery.data ?? null} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
         {structure.capabilities.inspector && <aside className={`inspector inspector-new${inspectorOpen ? " is-open" : " is-collapsed"}`}><div className="inspector-heading"><div><p className="panel-kicker">详情</p><h3>{showWorldTopology ? "拓扑检查器" : "检查器"}</h3></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen(false)}>收起</button></div><div className="inspector-scroll">
           {showWorldTopology ? <>
             {!topologySelection && <div className="inspector-empty"><strong>未选择拓扑对象</strong><p className="muted">单击范围或实体查看摘要，双击进入下一层。</p></div>}
@@ -593,8 +760,14 @@ export function EditorPage() {
   </main>;
 }
 
-function ValidationPanel({ validation, initializationPreview, sandboxGoal, sandbox, setSandboxGoal, onValidate, onPublish, onTest, onIssue }: { validation: ValidationResult | null; initializationPreview: InitializationPreview | null; sandboxGoal: string; sandbox: DraftSandboxResult | null; setSandboxGoal: (value: string) => void; onValidate: () => void; onPublish: () => void; onTest: () => void; onIssue: (issue: ValidationResult["issues"][number]) => void }) {
-  return <div className="validation-panel"><section className="validation-section validation-actions"><h4>草稿检查与发布</h4><p className="muted">先验证当前草稿；只有通过验证的已保存版本可以发布。</p><div className="button-row"><button onClick={onValidate}>验证当前草稿</button><button disabled={!validation?.publish_ready} onClick={onPublish}>发布不可变版本</button></div></section><section className="validation-section validation-bootstrap"><h4>开局准备度 · 当前草稿与已发布版本</h4>{initializationPreview ? <><p>初始化警告 {initializationPreview.projection.summary.warnings} 项</p><p>发布后开局变化 {initializationPreview.parity.initialization_changes.length} 项 · 设计变化 {initializationPreview.parity.design_changes.length} 组</p><Link to="../initialization" className="editor-button editor-button-secondary">打开初始化配置</Link></> : <p className="muted">正在生成开局完整度和版本差异。</p>}</section><section className="validation-section validation-readiness"><h4>运行准备度</h4>{validation ? validation.readiness.map((item) => <div className={`readiness ${item.passed ? "pass" : "fail"}`} key={item.level}>{item.passed ? "✓" : "×"} {uiLabel(item.level)}</div>) : <p className="muted">验证后将在这里显示各级运行准备度。</p>}</section><section className="validation-section validation-issues"><h4>问题</h4>{!validation ? <p className="muted">尚未验证当前草稿。</p> : validation.issues.length === 0 ? <p>没有发现问题。</p> : validation.issues.map((issue) => <article className={`issue ${issue.severity.toLowerCase()}`} role="button" tabIndex={0} onClick={() => onIssue(issue)} key={`${issue.code}:${issue.path}`}><strong>{uiLabel(issue.severity)} · {issue.code}</strong><p>{diagnosticMessage(issue.code, issue.message)}</p><code>{issue.path}</code>{issue.locator && <small>点击定位到字段</small>}</article>)}</section>
+function VersionDetailPanel({ draft, published, validation }: { draft: Draft; published: ScenarioVersionDetail | null; validation: ValidationResult | null }) {
+  const differenceCount = published ? documentDifferenceCount(draft.definition_document, published.definition_document) : null;
+  const aheadLabel = !published ? "暂无已发布版本" : differenceCount !== null && differenceCount > 0 ? "包含未发布修改" : "与最新已发布版本一致";
+  return <section className="validation-section validation-version-detail"><h4>版本详情</h4><div className="version-detail-grid"><span>当前草稿 <strong>r{draft.revision}</strong></span><span>验证状态 <strong>{validationStatusLabel(draft.validation_status)}</strong></span><span>最新发布 <strong>{published ? `v${published.version_number}` : "暂无"}</strong></span><span>草稿状态 <strong>{aheadLabel}</strong></span><span>当前发布准备度 <strong>{validation?.publish_ready ? "可发布" : "需先通过验证"}</strong></span></div><p className="muted">保存只更新场景草稿；验证不会发布。发布会创建不可变场景版本。</p><p className="muted">新游戏必须明确选择已发布的场景版本；已有游戏继续固定使用创建时的场景版本。</p><details className="version-technical-details"><summary>技术详情</summary><dl><div><dt>基础已发布版本</dt><dd><code>{draft.base_scenario_version_id ?? "无"}</code></dd></div><div><dt>草稿内容哈希</dt><dd><code>{draft.content_hash ?? "无"}</code></dd></div>{published && <div><dt>当前发布内容哈希</dt><dd><code>{published.content_hash}</code></dd></div>}</dl></details></section>;
+}
+
+function ValidationPanel({ draft, published, validation, initializationPreview, sandboxGoal, sandbox, setSandboxGoal, onValidate, onPublish, onTest, onIssue }: { draft: Draft | null; published: ScenarioVersionDetail | null; validation: ValidationResult | null; initializationPreview: InitializationPreview | null; sandboxGoal: string; sandbox: DraftSandboxResult | null; setSandboxGoal: (value: string) => void; onValidate: () => void; onPublish: () => void; onTest: () => void; onIssue: (issue: ValidationResult["issues"][number]) => void }) {
+  return <div className="validation-panel">{draft && <VersionDetailPanel draft={draft} published={published} validation={validation} />}<section className="validation-section validation-actions"><h4>草稿检查与发布</h4><p className="muted">先验证当前草稿；只有通过验证的已保存版本可以发布。</p><div className="button-row"><button onClick={onValidate}>验证当前草稿</button><button disabled={!validation?.publish_ready} onClick={onPublish}>发布不可变版本</button></div></section><section className="validation-section validation-bootstrap"><h4>开局准备度 · 当前草稿与已发布版本</h4>{initializationPreview ? <><p>初始化警告 {initializationPreview.projection.summary.warnings} 项</p><p>发布后开局变化 {initializationPreview.parity.initialization_changes.length} 项 · 设计变化 {initializationPreview.parity.design_changes.length} 组</p><Link to="../initialization" className="editor-button editor-button-secondary">打开初始化配置</Link></> : <p className="muted">正在生成开局完整度和版本差异。</p>}</section><section className="validation-section validation-readiness"><h4>运行准备度</h4>{validation ? validation.readiness.map((item) => <div className={`readiness ${item.passed ? "pass" : "fail"}`} key={item.level}>{item.passed ? "✓" : "×"} {uiLabel(item.level)}</div>) : <p className="muted">验证后将在这里显示各级运行准备度。</p>}</section><section className="validation-section validation-issues"><h4>问题</h4>{!validation ? <p className="muted">尚未验证当前草稿。</p> : validation.issues.length === 0 ? <p>没有发现问题。</p> : validation.issues.map((issue) => <article className={`issue ${issue.severity.toLowerCase()}`} role="button" tabIndex={0} onClick={() => onIssue(issue)} key={`${issue.code}:${issue.path}`}><strong>{uiLabel(issue.severity)} · {issue.code}</strong><p>{diagnosticMessage(issue.code, issue.message)}</p><code>{issue.path}</code>{issue.locator && <small>点击定位到字段</small>}</article>)}</section>
     <section className="sandbox-panel"><h4>预览/测试当前草稿</h4><p className="muted">在一次性隔离沙盒中运行，不会创建正式游戏。</p><label htmlFor="sandbox-goal">可选目标<input id="sandbox-goal" value={sandboxGoal} onChange={(event) => setSandboxGoal(event.target.value)} placeholder="输入精确版本中定义的目标别名" /></label><button onClick={onTest}>启动隔离测试</button>{sandbox && <div className={sandbox.sandbox_started ? "sandbox-result pass" : "sandbox-result fail"}><strong>{sandbox.sandbox_started ? "沙盒已启动" : "草稿无效，未启动沙盒"}</strong>{sandbox.goal_status && <p>目标解析：{uiLabel(sandbox.goal_status)}</p>}{sandbox.task && <p>任务状态：{uiLabel(sandbox.task.status)}</p>}{sandbox.issues.map((issue) => <p key={`${issue.code}:${issue.path}`}>{uiLabel(issue.severity)} · {diagnosticMessage(issue.code, issue.message)}</p>)}</div>}</section>
   </div>;
 }

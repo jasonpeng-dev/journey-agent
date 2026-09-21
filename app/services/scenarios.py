@@ -16,6 +16,7 @@ from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersio
 from app.scenarios.authoring import (
     DraftAuthoringError,
     ReferenceEdge,
+    delete_fact,
     delete_object,
     locator_for_path,
     reference_index,
@@ -325,11 +326,13 @@ class ScenarioService:
         *,
         expected_revision: int,
         definition_document: dict[str, Any],
-        operation_kind: Literal["RENAME_KEY", "DELETE_OBJECT"],
+        operation_kind: Literal["RENAME_KEY", "DELETE_OBJECT", "DELETE_FACT"],
         object_kind: str,
         old_key: str | None = None,
         new_key: str | None = None,
         object_key: str | None = None,
+        node_key: str | None = None,
+        fact_key: str | None = None,
     ) -> dict[str, Any]:
         """Apply one authoring transform to a client working copy only.
 
@@ -356,6 +359,17 @@ class ScenarioService:
                     old_key=old_key,
                     new_key=new_key,
                     protected_document=self._published_base_document(draft),
+                )
+            if operation_kind == "DELETE_FACT":
+                if object_kind != "node" or node_key is None or fact_key is None:
+                    raise DraftAuthoringError(
+                        "SCENARIO_AUTHORING_OPERATION_INVALID",
+                        "DELETE_FACT requires node object_kind, node_key, and fact_key",
+                    )
+                return delete_fact(
+                    definition_document,
+                    node_key=node_key,
+                    fact_key=fact_key,
                 )
             if object_key is None:
                 raise DraftAuthoringError(

@@ -269,19 +269,43 @@ class DraftDeleteObjectRequest(DraftRevisionRequest):
 
 
 class DraftTransformOperation(ApiModel):
-    kind: Literal["RENAME_KEY", "DELETE_OBJECT"]
+    kind: Literal["RENAME_KEY", "DELETE_OBJECT", "DELETE_FACT"]
     object_kind: str = Field(min_length=1, max_length=80)
     old_key: str | None = Field(default=None, min_length=1, max_length=100)
     new_key: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,79}$")
     object_key: str | None = Field(default=None, min_length=1, max_length=100)
+    node_key: str | None = Field(default=None, min_length=1, max_length=100)
+    fact_key: str | None = Field(default=None, min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def validate_operation_fields(self) -> DraftTransformOperation:
         if self.kind == "RENAME_KEY":
-            if self.old_key is None or self.new_key is None or self.object_key is not None:
+            if (
+                self.old_key is None
+                or self.new_key is None
+                or self.object_key is not None
+                or self.node_key is not None
+                or self.fact_key is not None
+            ):
                 raise ValueError("RENAME_KEY requires old_key and new_key only")
-        elif self.object_key is None or self.old_key is not None or self.new_key is not None:
-            raise ValueError("DELETE_OBJECT requires object_key only")
+        elif self.kind == "DELETE_OBJECT":
+            if (
+                self.object_key is None
+                or self.old_key is not None
+                or self.new_key is not None
+                or self.node_key is not None
+                or self.fact_key is not None
+            ):
+                raise ValueError("DELETE_OBJECT requires object_key only")
+        elif (
+            self.object_kind != "node"
+            or self.node_key is None
+            or self.fact_key is None
+            or self.object_key is not None
+            or self.old_key is not None
+            or self.new_key is not None
+        ):
+            raise ValueError("DELETE_FACT requires node_key and fact_key only")
         return self
 
 

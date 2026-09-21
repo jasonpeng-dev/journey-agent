@@ -2,6 +2,7 @@ import { useEffect, useId, useState, type ReactNode } from "react";
 
 import { type ReferenceDomain } from "../../editor-registry";
 import { displayEnumValue, editorLabel } from "../../ui";
+import { moveItem, type MoveDirection } from "../../editor-order";
 import { referenceOptions, type ReferenceOption } from "./ReferencePicker";
 import { fieldId } from "./FormUtils";
 
@@ -169,13 +170,26 @@ export function ScalarListEditor({ value, onChange, label, path, help, error }: 
     {items.length === 0 && <p className="muted">暂无内容。</p>}
     {items.map((item, index) => <div className="typed-array-row" key={`${path}.${index}`}>
       {typeof item === "boolean" ? <BooleanControl label={`${label} ${index + 1}`} path={`${path}.${index}`} value={item} onChange={(next) => onChange(items.map((old, oldIndex) => oldIndex === index ? next : old))} /> : typeof item === "number" ? <NumberInput label={`${label} ${index + 1}`} path={`${path}.${index}`} value={item} onChange={(next) => onChange(items.map((old, oldIndex) => oldIndex === index ? next ?? 0 : old))} /> : <TextInput label={`${label} ${index + 1}`} path={`${path}.${index}`} value={item} onChange={(next) => onChange(items.map((old, oldIndex) => oldIndex === index ? next : old))} />}
-      <button type="button" className="small" aria-label={`${normalizedLabel(label)} ${index + 1} 上移`} disabled={index === 0} onClick={() => onChange(items.map((old, oldIndex) => oldIndex === index - 1 ? item : oldIndex === index ? items[index - 1] : old))}>↑</button>
-      <button type="button" className="small" aria-label={`${normalizedLabel(label)} ${index + 1} 下移`} disabled={index === items.length - 1} onClick={() => onChange(items.map((old, oldIndex) => oldIndex === index + 1 ? item : oldIndex === index ? items[index + 1] : old))}>↓</button>
-      <button type="button" className="small danger" onClick={() => onChange(items.filter((_, oldIndex) => oldIndex !== index))}>移除</button>
+      <span className="typed-array-actions"><ReorderControls index={index} count={items.length} onMove={(direction) => onChange(moveItem(items, index, direction))} /><button type="button" className="small danger" onClick={() => onChange(items.filter((_, oldIndex) => oldIndex !== index))}>移除</button></span>
     </div>)}
     {help && <small className="typed-help">{help}</small>}
     {error && <small className="field-error" role="alert">{error}</small>}
   </section>;
+}
+
+type ReorderControlsProps = {
+  index: number;
+  count: number;
+  onMove?: (direction: MoveDirection) => void;
+  className?: string;
+};
+
+export function ReorderControls({ index, count, onMove, className = "" }: ReorderControlsProps) {
+  if (!onMove || count < 2) return null;
+  return <span className={`reorder-controls${className ? ` ${className}` : ""}`} aria-label="调整顺序">
+    <button type="button" className="small reorder-button" title="上移" aria-label="上移" disabled={index === 0} onClick={(event) => { event.stopPropagation(); onMove("up"); }}>↑</button>
+    <button type="button" className="small reorder-button" title="下移" aria-label="下移" disabled={index === count - 1} onClick={(event) => { event.stopPropagation(); onMove("down"); }}>↓</button>
+  </span>;
 }
 
 type NestedCardProps = {
@@ -187,6 +201,9 @@ type NestedCardProps = {
   children: ReactNode;
   onAdd?: () => void;
   onRemove?: () => void;
+  onMove?: (direction: "up" | "down") => void;
+  moveIndex?: number;
+  moveCount?: number;
   defaultExpanded?: boolean;
 };
 
@@ -200,7 +217,7 @@ export function NestedObjectHeader({ typeLabel, identity }: NestedObjectHeaderPr
   return <span className="nested-object-heading"><span className="nested-object-type">{normalizedLabel(typeLabel)}</span>{hasIdentity && <strong className="nested-object-identity">{identity}</strong>}</span>;
 }
 
-export function NestedCard({ title, summary, machineKey, typeLabel, identity, children, onAdd, onRemove, defaultExpanded = false }: NestedCardProps) {
+export function NestedCard({ title, summary, machineKey, typeLabel, identity, children, onAdd, onRemove, onMove, moveIndex, moveCount, defaultExpanded = false }: NestedCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const toggleId = useId();
   const titleParts = title.split(" · ");
@@ -214,6 +231,7 @@ export function NestedCard({ title, summary, machineKey, typeLabel, identity, ch
       </button>
       <span className="button-row nested-card-actions">
         {onAdd && <button type="button" className="small" onClick={onAdd}>＋</button>}
+        <ReorderControls index={moveIndex ?? 0} count={moveCount ?? 1} onMove={onMove} />
         {onRemove && <button type="button" className="small danger" onClick={onRemove}>删除</button>}
       </span>
     </header>

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import { metadataForKind, rootFieldRegistry, type FieldMetadata } from "../editor-registry";
 import type { RootOwnerSelection } from "../editor-collections";
+import type { MoveDirection } from "../editor-order";
 import type { DraftObject, JsonObject } from "../editor";
 import { displayEnumValue, editorLabel, fieldLabel } from "../ui";
 import {
@@ -23,7 +24,9 @@ import { ValueLabelList } from "./editor/ValueLabelEditor";
 import {
   ActionAuthorityPolicyEditor,
   ActionEditor,
+  AuthorityPolicyEditor,
   DerivedStateEditor,
+  DoctrineEditor,
   GoalResolutionEditor,
   InitializationEditor,
   MasterDetailInitializationEditor,
@@ -46,6 +49,8 @@ type Props = {
   collectionSelection?: RootOwnerSelection | null;
   onCollectionChange?: (value: JsonObject) => void;
   onCollectionRemove?: () => void;
+  onCollectionMove?: (direction: MoveDirection) => void;
+  onDeleteFact?: (nodeKey: string, factKey: string) => void;
 };
 
 function cloneObject(value: unknown): JsonObject {
@@ -98,7 +103,22 @@ function StringArrayEditor({ value, onChange, label, path }: { value: unknown; o
   return <ScalarListEditor value={items} onChange={(next) => onChange(next.filter((item): item is string => typeof item === "string"))} path={path} label={label} />;
 }
 
-function FactEditor({ value, document, path, initializationHref, onChange }: { value: JsonObject; document: JsonObject; path: string; initializationHref: string; onChange: (value: JsonObject) => void }) {
+function nodeTypeSemanticStatus(document: JsonObject, nodeTypeKey: string): "Generic" | "Region" | "Facility" | "Transport" {
+  const metadata = document.metadata && typeof document.metadata === "object" && !Array.isArray(document.metadata) ? document.metadata as JsonObject : {};
+  const locality = metadata.locality && typeof metadata.locality === "object" && !Array.isArray(metadata.locality) ? metadata.locality as JsonObject : {};
+  const matches = [
+    ["region_node_type_key", "Region"],
+    ["facility_node_type_key", "Facility"],
+    ["transport_node_type_key", "Transport"],
+  ].filter(([field]) => locality[field] === nodeTypeKey).map(([, label]) => label as "Region" | "Facility" | "Transport");
+  return matches.length === 1 ? matches[0] : "Generic";
+}
+
+function nodeTypeSemanticLabel(status: ReturnType<typeof nodeTypeSemanticStatus>): string {
+  return { Generic: "通用节点", Region: "区域", Facility: "设施", Transport: "交通节点" }[status];
+}
+
+function FactEditor({ value, document, path, initializationHref, onChange, onRemove }: { value: JsonObject; document: JsonObject; path: string; initializationHref: string; onChange: (value: JsonObject) => void; onRemove?: () => void }) {
   const factType = typeof value.value_type === "string" ? value.value_type : "BOOLEAN";
   const allowed = Array.isArray(value.allowed_values) ? value.allowed_values : [];
 return <article className="nested-editor"><header className="nested-object-header"><NestedObjectHeader typeLabel="FACT" identity={String(value.key ?? "未命名事实")} /></header><div className="typed-grid">
@@ -106,18 +126,18 @@ return <article className="nested-editor"><header className="nested-object-heade
     <FieldRow metadata={{ path: "value_type", type: "enum", enum: ["STRING", "ENUM", "INTEGER", "BOOLEAN"] }} value={value} document={document} path={path} onChange={onChange} />
 <div className="bootstrap-handoff form-field-full"><span>开局真实状态 / 玩家知识</span><strong>{String(value.initial_value)} · {displayEnumValue("visibility", String(value.initial_visibility ?? ""))}</strong><Link to={initializationHref}>前往初始化配置</Link></div>
     <FieldRow metadata={{ path: "presentation_role", type: "enum", enum: ["HEADER_PRIMARY", "HEADER_SECONDARY", "BODY_MAIN", "SUPPORTING", "REQUIREMENT_ONLY"] }} value={value} document={document} path={path} onChange={onChange} />
-    {factType === "ENUM" && <AdvancedJsonField value={value.allowed_values ?? []} onChange={(next) => onChange({ ...value, allowed_values: next })} path={`${path}.allowed_values`} label="Allowed values" />}
+    <>{factType === "ENUM" && <ScalarListEditor value={value.allowed_values ?? []} onChange={(next) => onChange({ ...value, allowed_values: next })} path={`${path}.allowed_values`} label="Allowed values" />}<AdvancedJsonField value={value.allowed_values ?? []} onChange={(next) => onChange({ ...value, allowed_values: next })} path={`${path}.allowed_values`} label="Allowed values (Advanced JSON)" /></>
     <ValueLabelList value={value.value_labels} valueType={factType} allowedValues={allowed} path={`${path}.value_labels`} onChange={(next) => onChange({ ...value, value_labels: next })} />
-    <AdvancedJsonField value={{ goal_addressable: value.goal_addressable ?? false, goal_aliases: value.goal_aliases ?? [], goal_examples: value.goal_examples ?? [], goal_target_values: value.goal_target_values ?? [] }} onChange={(next) => onChange({ ...value, ...(cloneObject(next)) })} path={`${path}.goal_metadata`} label="Goal metadata" />
+    <section className="nested-list fact-goal-metadata"><h4>{editorLabel("Goal metadata")}</h4><BooleanControl value={value.goal_addressable ?? false} onChange={(next) => onChange({ ...value, goal_addressable: next })} path={`${path}.goal_addressable`} label="Goal addressable" /><StringArrayEditor value={value.goal_aliases ?? []} onChange={(next) => onChange({ ...value, goal_aliases: next })} path={`${path}.goal_aliases`} label="Goal aliases" /><StringArrayEditor value={value.goal_examples ?? []} onChange={(next) => onChange({ ...value, goal_examples: next })} path={`${path}.goal_examples`} label="Goal examples" /><ScalarListEditor value={value.goal_target_values ?? []} onChange={(next) => onChange({ ...value, goal_target_values: next })} path={`${path}.goal_target_values`} label="Goal target values" /><AdvancedJsonField value={{ goal_addressable: value.goal_addressable ?? false, goal_aliases: value.goal_aliases ?? [], goal_examples: value.goal_examples ?? [], goal_target_values: value.goal_target_values ?? [] }} onChange={(next) => onChange({ ...value, ...(cloneObject(next)) })} path={`${path}.goal_metadata`} label="Goal metadata" /><button type="button" className="small danger" onClick={onRemove} disabled={!onRemove}>{editorLabel("Delete fact")}</button></section>
   </div></article>;
 }
 
-function FactList({ value, document, path, initializationHref, onChange }: { value: unknown; document: JsonObject; path: string; initializationHref: string; onChange: (value: unknown) => void }) {
+function FactList({ value, document, path, initializationHref, onChange, onDeleteFact, nodeKey }: { value: unknown; document: JsonObject; path: string; initializationHref: string; onChange: (value: unknown) => void; onDeleteFact?: (nodeKey: string, factKey: string) => void; nodeKey: string }) {
   const facts = Array.isArray(value) ? value : [];
-  return <section className="nested-list"><div className="typed-array-heading"><h4>{editorLabel("Facts")}</h4><button type="button" className="small" onClick={() => onChange([...facts, { key: "new_fact", name: "新事实", description: "", value_type: "BOOLEAN", initial_value: false, initial_visibility: "KNOWN", allowed_values: [] }])}>＋ {editorLabel("Add fact")}</button></div>{facts.map((fact, index) => fact && typeof fact === "object" && !Array.isArray(fact) ? <FactEditor key={`${path}.${index}`} value={fact as JsonObject} document={document} path={`${path}.${index}`} initializationHref={initializationHref} onChange={(next) => onChange(facts.map((old, oldIndex) => oldIndex === index ? next : old))} /> : null)}</section>;
+  return <section className="nested-list"><div className="typed-array-heading"><h4>{editorLabel("Facts")}</h4><button type="button" className="small" onClick={() => onChange([...facts, { key: "new_fact", name: "新事实", description: "", value_type: "BOOLEAN", initial_value: false, initial_visibility: "KNOWN", allowed_values: [] }])}>＋ {editorLabel("Add fact")}</button></div>{facts.map((fact, index) => fact && typeof fact === "object" && !Array.isArray(fact) ? <FactEditor key={`${path}.${index}`} value={fact as JsonObject} document={document} path={`${path}.${index}`} initializationHref={initializationHref} onChange={(next) => onChange(facts.map((old, oldIndex) => oldIndex === index ? next : old))} onRemove={typeof (fact as JsonObject).key === "string" && onDeleteFact ? () => onDeleteFact(nodeKey, String((fact as JsonObject).key)) : undefined} /> : null)}</section>;
 }
 
-function EntityEditor({ entity, document, initializationHref, onChange, focusPath }: { entity: DraftObject; document: JsonObject; initializationHref: string; onChange: (value: JsonObject) => void; focusPath?: string | null }) {
+function EntityEditor({ entity, document, initializationHref, onChange, focusPath, onDeleteFact, scenarioId }: { entity: DraftObject; document: JsonObject; initializationHref: string; onChange: (value: JsonObject) => void; focusPath?: string | null; onDeleteFact?: (nodeKey: string, factKey: string) => void; scenarioId?: string }) {
   const metadata = metadataForKind(entity.kind);
   const value = entity.value;
   useEffect(() => {
@@ -126,7 +146,7 @@ function EntityEditor({ entity, document, initializationHref, onChange, focusPat
     element?.scrollIntoView({ block: "center" });
     if (element instanceof HTMLElement && typeof element.focus === "function") element.focus();
   }, [focusPath]);
-  if (entity.kind === "action") return <><ActionEditor entity={entity} document={document} onChange={onChange} /><ActionAuthorityPolicyEditor value={value.authority_policy ?? {}} path={`${entity.kind}.${entity.key}.authority_policy`} onChange={(next) => onChange({ ...value, authority_policy: next })} /></>;
+  if (entity.kind === "action") return <><ActionEditor entity={entity} document={document} onChange={onChange} /><ActionAuthorityPolicyEditor value={value.authority_policy ?? {}} path={`${entity.kind}.${entity.key}.authority_policy`} parameterKeys={Array.isArray(value.parameters) ? value.parameters.flatMap((item) => item && typeof item === "object" && !Array.isArray(item) && typeof (item as JsonObject).key === "string" ? [String((item as JsonObject).key)] : []) : []} onChange={(next) => onChange({ ...value, authority_policy: next })} /></>;
   if (entity.kind === "rule") return <RuleEditor entity={entity} document={document} onChange={onChange} />;
   if (entity.kind === "derived_state") return <DerivedStateEditor entity={entity} document={document} onChange={onChange} />;
   if (entity.kind === "public_reference") return <PublicReferenceEditor entity={entity} document={document} onChange={onChange} />;
@@ -134,10 +154,12 @@ function EntityEditor({ entity, document, initializationHref, onChange, focusPat
     {metadata.fields.map((field) => field.type === "text" && Array.isArray(nestedValue(value, field.path))
       ? <StringArrayEditor key={field.path} value={nestedValue(value, field.path)} label={fieldLabel(field.path)} path={`${entity.kind}.${entity.key}.${field.path}`} onChange={(next) => onChange(withNestedValue(value, field.path, next))} />
       : <FieldRow key={field.path} metadata={field} value={value} document={document} path={`${entity.kind}.${entity.key}`} onChange={onChange} />)}
-  </div>
+    {entity.kind === "node_type" && <div className="form-field node-type-semantic-field"><div className="form-field-heading"><span className="typed-field-label">空间角色</span></div><div className="readonly-field"><strong>{nodeTypeSemanticLabel(nodeTypeSemanticStatus(document, entity.key))}</strong><Link to={scenarioId ? `/scenarios/${scenarioId}/edit/overview?focus_path=locality` : "../overview?focus_path=locality"}>配置空间语义</Link></div><small className="typed-help">由场景基础中的空间语义配置决定。</small></div>}
+   </div>
 {["node", "actor", "relation", "resource"].includes(entity.kind) && <div className="bootstrap-handoff"><span>开局配置由初始化工作区统一编辑</span><strong>{entity.kind === "node" ? `${displayEnumValue("access", String(value.initial_access ?? ""))} · ${displayEnumValue("visibility", String(value.initial_visibility ?? ""))}` : entity.kind === "actor" ? `${String(value.initial_node_key)} · ${displayEnumValue("reachability", String(value.command_reachability ?? "ONLINE"))}` : entity.kind === "relation" ? displayEnumValue("visibility", String(value.initial_visibility ?? "VISIBLE")) : `兼容回退 · ${String(value.initial_value)}`}</strong><Link to={`${initializationHref}?domain=${entity.kind === "node" ? "nodes" : entity.kind === "actor" ? "actors" : entity.kind === "relation" ? "relations" : "resources"}${entity.kind === "resource" ? "" : `&item=${encodeURIComponent(`${entity.kind}:${entity.key}`)}`}`}>前往初始化配置</Link></div>}
-    {entity.kind === "node" && <FactList value={value.facts} document={document} path={`${entity.kind}.${entity.key}.facts`} initializationHref={`${initializationHref}?domain=nodes&item=${encodeURIComponent(`node:${entity.key}`)}`} onChange={(next) => onChange({ ...value, facts: next })} />}
-    {metadata.nested?.map((nested) => <AdvancedJsonField key={nested} value={value[nested]} onChange={(next) => onChange({ ...value, [nested]: next })} path={`${entity.kind}.${entity.key}.${nested}`} label={fieldLabel(nested)} />)}
+    {entity.kind === "node" && <FactList value={value.facts} document={document} path={`${entity.kind}.${entity.key}.facts`} initializationHref={`${initializationHref}?domain=nodes&item=${encodeURIComponent(`node:${entity.key}`)}`} onChange={(next) => onChange({ ...value, facts: next })} onDeleteFact={onDeleteFact} nodeKey={entity.key} />}
+    {entity.kind === "actor" && <><DoctrineEditor value={value.doctrine} path={`${entity.kind}.${entity.key}.doctrine`} onChange={(next) => onChange({ ...value, doctrine: next })} /><AuthorityPolicyEditor value={value.authority_policy ?? {}} path={`${entity.kind}.${entity.key}.authority_policy`} onChange={(next) => onChange({ ...value, authority_policy: next })} /></>}
+    {metadata.nested?.filter((nested) => !(entity.kind === "actor" && (nested === "doctrine" || nested === "authority_policy"))).map((nested) => <AdvancedJsonField key={nested} value={value[nested]} onChange={(next) => onChange({ ...value, [nested]: next })} path={`${entity.kind}.${entity.key}.${nested}`} label={fieldLabel(nested)} />)}
     <p className="typed-help">未在基础表单中展开的合法字段会保留在原始草稿中；复杂结构当前标记为高级结构，不会静默删除。</p>
   </div>;
 }
@@ -145,17 +167,17 @@ function EntityEditor({ entity, document, initializationHref, onChange, focusPat
 function RootEditor({ rootKey, value, document, onChange }: { rootKey: string; value: unknown; document: JsonObject; onChange: (value: unknown) => void }) {
   const object = cloneObject(value);
   const fields = rootFieldRegistry[rootKey] ?? [];
-  return <div className="typed-root-editor"><div className="typed-grid">{fields.map((metadata) => <FieldRow key={metadata.path} metadata={metadata} value={object} document={document} path={rootKey} onChange={onChange as (value: JsonObject) => void} />)}</div>{rootKey === "initialization" && <p className="typed-help">资源定义在世界模型中维护；资源初始状态、资源池和区域资源知识属于初始化数据，当前以高级结构保留。</p>}{rootKey === "planning" && <p className="typed-help">规划指引已提供结构化文本数组入口；恢复提示会在规则与规划表单中展开。</p>}</div>;
+  return <div className="typed-root-editor"><div className="typed-grid">{fields.map((metadata) => <FieldRow key={metadata.path} metadata={metadata} value={object} document={document} path={rootKey} onChange={onChange as (value: JsonObject) => void} />)}</div>{rootKey === "initialization" && <p className="typed-help">资源定义在世界模型中维护；资源初始状态、资源池和区域资源知识属于初始化数据，当前以高级结构保留。</p>}{rootKey === "planning" && <p className="typed-help">全局规划指引已提供结构化文本数组入口；失败恢复策略会在规则与规划表单中展开。</p>}</div>;
 }
 
-export function TypedEditor({ section, value, document, onChange, path = section, focusPath, collectionSelection = null, onCollectionChange, onCollectionRemove }: Props) {
+export function TypedEditor({ section, value, document, onChange, path = section, focusPath, collectionSelection = null, onCollectionChange, onCollectionRemove, onCollectionMove }: Props) {
   if (section === "overview" || section === "initialization" || section === "goal-resolution" || section === "planning" || section === "public-knowledge") {
     const rootKey = section === "overview" ? "metadata" : section === "goal-resolution" ? "goal_resolution" : section === "public-knowledge" ? "public_knowledge" : section;
     if (rootKey === "metadata" && value && typeof value === "object" && !Array.isArray(value)) return <ScenarioOverviewEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
-    if (rootKey === "initialization" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailInitializationEditor value={value as JsonObject} document={document} selection={collectionSelection} onChange={onChange as (value: JsonObject) => void} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} /> : <InitializationEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
-    if (rootKey === "planning" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailPlanningEditor value={value as JsonObject} document={document} selection={collectionSelection} onChange={onChange as (value: JsonObject) => void} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} /> : <PlanningEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "initialization" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailInitializationEditor value={value as JsonObject} document={document} selection={collectionSelection} onChange={onChange as (value: JsonObject) => void} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} onCollectionMove={onCollectionMove} /> : <InitializationEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "planning" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailPlanningEditor value={value as JsonObject} document={document} selection={collectionSelection} onChange={onChange as (value: JsonObject) => void} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} onCollectionMove={onCollectionMove} /> : <PlanningEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
     if (rootKey === "goal_resolution" && value && typeof value === "object" && !Array.isArray(value)) return <GoalResolutionEditor value={value as JsonObject} onChange={onChange as (value: JsonObject) => void} />;
-    if (rootKey === "public_knowledge" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailPublicKnowledgeEditor value={value as JsonObject} document={document} selection={collectionSelection} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} /> : <PublicKnowledgeEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
+    if (rootKey === "public_knowledge" && value && typeof value === "object" && !Array.isArray(value)) return onCollectionChange && onCollectionRemove ? <MasterDetailPublicKnowledgeEditor value={value as JsonObject} document={document} selection={collectionSelection} onCollectionChange={onCollectionChange} onCollectionRemove={onCollectionRemove} onCollectionMove={onCollectionMove} /> : <PublicKnowledgeEditor value={value as JsonObject} document={document} onChange={onChange as (value: JsonObject) => void} />;
     return <RootEditor rootKey={rootKey} value={value} document={document} onChange={onChange} />;
   }
   if (value && typeof value === "object" && !Array.isArray(value) && "kind" in value && typeof (value as JsonObject).kind === "string") {
@@ -164,6 +186,6 @@ export function TypedEditor({ section, value, document, onChange, path = section
   return <AdvancedJsonField value={value} onChange={onChange} path={path} label="Advanced structure" />;
 }
 
-export function TypedEntityEditor({ entity, document, initializationHref = "../initialization", onChange, focusPath }: { entity: DraftObject; document: JsonObject; initializationHref?: string; onChange: (value: JsonObject) => void; focusPath?: string | null }) {
-  return <EntityEditor entity={entity} document={document} initializationHref={initializationHref} onChange={onChange} focusPath={focusPath} />;
+export function TypedEntityEditor({ entity, document, initializationHref = "../initialization", onChange, focusPath, onDeleteFact, scenarioId }: { entity: DraftObject; document: JsonObject; initializationHref?: string; onChange: (value: JsonObject) => void; focusPath?: string | null; onDeleteFact?: (nodeKey: string, factKey: string) => void; scenarioId?: string }) {
+  return <EntityEditor entity={entity} document={document} initializationHref={initializationHref} onChange={onChange} focusPath={focusPath} onDeleteFact={onDeleteFact} scenarioId={scenarioId} />;
 }

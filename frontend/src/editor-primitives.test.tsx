@@ -7,6 +7,7 @@ import {
   MultiValuePicker,
   NestedCard,
   NestedObjectHeader,
+  ReorderControls,
   ReferencePicker,
   TextInput,
 } from "./components/editor/FormPrimitives";
@@ -75,5 +76,29 @@ describe("shared editor form primitives", () => {
 
     expect(screen.getByText("事实")).toHaveClass("nested-object-type");
     expect(screen.getByText("operational")).toHaveClass("nested-object-identity");
+  });
+
+  it("renders one compact shared reorder group with stable boundary buttons", () => {
+    const onMove = vi.fn();
+    render(<><ReorderControls index={0} count={3} onMove={onMove} /><ReorderControls index={1} count={3} onMove={onMove} /><ReorderControls index={2} count={3} onMove={onMove} /></>);
+
+    const upButtons = screen.getAllByRole("button", { name: "上移" });
+    const downButtons = screen.getAllByRole("button", { name: "下移" });
+    expect(upButtons[0]).toBeDisabled();
+    expect(downButtons[0]).toBeEnabled();
+    expect(upButtons[1]).toBeEnabled();
+    expect(downButtons[1]).toBeEnabled();
+    expect(upButtons[2]).toBeEnabled();
+    expect(downButtons[2]).toBeDisabled();
+    expect(upButtons[1].parentElement).toHaveClass("reorder-controls");
+    fireEvent.click(downButtons[1]);
+    expect(onMove).toHaveBeenCalledWith("down");
+  });
+
+  it("does not render reorder affordances for a single item", () => {
+    render(<ReorderControls index={0} count={1} onMove={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "上移" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下移" })).not.toBeInTheDocument();
   });
 });

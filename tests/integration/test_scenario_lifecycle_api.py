@@ -332,6 +332,62 @@ def test_working_copy_transform_and_reference_analysis_do_not_persist(client: Te
         for item in deleted.json()["definition_document"]["world"]["resources"]
     )
 
+    fact_document = deepcopy(original)
+    node = fact_document["world"]["nodes"][0]
+    node_key = node["key"]
+    node["facts"].append(
+        {
+            "key": "working_only",
+            "name": "Working only",
+            "value_type": "BOOLEAN",
+            "initial_value": False,
+        }
+    )
+    fact_document["actions"][0]["planning"]["knowledge_gate"] = {
+        "node_key": node_key,
+        "fact_key": "working_only",
+        "accepted_values": [True],
+    }
+    blocked_fact = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/transform",
+        json={
+            "expected_revision": 1,
+            "definition_document": fact_document,
+            "operation": {
+                "kind": "DELETE_FACT",
+                "object_kind": "node",
+                "node_key": node_key,
+                "fact_key": "working_only",
+            },
+        },
+    )
+    assert blocked_fact.status_code == 409, blocked_fact.text
+    assert blocked_fact.json()["error"]["code"] == "SCENARIO_FACT_REFERENCED"
+    assert blocked_fact.json()["error"]["details"]["references"]
+
+    without_reference = deepcopy(fact_document)
+    without_reference["actions"][0]["planning"]["knowledge_gate"] = None
+    deleted_fact = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/transform",
+        json={
+            "expected_revision": 1,
+            "definition_document": without_reference,
+            "operation": {
+                "kind": "DELETE_FACT",
+                "object_kind": "node",
+                "node_key": node_key,
+                "fact_key": "working_only",
+            },
+        },
+    )
+    assert deleted_fact.status_code == 200, deleted_fact.text
+    deleted_node = next(
+        item
+        for item in deleted_fact.json()["definition_document"]["world"]["nodes"]
+        if item["key"] == node_key
+    )
+    assert all(fact["key"] != "working_only" for fact in deleted_node["facts"])
+
     persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
     assert persisted["revision"] == 1
     assert persisted["definition_document"] == original

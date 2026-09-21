@@ -150,7 +150,7 @@ export const sectionLabels: Record<string, string> = {
   actors: "参与者",
   actions: "行动",
   rules: "规则",
-  planning: "规划",
+  planning: "规划策略",
   "initial-state": "初始状态",
   validation: "验证与发布",
 };
@@ -246,12 +246,13 @@ const fieldLabels: Record<string, string> = {
   subsumes: "包含的目标",
   goal_aliases: "目标别名",
   goal_examples: "目标示例",
+  goal_target_values: "目标值",
   accepted_values: "可接受值",
   start_node_key: "起始节点",
   primary_actor_key: "主要参与者",
   goal_resolution: "目标解析",
-  instructions: "规划指引",
-  recovery_hints: "恢复提示",
+  instructions: "全局规划指引",
+  recovery_hints: "失败恢复策略",
   allowed_values: "允许值",
   required: "必填",
   code: "代码",
@@ -378,9 +379,9 @@ const editorLabels: Record<string, string> = {
   "Add pool": "添加资源池",
   "Region resource knowledge": "区域资源知识",
   "Add region state": "添加区域状态",
-  "Planning instructions": "规划指引",
-  "Recovery hint": "恢复提示",
-  "Add recovery hint": "添加恢复提示",
+  "Planning instructions": "全局规划指引",
+  "Recovery hint": "失败恢复策略",
+  "Add recovery hint": "新增失败恢复策略",
   "Allow LLM fallback": "允许模型辅助回退",
   "Clarification prompt": "澄清提示",
   "Quick inputs": "快捷输入",
@@ -406,7 +407,7 @@ const editorLabels: Record<string, string> = {
   "Goal examples": "目标示例",
   "Dependency kind": "依赖类型",
   Dependencies: "依赖",
-  "Planning guidance": "规划指引",
+  "Planning guidance": "全局规划指引",
   "Add relation": "添加关系",
   "Add relation type": "添加关系类型",
   "Add resource": "添加资源",
@@ -427,6 +428,9 @@ const editorLabels: Record<string, string> = {
   Facility: "设施",
   "Goal addressable": "可作为目标",
   "Goal metadata": "目标元数据",
+  "Goal target values": "目标值",
+  "Delete fact": "删除事实",
+  "Allowed values (Advanced JSON)": "允许值（高级 JSON）",
   "Goal required slots": "目标必需槽位",
   Phase: "阶段",
   "Primary region": "主要区域",
@@ -460,7 +464,7 @@ const editorLabels: Record<string, string> = {
   Success: "成功",
   "Resource definitions": "资源定义",
   "Resource definitions 在 World 中维护；resource initial states、pools 和 region knowledge 属于初始化数据，当前保留为 Advanced 结构。": "资源定义在世界模型中维护；资源初始状态、资源池和区域资源知识属于初始化数据，当前以高级结构保留。",
-  "Planning instructions 已提供 typed 文本数组入口；recovery hints 在 Phase 3 Rule/Planning 表单中展开。": "规划指引已提供结构化文本数组入口；恢复提示会在规则与规划表单中展开。",
+  "Planning instructions 已提供 typed 文本数组入口；recovery hints 在 Phase 3 Rule/Planning 表单中展开。": "全局规划指引已提供结构化文本数组入口；失败恢复策略会在规则与规划表单中展开。",
   Key: "稳定键",
   Name: "显示名称",
   "Start node": "起始节点",
@@ -537,6 +541,13 @@ const editorLabels: Record<string, string> = {
   "Wait success outcomes": "等待成功结果",
   "Planner hints": "规划提示",
   "Action planning projection": "行动规划投影",
+  "Action planning": "行动规划",
+  Projection: "投影",
+  "Autonomous limit": "自主权限上限",
+  "Approval-required values": "需要批准的值",
+  "Add doctrine": "添加行为准则",
+  "Add limit": "添加权限上限",
+  "Add approval rule": "添加审批规则",
   Parameters: "参数",
   Parameter: "参数",
   "Expected outcomes": "预期结果",
@@ -559,12 +570,15 @@ const editorLabels: Record<string, string> = {
   "Available value": "可用值",
   "Unavailable value": "不可用值",
   Instructions: "规划指令",
-  "Recovery hints": "恢复提示",
+  "Recovery hints": "失败恢复策略",
   Term: "术语",
 };
 
 export function editorLabel(value: string): string {
-  return editorLabels[value] ?? fieldLabel(value);
+  if (editorLabels[value]) return editorLabels[value];
+  const indexed = value.match(/^(.*) (\d+)$/);
+  if (indexed && editorLabels[indexed[1]]) return `${editorLabels[indexed[1]]} ${indexed[2]}`;
+  return fieldLabel(value);
 }
 
 export function stepDescription(value: string): string {

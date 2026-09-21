@@ -4,6 +4,7 @@ import pytest
 
 from app.scenarios.authoring import (
     DraftAuthoringError,
+    delete_fact,
     delete_object,
     locator_for_path,
     reference_index,
@@ -59,6 +60,86 @@ def test_referenced_delete_is_blocked_and_unreferenced_delete_succeeds() -> None
     )
     changed = delete_object(document, object_kind="resource", object_key="unused")
     assert all(item["key"] != "unused" for item in changed["world"]["resources"])
+
+
+def test_node_fact_delete_is_reference_safe_and_scoped_to_node_identity() -> None:
+    document = _document()
+    patient = next(item for item in document["world"]["nodes"] if item["key"] == "patient_one")
+    patient["facts"].append(
+        {
+            "key": "working_only",
+            "name": "Working only",
+            "value_type": "BOOLEAN",
+            "initial_value": False,
+        }
+    )
+    other = deepcopy(patient)
+    other["key"] = "other_node"
+    document["world"]["nodes"].append(other)
+    document["actions"][0]["planning"]["knowledge_gate"] = {
+        "node_key": "patient_one",
+        "fact_key": "working_only",
+        "accepted_values": [True],
+    }
+
+    with pytest.raises(DraftAuthoringError) as referenced:
+        delete_fact(document, node_key="patient_one", fact_key="working_only")
+    assert referenced.value.code == "SCENARIO_FACT_REFERENCED"
+    assert any(edge.source.object_kind == "action" for edge in referenced.value.references)
+
+    document["actions"][0]["planning"]["knowledge_gate"] = None
+    changed = delete_fact(document, node_key="patient_one", fact_key="working_only")
+    patient_after = next(item for item in changed["world"]["nodes"] if item["key"] == "patient_one")
+    other_after = next(item for item in changed["world"]["nodes"] if item["key"] == "other_node")
+    assert all(fact["key"] != "working_only" for fact in patient_after["facts"])
+    assert any(fact["key"] == "working_only" for fact in other_after["facts"])
+
+
+def test_locality_passability_fact_contract_is_projected_to_scoped_fact_edges() -> None:
+    document = _document()
+    patient = next(item for item in document["world"]["nodes"] if item["key"] == "patient_one")
+    patient["facts"].append(
+        {"key": "passable", "name": "Passable", "value_type": "BOOLEAN", "initial_value": True}
+    )
+    document["metadata"]["locality"] = {"passability_fact_key": "passable"}
+
+    with pytest.raises(DraftAuthoringError) as referenced:
+        delete_fact(document, node_key="patient_one", fact_key="passable")
+    assert referenced.value.code == "SCENARIO_FACT_REFERENCED"
+    assert any(edge.source.object_kind == "metadata" for edge in referenced.value.references)
+
+
+def test_dynamic_target_fact_consumers_expand_to_each_matching_scoped_fact() -> None:
+    document = _document()
+    patient = next(item for item in document["world"]["nodes"] if item["key"] == "patient_one")
+    patient["facts"].append(
+        {
+            "key": "dynamic_flag",
+            "name": "Dynamic flag",
+            "value_type": "BOOLEAN",
+            "initial_value": False,
+        }
+    )
+    document["rules"][0]["condition"] = {
+        "kind": "FACT_EQUALS",
+        "node": {"kind": "CURRENT_TARGET"},
+        "fact_key": "dynamic_flag",
+        "value": True,
+    }
+    document["actions"][0]["planning"]["target_terminal_effects"] = [
+        {"fact_key": "dynamic_flag", "value": True}
+    ]
+
+    edges = reference_index(document)
+    assert any(
+        edge.target.object_key == "patient_one"
+        and edge.target.field_path == "facts.dynamic_flag"
+        and edge.source.object_kind == "rule"
+        for edge in edges
+    )
+    with pytest.raises(DraftAuthoringError) as referenced:
+        delete_fact(document, node_key="patient_one", fact_key="dynamic_flag")
+    assert referenced.value.code == "SCENARIO_FACT_REFERENCED"
 
 
 def test_v2_reference_index_covers_nested_fact_pool_target_role_and_derived_refs() -> None:

@@ -254,7 +254,11 @@ def _fact_target(
     if node_key is None and source is not None and source.object_kind == "node":
         node_key = source.object_key
     if node_key is None:
-        return None
+        # CURRENT_TARGET and target-relative planning projections do not carry
+        # a concrete Node key in the authored document.  Keep the Fact key in
+        # the shared graph; reference_index expands this wildcard to each
+        # matching authored Node Fact before delete guards consume it.
+        return ObjectLocator("node", None, f"facts.{fact_key}")
     # Fact is a nested identity.  The owning Node remains the authoring
     # object; field_path identifies the nested Fact without inventing a CRUD
     # collection or a second stable-key namespace.
@@ -331,9 +335,77 @@ def _reference_target(
     return None
 
 
+def _locality_passability_edges(document: dict[str, Any]) -> list[ReferenceEdge]:
+    """Project the unscoped locality Fact-key contract onto scoped Node Facts.
+
+    Locality stores only a Fact key, while runtime validation accepts that key
+    when it exists on a Node.  Keep the delete guard conservative by exposing
+    one edge for every matching authored Node Fact; this does not change the
+    runtime contract or mutate the document.
+    """
+
+    metadata = document.get("metadata")
+    locality = metadata.get("locality") if isinstance(metadata, dict) else None
+    fact_key = locality.get("passability_fact_key") if isinstance(locality, dict) else None
+    if not isinstance(fact_key, str) or not fact_key:
+        return []
+    edges: list[ReferenceEdge] = []
+    for node in _collection(document, "node") or []:
+        if not isinstance(node, dict):
+            continue
+        node_key = _object_key("node", node)
+        facts = node.get("facts")
+        if not isinstance(node_key, str) or not isinstance(facts, list):
+            continue
+        if any(isinstance(fact, dict) and fact.get("key") == fact_key for fact in facts):
+            edges.append(
+                ReferenceEdge(
+                    ObjectLocator("metadata", None, "locality.passability_fact_key"),
+                    ObjectLocator("node", node_key, f"facts.{fact_key}"),
+                )
+            )
+    return edges
+
+
+def _expand_dynamic_fact_edges(
+    document: dict[str, Any],
+    edges: list[ReferenceEdge],
+) -> list[ReferenceEdge]:
+    nodes = [
+        node
+        for node in (_collection(document, "node") or [])
+        if isinstance(node, dict) and isinstance(_object_key("node", node), str)
+    ]
+    expanded: list[ReferenceEdge] = []
+    for edge in edges:
+        target = edge.target
+        if target.object_kind != "node" or target.object_key is not None:
+            expanded.append(edge)
+            continue
+        prefix, separator, fact_key = target.field_path.partition("facts.")
+        if prefix or not separator or not fact_key:
+            expanded.append(edge)
+            continue
+        for node in nodes:
+            node_key = _object_key("node", node)
+            facts = node.get("facts")
+            if not isinstance(node_key, str) or not isinstance(facts, list):
+                continue
+            if any(isinstance(fact, dict) and fact.get("key") == fact_key for fact in facts):
+                expanded.append(
+                    ReferenceEdge(
+                        edge.source,
+                        ObjectLocator("node", node_key, target.field_path),
+                    )
+                )
+    return expanded
+
+
 def reference_index(document: dict[str, Any]) -> tuple[ReferenceEdge, ...]:
     edges: list[ReferenceEdge] = []
     _walk(document, document, (), None, None, edges)
+    edges = _expand_dynamic_fact_edges(document, edges)
+    edges.extend(_locality_passability_edges(document))
     return tuple(edges)
 
 
@@ -538,6 +610,49 @@ def delete_object(
     return changed
 
 
+def delete_fact(
+    document: dict[str, Any],
+    *,
+    node_key: str,
+    fact_key: str,
+) -> dict[str, Any]:
+    """Delete one Node-scoped Fact without cascading inbound references."""
+
+    used_by = tuple(
+        edge
+        for edge in reference_index(document)
+        if (
+            edge.target.object_kind == "node"
+            and edge.target.object_key == node_key
+            and edge.target.field_path == f"facts.{fact_key}"
+        )
+    )
+    if used_by:
+        raise DraftAuthoringError(
+            "SCENARIO_FACT_REFERENCED",
+            "The Node Fact is referenced and cannot be deleted",
+            references=used_by,
+        )
+
+    node = _object(document, "node", node_key)
+    if node is None or not isinstance(node.get("facts"), list):
+        raise DraftAuthoringError("SCENARIO_FACT_NOT_FOUND", "The Node Fact does not exist")
+    facts = node["facts"]
+    assert isinstance(facts, list)
+    retained = [
+        item
+        for item in facts
+        if not isinstance(item, dict) or item.get("key") != fact_key
+    ]
+    if len(retained) == len(facts):
+        raise DraftAuthoringError("SCENARIO_FACT_NOT_FOUND", "The Node Fact does not exist")
+    changed = deepcopy(document)
+    changed_node = _object(changed, "node", node_key)
+    assert changed_node is not None
+    changed_node["facts"] = retained
+    return changed
+
+
 def locator_for_path(document: dict[str, Any], path: str) -> ObjectLocator | None:
     """Map a validator path to the nearest real editor object.
 
@@ -595,6 +710,7 @@ __all__ = [
     "DraftAuthoringError",
     "ObjectLocator",
     "ReferenceEdge",
+    "delete_fact",
     "delete_object",
     "locator_for_path",
     "reference_index",

@@ -1,4 +1,5 @@
 import type { EditorSection, JsonObject } from "./editor";
+import { moveItem, type MoveDirection } from "./editor-order";
 
 export type RootCollectionKey =
   | "resource_source_hints"
@@ -47,7 +48,7 @@ const definitions: Partial<Record<EditorSection, RootCollectionDefinition[]>> = 
     { key: "resource_source_hints", label: "资源发现知识", singularLabel: "资源来源提示" },
   ],
   planning: [
-    { key: "recovery_hints", label: "恢复提示", singularLabel: "恢复提示" },
+    { key: "recovery_hints", label: "失败恢复策略", singularLabel: "失败恢复策略" },
   ],
   initialization: [
     { key: "resource_initial_states", label: "资源初始状态", singularLabel: "资源初始状态" },
@@ -157,6 +158,21 @@ export function removeRootCollectionItem(root: JsonObject, selection: RootCollec
   return { ok: true, root: { ...structuredClone(root), [selection.collection]: values }, selection: null };
 }
 
+export function moveRootCollectionItem(
+  root: JsonObject,
+  selection: RootCollectionSelection,
+  direction: MoveDirection,
+): RootCollectionMutation {
+  const selected = rootCollectionItem(root, selection);
+  if (!selected) return { ok: false, reason: "当前集合项已不存在。" };
+  const values = collectionValues(root, selection.collection);
+  return {
+    ok: true,
+    root: { ...structuredClone(root), [selection.collection]: moveItem(values, selected.index, direction) },
+    selection,
+  };
+}
+
 function compact(value: unknown, fallback: string): string {
   if (typeof value !== "string" || value.trim().length === 0) return fallback;
   return value.trim();
@@ -176,7 +192,7 @@ function collectionName(document: JsonObject | undefined, path: string[], key: u
 
 function itemTitle(collection: RootCollectionKey, value: JsonObject, index: number): string {
   if (collection === "resource_source_hints") return compact(value.resource_key, `未命名来源提示 ${index + 1}`);
-  if (collection === "recovery_hints") return compact(value.failure_code, `未命名恢复提示 ${index + 1}`);
+  if (collection === "recovery_hints") return compact(value.failure_code, `未命名失败恢复策略 ${index + 1}`);
   if (collection === "resource_initial_states") return compact(value.resource_key, `未命名资源初始状态 ${index + 1}`);
   if (collection === "resource_pools") return compact(value.pool_key, `未命名资源池 ${index + 1}`);
   return compact(value.region_key, `未命名区域资源知识 ${index + 1}`);
@@ -241,7 +257,7 @@ export function rootCollectionItems(section: string, value: unknown, document?: 
 export function rootCollectionDefault(collection: RootCollectionKey, existing: JsonObject[] = []): JsonObject {
   const candidate = (suffix: string): JsonObject => {
     if (collection === "resource_source_hints") return { resource_key: `new_resource${suffix}`, primary_region_key: "new_region", candidate_region_keys: [] };
-    if (collection === "recovery_hints") return { failure_code: `FAILURE${suffix.toUpperCase()}`, hint: "请填写恢复建议。" };
+    if (collection === "recovery_hints") return { failure_code: `FAILURE${suffix.toUpperCase()}`, hint: "请填写失败恢复策略。" };
     if (collection === "resource_initial_states") return { resource_key: `new_resource${suffix}`, scope_node_key: null, value: 0, reserved_value: 0 };
     if (collection === "resource_pools") return { pool_key: `new_pool${suffix}`, resource_key: "new_resource", region_key: null, facility_key: null, quantity: 0, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false };
     return { region_key: `new_region${suffix}`, resource_inventory_visibility: "VISIBLE", resource_survey_completed: false };
@@ -271,7 +287,7 @@ export function rootSingletonOwner(section: string): RootSingletonOwnerDefinitio
     return { key: "initialization-entry", label: "初始化入口", summary: "起始节点与主要参与者" };
   }
   if (section === "planning") {
-    return { key: "planning-instructions", label: "规划指引", summary: "规划器使用的场景级指引" };
+    return { key: "planning-instructions", label: "全局规划指引", summary: "规划策略使用的场景级全局指引" };
   }
   return null;
 }

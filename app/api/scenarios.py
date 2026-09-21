@@ -536,6 +536,8 @@ def transform_working_copy(
             old_key=operation.old_key,
             new_key=operation.new_key,
             object_key=operation.object_key,
+            node_key=operation.node_key,
+            fact_key=operation.fact_key,
         )
         draft = service.get_draft(scenario_id)
         return DraftTransformResponse(

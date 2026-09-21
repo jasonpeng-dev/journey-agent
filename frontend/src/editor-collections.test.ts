@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   appendRootCollectionItem,
+  moveRootCollectionItem,
   removeRootCollectionItem,
   replaceRootCollectionItem,
   rootCollectionIdentity,
@@ -58,6 +59,14 @@ describe("root collection durable identity", () => {
     expect(removed.ok).toBe(true);
     if (!removed.ok) return;
     expect(rootCollectionItem(removed.root, selection)?.value).toEqual(second);
+  });
+
+  it("moves an author-visible root item without changing its durable identity", () => {
+    const selection = { owner: "collection" as const, collection: "recovery_hints" as const, identity: JSON.stringify(["SECOND"]) };
+    const moved = moveRootCollectionItem({ recovery_hints: [{ failure_code: "FIRST" }, { failure_code: "SECOND" }] }, selection, "up");
+    expect(moved).toMatchObject({ ok: true, selection });
+    if (!moved.ok) return;
+    expect(moved.root.recovery_hints).toEqual([{ failure_code: "SECOND" }, { failure_code: "FIRST" }]);
   });
 
   it("clears selection when the selected item is deleted", () => {

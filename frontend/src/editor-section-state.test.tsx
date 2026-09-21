@@ -235,8 +235,9 @@ describe("Editor section state ownership", () => {
     expect(screen.getByLabelText(/数量/)).toBeInTheDocument();
     expect(screen.getByText("未修改")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("link", { name: "规划" }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "规划指引", level: 3 })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("link", { name: "规划策略" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "全局规划指引", level: 3 })).toBeInTheDocument());
+    expect(screen.getByTestId("editor-taxonomy-heading")).toHaveTextContent("规划策略");
     expect(screen.getByDisplayValue("优先保障生命安全")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /BLOCKED/ }));
     await waitFor(() => expect(screen.getByDisplayValue("重新检查道路")).toBeInTheDocument());
@@ -256,15 +257,15 @@ describe("Editor section state ownership", () => {
   it("creates a uniquely addressable root item and returns to the hybrid fallback after delete", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     renderEditor("/scenarios/scenario-1/edit/planning");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "规划指引", level: 3 })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "全局规划指引", level: 3 })).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "＋ 新增恢复提示" }));
+    fireEvent.click(screen.getByRole("button", { name: "＋ 新增失败恢复策略" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "FAILURE", level: 3 })).toBeInTheDocument());
     expect(screen.getByText("有未保存修改")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("请填写恢复建议。")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("请填写失败恢复策略。")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "删除此项" }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "规划指引", level: 3 })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "全局规划指引", level: 3 })).toBeInTheDocument());
     expect(screen.queryByRole("heading", { name: "BLOCKED", level: 3 })).not.toBeInTheDocument();
     confirm.mockRestore();
   });
