@@ -15,7 +15,7 @@ describe("owner-aware editor locators", () => {
     expect(editorLocatorFromValidation({ object_kind: "action", object_key: "repair", field_path: "description" }, document)).toEqual({ owner: "entity", section: "actions", kind: "action", objectKey: "repair", fieldPath: "description" });
     expect(editorLocatorFromValidation({ object_kind: "relation_type", object_key: "located_in", field_path: "name" }, document)).toEqual({ owner: "entity", section: "relation-types", kind: "relation_type", objectKey: "located_in", fieldPath: "name" });
     expect(editorLocatorFromValidation({ object_kind: "relation", object_key: "same", field_path: "source_node_key" }, document)).toEqual({ owner: "entity", section: "relations", kind: "relation", objectKey: "same", fieldPath: "source_node_key" });
-    expect(editorLocatorFromValidation({ object_kind: "planning", object_key: null, field_path: "recovery_hints.0.hint" }, document)).toEqual({ owner: "root-collection", section: "planning", collection: "recovery_hints", identity: JSON.stringify(["BLOCKED"]), fieldPath: "recovery_hints.0.hint" });
+    expect(editorLocatorFromValidation({ object_kind: "planning", object_key: null, field_path: "recovery_hints.0.hint" }, document)).toEqual({ owner: "root-collection", section: "planning-recovery", collection: "recovery_hints", identity: JSON.stringify(["BLOCKED"]), fieldPath: "recovery_hints.0.hint" });
     expect(editorLocatorFromValidation({ object_kind: "public_reference", object_key: "REGION:central:Central", field_path: "term" }, document)).toEqual({ owner: "entity", section: "public-references", kind: "public_reference", objectKey: "REGION:central:Central", fieldPath: "term" });
   });
 

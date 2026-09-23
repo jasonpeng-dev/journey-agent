@@ -147,7 +147,6 @@ describe("Presentation settings workstation", () => {
 
   it("moves all actions to the top and guards dirty return without silently discarding", async () => {
     mockPageData();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     renderPage();
     await screen.findByTestId("presentation-settings-panel");
 
@@ -173,23 +172,20 @@ describe("Presentation settings workstation", () => {
     expect(screen.getByTestId("presentation-save-button")).toBeEnabled();
     expect(screen.getByTestId("presentation-discard-button")).toBeEnabled();
     fireEvent.click(screen.getByTestId("presentation-return-button"));
-    expect(confirm).toHaveBeenCalled();
+    const discardDialog = await screen.findByRole("dialog", { name: "放弃当前界面设置修改？" });
     expect(screen.getByTestId("settings-location")).toHaveTextContent("/scenarios/scenario-1/presentation");
     expect(screen.getByTestId("presentation-template")).toHaveValue("compact");
 
-    confirm.mockReturnValue(true);
-    fireEvent.click(screen.getByTestId("presentation-return-button"));
+    fireEvent.click(within(discardDialog).getByRole("button", { name: "离开" }));
     await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent("/scenarios/scenario-1"));
   });
 
   it("returns directly to Scenario Detail when settings are clean", async () => {
     mockPageData();
-    const confirm = vi.spyOn(window, "confirm");
     renderPage();
     await screen.findByTestId("presentation-settings-panel");
     fireEvent.click(screen.getByTestId("presentation-return-button"));
     await waitFor(() => expect(screen.getByTestId("settings-location")).toHaveTextContent("/scenarios/scenario-1"));
-    expect(confirm).not.toHaveBeenCalled();
   });
 
   it("restores canonical defaults locally, then supports discard or normal revisioned save", async () => {

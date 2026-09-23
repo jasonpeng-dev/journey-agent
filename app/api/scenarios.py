@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session
 
 from app.agent.provider import GenericProviderError
 from app.api.schemas.phase_d import (
+    CompletenessItemResponse,
+    DraftCompletenessRequest,
+    DraftCompletenessResponse,
     DraftDeleteObjectRequest,
     DraftPublishRequest,
     DraftReferenceAnalysisRequest,
@@ -516,6 +519,49 @@ def analyze_working_copy_references(
 
 
 @router.post(
+    "/scenarios/{scenario_id}/draft/completeness",
+    response_model=DraftCompletenessResponse,
+)
+def preview_working_copy_completeness(
+    scenario_id: UUID,
+    request: DraftCompletenessRequest,
+    db: Session = Depends(get_db),
+) -> DraftCompletenessResponse:
+    service = ScenarioService(db)
+    try:
+        result = service.completeness_working_copy(
+            scenario_id,
+            expected_revision=request.expected_revision,
+            definition_document=request.definition_document,
+        )
+        draft = service.get_draft(scenario_id)
+        return DraftCompletenessResponse(
+            scenario_id=scenario_id,
+            base_revision=draft.revision,
+            items=[
+                CompletenessItemResponse(
+                    key=item.key,
+                    title=item.title,
+                    level=item.level,
+                    dependency_kind=item.dependency_kind,
+                    message=item.message,
+                    path=item.path,
+                    locator=item.locator,
+                    action=item.action,
+                )
+                for item in result.items
+            ],
+            required_missing=result.required_missing,
+            recommended_missing=result.recommended_missing,
+            validation_issue_count=result.validation_issue_count,
+            reference_edge_count=result.reference_edge_count,
+        )
+    except ScenarioLifecycleError as exc:
+        db.rollback()
+        _raise_http(exc, details=exc.details)
+
+
+@router.post(
     "/scenarios/{scenario_id}/draft/transform",
     response_model=DraftTransformResponse,
 )
@@ -538,6 +584,11 @@ def transform_working_copy(
             object_key=operation.object_key,
             node_key=operation.node_key,
             fact_key=operation.fact_key,
+            collection=operation.collection,
+            identity=operation.identity,
+            parent_kind=operation.parent_kind,
+            parent_key=operation.parent_key,
+            nested_key=operation.nested_key,
         )
         draft = service.get_draft(scenario_id)
         return DraftTransformResponse(

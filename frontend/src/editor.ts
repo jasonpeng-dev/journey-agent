@@ -15,13 +15,15 @@ export const sections = [
   "derived-states",
   "initialization",
   "goal-resolution",
-  "planning",
+  "planning-instructions",
+  "planning-recovery",
   "public-knowledge",
   "public-references",
+  "configuration-check",
   "validation",
 ] as const;
 
-export const legacySections = ["world", "actors", "interactions"] as const;
+export const legacySections = ["world", "actors", "interactions", "planning"] as const;
 
 export type EditorSection = (typeof sections)[number] | (typeof legacySections)[number];
 
@@ -69,9 +71,11 @@ export const sectionRegistry: SectionDefinition[] = [
   { id: "derived-states", labelKey: "derived_states", entityKinds: ["derived_state"] },
   { id: "initialization", labelKey: "initialization", rootPath: ["initialization"] },
   { id: "goal-resolution", labelKey: "goal_resolution", rootPath: ["goal_resolution"] },
-  { id: "planning", labelKey: "planning", rootPath: ["planning"] },
+  { id: "planning-instructions", labelKey: "planning_instructions", rootPath: ["planning"] },
+  { id: "planning-recovery", labelKey: "planning_recovery", rootPath: ["planning"] },
   { id: "public-knowledge", labelKey: "public_knowledge", rootPath: ["public_knowledge"] },
   { id: "public-references", labelKey: "public_references", entityKinds: ["public_reference"] },
+  { id: "configuration-check", labelKey: "configuration_check" },
   { id: "validation", labelKey: "validation" },
 ];
 

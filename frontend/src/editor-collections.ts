@@ -14,14 +14,16 @@ export type RootCollectionSelection = {
   identity: string;
 };
 
-export type RootSingletonOwnerKey = "initialization-entry" | "planning-instructions";
+export type RootSingletonOwnerKey = "initialization-entry" | "planning-instructions" | "planning-recovery";
 
 export type RootSingletonSelection = {
   owner: "singleton";
   key: RootSingletonOwnerKey;
 };
 
-export type RootOwnerSelection = RootCollectionSelection | RootSingletonSelection;
+export type RootInstructionSelection = { owner: "instruction"; index: number };
+
+export type RootOwnerSelection = RootCollectionSelection | RootSingletonSelection | RootInstructionSelection;
 
 export type RootSingletonOwnerDefinition = {
   key: RootSingletonOwnerKey;
@@ -45,9 +47,9 @@ export type RootCollectionItem = RootCollectionSelection & {
 
 const definitions: Partial<Record<EditorSection, RootCollectionDefinition[]>> = {
   "public-knowledge": [
-    { key: "resource_source_hints", label: "资源发现知识", singularLabel: "资源来源提示" },
+    { key: "resource_source_hints", label: "资源来源提示", singularLabel: "资源来源提示" },
   ],
-  planning: [
+  "planning-recovery": [
     { key: "recovery_hints", label: "失败恢复策略", singularLabel: "失败恢复策略" },
   ],
   initialization: [
@@ -256,7 +258,7 @@ export function rootCollectionItems(section: string, value: unknown, document?: 
 
 export function rootCollectionDefault(collection: RootCollectionKey, existing: JsonObject[] = []): JsonObject {
   const candidate = (suffix: string): JsonObject => {
-    if (collection === "resource_source_hints") return { resource_key: `new_resource${suffix}`, primary_region_key: "new_region", candidate_region_keys: [] };
+    if (collection === "resource_source_hints") return { resource_key: "", primary_region_key: null, candidate_region_keys: [] };
     if (collection === "recovery_hints") return { failure_code: `FAILURE${suffix.toUpperCase()}`, hint: "请填写失败恢复策略。" };
     if (collection === "resource_initial_states") return { resource_key: `new_resource${suffix}`, scope_node_key: null, value: 0, reserved_value: 0 };
     if (collection === "resource_pools") return { pool_key: `new_pool${suffix}`, resource_key: "new_resource", region_key: null, facility_key: null, quantity: 0, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false };
@@ -270,6 +272,7 @@ export function rootCollectionDefault(collection: RootCollectionKey, existing: J
 }
 
 export function appendRootCollectionItem(root: JsonObject, collection: RootCollectionKey): RootCollectionMutation {
+  if (collection === "resource_source_hints") return { ok: false, reason: "资源来源提示必须先选择已有资源。" };
   const values = collectionValues(root, collection);
   const value = rootCollectionDefault(collection, values);
   const identity = rootCollectionIdentity(collection, value);
@@ -283,18 +286,19 @@ export function appendRootCollectionItem(root: JsonObject, collection: RootColle
 }
 
 export function rootSingletonOwner(section: string): RootSingletonOwnerDefinition | null {
+  return rootSingletonOwners(section)[0] ?? null;
+}
+
+export function rootSingletonOwners(section: string): RootSingletonOwnerDefinition[] {
   if (section === "initialization") {
-    return { key: "initialization-entry", label: "初始化入口", summary: "起始节点与主要参与者" };
+    return [{ key: "initialization-entry", label: "初始化入口", summary: "起始节点与主要参与者" }];
   }
-  if (section === "planning") {
-    return { key: "planning-instructions", label: "全局规划指引", summary: "规划策略使用的场景级全局指引" };
-  }
-  return null;
+  return [];
 }
 
 export function rootCollectionLabel(collection: RootCollectionKey): string {
   return rootCollectionDefinitions("initialization").concat(
-    rootCollectionDefinitions("planning"),
+    rootCollectionDefinitions("planning-recovery"),
     rootCollectionDefinitions("public-knowledge"),
   ).find((definition) => definition.key === collection)?.singularLabel ?? collection;
 }

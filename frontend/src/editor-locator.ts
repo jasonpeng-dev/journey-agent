@@ -13,7 +13,7 @@ const rootSections: Record<string, EditorSection> = {
   metadata: "overview",
   initialization: "initialization",
   goal_resolution: "goal-resolution",
-  planning: "planning",
+  planning: "planning-instructions",
   public_knowledge: "public-knowledge",
   engine_contract: "overview",
 };
@@ -24,6 +24,11 @@ const entityKinds = new Set<EntityKind>([
 ]);
 
 export function editorLocatorFromValidation(locator: Locator, document: JsonObject): EditorLocator | null {
+  if (locator.object_kind === "planning" && locator.field_path?.startsWith("recovery_hints")) {
+    const root = sectionRoot(document, "planning-recovery");
+    const selection = root && typeof root === "object" && !Array.isArray(root) ? rootCollectionSelectionForPath(root as JsonObject, locator.field_path) : null;
+    if (selection) return { owner: "root-collection", section: "planning-recovery", collection: selection.collection, identity: selection.identity, fieldPath: locator.field_path };
+  }
   const rootSection = rootSections[locator.object_kind];
   if (rootSection) {
     const root = sectionRoot(document, rootSection);

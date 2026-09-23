@@ -71,7 +71,7 @@ describe("world topology overview entry", () => {
     const overviewLink = await screen.findByRole("link", { name: "世界总览" });
     fireEvent.click(overviewLink);
 
-    expect(await screen.findByRole("region", { name: "分层拓扑浏览器" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "分层拓扑浏览" })).toBeInTheDocument();
     expect(screen.queryByRole("tablist", { name: "World 视图模式" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "对象编辑" })).not.toBeInTheDocument();
     expect(screen.getByRole("img", { name: "范围总览拓扑" })).toBeInTheDocument();
@@ -86,7 +86,7 @@ describe("world topology overview entry", () => {
     renderEditor("relations");
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "关系实例" })).toBeInTheDocument());
-    expect(screen.queryByRole("region", { name: "分层拓扑浏览器" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "分层拓扑浏览" })).not.toBeInTheDocument();
   });
 
   it("opens a topology node in the owning World Entities section", async () => {

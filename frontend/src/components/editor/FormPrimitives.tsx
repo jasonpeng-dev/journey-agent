@@ -12,6 +12,7 @@ type FormFieldProps = {
   label: string;
   path: string;
   children: ReactNode;
+  headingAddon?: ReactNode;
   help?: ReactNode;
   error?: ReactNode;
   machineValue?: string;
@@ -22,12 +23,15 @@ function normalizedLabel(label: string): string {
   return editorLabel(label);
 }
 
-export function FormField({ label, path, children, help, error, machineValue, size = "standard" }: FormFieldProps) {
+export function FormField({ label, path, children, headingAddon, help, error, machineValue, size = "standard" }: FormFieldProps) {
   const id = fieldId(path);
+  const required = label.endsWith(" *");
+  const displayLabel = normalizedLabel(required ? label.slice(0, -2) : label);
   return <div className={`form-field form-field-${size}${error ? " form-field-error" : ""}`} data-field-path={path}>
     <div className="form-field-heading">
-      <label htmlFor={id}>{normalizedLabel(label)}</label>
+      <label htmlFor={id}>{displayLabel}{required && <> <span className="required-marker">*</span></>}</label>
       {machineValue && <code className="machine-key">{machineValue}</code>}
+      {headingAddon}
     </div>
     {children}
     {help && <small className="typed-help">{help}</small>}
@@ -44,17 +48,18 @@ type InputProps = {
   error?: ReactNode;
   size?: ControlSize;
   placeholder?: string;
+  readOnly?: boolean;
 };
 
-export function TextInput({ value, onChange, path, label, help, error, size = "standard", placeholder }: InputProps) {
+export function TextInput({ value, onChange, path, label, help, error, size = "standard", placeholder, readOnly = false }: InputProps) {
   return <FormField label={label} path={path} help={help} error={error} size={size}>
-    <input className="editor-control" id={fieldId(path)} value={typeof value === "string" ? value : ""} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+    <input className={`editor-control${readOnly ? " is-readonly" : ""}`} id={fieldId(path)} value={typeof value === "string" ? value : ""} placeholder={placeholder} readOnly={readOnly} aria-readonly={readOnly || undefined} onChange={(event) => onChange(event.target.value)} />
   </FormField>;
 }
 
-export function TextArea({ value, onChange, path, label, help, error, size = "full", placeholder }: InputProps) {
+export function TextArea({ value, onChange, path, label, help, error, size = "full", placeholder, readOnly = false }: InputProps) {
   return <FormField label={label} path={path} help={help} error={error} size={size}>
-    <textarea className="editor-control editor-textarea" id={fieldId(path)} value={typeof value === "string" ? value : ""} placeholder={placeholder} rows={4} onChange={(event) => onChange(event.target.value)} />
+    <textarea className={`editor-control editor-textarea${readOnly ? " is-readonly" : ""}`} id={fieldId(path)} value={typeof value === "string" ? value : ""} placeholder={placeholder} readOnly={readOnly} aria-readonly={readOnly || undefined} rows={4} onChange={(event) => onChange(event.target.value)} />
   </FormField>;
 }
 
@@ -73,11 +78,23 @@ export function NumberInput({ value, onChange, path, label, help, error, size = 
 type BooleanControlProps = Omit<FormFieldProps, "children"> & {
   value: unknown;
   onChange: (value: boolean) => void;
+  layout?: "form" | "stacked";
 };
 
-export function BooleanControl({ value, onChange, label, path, help, error, machineValue, size = "compact" }: BooleanControlProps) {
-  return <FormField label={label} path={path} help={help} error={error} machineValue={machineValue} size={size}>
-    <input className="editor-checkbox" id={fieldId(path)} type="checkbox" checked={value === true} onChange={(event) => onChange(event.target.checked)} />
+export function BooleanControl({ value, onChange, label, path, headingAddon, help, error, machineValue, size = "compact", layout = "form" }: BooleanControlProps) {
+  const id = fieldId(path);
+  const control = <select aria-label={layout === "stacked" ? normalizedLabel(label) : undefined} className={layout === "stacked" ? undefined : "editor-control"} id={id} value={value === true ? "true" : "false"} onChange={(event) => onChange(event.target.value === "true")}>
+      <option value="true">是</option>
+      <option value="false">否</option>
+    </select>;
+  if (layout === "stacked") return <label className={`initialization-field${error ? " form-field-error" : ""}`} data-field-path={path}>
+    <span>{normalizedLabel(label)}{machineValue && <code className="machine-key">{machineValue}</code>}{headingAddon}</span>
+    {control}
+    {help && <small className="typed-help">{help}</small>}
+    {error && <small className="field-error" role="alert">{error}</small>}
+  </label>;
+  return <FormField label={label} path={path} headingAddon={headingAddon} help={help} error={error} machineValue={machineValue} size={size}>
+    {control}
   </FormField>;
 }
 
@@ -87,12 +104,13 @@ type SelectProps = Omit<FormFieldProps, "children"> & {
   options: readonly ReferenceOption[];
   placeholder?: string;
   showMachineValue?: boolean;
+  disabled?: boolean;
 };
 
-export function OptionSelect({ value, onChange, options, label, path, help, error, machineValue, size = "standard", placeholder = "请选择…", showMachineValue = true }: SelectProps) {
+export function OptionSelect({ value, onChange, options, label, path, help, error, machineValue, size = "standard", placeholder = "请选择…", showMachineValue = true, disabled = false }: SelectProps) {
   const selected = typeof value === "string" ? value : "";
   return <FormField label={label} path={path} help={help} error={error} machineValue={machineValue} size={size}>
-    <select className="editor-control" id={fieldId(path)} value={selected} onChange={(event) => onChange(event.target.value)}>
+    <select className={`editor-control${disabled ? " is-readonly" : ""}`} id={fieldId(path)} value={selected} disabled={disabled} aria-readonly={disabled || undefined} onChange={(event) => onChange(event.target.value)}>
       <option value="">{placeholder}</option>
       {options.map((option) => <option key={option.key} value={option.key}>{option.name}{showMachineValue ? ` · ${option.key}` : ""}</option>)}
       {selected && !options.some((option) => option.key === selected) && <option value={selected}>{selected}（当前引用无法解析）</option>}
@@ -201,10 +219,13 @@ type NestedCardProps = {
   children: ReactNode;
   onAdd?: () => void;
   onRemove?: () => void;
+  removeLabel?: string;
   onMove?: (direction: "up" | "down") => void;
   moveIndex?: number;
   moveCount?: number;
   defaultExpanded?: boolean;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 };
 
 type NestedObjectHeaderProps = {
@@ -217,22 +238,27 @@ export function NestedObjectHeader({ typeLabel, identity }: NestedObjectHeaderPr
   return <span className="nested-object-heading"><span className="nested-object-type">{normalizedLabel(typeLabel)}</span>{hasIdentity && <strong className="nested-object-identity">{identity}</strong>}</span>;
 }
 
-export function NestedCard({ title, summary, machineKey, typeLabel, identity, children, onAdd, onRemove, onMove, moveIndex, moveCount, defaultExpanded = false }: NestedCardProps) {
-  const [expanded, setExpanded] = useState(defaultExpanded);
+export function NestedCard({ title, summary, machineKey, typeLabel, identity, children, onAdd, onRemove, removeLabel = "删除", onMove, moveIndex, moveCount, defaultExpanded = false, expanded: controlledExpanded, onExpandedChange }: NestedCardProps) {
+  const [localExpanded, setLocalExpanded] = useState(defaultExpanded);
+  const expanded = controlledExpanded ?? localExpanded;
+  const setExpanded = (next: boolean) => {
+    if (controlledExpanded === undefined) setLocalExpanded(next);
+    onExpandedChange?.(next);
+  };
   const toggleId = useId();
   const titleParts = title.split(" · ");
   const resolvedTypeLabel = typeLabel ?? titleParts[0];
   const resolvedIdentity = identity ?? (titleParts.length > 1 ? titleParts.slice(1).join(" · ") : machineKey);
   return <article className={`nested-editor nested-card${expanded ? " is-expanded" : ""}`}>
     <header className="nested-card-header">
-      <button type="button" className="nested-card-toggle" aria-expanded={expanded} aria-controls={toggleId} onClick={() => setExpanded((current) => !current)}>
+      <button type="button" className="nested-card-toggle" aria-expanded={expanded} aria-controls={toggleId} onClick={() => setExpanded(!expanded)}>
         <span className="nested-card-title"><NestedObjectHeader typeLabel={resolvedTypeLabel} identity={resolvedIdentity} /></span>
         {summary && <span className="nested-card-summary">{summary}</span>}
       </button>
       <span className="button-row nested-card-actions">
         {onAdd && <button type="button" className="small" onClick={onAdd}>＋</button>}
         <ReorderControls index={moveIndex ?? 0} count={moveCount ?? 1} onMove={onMove} />
-        {onRemove && <button type="button" className="small danger" onClick={onRemove}>删除</button>}
+        {onRemove && <button type="button" className="small danger" onClick={onRemove}>{removeLabel}</button>}
       </span>
     </header>
     {expanded && <div className="nested-card-body" id={toggleId}>{children}</div>}

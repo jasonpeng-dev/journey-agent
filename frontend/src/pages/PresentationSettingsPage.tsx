@@ -4,6 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import { ApiError, api } from "../api";
 import { PresentationSettingsPanel } from "../components/PresentationSettingsPanel";
+import { EditorConfirmDialog } from "../components/editor/EditorConfirmDialog";
 import {
   clonePresentationProfile,
   defaultPresentationProfile,
@@ -70,6 +71,7 @@ export function PresentationSettingsPage() {
   const [savedProfile, setSavedProfile] = useState<PresentationProfileResponse | null>(null);
   const [workingProfile, setWorkingProfile] = useState<PresentationProfileDocument | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("CLEAN");
+  const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
 
   useEffect(() => {
     const next = presentation.data;
@@ -118,7 +120,7 @@ export function PresentationSettingsPage() {
     ? saveState
     : saveMutationPendingPlaceholder(saveState, dirty);
 
-  useUnsavedChangesGuard(dirty, "存在未保存的界面设置修改，离开后将丢失。确定离开吗？");
+  useUnsavedChangesGuard(dirty, "存在未保存的界面设置修改，离开后将丢失。确定离开吗？", setPendingNavigation);
 
   const setWorking = (next: PresentationProfileDocument) => {
     setWorkingProfile(next);
@@ -134,8 +136,18 @@ export function PresentationSettingsPage() {
   };
 
   const returnToScenario = () => {
-    if (dirty && !window.confirm("存在未保存的界面设置修改，离开后将丢失。确定返回场景详情吗？")) return;
+    if (dirty) {
+      setPendingNavigation(`/scenarios/${scenarioId}`);
+      return;
+    }
     navigate(`/scenarios/${scenarioId}`);
+  };
+  const confirmPendingNavigation = () => {
+    const target = pendingNavigation;
+    setPendingNavigation(null);
+    if (!target) return;
+    const url = new URL(target, window.location.href);
+    navigate(`${url.pathname}${url.search}${url.hash}`);
   };
 
   const saveMutation = useMutation({
@@ -181,6 +193,7 @@ export function PresentationSettingsPage() {
 
   return (
     <main className="page presentation-settings-page">
+      {pendingNavigation && <EditorConfirmDialog title="放弃当前界面设置修改？" message="当前界面设置有未保存修改，离开后这些修改将丢失。" confirmLabel="离开" onCancel={() => setPendingNavigation(null)} onConfirm={confirmPendingNavigation} />}
       <header className="presentation-page-header">
         <div className="presentation-page-title" data-testid="presentation-page-title">
           <p className="eyebrow">场景显示配置</p>

@@ -17,11 +17,14 @@ from app.scenarios.authoring import (
     DraftAuthoringError,
     ReferenceEdge,
     delete_fact,
+    delete_nested_object,
     delete_object,
+    delete_root_collection_item,
     locator_for_path,
     reference_index,
     rename_key,
 )
+from app.scenarios.completeness import CompletenessResult, evaluate_completeness
 from app.scenarios.serialization import canonical_document, scenario_content_hash
 from app.scenarios.validation import (
     ScenarioDefinitionValidator,
@@ -320,19 +323,52 @@ class ScenarioService:
         )
         return reference_index(definition_document)
 
+    def completeness_working_copy(
+        self,
+        scenario_id: UUID,
+        *,
+        expected_revision: int,
+        definition_document: dict[str, Any],
+    ) -> CompletenessResult:
+        """Return unsaved authoring guidance for the browser working copy.
+
+        This is deliberately a read-only preview.  The revision check protects
+        the browser from applying guidance to a stale Draft, while the
+        evaluator itself consumes the supplied raw document so unrelated
+        temporary schema errors do not disable editor guidance.
+        """
+
+        self._require_working_copy(
+            scenario_id,
+            expected_revision=expected_revision,
+            definition_document=definition_document,
+        )
+        return evaluate_completeness(definition_document)
+
     def transform_working_copy(
         self,
         scenario_id: UUID,
         *,
         expected_revision: int,
         definition_document: dict[str, Any],
-        operation_kind: Literal["RENAME_KEY", "DELETE_OBJECT", "DELETE_FACT"],
+        operation_kind: Literal[
+            "RENAME_KEY",
+            "DELETE_OBJECT",
+            "DELETE_FACT",
+            "DELETE_ROOT_COLLECTION_ITEM",
+            "DELETE_NESTED",
+        ],
         object_kind: str,
         old_key: str | None = None,
         new_key: str | None = None,
         object_key: str | None = None,
         node_key: str | None = None,
         fact_key: str | None = None,
+        collection: str | None = None,
+        identity: str | None = None,
+        parent_kind: str | None = None,
+        parent_key: str | None = None,
+        nested_key: str | None = None,
     ) -> dict[str, Any]:
         """Apply one authoring transform to a client working copy only.
 
@@ -370,6 +406,35 @@ class ScenarioService:
                     definition_document,
                     node_key=node_key,
                     fact_key=fact_key,
+                )
+            if operation_kind == "DELETE_ROOT_COLLECTION_ITEM":
+                if collection is None or identity is None:
+                    raise DraftAuthoringError(
+                        "SCENARIO_AUTHORING_OPERATION_INVALID",
+                        "DELETE_ROOT_COLLECTION_ITEM requires collection and identity",
+                    )
+                return delete_root_collection_item(
+                    definition_document,
+                    collection=collection,
+                    identity=identity,
+                )
+            if operation_kind == "DELETE_NESTED":
+                if (
+                    parent_kind is None
+                    or parent_key is None
+                    or collection is None
+                    or nested_key is None
+                ):
+                    raise DraftAuthoringError(
+                        "SCENARIO_AUTHORING_OPERATION_INVALID",
+                        "DELETE_NESTED requires its scoped identity fields",
+                    )
+                return delete_nested_object(
+                    definition_document,
+                    parent_kind=parent_kind,
+                    parent_key=parent_key,
+                    collection=collection,
+                    nested_key=nested_key,
                 )
             if object_key is None:
                 raise DraftAuthoringError(

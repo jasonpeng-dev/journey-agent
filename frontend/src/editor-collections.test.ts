@@ -35,7 +35,7 @@ describe("root collection durable identity", () => {
     expect(rootCollectionIdentityLabel("resource_pools", { pool_key: "north_water" })).toBe("资源池 · north_water");
   });
 
-  it("resolves Public Knowledge titles through Resource and Region names with safe fallback", () => {
+  it("resolves Resource Source Hint titles through Resource and Region names with safe fallback", () => {
     const root = { resource_source_hints: [
       { resource_key: "water", primary_region_key: "north", candidate_region_keys: [] },
       { resource_key: "missing", primary_region_key: "unknown", candidate_region_keys: [] },
@@ -86,7 +86,7 @@ describe("root collection durable identity", () => {
     });
   });
 
-  it.each(identityCases)("creates a uniquely addressable %s item", (collection) => {
+  it.each(identityCases.filter(([collection]) => collection !== "resource_source_hints"))("creates a uniquely addressable %s item", (collection) => {
     const first = appendRootCollectionItem({}, collection);
     expect(first.ok).toBe(true);
     if (!first.ok || !first.selection) return;
@@ -95,6 +95,13 @@ describe("root collection durable identity", () => {
     if (!second.ok || !second.selection) return;
     expect(second.selection.identity).not.toBe(first.selection.identity);
     expect(rootCollectionItem(second.root, second.selection)).not.toBeNull();
+  });
+
+  it("requires an explicit Resource identity before appending a source hint", () => {
+    const result = appendRootCollectionItem({}, "resource_source_hints");
+    expect(result).toEqual({ ok: false, reason: "资源来源提示必须先选择已有资源。" });
+    expect(JSON.stringify(result)).not.toContain("new_resource");
+    expect(JSON.stringify(result)).not.toContain("new_region");
   });
 
   it("maps a validation array path to durable item identity", () => {

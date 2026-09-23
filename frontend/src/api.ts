@@ -1,4 +1,4 @@
-import type { DeveloperSnapshot, Draft, DraftSandboxResult, DraftTransformOperation, GameHistory, GameSummary, GoalSubmission, PlayerGameState, PresentationProfileHistoryResponse, PresentationProfileResponse, PresentationProfileDocument, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult, WorkingCopyReferenceAnalysis, WorkingCopyTransformResult } from "./types";
+import type { CompletenessResult, DeveloperSnapshot, Draft, DraftSandboxResult, DraftTransformOperation, GameHistory, GameSummary, GoalSubmission, PlayerGameState, PresentationProfileHistoryResponse, PresentationProfileResponse, PresentationProfileDocument, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult, WorkingCopyReferenceAnalysis, WorkingCopyTransformResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -50,6 +50,11 @@ export const api = {
   references: (id: string) => request<ReferenceIndex>(`/api/v1/scenarios/${id}/draft/references`),
   analyzeWorkingCopyReferences: (id: string, revision: number, document: Record<string, unknown>) =>
     request<WorkingCopyReferenceAnalysis>(`/api/v1/scenarios/${id}/draft/reference-analysis`, {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision, definition_document: document }),
+    }),
+  completeness: (id: string, revision: number, document: Record<string, unknown>) =>
+    request<CompletenessResult>(`/api/v1/scenarios/${id}/draft/completeness`, {
       method: "POST",
       body: JSON.stringify({ expected_revision: revision, definition_document: document }),
     }),

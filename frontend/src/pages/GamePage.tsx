@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { ApiError, api } from "../api";
 import { groupActorsByTask } from "../actorPresentation";
 import { PresentationSettingsPanel } from "../components/PresentationSettingsPanel";
+import { EditorConfirmDialog } from "../components/editor/EditorConfirmDialog";
 import { useForkGame } from "../hooks/useForkGame";
 import {
   factDisplayLabel,
@@ -2313,6 +2314,7 @@ export function GamePresentationSettingsModal({
 
 export function GamePage() {
   const { gameId = "" } = useParams();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const fork = useForkGame();
   const [goal, setGoal] = useState("");
@@ -2327,6 +2329,7 @@ export function GamePage() {
   const [savedPresentationProfile, setSavedPresentationProfile] = useState<PresentationProfileResponse | null>(null);
   const [workingPresentationProfile, setWorkingPresentationProfile] = useState<PresentationProfileDocument | null>(null);
   const [presentationSaveState, setPresentationSaveState] = useState<"CLEAN" | "DIRTY" | "SAVING" | "CONFLICT" | "ERROR">("CLEAN");
+  const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [goalFeedback, setGoalFeedback] = useState<string | null>(null);
   const [lastParseResult, setLastParseResult] = useState<
@@ -2580,7 +2583,7 @@ export function GamePage() {
   const effectivePresentationSaveState = ["SAVING", "CONFLICT", "ERROR"].includes(presentationSaveState)
     ? presentationSaveState
     : presentationDirty ? "DIRTY" : "CLEAN";
-  useUnsavedChangesGuard(presentationDirty, "存在未保存的界面预览修改，离开后将丢失。确定离开吗？");
+  useUnsavedChangesGuard(presentationDirty, "存在未保存的界面预览修改，离开后将丢失。确定离开吗？", setPendingNavigation);
 
   const loadedTask = play.data?.current_task ?? null;
   const resolvingGoal = submit.isPending || pendingGoal !== null;
@@ -2712,6 +2715,7 @@ export function GamePage() {
 
   return (
     <main className="game-console">
+      {pendingNavigation && <EditorConfirmDialog title="放弃当前界面预览修改？" message="当前界面预览有未保存修改，离开后这些修改将丢失。" confirmLabel="离开" onCancel={() => setPendingNavigation(null)} onConfirm={() => { const target = pendingNavigation; setPendingNavigation(null); const url = new URL(target, window.location.href); navigate(`${url.pathname}${url.search}${url.hash}`); }} />}
       {mutationError && (
         <div className="console-error">
           <strong>命令无法继续</strong>
@@ -2939,7 +2943,7 @@ export function GamePage() {
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>
-      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span>{checkpointNotice && <small className="checkpoint-notice" role="status">{checkpointNotice}</small>}{game.status === "ACTIVE" && gameHasActiveTask && <small className="lifecycle-help">当前有活动任务，完成或放弃后才能归档。</small>}</div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <><button disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能存档" : undefined} onClick={() => checkpoint.mutate(liveGame.runtime_revision)}>存档</button><button className="danger-button" disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate(liveGame.runtime_revision)}>结束并归档游戏</button></>}{game.status === "ARCHIVED" && <button disabled={busy} onClick={() => fork.fork(gameId)}>以此归档状态新开一局</button>}</div></section>
+      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，前端页面才会读取内部状态。</span>{checkpointNotice && <small className="checkpoint-notice" role="status">{checkpointNotice}</small>}{game.status === "ACTIVE" && gameHasActiveTask && <small className="lifecycle-help">当前有活动任务，完成或放弃后才能归档。</small>}</div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <><button disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能存档" : undefined} onClick={() => checkpoint.mutate(liveGame.runtime_revision)}>存档</button><button className="danger-button" disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate(liveGame.runtime_revision)}>结束并归档游戏</button></>}{game.status === "ARCHIVED" && <button disabled={busy} onClick={() => fork.fork(gameId)}>以此归档状态新开一局</button>}</div></section>
       {developerOpen && <section className="developer-panel-v2"><label>开发者凭证<input type="password" value={developerToken} onChange={(event) => setDeveloperToken(event.target.value)} /></label>{developer.error && <p className="developer-error">开发者访问被拒绝。</p>}{developer.data && <><h2>内部运行时快照</h2><pre>{JSON.stringify(developer.data, null, 2)}</pre></>}</section>}
     </main>
   );

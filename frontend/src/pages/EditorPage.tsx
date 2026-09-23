@@ -6,6 +6,10 @@ import { api, ApiError } from "../api";
 import { TypedEditor, TypedEntityEditor } from "../components/TypedEditor";
 import { InitializationWorkspace } from "../components/InitializationWorkspace";
 import { FactDeleteDialog, type FactDeleteDialogState, type FactDeleteReference } from "../components/editor/FactDeleteDialog";
+import { AuthoringOperationDialog, type AuthoringOperationDialogState, type AuthoringReference } from "../components/editor/AuthoringOperationDialog";
+import { EditorConfirmDialog, EditorRenameDialog } from "../components/editor/EditorConfirmDialog";
+import { CompletenessPanel, CompletenessSummary, ContextualCompleteness } from "../components/editor/CompletenessPanel";
+import { ResourceSourceHintCreateDialog } from "../components/editor/ResourceSourceHintCreateDialog";
 import { WorldGraph, type TopologyContext, type TopologySelection } from "../components/WorldGraph";
 import {
   addObject,
@@ -27,12 +31,12 @@ import {
   type JsonObject,
 } from "../editor";
 import { kindsBySection } from "../templates";
-import { appendRootCollectionItem, moveRootCollectionItem, removeRootCollectionItem, replaceRootCollectionItem, rootCollectionDefinitions, rootCollectionIdentity, rootCollectionItems, rootCollectionReferencePath, rootSingletonOwner, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
+import { appendRootCollectionItem, moveRootCollectionItem, replaceRootCollectionItem, rootCollectionDefinitions, rootCollectionIdentity, rootCollectionIdentityLabel, rootCollectionItems, rootCollectionLabel, rootSingletonOwner, rootSingletonOwners, type RootCollectionKey, type RootCollectionSelection, type RootOwnerSelection } from "../editor-collections";
 import { sectionStructure } from "../editor-structure";
 import { editorLocatorFromValidation, editorLocatorHref } from "../editor-locator";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
-import type { Draft, DraftSandboxResult, InitializationPreview, ScenarioVersionDetail, ValidationResult } from "../types";
+import type { CompletenessItem, Draft, DraftSandboxResult, InitializationPreview, ScenarioVersionDetail, ValidationResult } from "../types";
 import { diagnosticMessage, editorSectionTaxonomy, editorTaxonomyGroups, errorText, kindLabels, sectionLabels, uiLabel } from "../ui";
 
 type SaveState = WorkingCopySaveState;
@@ -56,7 +60,16 @@ function authoredReferenceDetails(document: JsonObject, locator: { object_kind: 
   const object = locator.object_key && entityKinds.includes(locator.object_kind)
     ? objectByKindAndKey(document, locator.object_kind as EntityKind, locator.object_key)
     : null;
-  const name = object ? objectDisplayValue(object.value, locator.object_key ?? "(root)") : locator.object_key ?? "(root)";
+  const nestedKinds = new Set(["action_parameter", "action_outcome", "action_binding", "action_target_role", "action_authority_limit", "action_authority_approval", "actor_doctrine", "actor_authority_limit", "actor_authority_approval"]);
+  const nestedParts = locator.object_key?.split(":") ?? [];
+  const parentAction = nestedKinds.has(locator.object_kind) && nestedParts[0]
+    ? objectByKindAndKey(document, "action", nestedParts[0])
+    : null;
+  const name = object
+    ? objectDisplayValue(object.value, locator.object_key ?? "(root)")
+    : parentAction
+      ? `${objectDisplayValue(parentAction.value, nestedParts[0])} · ${nestedParts.slice(1).join(":")}`
+      : locator.object_key ?? (locator.field_path?.split(".").at(-1) ?? "(root)");
   const type = kindLabels[locator.object_kind] ?? locator.object_kind;
   return { type, name, path: locator.field_path ?? "(object)" };
 }
@@ -67,6 +80,18 @@ function authoredReferenceHref(scenarioId: string, locator: { object_kind: strin
     return editorLocatorHref({ owner: "entity", section: sectionForKind(locator.object_kind), kind: locator.object_kind as EntityKind, objectKey: locator.object_key, fieldPath: locator.field_path }, scenarioId);
   }
   if (locator.object_kind === "metadata" && locator.field_path?.startsWith("locality")) return `/scenarios/${scenarioId}/edit/overview?focus_path=${encodeURIComponent(locator.field_path)}`;
+  if (locator.object_kind === "initialization" && locator.field_path) {
+    const [collection, identity] = locator.field_path.split(".");
+    if (collection && identity) return `/scenarios/${scenarioId}/edit/initialization?domain=resources&group=${encodeURIComponent(collection.replaceAll("_", "-"))}&item=${encodeURIComponent(`pool:${identity}`)}`;
+    return `/scenarios/${scenarioId}/edit/initialization`;
+  }
+  if (locator.object_kind === "planning" && locator.field_path?.startsWith("recovery_hints.")) return `/scenarios/${scenarioId}/edit/planning-recovery?owner=collection&collection=recovery_hints&item=${encodeURIComponent(JSON.stringify([locator.field_path.split(".").at(-1)]))}`;
+  if (locator.object_kind === "planning") return `/scenarios/${scenarioId}/edit/planning-instructions`;
+  if (locator.object_kind === "public_knowledge") return `/scenarios/${scenarioId}/edit/public-knowledge`;
+  if (locator.object_kind.startsWith("action_") && locator.object_key) {
+    const parentKey = locator.object_key.split(":", 1)[0];
+    return editorLocatorHref({ owner: "entity", section: "actions", kind: "action", objectKey: parentKey, fieldPath: locator.field_path }, scenarioId);
+  }
   return null;
 }
 
@@ -109,6 +134,29 @@ function factDeletePreflightError(error: unknown): { reason: string; code?: stri
   return { reason: "服务端未能完成删除预检，请稍后重试。" };
 }
 
+function authoringReferencesFromError(error: unknown, document: JsonObject, scenarioId: string): AuthoringReference[] {
+  if (!(error instanceof ApiError)) return [];
+  const details = error.details && typeof error.details === "object" && !Array.isArray(error.details)
+    ? error.details as { references?: unknown }
+    : {};
+  if (!Array.isArray(details.references)) return [];
+  return details.references.flatMap((item): AuthoringReference[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const source = (item as { source?: unknown }).source;
+    if (!source || typeof source !== "object" || Array.isArray(source)) return [];
+    const locator = source as { object_kind?: unknown; object_key?: unknown; field_path?: unknown };
+    const authoredLocator = {
+      object_kind: typeof locator.object_kind === "string" ? locator.object_kind : "unknown",
+      object_key: typeof locator.object_key === "string" ? locator.object_key : null,
+      field_path: typeof locator.field_path === "string" ? locator.field_path : null,
+    };
+    return [{
+      ...authoredReferenceDetails(document, authoredLocator),
+      href: authoredReferenceHref(scenarioId, authoredLocator),
+    }];
+  });
+}
+
 function documentDifferenceCount(left: unknown, right: unknown): number {
   if (Object.is(left, right)) return 0;
   if (Array.isArray(left) && Array.isArray(right)) {
@@ -143,7 +191,8 @@ function rootEditorKey(section: EditorSection): string | null {
   if (section === "overview") return "metadata";
   if (section === "goal-resolution") return "goal_resolution";
   if (section === "public-knowledge") return "public_knowledge";
-  if (section === "initialization" || section === "planning") return section;
+  if (section === "initialization") return section;
+  if (section === "planning" || section === "planning-instructions" || section === "planning-recovery") return "planning";
   return null;
 }
 
@@ -177,12 +226,18 @@ function normalizeEditorNavigation(to: string, scenarioId: string): string {
 export function EditorPage() {
   const { scenarioId = "", section: routeSection = "overview", objectKey } = useParams();
   const requestedSection: EditorSection = isEditorSection(routeSection) ? routeSection : "overview";
-  const section: EditorSection = requestedSection === "world" && objectKey ? "world-entities" : requestedSection;
+  const section: EditorSection = requestedSection === "world" && objectKey ? "world-entities" : requestedSection === "planning" ? "planning-instructions" : requestedSection;
   const structure = sectionStructure(section);
   const singletonOwner = useMemo(() => rootSingletonOwner(section), [section]);
+  const singletonOwners = useMemo(() => rootSingletonOwners(section), [section]);
   const navigateRouter = useNavigate();
   const navigate = (to: string, options?: { replace?: boolean }) => navigateRouter(normalizeEditorNavigation(to, scenarioId), options);
   const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    if (requestedSection !== "planning") return;
+    const recovery = searchParams.get("collection") === "recovery_hints" || searchParams.get("owner") === "planning-recovery";
+    navigateRouter(`/scenarios/${scenarioId}/edit/${recovery ? "planning-recovery" : "planning-instructions"}${searchParams.size ? `?${searchParams}` : ""}`, { replace: true });
+  }, [navigateRouter, requestedSection, scenarioId, searchParams]);
   const requestedKind = searchParams.get("kind");
   const routeKind = structure.owners.entityKinds.includes(requestedKind as EntityKind) ? requestedKind as EntityKind : null;
   const queryClient = useQueryClient();
@@ -195,6 +250,10 @@ export function EditorPage() {
   const [saveState, setSaveState] = useState<SaveState>("UNCHANGED");
   const [message, setMessage] = useState("");
   const [factDeleteDialog, setFactDeleteDialog] = useState<FactDeleteDialogState | null>(null);
+  const [authoringDialog, setAuthoringDialog] = useState<AuthoringOperationDialogState | null>(null);
+  const [discardRequest, setDiscardRequest] = useState<string | null>(null);
+  const [renameRequest, setRenameRequest] = useState<{ subject: string; currentKey: string } | null>(null);
+  const [resourceSourceCreateOpen, setResourceSourceCreateOpen] = useState(false);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [sandboxGoal, setSandboxGoal] = useState("");
   const [sandbox, setSandbox] = useState<DraftSandboxResult | null>(null);
@@ -209,6 +268,10 @@ export function EditorPage() {
     next.delete("collection");
     next.delete("item");
     if (selection?.owner === "singleton") next.set("owner", selection.key);
+    if (selection?.owner === "instruction") {
+      next.set("owner", "instruction");
+      next.set("item", String(selection.index));
+    }
     if (selection?.owner === "collection") {
       next.set("owner", "collection");
       next.set("collection", selection.collection);
@@ -234,6 +297,9 @@ export function EditorPage() {
     setSandbox(null);
     setMessage("");
     setFactDeleteDialog(null);
+    setAuthoringDialog(null);
+    setDiscardRequest(null);
+    setRenameRequest(null);
   };
 
   useEffect(() => {
@@ -285,6 +351,12 @@ export function EditorPage() {
     queryFn: () => api.analyzeWorkingCopyReferences(scenarioId, serverDraft!.revision, workingDocument!),
     enabled: Boolean(serverDraft && workingDocument && saveState !== "CONFLICT"),
   });
+  const completenessQuery = useQuery({
+    queryKey: ["working-copy-completeness", scenarioId, serverDraft?.revision, workingDocument],
+    queryFn: () => api.completeness(scenarioId, serverDraft!.revision, workingDocument!),
+    enabled: Boolean(serverDraft && workingDocument && saveState !== "CONFLICT" && typeof api.completeness === "function"),
+    retry: false,
+  });
   const initializationPreviewQuery = useQuery({
     queryKey: ["initialization-preview", scenarioId, serverDraft?.revision, workingDocument],
     queryFn: () => api.initializationPreview(scenarioId, serverDraft!.revision, workingDocument!),
@@ -294,6 +366,15 @@ export function EditorPage() {
   });
   const local = useMemo(() => serverDraft && workingDocument ? { ...serverDraft, definition_document: workingDocument } : null, [serverDraft, workingDocument]);
   const hasUnsavedChanges = workingCopyIsDirty(serverDraft, workingDocument);
+  useEffect(() => {
+    if (!hasUnsavedChanges) return undefined;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [hasUnsavedChanges]);
   const topologyModeActive = structure.mode === "BROWSER";
   const legacyRelationTarget = useMemo(() => {
     if (requestedSection !== "relations" || !objectKey) return null;
@@ -321,35 +402,58 @@ export function EditorPage() {
   const availableKinds = useMemo(() => Array.from(new Set(objects.map((item) => item.kind))), [objects]);
   const filteredObjects = useMemo(() => filterDraftObjects(objects, objectSearch, kindFilter), [objects, objectSearch, kindFilter]);
   const sectionValue = local ? sectionRoot(local.definition_document, section) : null;
+  const planningInstructions = section === "planning-instructions" && sectionValue && typeof sectionValue === "object" && !Array.isArray(sectionValue) && Array.isArray((sectionValue as JsonObject).instructions)
+    ? (sectionValue as JsonObject).instructions as string[]
+    : [];
   const collectionDefinitions = useMemo(() => rootCollectionDefinitions(section), [section]);
   const collectionItems = useMemo(() => rootCollectionItems(section, sectionValue, local?.definition_document), [local?.definition_document, section, sectionValue]);
   const collectionSelection = collectionSelectionState?.section === section ? collectionSelectionState.selection : null;
   useEffect(() => {
+    const select = (next: ScopedCollectionSelection | null) => {
+      setCollectionSelectionState((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+    };
     const owner = searchParams.get("owner");
     const collection = searchParams.get("collection");
     const identity = searchParams.get("item");
+    if (section === "planning-instructions") {
+      const requestedIndex = owner === "instruction" ? Number(identity) : -1;
+      const index = Number.isInteger(requestedIndex) && requestedIndex >= 0 && requestedIndex < planningInstructions.length ? requestedIndex : -1;
+      select(index >= 0 ? { section, selection: { owner: "instruction", index } } : null);
+      return;
+    }
     const collectionMatch = collectionDefinitions.find((definition) => definition.key === collection);
     if (owner === "collection" && collectionMatch && identity && collectionItems.some((item) => item.collection === collectionMatch.key && item.identity === identity)) {
-      setCollectionSelectionState({ section, selection: { owner: "collection", collection: collectionMatch.key, identity } });
+      select({ section, selection: { owner: "collection", collection: collectionMatch.key, identity } });
       return;
     }
-    if (singletonOwner && owner === singletonOwner.key) {
-      setCollectionSelectionState({ section, selection: { owner: "singleton", key: singletonOwner.key } });
+    const singletonMatch = singletonOwners.find((candidate) => owner === candidate.key);
+    if (singletonMatch) {
+      select({ section, selection: { owner: "singleton", key: singletonMatch.key } });
       return;
     }
-    setCollectionSelectionState(singletonOwner ? { section, selection: { owner: "singleton", key: singletonOwner.key } } : null);
-  }, [collectionDefinitions, collectionItems, searchParams, section, singletonOwner]);
+    if (section === "planning-recovery") {
+      select(null);
+      return;
+    }
+    select(singletonOwner ? { section, selection: { owner: "singleton", key: singletonOwner.key } } : null);
+  }, [collectionDefinitions, collectionItems, planningInstructions.length, searchParams, section, singletonOwner, singletonOwners]);
   const filteredCollectionItems = useMemo(() => {
     const query = objectSearch.trim().toLocaleLowerCase();
     return collectionItems.filter((item) => !query || [item.title, item.summary, item.identityLabel, item.collection].some((value) => value.toLocaleLowerCase().includes(query)));
   }, [collectionItems, objectSearch]);
-  const singletonOwnerVisible = singletonOwner
-    ? !objectSearch.trim() || [singletonOwner.label, singletonOwner.summary].some((value) => value.toLocaleLowerCase().includes(objectSearch.trim().toLocaleLowerCase()))
-    : false;
+  const visibleSingletonOwners = singletonOwners.filter((owner) => !objectSearch.trim() || [owner.label, owner.summary].some((value) => value.toLocaleLowerCase().includes(objectSearch.trim().toLocaleLowerCase())));
   const selectedCollectionItem = collectionSelection?.owner === "collection"
     ? collectionItems.find((item) => item.collection === collectionSelection.collection && item.identity === collectionSelection.identity) ?? null
     : null;
-  const selectedSingletonOwner = collectionSelection?.owner === "singleton" ? singletonOwner : null;
+  const selectedInstruction = collectionSelection?.owner === "instruction" ? planningInstructions[collectionSelection.index] ?? null : null;
+  const selectedSingletonOwner = collectionSelection?.owner === "singleton"
+    ? singletonOwners.find((owner) => owner.key === collectionSelection.key) ?? null
+    : collectionSelection?.owner === "collection" && collectionSelection.collection === "recovery_hints"
+      ? singletonOwners.find((owner) => owner.key === "planning-recovery") ?? null
+      : null;
+  const planningRecoverySelected = section === "planning-recovery"
+    && collectionSelection?.owner === "collection"
+    && collectionSelection.collection === "recovery_hints";
   const selected = objects.find((item) => item.key === objectKey && (!routeKind || item.kind === routeKind)) ?? null;
   const focusPath = searchParams.get("focus_path");
   const editorFocusPath = focusPath ? `${selected ? `${selected.kind}.${selected.key}` : rootEditorKey(section) ?? ""}.${focusPath}` : null;
@@ -361,16 +465,6 @@ export function EditorPage() {
   const topologyRelation = topologySelection?.kind === "relation" ? relationByTopologyKey(topologyDocument, topologySelection.key) : null;
   const topologyPortal = topologySelection?.kind === "portal" ? buildScopeTopology(topologyDocument, topologySelection.scopeKey).portals.find((portal) => portal.key === topologySelection.key) ?? null : null;
   const topologyNeighborhood = topologyNode ? buildEntityNeighborhood(topologyDocument, topologyNode.key) : null;
-
-  useEffect(() => {
-    if (!hasUnsavedChanges) return;
-    const beforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [hasUnsavedChanges]);
 
   if (!local) return <main className="page"><p>正在加载草稿…</p></main>;
 
@@ -393,8 +487,7 @@ export function EditorPage() {
     }
     save.mutate({ revision: draft.revision, document: cloneWorkingDocument(document) });
   };
-  const discardWorkingCopy = (confirmDiscard = true): boolean => {
-    if (confirmDiscard && hasUnsavedChanges && !window.confirm("当前有未保存修改，确定放弃并离开吗？")) return false;
+  const discardWorkingCopy = (): boolean => {
     const draft = serverDraftRef.current;
     if (!draft) return false;
     const document = cloneWorkingDocument(draft.definition_document);
@@ -407,7 +500,18 @@ export function EditorPage() {
     return true;
   };
   const guardedNavigate = (to: string) => {
-    if (!hasUnsavedChanges || discardWorkingCopy()) navigate(to);
+    if (!hasUnsavedChanges) navigate(to);
+    else setDiscardRequest(to);
+  };
+  const requestDiscard = () => {
+    if (!hasUnsavedChanges) return;
+    setDiscardRequest("");
+  };
+  const confirmDiscardRequest = () => {
+    const target = discardRequest;
+    setDiscardRequest(null);
+    if (!discardWorkingCopy()) return;
+    if (target) navigate(target);
   };
   const reloadServerDraft = async () => {
     const result = await draftQuery.refetch();
@@ -421,6 +525,80 @@ export function EditorPage() {
     const added = addObject(local.definition_document, kind);
     editDocument(added.document);
     navigate(editorLocatorHref({ owner: "entity", section, kind, objectKey: added.key, fieldPath: null }, scenarioId));
+  };
+  const createAndLinkEntity = (kind: EntityKind, parentKind: EntityKind, parentKey: string, field: string) => {
+    const document = workingDocumentRef.current;
+    if (!document) return;
+    const added = addObject(document, kind);
+    const parent = objectByKindAndKey(added.document, parentKind, parentKey);
+    if (!parent) {
+      setMessage("当前工作副本中的关联对象已变化，请重试。");
+      return;
+    }
+    const next = replaceObject(added.document, sectionForKind(parentKind), parentKey, { ...parent.value, [field]: added.key }, parentKind);
+    editDocument(next);
+    navigate(editorLocatorHref({ owner: "entity", section: sectionForKind(parentKind), kind: parentKind, objectKey: parentKey, fieldPath: field }, scenarioId));
+  };
+  const createGuidedDependency = (item: CompletenessItem) => {
+    const document = workingDocumentRef.current;
+    if (!document) return;
+    const actorRoleMatch = item.key.match(/^actor:([^:]+):role$/);
+    if (actorRoleMatch) { createAndLinkEntity("role", "actor", actorRoleMatch[1], "role_key"); return; }
+    const actionInteractionMatch = item.key.match(/^action:([^:]+):interaction$/);
+    if (actionInteractionMatch) { createAndLinkEntity("interaction", "action", actionInteractionMatch[1], "required_interaction_key"); return; }
+    const resolveRuleMatch = item.key.match(/^action:([^:]+):resolve-rule$/);
+    if (resolveRuleMatch) {
+      const actionKey = resolveRuleMatch[1];
+      const added = addObject(document, "rule");
+      const action = objectByKindAndKey(added.document, "action", actionKey);
+      const rule = objectByKindAndKey(added.document, "rule", added.key);
+      if (!action || !rule) { setMessage("当前工作副本中的行动已变化，请重新计算配置状态。"); return; }
+      const outcomes = Array.isArray(action.value.expected_outcomes) ? action.value.expected_outcomes : [];
+      const firstOutcome = outcomes.find((outcome) => outcome && typeof outcome === "object" && !Array.isArray(outcome) && typeof (outcome as JsonObject).code === "string") as JsonObject | undefined;
+      const outcomeCode = typeof firstOutcome?.code === "string" && firstOutcome.code ? firstOutcome.code : "Success";
+      const next = replaceObject(added.document, "rules", added.key, { ...rule.value, phase: "RESOLVE", trigger: "ACTION", action_key: actionKey, effects: [{ kind: "EMIT_OUTCOME", outcome_code: outcomeCode, retryable: false }] }, "rule");
+      editDocument(next);
+      navigate(editorLocatorHref({ owner: "entity", section: "actions", kind: "action", objectKey: actionKey, fieldPath: "rules" }, scenarioId));
+      return;
+    }
+    const sourceHintMatch = item.key.match(/^resource:([^:]+):public-source$/);
+    if (sourceHintMatch) {
+      const resourceKey = sourceHintMatch[1];
+      const knowledge = document.public_knowledge && typeof document.public_knowledge === "object" && !Array.isArray(document.public_knowledge) ? document.public_knowledge as JsonObject : {};
+      const hints = Array.isArray(knowledge.resource_source_hints) ? knowledge.resource_source_hints as JsonObject[] : [];
+      if (hints.some((hint) => hint.resource_key === resourceKey)) return;
+      const next = { ...document, public_knowledge: { ...knowledge, resource_source_hints: [...hints, { resource_key: resourceKey, primary_region_key: null, candidate_region_keys: [] }] } };
+      editDocument(next);
+      navigate(`/scenarios/${scenarioId}/edit/public-knowledge?owner=collection&collection=resource_source_hints&item=${encodeURIComponent(JSON.stringify([resourceKey]))}`);
+      return;
+    }
+    const poolMatch = item.key.match(/^resource:([^:]+):pool$/);
+    if (poolMatch) {
+      const resourceKey = poolMatch[1];
+      const initialization = document.initialization && typeof document.initialization === "object" && !Array.isArray(document.initialization) ? document.initialization as JsonObject : {};
+      const pools = Array.isArray(initialization.resource_pools) ? initialization.resource_pools as JsonObject[] : [];
+      if (pools.some((pool) => pool.resource_key === resourceKey)) return;
+      const existingKeys = new Set(pools.flatMap((pool) => typeof pool.pool_key === "string" ? [pool.pool_key] : []));
+      const baseKey = `pool_${resourceKey}`;
+      let poolKey = baseKey;
+      for (let index = 2; existingKeys.has(poolKey); index += 1) poolKey = `${baseKey}_${index}`;
+      const next = { ...document, initialization: { ...initialization, resource_pools: [...pools, { pool_key: poolKey, resource_key: resourceKey, region_key: null, facility_key: null, quantity: 0, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false }] } };
+      editDocument(next);
+      navigate(`/scenarios/${scenarioId}/edit/initialization?domain=resources&group=resource-pools&item=${encodeURIComponent(`pool:${poolKey}`)}`);
+      return;
+    }
+    const recoveryMatch = item.key.match(/^recovery-hint:(.+)$/);
+    if (recoveryMatch) {
+      const failureCode = recoveryMatch[1];
+      const planning = document.planning && typeof document.planning === "object" && !Array.isArray(document.planning) ? document.planning as JsonObject : {};
+      const hints = Array.isArray(planning.recovery_hints) ? planning.recovery_hints as JsonObject[] : [];
+      if (hints.some((hint) => hint.failure_code === failureCode)) return;
+      const next = { ...document, planning: { ...planning, recovery_hints: [...hints, { failure_code: failureCode, hint: "请填写失败恢复策略。" }] } };
+      editDocument(next);
+      navigate(`/scenarios/${scenarioId}/edit/planning-recovery?owner=collection&collection=recovery_hints&item=${encodeURIComponent(JSON.stringify([failureCode]))}`);
+      return;
+    }
+    setMessage("该依赖不能安全推断业务值，请使用精确前往链接完成配置。");
   };
   const updateSelectedEntity = (value: JsonObject) => {
     if (!selected) return;
@@ -438,12 +616,9 @@ export function EditorPage() {
   };
   const updateCollectionItem = (selection: RootCollectionSelection, item: JsonObject) => {
     const root = structuredClone(sectionValue) as JsonObject;
-    const selectedItem = selectedCollectionItem?.value ?? null;
-    const referencePath = selectedItem ? rootCollectionReferencePath(selection.collection, selectedItem) : null;
     const identityChanged = rootCollectionIdentity(selection.collection, item) !== selection.identity;
-    const identityReferences = referencePath ? refsQuery.data?.references.filter((edge) => edge.target.object_kind === "initialization" && edge.target.field_path === referencePath) ?? [] : [];
-    if (identityChanged && identityReferences.length > 0) {
-      setMessage("该身份仍被其他配置引用，不能直接修改。请先移除相关引用。");
+    if (identityChanged) {
+      setMessage("集合项稳定身份是只读的；请删除后按正确身份重新创建，避免产生悬空引用。");
       return;
     }
     const result = replaceRootCollectionItem(root, selection, item);
@@ -464,21 +639,57 @@ export function EditorPage() {
     editDocument(updateSectionRoot(local.definition_document, section, result.root));
     setCollectionSelection(result.selection, true);
   };
-  const removeCollectionItem = (selection: RootCollectionSelection) => {
-    const root = structuredClone(sectionValue) as JsonObject;
-    const selectedItem = selectedCollectionItem?.value ?? null;
-    const referencePath = selectedItem ? rootCollectionReferencePath(selection.collection, selectedItem) : null;
-    const references = referencePath ? refsQuery.data?.references.filter((edge) => edge.target.object_kind === "initialization" && edge.target.field_path === referencePath) ?? [] : [];
-    if (references.length > 0) {
-      setMessage("该集合项仍被其他配置引用，不能删除。请先移除相关引用。");
-      return;
+  const preflightRootCollectionDelete = async (selection: RootCollectionSelection, subject: string) => {
+    const document = workingDocumentRef.current;
+    const draft = serverDraftRef.current;
+    if (!document || !draft) return;
+    const snapshot = cloneWorkingDocument(document);
+    let operationIdentity = selection.identity;
+    try {
+      const parsed = JSON.parse(selection.identity) as unknown;
+      if (Array.isArray(parsed)) operationIdentity = parsed.map((part) => part == null ? "" : String(part)).join(":");
+    } catch {
+      // Keep the canonical string when a legacy selection was already raw.
     }
-    if (!window.confirm("确定删除当前集合项吗？")) return;
-    const result = removeRootCollectionItem(root, selection);
-    if (!result.ok) { setMessage(result.reason); return; }
-    setMessage("");
-    editDocument(updateSectionRoot(local.definition_document, section, result.root));
-    setCollectionSelection(null);
+    setAuthoringDialog(null);
+    try {
+      const transformed = await api.transformWorkingCopy(scenarioId, draft.revision, snapshot, {
+        kind: "DELETE_ROOT_COLLECTION_ITEM",
+        object_kind: section === "planning-recovery" ? "planning" : section === "public-knowledge" ? "public_knowledge" : "initialization",
+        collection: selection.collection,
+        identity: operationIdentity,
+      });
+      if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
+        setMessage("工作副本在删除预检期间发生了新修改，请重试该操作。");
+        return;
+      }
+      const transformedDocument = cloneWorkingDocument(transformed.definition_document);
+      const currentIndex = collectionItems.find((item) => item.collection === selection.collection && item.identity === selection.identity)?.index ?? 0;
+      const remainingItems = section === "public-knowledge"
+        ? rootCollectionItems(section, sectionRoot(transformedDocument, section), transformedDocument).filter((item) => item.collection === selection.collection)
+        : [];
+      const fallback = remainingItems.length > 0 ? remainingItems[Math.min(currentIndex, remainingItems.length - 1)] : null;
+      setAuthoringDialog({ kind: "confirm", title: `删除「${subject}」？`, subject, detail: "删除后将从当前工作副本中移除。", document: snapshot, transformedDocument, onApplied: () => setCollectionSelection(fallback ? { owner: "collection", collection: fallback.collection, identity: fallback.identity } : null) });
+    } catch (error) {
+      if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
+        setMessage("工作副本在删除预检期间发生了新修改，请重试该操作。");
+        return;
+      }
+      if (error instanceof ApiError && error.code === "SCENARIO_ROOT_COLLECTION_ITEM_REFERENCED") {
+        setAuthoringDialog({ kind: "blocked", title: `无法删除「${subject}」`, subject, references: authoringReferencesFromError(error, snapshot, scenarioId) });
+        return;
+      }
+      const preflightError = factDeletePreflightError(error);
+      setAuthoringDialog({ kind: "error", subject, ...preflightError });
+    }
+  };
+  const removeCollectionItem = (selection: RootCollectionSelection) => {
+    const selectedItem = collectionItems.find((item) => item.collection === selection.collection && item.identity === selection.identity)?.value;
+    const selectedPresentation = collectionItems.find((item) => item.collection === selection.collection && item.identity === selection.identity);
+    const subject = section === "public-knowledge" && selectedPresentation
+      ? selectedPresentation.title
+      : selectedItem ? rootCollectionIdentityLabel(selection.collection, selectedItem) : rootCollectionLabel(selection.collection);
+    void preflightRootCollectionDelete(selection, subject);
   };
   const createCollectionItem = (collectionKey: RootCollectionKey) => {
     const root = structuredClone(sectionValue) as JsonObject;
@@ -488,30 +699,106 @@ export function EditorPage() {
     editDocument(updateSectionRoot(local.definition_document, section, result.root));
     setCollectionSelection(result.selection);
   };
+  const createResourceSourceHint = (item: { resource_key: string; primary_region_key: string | null; candidate_region_keys: string[] }) => {
+    const document = workingDocumentRef.current;
+    if (!document) return;
+    const resources = sectionObjects(document, "resources").filter((resource) => resource.kind === "resource");
+    if (!resources.some((resource) => resource.key === item.resource_key)) {
+      setMessage("所选资源已不存在，请重新选择。");
+      return;
+    }
+    const knowledge = document.public_knowledge && typeof document.public_knowledge === "object" && !Array.isArray(document.public_knowledge) ? document.public_knowledge as JsonObject : {};
+    const hints = Array.isArray(knowledge.resource_source_hints) ? knowledge.resource_source_hints.filter((hint): hint is JsonObject => Boolean(hint) && typeof hint === "object" && !Array.isArray(hint)) : [];
+    if (hints.some((hint) => hint.resource_key === item.resource_key)) {
+      setMessage("该资源已经有来源提示。");
+      return;
+    }
+    const next = { ...document, public_knowledge: { ...knowledge, resource_source_hints: [...hints, structuredClone(item)] } };
+    setMessage("");
+    setResourceSourceCreateOpen(false);
+    editDocument(next);
+    setCollectionSelection({ owner: "collection", collection: "resource_source_hints", identity: JSON.stringify([item.resource_key]) });
+  };
+  const createPlanningInstruction = () => {
+    const root = structuredClone(sectionValue) as JsonObject;
+    const instructions = Array.isArray(root.instructions) ? root.instructions.filter((item): item is string => typeof item === "string") : [];
+    const index = instructions.length;
+    editDocument(updateSectionRoot(local.definition_document, section, { ...root, instructions: [...instructions, ""] }));
+    setCollectionSelection({ owner: "instruction", index });
+  };
+  const updatePlanningInstruction = (index: number, content: string) => {
+    const root = structuredClone(sectionValue) as JsonObject;
+    const instructions = Array.isArray(root.instructions) ? root.instructions.filter((item): item is string => typeof item === "string") : [];
+    editDocument(updateSectionRoot(local.definition_document, section, { ...root, instructions: instructions.map((item, oldIndex) => oldIndex === index ? content : item) }));
+  };
+  const movePlanningInstruction = (index: number, direction: "up" | "down") => {
+    const target = direction === "up" ? index - 1 : index + 1;
+    if (target < 0 || target >= planningInstructions.length) return;
+    const instructions = [...planningInstructions];
+    [instructions[index], instructions[target]] = [instructions[target], instructions[index]];
+    editDocument(updateSectionRoot(local.definition_document, section, { ...(sectionValue as JsonObject), instructions }));
+    setCollectionSelection({ owner: "instruction", index: target }, true);
+  };
+  const removePlanningInstruction = (index: number) => {
+    const snapshot = cloneWorkingDocument(local.definition_document);
+    const instructions = planningInstructions.filter((_, oldIndex) => oldIndex !== index);
+    const transformedDocument = updateSectionRoot(snapshot, section, { ...(sectionValue as JsonObject), instructions });
+    setAuthoringDialog({ kind: "confirm", title: `删除「规划指引 ${index + 1}」？`, subject: `规划指引 ${index + 1}`, detail: "只会删除当前规划指引。", document: snapshot, transformedDocument, onApplied: () => setCollectionSelection(instructions.length > 0 ? { owner: "instruction", index: Math.min(index, instructions.length - 1) } : null) });
+  };
   const deleteInitializationResourcePool = (poolKey: string) => {
     const initialization = local.definition_document.initialization;
     if (!initialization || typeof initialization !== "object" || Array.isArray(initialization)) return;
     const pools = Array.isArray((initialization as JsonObject).resource_pools) ? (initialization as JsonObject).resource_pools as JsonObject[] : [];
     const pool = pools.find((item) => item.pool_key === poolKey);
     if (!pool) return;
-    const referencePath = rootCollectionReferencePath("resource_pools", pool);
-    const references = refsQuery.data?.references.filter((edge) => edge.target.object_kind === "initialization" && edge.target.field_path === referencePath) ?? [];
-    if (references.length > 0) {
-      setMessage("该集合项仍被其他配置引用，不能删除。请先移除相关引用。");
+    void preflightRootCollectionDelete({ owner: "collection", collection: "resource_pools", identity: JSON.stringify([poolKey]) }, objectDisplayValue(pool, poolKey));
+  };
+  const deleteRootCollectionItemFromInitialization = (collection: RootCollectionKey, identity: string, subject: string) => {
+    void preflightRootCollectionDelete({ owner: "collection", collection, identity: JSON.stringify([identity]) }, subject);
+  };
+  const addRegionResourceKnowledge = () => {
+    const initialization = local.definition_document.initialization && typeof local.definition_document.initialization === "object" && !Array.isArray(local.definition_document.initialization)
+      ? local.definition_document.initialization as JsonObject
+      : {};
+    const world = local.definition_document.world && typeof local.definition_document.world === "object" && !Array.isArray(local.definition_document.world)
+      ? local.definition_document.world as JsonObject
+      : {};
+    const metadata = local.definition_document.metadata && typeof local.definition_document.metadata === "object" && !Array.isArray(local.definition_document.metadata)
+      ? local.definition_document.metadata as JsonObject
+      : {};
+    const locality = metadata.locality && typeof metadata.locality === "object" && !Array.isArray(metadata.locality) ? metadata.locality as JsonObject : {};
+    const nodes = Array.isArray(world.nodes) ? world.nodes as JsonObject[] : [];
+    const regionType = typeof locality.region_node_type_key === "string" ? locality.region_node_type_key : null;
+    const region = nodes.find((node) => !regionType || node.node_type_key === regionType) ?? nodes[0];
+    const regionKey = typeof region?.key === "string" ? region.key : "";
+    if (!regionKey) {
+      setMessage("请先创建至少一个区域节点，再添加区域资源知识。");
       return;
     }
-    if (!window.confirm("确定删除当前资源池吗？")) return;
-    setMessage("");
-    editDocument(updateSectionRoot(local.definition_document, "initialization", { ...(initialization as JsonObject), resource_pools: pools.filter((item) => item !== pool) }));
+    const states = Array.isArray(initialization.region_resource_knowledge) ? initialization.region_resource_knowledge as JsonObject[] : [];
+    if (states.some((state) => state.region_key === regionKey)) {
+      setMessage("该区域已经存在区域资源知识。");
+      setSearchParams({ domain: "resources", group: "region-resource-knowledge", item: `region-knowledge:${regionKey}` }, { replace: true });
+      return;
+    }
+    const nextDocument = updateSectionRoot(local.definition_document, "initialization", { ...initialization, region_resource_knowledge: [...states, { region_key: regionKey, resource_inventory_visibility: "VISIBLE", resource_survey_completed: false }] });
+    editDocument(nextDocument);
+    setSearchParams({ domain: "resources", group: "region-resource-knowledge", item: `region-knowledge:${regionKey}` }, { replace: true });
   };
 
-  const rename = async () => {
+  const requestRename = () => {
     if (!selected) return;
-    const newKey = window.prompt("请输入新的稳定键", selected.key)?.trim();
-    if (!newKey || newKey === selected.key) return;
+    setRenameRequest({ subject: objectDisplayValue(selected.value, selected.key), currentKey: selected.key });
+  };
+  const rename = async (newKey: string) => {
+    if (!selected || !newKey || newKey === selected.key) {
+      setRenameRequest(null);
+      return;
+    }
     const document = workingDocumentRef.current;
     const draft = serverDraftRef.current;
     if (!document || !draft) return;
+    setRenameRequest(null);
     try {
       const transformed = await api.transformWorkingCopy(scenarioId, draft.revision, document, { kind: "RENAME_KEY", object_kind: selected.kind, old_key: selected.key, new_key: newKey });
       if (!workingDocumentsEqual(workingDocumentRef.current, document)) {
@@ -524,19 +811,64 @@ export function EditorPage() {
   };
 
   const remove = async () => {
-    if (!selected || !window.confirm(`确定删除“${objectDisplayValue(selected.value, selected.key)}”吗？被其他对象引用时系统会阻止删除。`)) return;
+    if (!selected) return;
     const document = workingDocumentRef.current;
     const draft = serverDraftRef.current;
     if (!document || !draft) return;
+    const snapshot = cloneWorkingDocument(document);
+    const subject = objectDisplayValue(selected.value, selected.key);
+    const selectedKind = selected.kind;
+    const selectedKey = selected.key;
     try {
-      const transformed = await api.transformWorkingCopy(scenarioId, draft.revision, document, { kind: "DELETE_OBJECT", object_kind: selected.kind, object_key: selected.key });
-      if (!workingDocumentsEqual(workingDocumentRef.current, document)) {
+      const transformed = await api.transformWorkingCopy(scenarioId, draft.revision, snapshot, { kind: "DELETE_OBJECT", object_kind: selectedKind, object_key: selectedKey });
+      if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
         setMessage("工作副本在删除期间发生了新修改，请重试该操作。");
         return;
       }
-      editDocument(transformed.definition_document);
-      navigate(`/scenarios/${scenarioId}/edit/${section}`);
-    } catch (error) { setSaveState(error instanceof ApiError && error.code === "SCENARIO_DRAFT_CONFLICT" ? "CONFLICT" : "ERROR"); setMessage(errorText(error, "删除失败，该对象可能仍被引用。")); }
+      setAuthoringDialog({ kind: "confirm", title: `删除「${subject}」？`, subject, detail: "删除后将从当前工作副本中移除。", document: snapshot, transformedDocument: cloneWorkingDocument(transformed.definition_document), onApplied: () => navigate(`/scenarios/${scenarioId}/edit/${section}`) });
+    } catch (error) {
+      if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
+        setMessage("工作副本在删除预检期间发生了新修改，请重试该操作。");
+        return;
+      }
+      if (error instanceof ApiError && (error.code === "SCENARIO_OBJECT_REFERENCED" || error.code === "SCENARIO_NESTED_OBJECT_REFERENCED")) {
+        setAuthoringDialog({ kind: "blocked", title: `无法删除「${subject}」`, subject, references: authoringReferencesFromError(error, snapshot, scenarioId) });
+        return;
+      }
+      const preflightError = factDeletePreflightError(error);
+      setAuthoringDialog({ kind: "error", subject, ...preflightError });
+    }
+  };
+  const removeNested = async (request: { parentKind: string; parentKey: string; collection: string; nestedKey: string; subject: string }) => {
+    const document = workingDocumentRef.current;
+    const draft = serverDraftRef.current;
+    if (!document || !draft) return;
+    const snapshot = cloneWorkingDocument(document);
+    try {
+      const transformed = await api.transformWorkingCopy(scenarioId, draft.revision, snapshot, {
+        kind: "DELETE_NESTED",
+        object_kind: request.parentKind,
+        parent_kind: request.parentKind,
+        parent_key: request.parentKey,
+        collection: request.collection,
+        nested_key: request.nestedKey,
+      });
+      if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
+        setMessage("工作副本在删除预检期间发生了新修改，请重试该操作。");
+        return;
+      }
+      setAuthoringDialog({ kind: "confirm", title: `删除「${request.subject}」？`, subject: request.subject, detail: "删除后将从当前工作副本中移除。", document: snapshot, transformedDocument: cloneWorkingDocument(transformed.definition_document) });
+    } catch (error) {
+      if (!workingDocumentsEqual(workingDocumentRef.current, snapshot)) {
+        setMessage("工作副本在删除预检期间发生了新修改，请重试该操作。");
+        return;
+      }
+      if (error instanceof ApiError && error.code === "SCENARIO_NESTED_OBJECT_REFERENCED") {
+        setAuthoringDialog({ kind: "blocked", title: `无法删除「${request.subject}」`, subject: request.subject, references: authoringReferencesFromError(error, snapshot, scenarioId) });
+        return;
+      }
+      setAuthoringDialog({ kind: "error", subject: request.subject, ...factDeletePreflightError(error) });
+    }
   };
 
   const deleteFact = async (nodeKey: string, factKey: string) => {
@@ -598,6 +930,18 @@ export function EditorPage() {
     setFactDeleteDialog(null);
     editDocument(factDeleteDialog.transformedDocument as JsonObject);
   };
+  const confirmAuthoringOperation = () => {
+    if (!authoringDialog || authoringDialog.kind !== "confirm") return;
+    if (!workingDocumentsEqual(workingDocumentRef.current, authoringDialog.document)) {
+      setAuthoringDialog(null);
+      setMessage("工作副本在确认删除前发生了新修改，请重试该操作。");
+      return;
+    }
+    const onApplied = authoringDialog.onApplied;
+    setAuthoringDialog(null);
+    editDocument(authoringDialog.transformedDocument as JsonObject);
+    onApplied?.();
+  };
   const validate = async () => {
     const draft = serverDraftRef.current;
     if (!draft || saveState !== "UNCHANGED") { setMessage("请先保存当前工作副本后再验证。"); return; }
@@ -648,7 +992,7 @@ export function EditorPage() {
   const showWorldTopology = structure.workspace.renderer === "topology";
   const usesRootCollections = structure.master.source === "root-collections";
   const masterCount = usesRootCollections
-    ? collectionItems.length + (singletonOwner ? 1 : 0)
+    ? section === "planning-instructions" ? planningInstructions.length : section === "planning-recovery" ? collectionItems.length : collectionItems.length + singletonOwners.length
     : structure.master.source === "topology"
       ? nodeSemanticView(local.definition_document, "all").length
       : objects.length;
@@ -656,8 +1000,14 @@ export function EditorPage() {
     ? "世界拓扑"
     : structure.workspace.renderer === "initialization"
       ? "初始化"
+    : structure.workspace.renderer === "configuration-check"
+      ? "配置检查"
     : selected
       ? objectDisplayValue(selected.value, selected.name)
+      : selectedInstruction !== null && collectionSelection?.owner === "instruction"
+        ? `规划指引 ${collectionSelection.index + 1}`
+      : planningRecoverySelected
+        ? String(selectedCollectionItem?.value.failure_code ?? "失败恢复策略")
       : selectedCollectionItem
         ? selectedCollectionItem.title
         : selectedSingletonOwner
@@ -667,8 +1017,16 @@ export function EditorPage() {
     ? "浏览范围、实体与关系；编辑请进入对应的世界模型页面"
     : structure.workspace.renderer === "initialization"
       ? "配置当前版本的开局状态"
+    : structure.workspace.renderer === "configuration-check"
+      ? "按领域检查当前工作副本的完整性，并前往或创建确定的关联配置"
     : selected
       ? `${kindLabels[selected.kind] ?? selected.kind} · 可编辑对象`
+      : selectedInstruction !== null
+        ? "规划指引 · 可编辑对象"
+      : planningRecoverySelected
+        ? "失败恢复策略 · 可编辑对象"
+      : section === "public-knowledge" && selectedCollectionItem
+        ? "资源来源提示 · 可编辑对象"
       : selectedCollectionItem
         ? "编辑当前集合项"
         : selectedSingletonOwner
@@ -710,22 +1068,35 @@ export function EditorPage() {
   return <main className="editor-shell">
     <aside className="editor-nav">
       <div className="editor-nav-header"><div className="editor-nav-identity"><p>场景编辑器</p><h2>当前草稿</h2></div></div>
-      <nav className="editor-section-nav" aria-label="编辑器导航">{editorTaxonomyGroups.map((group) => <div className="editor-nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => <Link className={item === section ? "active" : ""} key={item} to={`/scenarios/${scenarioId}/edit/${item}`} onClick={(event) => { if (hasUnsavedChanges) { event.preventDefault(); guardedNavigate(`/scenarios/${scenarioId}/edit/${item}`); } }}>{sectionLabels[item] ?? item}</Link>)}</div>)}</nav>
+      <nav className="editor-section-nav" aria-label="编辑器导航">{editorTaxonomyGroups.map((group) => <div className="editor-nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => <Link className={item === section ? "active" : ""} key={item} to={`/scenarios/${scenarioId}/edit/${item}`}>{sectionLabels[item] ?? item}</Link>)}</div>)}</nav>
     </aside>
     <section className="editor-main">
-      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span>{serverDraft && <VersionStatusBadges draft={serverDraft} published={publishedVersionQuery.data ?? null} saveState={saveState} />}<button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={() => discardWorkingCopy()}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
+      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span>{serverDraft && <VersionStatusBadges draft={serverDraft} published={publishedVersionQuery.data ?? null} saveState={saveState} />}<button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={requestDiscard}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
       {message && <div className="conflict-banner"><p>{message}</p>{saveState === "CONFLICT" && <button type="button" className="editor-button editor-button-secondary" onClick={() => void reloadServerDraft()}>重新加载服务器草稿</button>}</div>}
       {factDeleteDialog && <FactDeleteDialog state={factDeleteDialog} onClose={() => setFactDeleteDialog(null)} onConfirm={confirmFactDelete} />}
+      {authoringDialog && <AuthoringOperationDialog state={authoringDialog} onClose={() => setAuthoringDialog(null)} onConfirm={confirmAuthoringOperation} />}
+      {resourceSourceCreateOpen && <ResourceSourceHintCreateDialog document={local.definition_document} scenarioId={scenarioId} onCancel={() => setResourceSourceCreateOpen(false)} onCreate={createResourceSourceHint} />}
+      {discardRequest !== null && <EditorConfirmDialog title="放弃当前修改？" message="当前工作副本有未保存修改，放弃后将恢复到已保存草稿。" confirmLabel="放弃修改" onCancel={() => setDiscardRequest(null)} onConfirm={confirmDiscardRequest} />}
+      {renameRequest && <EditorRenameDialog subject={renameRequest.subject} initialValue={renameRequest.currentKey} onCancel={() => setRenameRequest(null)} onConfirm={(value) => void rename(value)} />}
       <div className={`editor-columns${structure.master.visible ? "" : " master-hidden"}${inspectorOpen ? "" : " inspector-collapsed"}`}>
         {structure.master.visible && <aside className="object-list object-panel">
           <header className="object-panel-header"><div><p className="panel-kicker">{structure.mode === "BROWSER" ? "世界结构" : structure.mode === "HYBRID" ? "配置导航" : "内容导航"}</p><div className="object-panel-title">{sectionLabels[section] ?? section}</div></div><span className="object-count">{masterCount}</span></header>
           {structure.master.source === "topology" && <div className="segmented-control world-filter-tabs" role="tablist" aria-label="世界对象筛选">{(["all", "regions", "facilities", "transports"] as WorldView[]).map((item) => <button type="button" className={worldView === item ? "selected" : ""} aria-pressed={worldView === item} key={item} onClick={() => setWorldView(item)}><span>{worldViewLabels[item]}</span><small>{nodeSemanticView(local.definition_document, item).length}</small></button>)}</div>}
-          <div className="object-panel-tools">{structure.master.searchable && <label className="object-search">搜索<input value={objectSearch} placeholder={usesRootCollections ? "名称、代码或标识" : "名称或稳定键"} onChange={(event) => setObjectSearch(event.target.value)} /></label>}{structure.master.source === "entities" && availableKinds.length > 1 && !structure.master.grouped && <label className="object-filter">对象类型<select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">全部类型</option>{availableKinds.map((kind) => <option key={kind} value={kind}>{kindLabels[kind] ?? kind}</option>)}</select></label>}{structure.master.create === "entity" && !structure.master.grouped && <div className="object-list-actions">{(kindsBySection[section] ?? []).map((kind) => <button type="button" className="editor-button editor-button-secondary add-object" key={kind} onClick={() => createObject(kind)}>＋ {kind === "relation_type" ? "新增关系类型" : kind === "relation" ? "新增关系实例" : kindLabels[kind] ?? kind}</button>)}</div>}</div>
+          <div className="object-panel-tools">{structure.master.searchable && <label className="object-search">搜索<input value={objectSearch} placeholder={usesRootCollections ? "名称、代码或标识" : "名称或稳定键"} onChange={(event) => setObjectSearch(event.target.value)} /></label>}{structure.master.source === "entities" && availableKinds.length > 1 && !structure.master.grouped && <label className="object-filter">对象类型<select value={kindFilter} onChange={(event) => setKindFilter(event.target.value)}><option value="all">全部类型</option>{availableKinds.map((kind) => <option key={kind} value={kind}>{kindLabels[kind] ?? kind}</option>)}</select></label>}{structure.master.create === "entity" && !structure.master.grouped && <div className="object-list-actions">{(kindsBySection[section] ?? []).map((kind) => <button type="button" className="editor-button editor-button-secondary add-object" key={kind} onClick={() => createObject(kind)}>＋ {kind === "relation_type" ? "新增关系类型" : kind === "relation" ? "新增关系实例" : kindLabels[kind] ?? kind}</button>)}</div>}{section === "public-knowledge" && <div className="object-list-actions"><button type="button" className="editor-button editor-button-secondary add-object" onClick={() => setResourceSourceCreateOpen(true)}>＋ 资源来源提示</button></div>}{section === "planning-instructions" && <div className="object-list-actions"><button type="button" className="editor-button editor-button-secondary add-object" onClick={createPlanningInstruction}>＋ 规划指引</button></div>}{section === "planning-recovery" && <div className="object-list-actions"><button type="button" className="editor-button editor-button-secondary add-object" onClick={() => createCollectionItem("recovery_hints")}>＋ 失败恢复策略</button></div>}</div>
           <div className="object-list-scroll">
-            {usesRootCollections ? <div className="collection-list-groups">
-              {singletonOwner && <section className="collection-list-group">
-                <header><div><h4>基础配置</h4><span>1 项</span></div></header>
-                {singletonOwnerVisible && <button type="button" className={`collection-list-item${collectionSelection?.owner === "singleton" ? " selected" : ""}`} onClick={() => setCollectionSelection({ owner: "singleton", key: singletonOwner.key })}><strong>{singletonOwner.label}</strong><span>{singletonOwner.summary}</span><code>{singletonOwner.key}</code></button>}
+            {usesRootCollections ? section === "public-knowledge" ? <>
+              {filteredCollectionItems.map((item) => <button type="button" className={`collection-list-item${collectionSelection?.owner === "collection" && collectionSelection.collection === item.collection && collectionSelection.identity === item.identity ? " selected" : ""}`} key={`${item.collection}:${item.identity}`} onClick={() => setCollectionSelection({ owner: "collection", collection: item.collection, identity: item.identity })}><strong>{item.title}</strong><span>{item.summary}</span><code>{item.identityLabel}</code></button>)}
+              {collectionItems.length === 0 && <p className="muted collection-list-empty">暂无资源来源提示</p>}
+            </> : section === "planning-instructions" ? <>
+              {planningInstructions.map((instruction, index) => ({ instruction, index })).filter(({ instruction }) => !objectSearch.trim() || instruction.toLocaleLowerCase().includes(objectSearch.trim().toLocaleLowerCase())).map(({ instruction, index }) => <button type="button" className={`collection-list-item${collectionSelection?.owner === "instruction" && collectionSelection.index === index ? " selected" : ""}`} key={`instruction-${index}`} onClick={() => setCollectionSelection({ owner: "instruction", index })}><strong>规划指引 {index + 1}</strong><span>{instruction || "尚未填写内容"}</span><code>planning.instructions.{index}</code></button>)}
+              {planningInstructions.length === 0 && <p className="muted collection-list-empty">暂无规划指引</p>}
+            </> : section === "planning-recovery" ? <>
+              {filteredCollectionItems.map((item) => <button type="button" className={`collection-list-item${collectionSelection?.owner === "collection" && collectionSelection.collection === item.collection && collectionSelection.identity === item.identity ? " selected" : ""}`} key={`${item.collection}:${item.identity}`} onClick={() => setCollectionSelection({ owner: "collection", collection: item.collection, identity: item.identity })}><strong>{item.title}</strong><span>{item.summary}</span><code>{item.identityLabel}</code></button>)}
+              {collectionItems.length === 0 && <p className="muted collection-list-empty">暂无失败恢复策略</p>}
+            </> : <div className="collection-list-groups">
+              {singletonOwners.length > 0 && <section className="collection-list-group">
+              <header><div><h4>初始化</h4><span>{singletonOwners.length} 项</span></div></header>
+                {visibleSingletonOwners.map((owner) => <button type="button" key={owner.key} className={`collection-list-item${(collectionSelection?.owner === "singleton" && collectionSelection.key === owner.key) || (owner.key === "planning-recovery" && collectionSelection?.owner === "collection" && collectionSelection.collection === "recovery_hints") ? " selected" : ""}`} onClick={() => setCollectionSelection({ owner: "singleton", key: owner.key })}><strong>{owner.label}</strong><span>{owner.summary}</span><code>{owner.key}</code></button>)}
               </section>}
               {collectionDefinitions.map((definition) => <section className="collection-list-group" key={definition.key}>
                 <header><div><h4>{definition.label}</h4><span>{collectionItems.filter((item) => item.collection === definition.key).length} 项</span></div><button type="button" className="editor-button editor-button-secondary" onClick={() => createCollectionItem(definition.key)}>＋ 新增{definition.singularLabel}</button></header>
@@ -745,7 +1116,18 @@ export function EditorPage() {
             </>}
           </div>
         </aside>}
-         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-initialization" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{structure.mode === "WORKFLOW" ? "工作流程" : structure.mode === "BROWSER" ? "浏览器" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div></header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-body-initialization" : ""}`}>{showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}{structure.workspace.renderer === "initialization" && <InitializationWorkspace document={local.definition_document} preview={initializationPreviewQuery.data ?? null} loading={initializationPreviewQuery.isPending} error={initializationPreviewQuery.error ? errorText(initializationPreviewQuery.error) : null} scenarioId={scenarioId} onChange={editDocument} onDeleteResourcePool={deleteInitializationResourcePool} />}{structure.workspace.renderer === "entity" && selected && <TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} initializationHref={`/scenarios/${scenarioId}/edit/initialization`} onDeleteFact={deleteFact} scenarioId={scenarioId} onChange={updateSelectedEntity} />}{["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} onCollectionMove={(direction) => { if (collectionSelection?.owner === "collection") moveCollectionItem(collectionSelection, direction); }} />}{structure.workspace.renderer === "workflow" && <ValidationPanel draft={serverDraft} published={publishedVersionQuery.data ?? null} validation={validation} initializationPreview={initializationPreviewQuery.data ?? null} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}{structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}</div></section>
+         <section className={`canvas editor-canvas${showWorldTopology ? " canvas-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-initialization" : ""}`}><header className="canvas-header"><div><p className="panel-kicker">{showWorldTopology ? "世界浏览" : structure.workspace.renderer === "initialization" ? "开局状态" : structure.workspace.renderer === "configuration-check" ? "检查与发布" : structure.mode === "WORKFLOW" ? "验证与发布" : "编辑区"}</p><h3>{workspaceTitle}</h3><p className="canvas-subtitle">{workspaceSubtitle}</p></div>{structure.workspace.renderer === "entity" && selected && <button type="button" className="editor-button editor-button-danger" onClick={() => void remove()}>删除{kindLabels[selected.kind] ?? "对象"}</button>}{section === "planning-instructions" && collectionSelection?.owner === "instruction" && <div className="button-row planning-header-actions"><button type="button" className="small" disabled={collectionSelection.index === 0} onClick={() => movePlanningInstruction(collectionSelection.index, "up")}>↑</button><button type="button" className="small" disabled={collectionSelection.index >= planningInstructions.length - 1} onClick={() => movePlanningInstruction(collectionSelection.index, "down")}>↓</button><button type="button" className="small danger" onClick={() => removePlanningInstruction(collectionSelection.index)}>删除</button></div>}{section === "planning-recovery" && collectionSelection?.owner === "collection" && selectedCollectionItem && <div className="button-row planning-header-actions"><button type="button" className="small" disabled={selectedCollectionItem.index === 0} onClick={() => moveCollectionItem(collectionSelection, "up")}>↑</button><button type="button" className="small" disabled={selectedCollectionItem.index >= collectionItems.length - 1} onClick={() => moveCollectionItem(collectionSelection, "down")}>↓</button><button type="button" className="small danger" onClick={() => removeCollectionItem(collectionSelection)}>删除</button></div>}{section === "public-knowledge" && collectionSelection?.owner === "collection" && selectedCollectionItem && <div className="button-row planning-header-actions"><button type="button" className="small" disabled={selectedCollectionItem.index === 0} onClick={() => moveCollectionItem(collectionSelection, "up")}>↑</button><button type="button" className="small" disabled={selectedCollectionItem.index >= collectionItems.length - 1} onClick={() => moveCollectionItem(collectionSelection, "down")}>↓</button><button type="button" className="small danger" onClick={() => removeCollectionItem(collectionSelection)}>删除</button></div>}</header><div className={`canvas-body${showWorldTopology ? " canvas-body-topology" : ""}${structure.workspace.renderer === "initialization" ? " canvas-body-initialization" : ""}`}>
+          {section === "overview" && completenessQuery.data && <CompletenessSummary result={completenessQuery.data} scenarioId={scenarioId} />}
+          {showWorldTopology && <WorldGraph document={local.definition_document} context={topologyContext} selection={topologySelection} focusNodeKey={topologyFocusNodeKey} onContextChange={setTopologyContext} onSelectionChange={setTopologySelection} onOpenEditor={openTopologyEditor} onFocusNodeConsumed={() => setTopologyFocusNodeKey(null)} />}
+          {structure.workspace.renderer === "initialization" && <InitializationWorkspace document={local.definition_document} preview={initializationPreviewQuery.data ?? null} loading={initializationPreviewQuery.isPending} error={initializationPreviewQuery.error ? errorText(initializationPreviewQuery.error) : null} scenarioId={scenarioId} onChange={editDocument} onDeleteResourcePool={deleteInitializationResourcePool} onDeleteRootCollectionItem={deleteRootCollectionItemFromInitialization} onAddRegionResourceKnowledge={addRegionResourceKnowledge} />}
+          {structure.workspace.renderer === "configuration-check" && completenessQuery.isPending && <p className="muted">正在检查当前工作副本…</p>}
+          {structure.workspace.renderer === "configuration-check" && completenessQuery.error && <div className="conflict-banner"><p>暂时无法完成配置检查：{errorText(completenessQuery.error)}</p></div>}
+          {structure.workspace.renderer === "configuration-check" && completenessQuery.data && <CompletenessPanel result={completenessQuery.data} scenarioId={scenarioId} onCreate={createGuidedDependency} />}
+          {structure.workspace.renderer === "entity" && selected && <><TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} initializationHref={`/scenarios/${scenarioId}/edit/initialization`} onDeleteFact={deleteFact} onDeleteNested={(request) => void removeNested(request)} scenarioId={scenarioId} onChange={updateSelectedEntity} />{completenessQuery.data && <ContextualCompleteness result={completenessQuery.data} scenarioId={scenarioId} kind={selected.kind} objectKey={selected.key} onCreate={createGuidedDependency} />}</>}
+          {["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <TypedEditor section={section} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onDeleteNested={(request) => void removeNested(request)} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} onCollectionRemoveSelection={removeCollectionItem} onCollectionMove={(direction) => { if (collectionSelection?.owner === "collection") moveCollectionItem(collectionSelection, direction); }} onInstructionChange={updatePlanningInstruction} onInstructionRemove={removePlanningInstruction} onInstructionMove={movePlanningInstruction} />}
+          {structure.workspace.renderer === "workflow" && <ValidationPanel draft={serverDraft} published={publishedVersionQuery.data ?? null} validation={validation} initializationPreview={initializationPreviewQuery.data ?? null} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} onIssue={focusIssue} />}
+          {structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}
+        </div></section>
         {structure.capabilities.inspector && <aside className={`inspector inspector-new${inspectorOpen ? " is-open" : " is-collapsed"}`}><div className="inspector-heading"><div><p className="panel-kicker">详情</p><h3>{showWorldTopology ? "拓扑检查器" : "检查器"}</h3></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen(false)}>收起</button></div><div className="inspector-scroll">
           {showWorldTopology ? <>
             {!topologySelection && <div className="inspector-empty"><strong>未选择拓扑对象</strong><p className="muted">单击范围或实体查看摘要，双击进入下一层。</p></div>}
@@ -753,7 +1135,7 @@ export function EditorPage() {
             {topologyNode && <><section className="inspector-section"><p className="inspector-section-title">实体摘要</p><h4 className="topology-inspector-title">{topologyNode.name}</h4><p className="muted machine-key">{topologyNode.key}</p><div className="topology-detail-list"><span>类型 <strong>{topologyNode.nodeTypeName}</strong></span><span>所在范围 <strong>{topologyNode.scopeKeys.join("、") || "未归属"}</strong></span><span>直接关系 <strong>{topologyNode.relationCount}</strong></span><span>事实 <strong>{topologyNode.factCount}</strong></span></div></section><section className="inspector-section"><p className="inspector-section-title">邻域操作</p><button type="button" className="editor-button editor-button-primary" onClick={() => setTopologyContext({ kind: "entity", entityKey: topologyNode.key, scopeKey: topologyNode.scopeKeys[0] ?? findScopeForNode(local.definition_document, topologyNode.key) })}>聚焦关系</button><button type="button" className="editor-button editor-button-secondary" onClick={() => openTopologyEditor(topologyNode.key)}>在编辑器中打开</button></section>{topologyNeighborhood && <section className="inspector-section"><p className="inspector-section-title">一跳关系</p>{topologyNeighborhood.relations.length === 0 ? <p className="muted">没有直接关系。</p> : topologyNeighborhood.relations.map((relation) => <p className="topology-relation-summary" key={relation.key}>{relation.sourceNodeName} <span>{relation.relationTypeKey}</span> {relation.targetNodeName}</p>)}</section>}</>}
             {topologyPortal && <section className="inspector-section"><p className="inspector-section-title">边界出口</p><h4 className="topology-inspector-title">→ {topologyPortal.neighborScopeName}</h4><p className="muted">{topologyPortal.transportNodeNames.join("、") || topologyPortal.relationSummaries.join("、") || "边界连接"}</p><div className="inspector-actions"><button type="button" className="editor-button editor-button-primary" onClick={() => { setTopologyContext({ kind: "scope", scopeKey: topologyPortal.neighborScopeKey }); setTopologySelection({ kind: "scope", key: topologyPortal.neighborScopeKey }); }}>前往 {topologyPortal.neighborScopeName}</button>{topologyPortal.transportNodeKeys.length === 1 && <button type="button" className="editor-button editor-button-secondary" onClick={() => openTopologyEditor(topologyPortal.transportNodeKeys[0])}>打开连接对象</button>}</div></section>}
             {topologyRelation && <section className="inspector-section"><p className="inspector-section-title">关系摘要</p><h4 className="topology-inspector-title">{topologyRelation.relationTypeKey}</h4><p>{topologyRelation.sourceNodeName} → {topologyRelation.targetNodeName}</p><code className="machine-key">{topologyRelation.key}</code></section>}
-          </> : !selected ? <div className="inspector-empty"><strong>未选择对象</strong><p className="muted">选择一个对象后查看身份、引用和危险操作。</p></div> : <><section className="inspector-section"><p className="inspector-section-title">对象身份</p>{typeof selected.value.name === "string" && <label>显示名称<input value={objectDisplayValue(selected.value, selected.key)} onChange={(event) => changeName(event.target.value)} /></label>}<label>{selected.kind === "public_reference" ? "语义身份" : selected.kind === "relation" && !selected.value.key ? "复合身份" : "稳定键"}<input readOnly value={selected.key} /></label></section><section className="inspector-section"><p className="inspector-section-title">引用关系</p>{usedBy.length === 0 ? <p className="muted">没有对象引用。</p> : usedBy.map((edge, index) => edge.source.object_key ? <Link key={index} to={editorLocatorHref({ owner: "entity", section: sectionForKind(edge.source.object_kind), kind: edge.source.object_kind as EntityKind, objectKey: edge.source.object_key, fieldPath: edge.source.field_path }, scenarioId)}>{kindLabels[edge.source.object_kind] ?? edge.source.object_kind} · {edge.source.object_key}</Link> : <p className="muted" key={index}>{kindLabels[edge.source.object_kind] ?? edge.source.object_kind} · {edge.source.field_path}</p>)}</section><section className="inspector-section inspector-danger"><p className="inspector-section-title">危险操作</p><div className="button-row">{structure.capabilities.rename && (selected.kind !== "relation" || typeof selected.value.key === "string") && <button type="button" className="editor-button editor-button-secondary" onClick={() => void rename()}>重命名稳定键</button>}<button type="button" className="editor-button editor-button-danger" onClick={() => void remove()}>删除</button></div></section></>}
+          </> : !selected ? <div className="inspector-empty"><strong>未选择对象</strong><p className="muted">选择一个对象后查看身份、引用和危险操作。</p></div> : <><section className="inspector-section"><p className="inspector-section-title">对象身份</p>{typeof selected.value.name === "string" && <label>显示名称<input value={objectDisplayValue(selected.value, selected.key)} onChange={(event) => changeName(event.target.value)} /></label>}<label>{selected.kind === "public_reference" ? "语义身份" : selected.kind === "relation" && !selected.value.key ? "复合身份" : "稳定键"}<input readOnly value={selected.key} /></label></section><section className="inspector-section"><p className="inspector-section-title">引用关系</p>{usedBy.length === 0 ? <p className="muted">没有对象引用。</p> : usedBy.map((edge, index) => edge.source.object_key ? <Link key={index} to={editorLocatorHref({ owner: "entity", section: sectionForKind(edge.source.object_kind), kind: edge.source.object_kind as EntityKind, objectKey: edge.source.object_key, fieldPath: edge.source.field_path }, scenarioId)}>{kindLabels[edge.source.object_kind] ?? edge.source.object_kind} · {edge.source.object_key}</Link> : <p className="muted" key={index}>{kindLabels[edge.source.object_kind] ?? edge.source.object_kind} · {edge.source.field_path}</p>)}</section><section className="inspector-section inspector-danger"><p className="inspector-section-title">危险操作</p><div className="button-row">{structure.capabilities.rename && (selected.kind !== "relation" || typeof selected.value.key === "string") && <button type="button" className="editor-button editor-button-secondary" onClick={requestRename}>重命名稳定键</button>}<button type="button" className="editor-button editor-button-danger" onClick={() => void remove()}>删除</button></div></section></>}
         </div></aside>}
       </div>
     </section>

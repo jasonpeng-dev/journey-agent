@@ -269,13 +269,24 @@ class DraftDeleteObjectRequest(DraftRevisionRequest):
 
 
 class DraftTransformOperation(ApiModel):
-    kind: Literal["RENAME_KEY", "DELETE_OBJECT", "DELETE_FACT"]
+    kind: Literal[
+        "RENAME_KEY",
+        "DELETE_OBJECT",
+        "DELETE_FACT",
+        "DELETE_ROOT_COLLECTION_ITEM",
+        "DELETE_NESTED",
+    ]
     object_kind: str = Field(min_length=1, max_length=80)
     old_key: str | None = Field(default=None, min_length=1, max_length=100)
     new_key: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,79}$")
     object_key: str | None = Field(default=None, min_length=1, max_length=100)
     node_key: str | None = Field(default=None, min_length=1, max_length=100)
     fact_key: str | None = Field(default=None, min_length=1, max_length=100)
+    collection: str | None = Field(default=None, min_length=1, max_length=100)
+    identity: str | None = Field(default=None, min_length=1, max_length=200)
+    parent_kind: str | None = Field(default=None, min_length=1, max_length=80)
+    parent_key: str | None = Field(default=None, min_length=1, max_length=100)
+    nested_key: str | None = Field(default=None, min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def validate_operation_fields(self) -> DraftTransformOperation:
@@ -286,6 +297,11 @@ class DraftTransformOperation(ApiModel):
                 or self.object_key is not None
                 or self.node_key is not None
                 or self.fact_key is not None
+                or self.collection is not None
+                or self.identity is not None
+                or self.parent_kind is not None
+                or self.parent_key is not None
+                or self.nested_key is not None
             ):
                 raise ValueError("RENAME_KEY requires old_key and new_key only")
         elif self.kind == "DELETE_OBJECT":
@@ -295,17 +311,59 @@ class DraftTransformOperation(ApiModel):
                 or self.new_key is not None
                 or self.node_key is not None
                 or self.fact_key is not None
+                or self.collection is not None
+                or self.identity is not None
+                or self.parent_kind is not None
+                or self.parent_key is not None
+                or self.nested_key is not None
             ):
                 raise ValueError("DELETE_OBJECT requires object_key only")
+        elif self.kind == "DELETE_FACT":
+            if (
+                self.object_kind != "node"
+                or self.node_key is None
+                or self.fact_key is None
+                or self.object_key is not None
+                or self.old_key is not None
+                or self.new_key is not None
+                or self.collection is not None
+                or self.identity is not None
+                or self.parent_kind is not None
+                or self.parent_key is not None
+                or self.nested_key is not None
+            ):
+                raise ValueError("DELETE_FACT requires node_key and fact_key only")
+        elif self.kind == "DELETE_ROOT_COLLECTION_ITEM":
+            if (
+                self.collection is None
+                or self.identity is None
+                or self.old_key is not None
+                or self.new_key is not None
+                or self.object_key is not None
+                or self.node_key is not None
+                or self.fact_key is not None
+                or self.parent_kind is not None
+                or self.parent_key is not None
+                or self.nested_key is not None
+            ):
+                raise ValueError(
+                    "DELETE_ROOT_COLLECTION_ITEM requires collection and identity only"
+                )
         elif (
-            self.object_kind != "node"
-            or self.node_key is None
-            or self.fact_key is None
-            or self.object_key is not None
+            self.parent_kind is None
+            or self.parent_key is None
+            or self.collection is None
+            or self.nested_key is None
             or self.old_key is not None
             or self.new_key is not None
+            or self.object_key is not None
+            or self.node_key is not None
+            or self.fact_key is not None
+            or self.identity is not None
         ):
-            raise ValueError("DELETE_FACT requires node_key and fact_key only")
+            raise ValueError(
+                "DELETE_NESTED requires parent_kind, parent_key, collection, and nested_key"
+            )
         return self
 
 
@@ -396,11 +454,52 @@ class DraftReferenceAnalysisRequest(DraftRevisionRequest):
     definition_document: dict[str, Any]
 
 
+class DraftCompletenessRequest(DraftRevisionRequest):
+    definition_document: dict[str, Any]
+
+
 class DraftReferenceAnalysisResponse(ApiModel):
     scenario_id: UUID
     base_revision: int = Field(ge=1)
     source: Literal["WORKING_COPY"]
     references: list[ReferenceEdgeResponse]
+
+
+class CompletenessItemResponse(ApiModel):
+    key: str
+    title: str
+    level: Literal[
+        "COMPLETE",
+        "INCOMPLETE_REQUIRED",
+        "VALID_BUT_UNCONFIGURED",
+        "OPTIONAL_ENHANCEMENT",
+        "LEGACY_FALLBACK",
+    ]
+    dependency_kind: Literal[
+        "HARD_REQUIRED",
+        "PUBLISH_REQUIRED",
+        "RUNTIME_REQUIRED",
+        "SEMANTIC_REQUIRED",
+        "RECOMMENDED",
+        "OPTIONAL",
+        "DERIVED",
+        "LEGACY",
+        "NONE",
+    ]
+    message: str
+    path: str
+    locator: ObjectLocator | None = None
+    action: Literal["OPEN", "CREATE", "CONFIGURE", "NONE"] = "OPEN"
+
+
+class DraftCompletenessResponse(ApiModel):
+    scenario_id: UUID
+    base_revision: int = Field(ge=1)
+    items: list[CompletenessItemResponse]
+    required_missing: int = Field(ge=0)
+    recommended_missing: int = Field(ge=0)
+    validation_issue_count: int = Field(ge=0)
+    reference_edge_count: int = Field(ge=0)
 
 
 class NewGameRequest(ApiModel):
@@ -986,7 +1085,10 @@ class PlayerPacingRequest(ApiModel):
 __all__ = [
     "ApprovalDecisionRequest",
     "CheckpointGameRequest",
+    "CompletenessItemResponse",
     "DeveloperGameSnapshotResponse",
+    "DraftCompletenessRequest",
+    "DraftCompletenessResponse",
     "DraftDeleteObjectRequest",
     "DraftPublishRequest",
     "DraftReferenceAnalysisRequest",

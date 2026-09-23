@@ -1,29 +1,28 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { Link, MemoryRouter, useLocation } from "react-router-dom";
+import { useState } from "react";
+import { afterEach, describe, expect, it } from "vitest";
+import { Link, MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { useUnsavedChangesGuard } from "./useUnsavedChangesGuard";
 
 function GuardHarness() {
-  useUnsavedChangesGuard(true, "Unsaved changes");
-  return <><Link to="/next">Leave</Link><output>{useLocation().pathname}</output></>;
+  const navigate = useNavigate();
+  const [pending, setPending] = useState<string | null>(null);
+  useUnsavedChangesGuard(true, "Unsaved changes", setPending);
+  return <><Link to="/next">Leave</Link><output role="status">{useLocation().pathname}</output>{pending && <div role="dialog" aria-label="Unsaved changes"><p>Unsaved changes</p><button onClick={() => setPending(null)}>Cancel</button><button onClick={() => { const target = pending; setPending(null); navigate(new URL(target).pathname); }}>Leave</button></div>}</>;
 }
 
 afterEach(cleanup);
 
 describe("unsaved route guard", () => {
   it("protects refresh and in-app links without owning draft state", () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<MemoryRouter initialEntries={["/current"]}><GuardHarness /></MemoryRouter>);
 
     const beforeUnload = new Event("beforeunload", { cancelable: true });
     expect(window.dispatchEvent(beforeUnload)).toBe(false);
     fireEvent.click(screen.getByRole("link", { name: "Leave" }));
-    expect(confirm).toHaveBeenCalledWith("Unsaved changes");
     expect(screen.getByRole("status")).toHaveTextContent("/current");
-
-    confirm.mockReturnValue(true);
-    fireEvent.click(screen.getByRole("link", { name: "Leave" }));
+    fireEvent.click(screen.getByRole("button", { name: "Leave" }));
     expect(screen.getByRole("status")).toHaveTextContent("/next");
   });
 });

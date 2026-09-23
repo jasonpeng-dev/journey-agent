@@ -399,6 +399,170 @@ def test_working_copy_transform_and_reference_analysis_do_not_persist(client: Te
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "SCENARIO_DRAFT_CONFLICT"
 
+    # Authoring preflight intentionally analyzes the raw working shape instead
+    # of parsing the whole ScenarioDefinition first: deletion can itself be a
+    # repair for an unrelated invalid field.
+    invalid_working = deepcopy(original)
+    invalid_working["actions"][0]["unrelated_invalid_field"] = {"value_type": "NOT_A_SCHEMA_VALUE"}
+    invalid_working["world"]["nodes"][0]["facts"].append(
+        {
+            "key": "repair_candidate",
+            "name": "Repair candidate",
+            "value_type": "BOOLEAN",
+            "initial_value": False,
+        }
+    )
+    invalid_delete = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/transform",
+        json={
+            "expected_revision": 1,
+            "definition_document": invalid_working,
+            "operation": {
+                "kind": "DELETE_FACT",
+                "object_kind": "node",
+                "node_key": node_key,
+                "fact_key": "repair_candidate",
+            },
+        },
+    )
+    assert invalid_delete.status_code == 200, invalid_delete.text
+    assert invalid_delete.json()["definition_document"]["actions"][0]["unrelated_invalid_field"]
+    assert all(
+        fact["key"] != "repair_candidate"
+        for fact in invalid_delete.json()["definition_document"]["world"]["nodes"][0]["facts"]
+    )
+
+    root_working = deepcopy(original)
+    root_working["initialization"]["resource_pools"].append(
+        {
+            "pool_key": "working_pool",
+            "resource_key": "medicine",
+            "region_key": None,
+            "facility_key": None,
+            "quantity": 1,
+            "reserved_value": 0,
+            "visibility": "VISIBLE",
+            "availability": "AVAILABLE",
+            "survey_discoverable": False,
+        }
+    )
+    root_deleted = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/transform",
+        json={
+            "expected_revision": 1,
+            "definition_document": root_working,
+            "operation": {
+                "kind": "DELETE_ROOT_COLLECTION_ITEM",
+                "object_kind": "initialization",
+                "collection": "resource_pools",
+                "identity": "working_pool",
+            },
+        },
+    )
+    assert root_deleted.status_code == 200, root_deleted.text
+    assert all(
+        item["pool_key"] != "working_pool"
+        for item in root_deleted.json()["definition_document"]["initialization"]["resource_pools"]
+    )
+
+    nested_working = deepcopy(original)
+    nested_action = next(
+        item for item in nested_working["actions"] if item["key"] == "repair_facility"
+    )
+    nested_action["parameters"].append(
+        {
+            "key": "working_parameter",
+            "name": "Working parameter",
+            "value_type": "INTEGER",
+            "required": False,
+            "minimum": 0,
+            "maximum": 10,
+            "allowed_values": [],
+            "default": 1,
+        }
+    )
+    nested_working["rules"].append(
+        {
+            "key": "working_parameter_rule",
+            "phase": "RESOLVE",
+            "action_key": "repair_facility",
+            "priority": 0,
+            "condition": {
+                "kind": "PARAMETER_COMPARE",
+                "parameter_key": "working_parameter",
+                "operator": "GTE",
+                "value": 1,
+            },
+            "effects": [],
+        }
+    )
+    blocked_nested = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/transform",
+        json={
+            "expected_revision": 1,
+            "definition_document": nested_working,
+            "operation": {
+                "kind": "DELETE_NESTED",
+                "object_kind": "action",
+                "parent_kind": "action",
+                "parent_key": "repair_facility",
+                "collection": "parameters",
+                "nested_key": "working_parameter",
+            },
+        },
+    )
+    assert blocked_nested.status_code == 409, blocked_nested.text
+    assert blocked_nested.json()["error"]["code"] == "SCENARIO_NESTED_OBJECT_REFERENCED"
+    assert blocked_nested.json()["error"]["details"]["references"]
+
+    nested_without_reference = deepcopy(nested_working)
+    nested_without_reference["rules"][-1]["condition"] = None
+    deleted_nested = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/transform",
+        json={
+            "expected_revision": 1,
+            "definition_document": nested_without_reference,
+            "operation": {
+                "kind": "DELETE_NESTED",
+                "object_kind": "action",
+                "parent_kind": "action",
+                "parent_key": "repair_facility",
+                "collection": "parameters",
+                "nested_key": "working_parameter",
+            },
+        },
+    )
+    assert deleted_nested.status_code == 200, deleted_nested.text
+    assert next(
+        item for item in deleted_nested.json()["definition_document"]["actions"]
+        if item["key"] == "repair_facility"
+    )["parameters"] == []
+
+
+def test_working_copy_completeness_is_readonly_and_tolerates_temporary_invalid_shape(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="completeness_case")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    working = deepcopy(draft["definition_document"])
+    working["temporary_editor_note"] = {"not_in_schema": True}
+    working["initialization"]["start_node_key"] = "temporary_missing_node"
+
+    response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/completeness",
+        json={"expected_revision": draft["revision"], "definition_document": working},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["base_revision"] == draft["revision"]
+    assert payload["required_missing"] > 0
+    assert payload["validation_issue_count"] > 0
+    assert any(item["key"] == "initialization.start-node" for item in payload["items"])
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == draft["revision"]
+    assert persisted["definition_document"] == draft["definition_document"]
 
 @pytest.mark.parametrize("example_key", ["linjiang_infrastructure_recovery_v2_0"])
 def test_generic_editor_round_trip_remains_engine_parseable(

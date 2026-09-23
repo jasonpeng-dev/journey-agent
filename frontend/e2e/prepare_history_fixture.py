@@ -27,6 +27,7 @@ from app.infrastructure.db.models import (
     GameInstanceFactState,
     PlayerExecutionCheckpoint,
     Scenario,
+    ScenarioDraft,
     ScenarioVersion,
     WorldOperation,
 )
@@ -34,8 +35,34 @@ from app.infrastructure.db.session import SessionLocal
 from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
+from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import GENERIC_TEST
 
-SCENARIO_KEY = "linjiang_infrastructure_recovery_v2_0"
+SCENARIO_KEY = "generic_authoring_e2e"
+SCENARIO_NAME = "Generic Authoring Scenario"
+
+
+def ensure_generic_scenario(db):  # type: ignore[no-untyped-def]
+    scenario = db.scalar(select(Scenario).where(Scenario.key == SCENARIO_KEY))
+    if scenario is None:
+        service = ScenarioService(db)
+        scenario = service.create_from_definition(
+            key=SCENARIO_KEY,
+            name=SCENARIO_NAME,
+            definition=GENERIC_TEST,
+        )
+        db.flush()
+        draft = db.get(ScenarioDraft, scenario.id)
+        if draft is None:
+            raise RuntimeError("generic E2E Scenario Draft was not created")
+        service.publish_draft(scenario.id, expected_revision=draft.revision)
+        db.commit()
+    if scenario.current_published_version_id is None:
+        raise RuntimeError("generic E2E ScenarioVersion was not published")
+    version = db.get(ScenarioVersion, scenario.current_published_version_id)
+    if version is None:
+        raise RuntimeError("generic E2E ScenarioVersion is unavailable")
+    return scenario, version
 
 
 def create_fixture(kind: str) -> dict[str, str]:
@@ -44,16 +71,17 @@ def create_fixture(kind: str) -> dict[str, str]:
 
     db = SessionLocal()
     try:
-        scenario = db.scalar(select(Scenario).where(Scenario.key == SCENARIO_KEY))
-        if scenario is None or scenario.current_published_version_id is None:
-            raise RuntimeError("current Linjiang production ScenarioVersion is unavailable")
-        version = db.get(ScenarioVersion, scenario.current_published_version_id)
-        if version is None:
-            raise RuntimeError("current Linjiang production ScenarioVersion is unavailable")
+        scenario, version = ensure_generic_scenario(db)
         definition = ScenarioVersionRepository(db).load(version.id).definition
+        if not definition.objectives:
+            raise RuntimeError("generic E2E Scenario has no authored objective")
         objective = definition.objectives[0]
-        action = next(item for item in definition.actions if item.key == "inspect")
-        target = next(item for item in definition.world.nodes if item.key == "central_telecom_hub")
+        action = definition.actions[0]
+        target = next(
+            (item for item in definition.world.nodes if item.facts),
+            definition.world.nodes[0],
+        )
+        outcome_code = action.expected_outcomes[0].code if action.expected_outcomes else "SUCCESS"
 
         runtime = GameLifecycleService(db).create(
             scenario_version_id=version.id,
@@ -111,7 +139,7 @@ def create_fixture(kind: str) -> dict[str, str]:
                 "target_key": target.key,
                 "parameters": {},
             },
-            expected_outcome={"outcome_code": "INSPECTED"},
+            expected_outcome={"outcome_code": outcome_code},
             actual_result={"success": True},
             attempts=1,
             started_at=now,
@@ -123,16 +151,11 @@ def create_fixture(kind: str) -> dict[str, str]:
         changes = [
             {
                 "kind": "FACT_REVEALED",
-                "key": f"{target.key}.operational",
-                "name": "operational",
-                "value": False,
-            },
-            {
-                "kind": "FACT_REVEALED",
-                "key": f"{target.key}.power_supply",
-                "name": "power_supply",
-                "value": "AVAILABLE",
-            },
+                "key": f"{target.key}.{fact.key}",
+                "name": fact.name,
+                "value": fact.model_dump(mode="json").get("initial_value"),
+            }
+            for fact in target.facts[:2]
         ]
         db.add(
             WorldOperation(
@@ -148,17 +171,17 @@ def create_fixture(kind: str) -> dict[str, str]:
                 parameters={},
                 outcome={
                     "success": True,
-                    "outcome_code": "INSPECTED",
+                    "outcome_code": outcome_code,
                     "knowledge_changes": changes,
                 },
                 idempotency_key=f"browser-smoke-operation-{uuid4()}",
                 resolved_at=now,
             )
         )
-        for fact_key in ("operational", "power_supply"):
+        for fact in target.facts[:2]:
             fact_state = db.get(
                 GameInstanceFactState,
-                (runtime.instance.id, target.key, fact_key),
+                (runtime.instance.id, target.key, fact.key),
             )
             if fact_state is not None:
                 fact_state.visibility = Visibility.KNOWN
@@ -180,7 +203,12 @@ def create_fixture(kind: str) -> dict[str, str]:
             task.completed_at = now
         db.flush()
         db.commit()
-        return {"gameId": str(runtime.instance.id)}
+        return {
+            "gameId": str(runtime.instance.id),
+            "scenarioName": scenario.name,
+            "targetName": target.name,
+            "actionName": action.name,
+        }
     except Exception:
         db.rollback()
         raise
@@ -205,7 +233,7 @@ def append_post_fork_task(game_id: str) -> dict[str, str]:
             raise RuntimeError("forked fixture ConversationSession is unavailable")
         version = db.get(ScenarioVersion, game.scenario_version_id)
         if version is None:
-            raise RuntimeError("forked production ScenarioVersion is unavailable")
+            raise RuntimeError("forked generic ScenarioVersion is unavailable")
         definition = ScenarioVersionRepository(db).load(version.id).definition
         objective = definition.objectives[0]
         task = GenericAgentService(
@@ -232,13 +260,22 @@ def append_post_fork_task(game_id: str) -> dict[str, str]:
 
 
 def main() -> None:
+    if len(sys.argv) == 2 and sys.argv[1] == "scenario":
+        db = SessionLocal()
+        try:
+            ensure_generic_scenario(db)
+        finally:
+            db.close()
+        return
     if len(sys.argv) == 2 and sys.argv[1] in {"presentation", "fork"}:
         print(json.dumps(create_fixture(sys.argv[1])))
         return
     if len(sys.argv) == 3 and sys.argv[1] == "append":
         print(json.dumps(append_post_fork_task(sys.argv[2])))
         return
-    raise ValueError("usage: prepare_history_fixture.py presentation|fork | append GAME_ID")
+    raise ValueError(
+        "usage: prepare_history_fixture.py scenario|presentation|fork | append GAME_ID"
+    )
 
 
 if __name__ == "__main__":

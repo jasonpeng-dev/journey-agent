@@ -28,9 +28,30 @@ export type ReferenceIndex = { scenario_id: string; revision: number; references
 export type DraftTransformOperation =
   | { kind: "RENAME_KEY"; object_kind: string; old_key: string; new_key: string }
   | { kind: "DELETE_OBJECT"; object_kind: string; object_key: string }
-  | { kind: "DELETE_FACT"; object_kind: "node"; node_key: string; fact_key: string };
+  | { kind: "DELETE_FACT"; object_kind: "node"; node_key: string; fact_key: string }
+  | { kind: "DELETE_ROOT_COLLECTION_ITEM"; object_kind: string; collection: string; identity: string }
+  | { kind: "DELETE_NESTED"; object_kind: string; parent_kind: string; parent_key: string; collection: string; nested_key: string };
 export type WorkingCopyReferenceAnalysis = { scenario_id: string; base_revision: number; source: "WORKING_COPY"; references: ReferenceEdge[] };
 export type WorkingCopyTransformResult = WorkingCopyReferenceAnalysis & { definition_document: Record<string, unknown> };
+export type CompletenessItem = {
+  key: string;
+  title: string;
+  level: "COMPLETE" | "INCOMPLETE_REQUIRED" | "VALID_BUT_UNCONFIGURED" | "OPTIONAL_ENHANCEMENT" | "LEGACY_FALLBACK";
+  dependency_kind: "HARD_REQUIRED" | "PUBLISH_REQUIRED" | "RUNTIME_REQUIRED" | "SEMANTIC_REQUIRED" | "RECOMMENDED" | "OPTIONAL" | "DERIVED" | "LEGACY" | "NONE";
+  message: string;
+  path: string;
+  locator?: Locator | null;
+  action: "OPEN" | "CREATE" | "CONFIGURE" | "NONE";
+};
+export type CompletenessResult = {
+  scenario_id: string;
+  base_revision: number;
+  items: CompletenessItem[];
+  required_missing: number;
+  recommended_missing: number;
+  validation_issue_count: number;
+  reference_edge_count: number;
+};
 
 export type ValidationResult = {
   scenario_id: string; revision: number; content_hash: string | null; publish_ready: boolean;

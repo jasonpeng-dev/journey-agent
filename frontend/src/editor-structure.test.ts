@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { sectionStructure, sectionStructureRegistry, type SectionMode } from "./editor-structure";
 import { entityRegistry, rootFieldRegistry } from "./editor-registry";
+import { editorTaxonomyGroups, sectionLabels } from "./ui";
 
 const expectedModes: Record<SectionMode, string[]> = {
   SINGLETON: ["overview", "goal-resolution"],
@@ -17,17 +18,19 @@ const expectedModes: Record<SectionMode, string[]> = {
     "actions",
     "rules",
     "derived-states",
+    "planning-instructions",
+    "planning-recovery",
     "public-knowledge",
     "public-references",
   ],
   HYBRID: ["planning"],
   BROWSER: ["world", "initialization"],
-  WORKFLOW: ["validation"],
+  WORKFLOW: ["configuration-check", "validation"],
 };
 
 describe("section structure registry", () => {
-  it("freezes the 19 routes into the five product modes", () => {
-    expect(Object.keys(sectionStructureRegistry)).toHaveLength(19);
+  it("freezes the authoring and legacy routes into the five product modes", () => {
+    expect(Object.keys(sectionStructureRegistry)).toHaveLength(22);
     for (const [mode, sections] of Object.entries(expectedModes)) {
       expect(Object.values(sectionStructureRegistry).filter((item) => item.mode === mode).map((item) => item.section)).toEqual(sections);
     }
@@ -48,6 +51,11 @@ describe("section structure registry", () => {
   it("does not infer shell mode or controls from current collection contents", () => {
     expect(sectionStructure("overview").master).toMatchObject({ visible: false, searchable: false, create: "none" });
     expect(sectionStructure("validation").master).toMatchObject({ visible: false, searchable: false, create: "none" });
+    expect(sectionStructure("configuration-check")).toMatchObject({
+      mode: "WORKFLOW",
+      master: { visible: false, source: "none", create: "none" },
+      workspace: { renderer: "configuration-check" },
+    });
     expect(sectionStructure("world")).toMatchObject({
       mode: "BROWSER",
       master: { source: "topology", create: "none" },
@@ -77,5 +85,12 @@ describe("section structure registry", () => {
     expect(entityRegistry.actor.fields.map((field) => field.path)).not.toEqual(expect.arrayContaining(["initial_node_key", "command_reachability"]));
     expect(entityRegistry.relation.fields.map((field) => field.path)).not.toContain("initial_visibility");
     expect(entityRegistry.resource.fields.map((field) => field.path)).not.toContain("initial_value");
+  });
+
+  it("separates configuration checks from validation and publishing", () => {
+    const group = editorTaxonomyGroups.find((entry) => entry.label === "检查与发布");
+    expect(group?.items).toEqual(["configuration-check", "validation"]);
+    expect(sectionLabels["configuration-check"]).toBe("配置检查");
+    expect(sectionLabels.validation).toBe("验证与发布");
   });
 });

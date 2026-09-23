@@ -1,8 +1,10 @@
-import { type KeyboardEvent, useEffect, useMemo, useState } from "react";
+import { type KeyboardEvent, useEffect, useId, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { authoredDisplayName, type JsonObject } from "../editor";
+import type { RootCollectionKey } from "../editor-collections";
 import { authoredReferenceName } from "./editor/ReferencePicker";
+import { BooleanControl } from "./editor/FormPrimitives";
 import type { InitializationFinding, InitializationPreview, InitializationProjectionItem } from "../types";
 import { displayEnumValue } from "../ui";
 
@@ -14,15 +16,17 @@ type Props = {
   scenarioId: string;
   onChange: (document: JsonObject) => void;
   onDeleteResourcePool: (poolKey: string) => void;
+  onDeleteRootCollectionItem?: (collection: RootCollectionKey, identity: string, subject: string) => void;
+  onAddRegionResourceKnowledge?: () => void;
 };
 
 const domainLabels: Record<string, string> = {
-  basic: "基础配置", nodes: "节点", actors: "参与者", resources: "资源",
+  basic: "开局入口", nodes: "节点", actors: "参与者", resources: "资源",
   relations: "关系", derived: "派生状态预览",
 };
 
 const subgroupHeadings: Record<string, string> = {
-  basic: "配置分组", nodes: "节点类型", actors: "角色", resources: "资源分类",
+  basic: "开局入口", nodes: "节点类型", actors: "角色", resources: "资源分类",
   relations: "关系类型", derived: "派生状态",
 };
 
@@ -130,8 +134,9 @@ function SelectField({ label, value, choices, onChange, source, enumType }: { la
   return <label className="initialization-field"><span>{label}{source && <SourceBadge source={source} />}</span><select value={String(value ?? "")} onChange={(event) => onChange(event.target.value)}>{choices.map((choice) => <option value={choice.key} key={choice.key}>{enumType ? displayEnumValue(enumType, choice.key) : choice.name}</option>)}</select></label>;
 }
 
-function ScalarField({ label, value, onChange, source, type = "text" }: { label: string; value: unknown; onChange: (value: unknown) => void; source?: string; type?: "text" | "number" | "checkbox" }) {
-  if (type === "checkbox") return <label className="initialization-field initialization-check"><span>{label}{source && <SourceBadge source={source} />}</span><span className="initialization-checkbox-control"><input type="checkbox" checked={value === true} onChange={(event) => onChange(event.target.checked)} />{value === true ? "是" : "否"}</span></label>;
+function ScalarField({ label, value, onChange, source, type = "text" }: { label: string; value: unknown; onChange: (value: unknown) => void; source?: string; type?: "text" | "number" | "boolean" | "checkbox" }) {
+  const controlId = useId();
+  if (type === "boolean" || type === "checkbox") return <BooleanControl label={label} path={`initialization.${label}.${controlId}`} value={value} onChange={onChange} headingAddon={source && <SourceBadge source={source} />} layout="stacked" />;
   return <label className="initialization-field"><span>{label}{source && <SourceBadge source={source} />}</span><input type={type} value={String(value ?? "")} onChange={(event) => onChange(type === "number" ? Number(event.target.value) : event.target.value)} /></label>;
 }
 
@@ -149,7 +154,7 @@ function designHref(item: InitializationProjectionItem, scenarioId: string): str
   return `/scenarios/${scenarioId}/edit/${locator.section}/${encodeURIComponent(locator.object_key)}`;
 }
 
-function Detail({ item, preview, document, scenarioId, onChange, onDeleteResourcePool }: { item: InitializationProjectionItem; preview: InitializationPreview; document: JsonObject; scenarioId: string; onChange: (document: JsonObject) => void; onDeleteResourcePool: (poolKey: string) => void }) {
+function Detail({ item, preview, document, scenarioId, focusFactKey, onChange, onDeleteResourcePool, onDeleteRootCollectionItem }: { item: InitializationProjectionItem; preview: InitializationPreview; document: JsonObject; scenarioId: string; focusFactKey?: string; onChange: (document: JsonObject) => void; onDeleteResourcePool: (poolKey: string) => void; onDeleteRootCollectionItem: (collection: RootCollectionKey, identity: string, subject: string) => void }) {
   const world = object(document.world);
   const actors = object(document.actors);
   const initialization = object(document.initialization);
@@ -166,7 +171,7 @@ function Detail({ item, preview, document, scenarioId, onChange, onDeleteResourc
     const node = nodes[index];
     if (!node) return null;
     const update = (value: JsonObject) => onChange(replaceIn(document, "world", "nodes", index, value));
-    return <div>{heading}<section className="initialization-detail-section"><h5>真实初始状态</h5><SelectField label="节点访问状态" value={node.initial_access} choices={[{ key: "AVAILABLE", name: "AVAILABLE" }, { key: "LOCKED", name: "LOCKED" }]} enumType="access" source="EXPLICIT" onChange={(value) => update({ ...node, initial_access: value })} /></section><section className="initialization-detail-section"><h5>玩家初始知识</h5><SelectField label="节点可见性" value={node.initial_visibility} choices={[{ key: "KNOWN", name: "KNOWN" }, { key: "HIDDEN", name: "HIDDEN" }]} enumType="visibility" source="EXPLICIT" onChange={(value) => update({ ...node, initial_visibility: value })} /></section>{array(node.facts).map((fact, factIndex) => <section className="initialization-fact" key={String(fact.key)}><div><strong>{String(fact.name ?? fact.key)}</strong><code>{String(fact.key)}</code><small>{displayEnumValue("value_type", String(fact.value_type ?? ""))}</small></div>{fact.value_type === "ENUM" ? <SelectField label="真实值 · 初始值" value={fact.initial_value} choices={(Array.isArray(fact.allowed_values) ? fact.allowed_values : []).map((value) => ({ key: String(value), name: String(value) }))} source="EXPLICIT" onChange={(value) => update({ ...node, facts: array(node.facts).map((old, oldIndex) => oldIndex === factIndex ? { ...fact, initial_value: value } : old) })} /> : <ScalarField label="真实值 · 初始值" value={fact.initial_value} source="EXPLICIT" type={fact.value_type === "INTEGER" ? "number" : fact.value_type === "BOOLEAN" ? "checkbox" : "text"} onChange={(value) => update({ ...node, facts: array(node.facts).map((old, oldIndex) => oldIndex === factIndex ? { ...fact, initial_value: value } : old) })} />}<SelectField label="知识 · 可见性" value={fact.initial_visibility} choices={[{ key: "KNOWN", name: "KNOWN" }, { key: "HIDDEN", name: "HIDDEN" }]} enumType="visibility" source="EXPLICIT" onChange={(value) => update({ ...node, facts: array(node.facts).map((old, oldIndex) => oldIndex === factIndex ? { ...fact, initial_visibility: value } : old) })} /></section>)}</div>;
+    return <div>{heading}<section className="initialization-detail-section"><h5>真实初始状态</h5><SelectField label="节点访问状态" value={node.initial_access} choices={[{ key: "AVAILABLE", name: "AVAILABLE" }, { key: "LOCKED", name: "LOCKED" }]} enumType="access" source="EXPLICIT" onChange={(value) => update({ ...node, initial_access: value })} /></section><section className="initialization-detail-section"><h5>玩家初始知识</h5><SelectField label="节点可见性" value={node.initial_visibility} choices={[{ key: "KNOWN", name: "KNOWN" }, { key: "HIDDEN", name: "HIDDEN" }]} enumType="visibility" source="EXPLICIT" onChange={(value) => update({ ...node, initial_visibility: value })} /></section>{array(node.facts).map((fact, factIndex) => <section className={`initialization-fact${String(fact.key) === focusFactKey ? " is-focused" : ""}`} data-fact-key={String(fact.key)} key={String(fact.key)}><div><strong>{String(fact.name ?? fact.key)}</strong><code>{String(fact.key)}</code>{String(fact.key) === focusFactKey && <small>当前定位</small>}<small>{displayEnumValue("value_type", String(fact.value_type ?? ""))}</small></div>{fact.value_type === "ENUM" ? <SelectField label="真实值 · 初始值" value={fact.initial_value} choices={(Array.isArray(fact.allowed_values) ? fact.allowed_values : []).map((value) => ({ key: String(value), name: String(value) }))} source="EXPLICIT" onChange={(value) => update({ ...node, facts: array(node.facts).map((old, oldIndex) => oldIndex === factIndex ? { ...fact, initial_value: value } : old) })} /> : <ScalarField label="真实值 · 初始值" value={fact.initial_value} source="EXPLICIT" type={fact.value_type === "INTEGER" ? "number" : fact.value_type === "BOOLEAN" ? "boolean" : "text"} onChange={(value) => update({ ...node, facts: array(node.facts).map((old, oldIndex) => oldIndex === factIndex ? { ...fact, initial_value: value } : old) })} />}<SelectField label="知识 · 可见性" value={fact.initial_visibility} choices={[{ key: "KNOWN", name: "KNOWN" }, { key: "HIDDEN", name: "HIDDEN" }]} enumType="visibility" source="EXPLICIT" onChange={(value) => update({ ...node, facts: array(node.facts).map((old, oldIndex) => oldIndex === factIndex ? { ...fact, initial_visibility: value } : old) })} /></section>)}</div>;
   }
 
   if (item.id.startsWith("actor:")) {
@@ -217,7 +222,7 @@ function Detail({ item, preview, document, scenarioId, onChange, onDeleteResourc
       next.initialization = nextInitialization;
       onChange(next);
     };
-    return <div>{heading}<section className="initialization-detail-section"><h5>玩家初始知识</h5><SelectField label="库存可见性" value={state.resource_inventory_visibility} choices={[{ key: "VISIBLE", name: "VISIBLE" }, { key: "HIDDEN", name: "HIDDEN" }]} enumType="visibility" source={source} onChange={(value) => update({ ...state, resource_inventory_visibility: value })} /><ScalarField label="调查已完成" value={state.resource_survey_completed} type="checkbox" source={source} onChange={(value) => update({ ...state, resource_survey_completed: value })} /></section></div>;
+    return <div>{heading}<section className="initialization-detail-section"><h5>玩家初始知识</h5><SelectField label="库存可见性" value={state.resource_inventory_visibility} choices={[{ key: "VISIBLE", name: "VISIBLE" }, { key: "HIDDEN", name: "HIDDEN" }]} enumType="visibility" source={source} onChange={(value) => update({ ...state, resource_inventory_visibility: value })} /><ScalarField label="调查已完成" value={state.resource_survey_completed} type="checkbox" source={source} onChange={(value) => update({ ...state, resource_survey_completed: value })} />{index >= 0 && <button type="button" className="editor-button editor-button-danger" onClick={() => onDeleteRootCollectionItem("region_resource_knowledge", key, displayItemLabel(item, document))}>删除区域资源知识</button>}</section></div>;
   }
 
   if (item.id.startsWith("derived:")) return <div>{heading}<section className="initialization-detail-section"><h5>真实初始状态</h5><div className="derived-preview-value">{displayEnumValue("generic", String(item.context.truth ?? "UNKNOWN"))}</div></section><section className="initialization-detail-section"><h5>玩家初始知识</h5><div className="derived-preview-value">{displayEnumValue("generic", String(item.context.knowledge ?? "UNKNOWN"))}</div><SourceBadge source="DERIVED" /><p>{String(item.context.dependencies)} 项依赖 · 只读计算结果</p></section></div>;
@@ -228,7 +233,7 @@ function EmptyPanel({ children }: { children: string }) {
   return <div className="initialization-panel-empty">{children}</div>;
 }
 
-export function InitializationWorkspace({ document, preview, loading, error, scenarioId, onChange, onDeleteResourcePool }: Props) {
+export function InitializationWorkspace({ document, preview, loading, error, scenarioId, onChange, onDeleteResourcePool, onDeleteRootCollectionItem = () => undefined, onAddRegionResourceKnowledge = () => undefined }: Props) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [overviewOpen, setOverviewOpen] = useState(false);
@@ -236,6 +241,7 @@ export function InitializationWorkspace({ document, preview, loading, error, sce
   const requestedDomainId = searchParams.get("domain") ?? "";
   const requestedGroupId = searchParams.get("group") ?? "";
   const requestedItemId = searchParams.get("item") ?? "";
+  const requestedFactKey = searchParams.get("fact") ?? "";
   const domain = domains.find((candidate) => candidate.id === requestedDomainId);
   const inferredGroup = domain && !requestedGroupId && requestedItemId ? domain.groups.find((candidate) => candidate.items.some((candidateItem) => candidateItem.id === requestedItemId)) : undefined;
   const group = domain?.groups.find((candidate) => candidate.id === requestedGroupId) ?? inferredGroup;
@@ -243,7 +249,7 @@ export function InitializationWorkspace({ document, preview, loading, error, sce
   const filteredItems = useMemo(() => (group?.items ?? []).filter((candidate) => `${displayItemLabel(candidate, document)} ${candidate.label} ${candidate.id}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())), [document, group, search]);
   const selectPath = (nextDomain: string, nextGroup = "", nextItem = "") => {
     const next = new URLSearchParams(searchParams);
-    for (const key of ["domain", "group", "item"]) next.delete(key);
+    for (const key of ["domain", "group", "item", "fact"]) next.delete(key);
     if (nextDomain) next.set("domain", nextDomain);
     if (nextGroup) next.set("group", nextGroup);
     if (nextItem) next.set("item", nextItem);
@@ -256,7 +262,7 @@ export function InitializationWorkspace({ document, preview, loading, error, sce
     const normalizedItem = item?.id ?? "";
     if (normalizedDomain === requestedDomainId && normalizedGroup === requestedGroupId && normalizedItem === requestedItemId) return;
     const next = new URLSearchParams(searchParams);
-    for (const key of ["domain", "group", "item"]) next.delete(key);
+    for (const key of ["domain", "group", "item", "fact"]) next.delete(key);
     if (normalizedDomain) next.set("domain", normalizedDomain);
     if (normalizedGroup) next.set("group", normalizedGroup);
     if (normalizedItem) next.set("item", normalizedItem);
@@ -266,9 +272,8 @@ export function InitializationWorkspace({ document, preview, loading, error, sce
   const createResourcePool = () => {
     const initialization = object(document.initialization);
     const pools = array(initialization.resource_pools);
-    const resources = array(object(document.world).resources);
     const poolKey = `new_pool_${pools.length + 1}`;
-    onChange({ ...document, initialization: { ...initialization, resource_pools: [...pools, { pool_key: poolKey, resource_key: String(resources[0]?.key ?? ""), region_key: null, facility_key: null, quantity: 0, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false }] } });
+    onChange({ ...document, initialization: { ...initialization, resource_pools: [...pools, { pool_key: poolKey, resource_key: "", region_key: null, facility_key: null, quantity: 0, reserved_value: 0, visibility: "VISIBLE", availability: "AVAILABLE", survey_discoverable: false }] } });
     selectPath("resources", "resource-pools");
   };
   if (loading && !preview) return <div className="initialization-loading">正在计算完整开局配置…</div>;
@@ -281,8 +286,8 @@ export function InitializationWorkspace({ document, preview, loading, error, sce
     <div className="initialization-panels" data-testid="initialization-four-panel-workspace">
        <section className={`initialization-panel initialization-column${!domain ? " mobile-active" : ""}`} aria-label="类别" onKeyDown={navigateColumn}><header><h4>类别</h4><span>选择领域</span></header><div className="initialization-panel-body">{domains.map((candidate) => <button aria-current={candidate.id === domain?.id ? "true" : undefined} className={candidate.id === domain?.id ? "selected" : ""} key={candidate.id} onClick={() => selectPath(candidate.id)}><span>{domainLabels[candidate.id] ?? candidate.label}</span><small>{candidate.groups.reduce((total, value) => total + value.items.length, 0)}</small></button>)}</div></section>
        <section className={`initialization-panel initialization-column${domain && !group ? " mobile-active" : ""}`} aria-label="分类" onKeyDown={navigateColumn}><header><h4>{domain ? subgroupHeadings[domain.id] ?? "分类" : "分类"}</h4><span>{domain ? domainLabels[domain.id] ?? domain.label : "等待选择"}</span></header><div className="initialization-panel-body">{domain ? domain.groups.map((candidate) => <button aria-current={candidate.id === group?.id ? "true" : undefined} className={candidate.id === group?.id ? "selected" : ""} key={candidate.id} onClick={() => selectPath(domain.id, candidate.id)}><span>{displayGroupLabel(candidate)}</span><small>{candidate.items.length}</small></button>) : <EmptyPanel>请选择一个类别</EmptyPanel>}</div></section>
-       <section className={`initialization-panel initialization-column initialization-items${group && !item ? " mobile-active" : ""}`} aria-label="对象" onKeyDown={navigateColumn}><header><h4>{group ? displayGroupLabel(group) : "对象"}</h4><span>{group ? "选择具体对象" : "等待选择"}</span>{group && <input aria-label="搜索当前项目" placeholder="名称或稳定键" value={search} onChange={(event) => setSearch(event.target.value)} />}{group?.id === "resource-pools" && <button type="button" className="initialization-add" onClick={createResourcePool}>＋ 新增资源池</button>}</header><div className="initialization-panel-body">{group ? filteredItems.map((candidate) => <button aria-current={candidate.id === item?.id ? "true" : undefined} className={candidate.id === item?.id ? "selected" : ""} key={candidate.id} onClick={() => selectPath(domain!.id, group.id, candidate.id)}><span>{displayItemLabel(candidate, document)}</span><code>{displayItemIdentity(candidate)}</code></button>) : <EmptyPanel>请选择一个分类</EmptyPanel>}{group && filteredItems.length === 0 && <EmptyPanel>没有匹配的对象</EmptyPanel>}</div></section>
-      <section className={`initialization-panel initialization-detail${item ? " mobile-active" : ""}`} aria-label="初始化配置"><header><h4>初始化配置</h4><span>{item ? "编辑开局状态" : "等待选择"}</span></header><div className="initialization-panel-body">{item ? <Detail item={item} preview={preview} document={document} scenarioId={scenarioId} onChange={onChange} onDeleteResourcePool={onDeleteResourcePool} /> : <EmptyPanel>请选择一个对象以配置初始化状态</EmptyPanel>}</div></section>
+       <section className={`initialization-panel initialization-column initialization-items${group && !item ? " mobile-active" : ""}`} aria-label="对象" onKeyDown={navigateColumn}><header><h4>{group ? displayGroupLabel(group) : "对象"}</h4><span>{group ? "选择具体对象" : "等待选择"}</span>{group && <input aria-label="搜索当前项目" placeholder="名称或稳定键" value={search} onChange={(event) => setSearch(event.target.value)} />}{group?.id === "resource-pools" && <button type="button" className="initialization-add" onClick={createResourcePool}>＋ 新增资源池</button>}{group?.id === "region-resource-knowledge" && <button type="button" className="initialization-add" onClick={onAddRegionResourceKnowledge}>＋ 新增区域资源知识</button>}</header><div className="initialization-panel-body">{group ? filteredItems.map((candidate) => <button aria-current={candidate.id === item?.id ? "true" : undefined} className={candidate.id === item?.id ? "selected" : ""} key={candidate.id} onClick={() => selectPath(domain!.id, group.id, candidate.id)}><span>{displayItemLabel(candidate, document)}</span><code>{displayItemIdentity(candidate)}</code></button>) : <EmptyPanel>请选择一个分类</EmptyPanel>}{group && filteredItems.length === 0 && <EmptyPanel>没有匹配的对象</EmptyPanel>}</div></section>
+      <section className={`initialization-panel initialization-detail${item ? " mobile-active" : ""}`} aria-label="初始化配置"><header><h4>初始化配置</h4><span>{item ? "编辑开局状态" : "等待选择"}</span></header><div className="initialization-panel-body">{item ? <Detail item={item} preview={preview} document={document} scenarioId={scenarioId} focusFactKey={requestedFactKey || undefined} onChange={onChange} onDeleteResourcePool={onDeleteResourcePool} onDeleteRootCollectionItem={onDeleteRootCollectionItem} /> : <EmptyPanel>请选择一个对象以配置初始化状态</EmptyPanel>}</div></section>
     </div>
   </div>;
 }

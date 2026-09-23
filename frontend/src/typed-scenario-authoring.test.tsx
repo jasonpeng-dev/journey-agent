@@ -44,6 +44,29 @@ function expandNestedCards() {
 }
 
 describe("typed ScenarioDefinition v2 authoring", () => {
+  it("keeps existing Facts collapsed and expands new or deep-linked Facts", () => {
+    const node = entity("node", {
+      key: "target",
+      name: "Target",
+      node_type_key: "facility",
+      facts: [{ key: "operational", name: "Operational", description: "Current status", value_type: "BOOLEAN", initial_value: true, initial_visibility: "KNOWN", allowed_values: [] }],
+    });
+    render(<MemoryRouter><EntityHarness initial={node} /></MemoryRouter>);
+
+    const existingToggle = screen.getByRole("button", { name: /事实 Operational operational/ });
+    expect(existingToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByDisplayValue("Operational")).not.toBeInTheDocument();
+    fireEvent.click(existingToggle);
+    expect(screen.getByDisplayValue("Operational")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "＋ 添加事实" })[0]);
+    expect(screen.getByDisplayValue("新事实")).toBeInTheDocument();
+
+    cleanup();
+    render(<MemoryRouter><TypedEntityEditor entity={node} document={document} focusPath="node.target.facts.0.name" onChange={vi.fn()} onDeleteFact={vi.fn()} /></MemoryRouter>);
+    expect(screen.getByDisplayValue("Operational")).toBeInTheDocument();
+  });
+
   it("edits Condition and Effect AST variants through typed controls", () => {
     render(<EntityHarness initial={entity("rule", {
       key: "rule",
@@ -169,15 +192,21 @@ describe("typed ScenarioDefinition v2 authoring", () => {
   });
 
   it("authors initialization availability requirements and root planning/goal/public sections", () => {
+    const onInitializationChange = vi.fn();
     render(<TypedEditor section="initialization" value={{
       start_node_key: "target",
       primary_actor_key: "agent",
       resource_initial_states: [],
       resource_pools: [{ pool_key: "fuel_pool", resource_key: "fuel", region_key: "target", facility_key: null, quantity: 5, reserved_value: 0, visibility: "HIDDEN", availability: "UNAVAILABLE", survey_discoverable: true, availability_requirement: { node_key: "target", fact_key: "operational", value: true } }],
       region_resource_knowledge: [],
-    }} document={document} onChange={vi.fn()} />);
+    }} document={document} onChange={onInitializationChange} />);
     expandNestedCards();
-    expect(screen.getByLabelText("要求值")).toBeChecked();
+    expect(screen.getByLabelText("要求值")).toHaveValue("true");
+    expect(screen.getByLabelText("要求值")).toHaveDisplayValue("是");
+    fireEvent.change(screen.getByLabelText("要求值"), { target: { value: "false" } });
+    expect(onInitializationChange).toHaveBeenLastCalledWith(expect.objectContaining({ resource_pools: [expect.objectContaining({ availability_requirement: expect.objectContaining({ value: false }) })] }));
+    expect(screen.getByLabelText("可见性")).toHaveValue("HIDDEN");
+    expect(screen.getByLabelText("可见性")).toHaveDisplayValue("隐藏");
     expect(screen.queryByText("可接受值")).not.toBeInTheDocument();
 
     cleanup();
@@ -185,7 +214,11 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expect(screen.getByDisplayValue("Plan safely")).toBeInTheDocument();
     cleanup();
     const onGoalResolutionChange = vi.fn();
-    render(<TypedEditor section="goal-resolution" value={{ allow_llm_fallback: true, clarification_prompt: "Clarify", quick_inputs: ["First", "Second"], world_goal_state_catalog: true }} document={document} onChange={onGoalResolutionChange} />);
+    render(<TypedEditor section="goal-resolution" value={{ allow_llm_fallback: true, clarification_prompt: "Clarify", quick_inputs: ["First", "Second"], world_goal_state_catalog: false }} document={document} onChange={onGoalResolutionChange} />);
+    expect(screen.getByLabelText("允许模型辅助回退")).toHaveDisplayValue("是");
+    expect(screen.getByLabelText("世界目标状态目录")).toHaveDisplayValue("否");
+    fireEvent.change(screen.getByLabelText("世界目标状态目录"), { target: { value: "true" } });
+    expect(onGoalResolutionChange).toHaveBeenLastCalledWith(expect.objectContaining({ world_goal_state_catalog: true }));
     expect(screen.getByLabelText("澄清提示")).toHaveValue("Clarify");
     expect(screen.getByDisplayValue("First")).toBeInTheDocument();
     expect(screen.getByText(/仅用于填充玩家的目标输入/)).toBeInTheDocument();
@@ -199,26 +232,31 @@ describe("typed ScenarioDefinition v2 authoring", () => {
 
   it("uses master-detail rendering for root collection sections", () => {
     const onCollectionChange = vi.fn();
-    render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }, { failure_code: "RETRY", hint: "Try again" }] }} document={document} collectionSelection={{ owner: "collection", collection: "recovery_hints", identity: JSON.stringify(["BLOCKED"]) }} onChange={vi.fn()} onCollectionChange={onCollectionChange} onCollectionRemove={vi.fn()} />);
+    render(<TypedEditor section="planning-recovery" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }, { failure_code: "RETRY", hint: "Try again" }] }} document={document} collectionSelection={{ owner: "collection", collection: "recovery_hints", identity: JSON.stringify(["BLOCKED"]) }} onChange={vi.fn()} onCollectionChange={onCollectionChange} onCollectionRemove={vi.fn()} onCollectionMove={vi.fn()} />);
 
-    expect(screen.getByRole("heading", { name: "失败恢复策略" })).toBeInTheDocument();
     expect(screen.getByDisplayValue("BLOCKED")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Inspect again")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("RETRY")).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue("Plan safely")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Inspect again").closest("article")).toBeNull();
 
-    fireEvent.change(screen.getByDisplayValue("BLOCKED"), { target: { value: "MODEL_PROVIDER_TIMEOUT" } });
-    expect(onCollectionChange).toHaveBeenCalledWith(expect.objectContaining({ failure_code: "MODEL_PROVIDER_TIMEOUT" }));
+    fireEvent.change(screen.getByDisplayValue("Inspect again"), { target: { value: "Inspect deliberately" } });
+    expect(onCollectionChange).toHaveBeenCalledWith(expect.objectContaining({ failure_code: "BLOCKED", hint: "Inspect deliberately" }));
 
     cleanup();
-    render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }] }} document={document} collectionSelection={{ owner: "singleton", key: "planning-instructions" }} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} />);
-    expect(screen.getByDisplayValue("Plan safely")).toBeInTheDocument();
+    const onInstructionChange = vi.fn();
+    render(<TypedEditor section="planning-instructions" value={{ instructions: ["Plan safely", "Recover safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }] }} document={document} collectionSelection={{ owner: "instruction", index: 1 }} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} onInstructionChange={onInstructionChange} />);
+    expect(screen.getByDisplayValue("Recover safely")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Plan safely")).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue("BLOCKED")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("Recover safely").closest("section")).toBeNull();
+    fireEvent.change(screen.getByDisplayValue("Recover safely"), { target: { value: "Recover deliberately" } });
+    expect(onInstructionChange).toHaveBeenCalledWith(1, "Recover deliberately");
 
     cleanup();
     render(<TypedEditor section="public-knowledge" value={{ resource_source_hints: [] }} document={document} collectionSelection={null} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} />);
-    expect(screen.queryByRole("heading", { name: "公共知识配置" })).not.toBeInTheDocument();
-    expect(screen.getByText("请选择或新建资源发现知识")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "资源来源提示配置" })).not.toBeInTheDocument();
+    expect(screen.getByText("请选择或新增一条资源来源提示")).toBeInTheDocument();
   });
 
   it("keeps unknown future AST variants editable through an isolated JSON fallback", () => {

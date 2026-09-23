@@ -114,6 +114,21 @@ describe("InitializationWorkspace", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it("uses the shared 是/否 selector for Boolean facts while preserving enum semantics", () => {
+    const onChange = renderWorkspace(vi.fn(), "/initialization?domain=nodes&group=node-type%3Aroom_type&item=node%3Aroom");
+    const booleanField = screen.getByLabelText("真实值 · 初始值");
+    const factSection = booleanField.closest(".initialization-fact");
+    expect(factSection).not.toBeNull();
+    const booleanFieldContainer = booleanField.closest(".initialization-field");
+    expect(booleanFieldContainer).not.toBeNull();
+    expect(booleanFieldContainer?.querySelector(":scope > span .source-badge")).toHaveTextContent("显式配置");
+    expect(booleanField).toHaveDisplayValue("否");
+    expect(within(factSection as HTMLElement).getByDisplayValue("已知")).toBeInTheDocument();
+
+    fireEvent.change(booleanField, { target: { value: "true" } });
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ world: expect.objectContaining({ nodes: [expect.objectContaining({ facts: [expect.objectContaining({ initial_value: true })] })] }) }));
+  });
+
   it("clears every downstream selection when the domain changes", () => {
     renderWorkspace(vi.fn(), "/initialization?domain=nodes&group=node-type%3Aroom_type&item=node%3Aroom");
     expect(screen.getByRole("heading", { name: "诊疗室" })).toBeInTheDocument();

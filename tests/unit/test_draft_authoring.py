@@ -5,7 +5,9 @@ import pytest
 from app.scenarios.authoring import (
     DraftAuthoringError,
     delete_fact,
+    delete_nested_object,
     delete_object,
+    delete_root_collection_item,
     locator_for_path,
     reference_index,
     rename_key,
@@ -140,6 +142,95 @@ def test_dynamic_target_fact_consumers_expand_to_each_matching_scoped_fact() -> 
     with pytest.raises(DraftAuthoringError) as referenced:
         delete_fact(document, node_key="patient_one", fact_key="dynamic_flag")
     assert referenced.value.code == "SCENARIO_FACT_REFERENCED"
+
+
+def test_current_target_fact_is_limited_to_explicit_action_targets() -> None:
+    document = _document()
+    patient = next(item for item in document["world"]["nodes"] if item["key"] == "patient_one")
+    patient["facts"].append(
+        {
+            "key": "target_flag",
+            "name": "Target flag",
+            "value_type": "BOOLEAN",
+            "initial_value": False,
+        }
+    )
+    other = deepcopy(patient)
+    other["key"] = "other_node"
+    document["world"]["nodes"].append(other)
+    document["actions"][0]["target_actor_roles"] = [
+        {"role": "TARGET", "target_key": "patient_one"}
+    ]
+    document["actions"][0]["target_node_type_keys"] = []
+    document["rules"][0]["condition"] = {
+        "kind": "FACT_EQUALS",
+        "node": {"kind": "CURRENT_TARGET"},
+        "fact_key": "target_flag",
+        "value": False,
+    }
+
+    targets = {
+        edge.target.object_key
+        for edge in reference_index(document)
+        if edge.source.object_kind == "rule" and edge.target.field_path == "facts.target_flag"
+    }
+    assert targets == {"patient_one"}
+
+
+def test_immutable_current_target_discriminator_excludes_other_authored_values() -> None:
+    document = _document()
+    patient = next(item for item in document["world"]["nodes"] if item["key"] == "patient_one")
+    patient["facts"].append(
+        {"key": "profile", "name": "Profile", "value_type": "TEXT", "initial_value": "patient"}
+    )
+    other = deepcopy(patient)
+    other["key"] = "other_node"
+    next(fact for fact in other["facts"] if fact["key"] == "profile")["initial_value"] = "other"
+    document["world"]["nodes"].append(other)
+    document["actions"][0]["target_actor_roles"] = [
+        {"role": "PRIMARY", "target_key": "patient_one"},
+        {"role": "SECONDARY", "target_key": "other_node"},
+    ]
+    document["actions"][0]["target_node_type_keys"] = []
+    document["rules"][0]["condition"] = {
+        "kind": "FACT_EQUALS",
+        "node": {"kind": "CURRENT_TARGET"},
+        "fact_key": "profile",
+        "value": "patient",
+    }
+
+    targets = {
+        edge.target.object_key
+        for edge in reference_index(document)
+        if edge.source.object_kind == "rule" and edge.target.field_path == "facts.profile"
+    }
+    assert targets == {"patient_one"}
+
+
+def test_genuinely_dynamic_fact_selector_remains_conservative() -> None:
+    document = _document()
+    patient = next(item for item in document["world"]["nodes"] if item["key"] == "patient_one")
+    patient["facts"].append(
+        {"key": "dynamic_flag", "name": "Dynamic", "value_type": "BOOLEAN", "initial_value": False}
+    )
+    other = deepcopy(patient)
+    other["key"] = "other_node"
+    document["world"]["nodes"].append(other)
+    document["actions"][0]["target_actor_roles"] = []
+    document["actions"][0]["target_node_type_keys"] = []
+    document["rules"][0]["condition"] = {
+        "kind": "FACT_EQUALS",
+        "node": {"kind": "CURRENT_TARGET"},
+        "fact_key": "dynamic_flag",
+        "value": False,
+    }
+
+    targets = {
+        edge.target.object_key
+        for edge in reference_index(document)
+        if edge.source.object_kind == "rule" and edge.target.field_path == "facts.dynamic_flag"
+    }
+    assert targets == {"patient_one", "other_node"}
 
 
 def test_v2_reference_index_covers_nested_fact_pool_target_role_and_derived_refs() -> None:
@@ -286,3 +377,80 @@ def test_display_names_are_not_reference_identity() -> None:
     assert {(edge.source, edge.target) for edge in changed} == {
         (edge.source, edge.target) for edge in original
     }
+
+
+def test_root_pool_delete_ignores_its_own_identity_but_blocks_external_pool_refs() -> None:
+    document = _document()
+    initialization = document.setdefault("initialization", {})
+    assert isinstance(initialization, dict)
+    initialization["resource_pools"] = [
+        {
+            "pool_key": "unused_pool",
+            "resource_key": "medicine",
+            "region_key": None,
+            "facility_key": None,
+            "quantity": 1,
+            "reserved_value": 0,
+            "visibility": "VISIBLE",
+            "availability": "AVAILABLE",
+            "survey_discoverable": False,
+        }
+    ]
+    changed = delete_root_collection_item(
+        document, collection="resource_pools", identity="unused_pool"
+    )
+    assert changed["initialization"]["resource_pools"] == []
+
+    document["rules"][0]["effects"].append(
+        {
+            "kind": "SET_RESOURCE_POOL_VISIBILITY",
+            "pool_key": "unused_pool",
+            "visibility": "VISIBLE",
+        }
+    )
+    with pytest.raises(DraftAuthoringError) as referenced:
+        delete_root_collection_item(
+            document, collection="resource_pools", identity="unused_pool"
+        )
+    assert referenced.value.code == "SCENARIO_ROOT_COLLECTION_ITEM_REFERENCED"
+    assert referenced.value.references
+
+
+def test_nested_action_parameter_delete_is_scoped_and_reference_safe() -> None:
+    document = _document()
+    document["rules"][0]["condition"] = {
+        "kind": "PARAMETER_COMPARE",
+        "parameter_key": "dosage",
+        "operator": "GTE",
+        "value": 1,
+    }
+    with pytest.raises(DraftAuthoringError) as referenced:
+        delete_nested_object(
+            document,
+            parent_kind="action",
+            parent_key="treat_patient",
+            collection="parameters",
+            nested_key="dosage",
+        )
+    assert referenced.value.code == "SCENARIO_NESTED_OBJECT_REFERENCED"
+    assert any(
+        edge.target.object_kind == "action_parameter"
+        for edge in referenced.value.references
+    )
+
+    document["rules"][0]["condition"] = None
+    document["rules"][2]["effects"][1]["amount"] = {
+        "source": "LITERAL",
+        "literal": 1,
+        "parameter_key": None,
+        "multiplier": -1,
+    }
+    changed = delete_nested_object(
+        document,
+        parent_kind="action",
+        parent_key="treat_patient",
+        collection="parameters",
+        nested_key="dosage",
+    )
+    action = next(item for item in changed["actions"] if item["key"] == "treat_patient")
+    assert action["parameters"] == []

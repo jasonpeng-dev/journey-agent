@@ -5,7 +5,7 @@ export type SectionMode = "SINGLETON" | "COLLECTION" | "HYBRID" | "BROWSER" | "W
 export type MasterSource = "none" | "entities" | "root-collections" | "topology";
 export type CreateCapability = "none" | "entity" | "root-collection-item";
 export type SelectionStrategy = "none" | "route-object" | "root-owner" | "topology" | "workflow";
-export type WorkspaceRenderer = "root" | "entity" | "root-collection" | "hybrid" | "topology" | "workflow" | "initialization";
+export type WorkspaceRenderer = "root" | "entity" | "root-collection" | "hybrid" | "topology" | "workflow" | "initialization" | "configuration-check";
 export type AdvancedJsonCapability = "none" | "nested-only" | "unknown-variant";
 export type LocatorStrategy = "singleton" | "entity" | "root-collection" | "mixed-entity" | "browser" | "workflow";
 
@@ -130,6 +130,22 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
     { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
     "root-collection",
   ),
+  "planning-instructions": declaration(
+    "planning-instructions",
+    "COLLECTION",
+    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: false, itemIdentity: "collection-identity" },
+    { renderer: "root-collection", title: "selected-item", selection: "root-owner" },
+    { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
+    "root-collection",
+  ),
+  "planning-recovery": declaration(
+    "planning-recovery",
+    "COLLECTION",
+    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: false, itemIdentity: "collection-identity" },
+    { renderer: "root-collection", title: "selected-item", selection: "root-owner" },
+    { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
+    "root-collection",
+  ),
   "public-knowledge": declaration(
     "public-knowledge",
     "COLLECTION",
@@ -139,6 +155,14 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
     "root-collection",
   ),
   "public-references": declaration("public-references", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, rename: false }, "mixed-entity"),
+  "configuration-check": declaration(
+    "configuration-check",
+    "WORKFLOW",
+    { visible: false, source: "none", label: "workflow", searchable: false, create: "none", grouped: false, itemIdentity: "none" },
+    { renderer: "configuration-check", title: "workflow", selection: "workflow" },
+    { create: false, rename: false, delete: false, inspector: false, advancedJson: "none" },
+    "workflow",
+  ),
   validation: declaration(
     "validation",
     "WORKFLOW",

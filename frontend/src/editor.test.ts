@@ -25,6 +25,18 @@ describe("editor draft helpers", () => {
     expect(sectionObjects(changed, "world")[0].name).toBe("Harbor");
   });
 
+  it("creates the first generic authoring objects in a blank scenario without inferred dependencies", () => {
+    let blank = {};
+    for (const kind of ["node_type", "node", "role", "actor", "interaction", "action"] as const) blank = addObject(blank, kind).document;
+
+    expect(sectionObjects(blank, "node-types")).toHaveLength(1);
+    expect(sectionObjects(blank, "world-entities")[0].value.node_type_key).toBe("");
+    expect(sectionObjects(blank, "roles")).toHaveLength(1);
+    expect(sectionObjects(blank, "actors")[0].value.role_key).toBe("");
+    expect(sectionObjects(blank, "interactions")).toHaveLength(1);
+    expect(sectionObjects(blank, "actions")[0].value.required_interaction_key).toBe("");
+  });
+
   it("creates engine-supported AST shapes", () => {
     expect(defaultArrayItem("conditions")).toMatchObject({ kind: "FACT_EQUALS" });
     expect(defaultArrayItem("effects")).toMatchObject({ kind: "EMIT_OUTCOME" });
