@@ -23,7 +23,7 @@ export function EditorRenameDialog({ subject, initialValue, onCancel, onConfirm 
   return <EditorDialog titleId="editor-rename-dialog-title" kicker="重命名稳定身份" title={`重命名「${subject}」`} onClose={onCancel} footer={<><button type="button" className="editor-button editor-button-secondary" onClick={onCancel}>取消</button><button type="submit" form="editor-rename-form" className="editor-button editor-button-primary">重命名</button></>}>
       <form id="editor-rename-form" onSubmit={(event) => { event.preventDefault(); const input = new FormData(event.currentTarget).get("new-key"); onConfirm(typeof input === "string" ? input.trim() : ""); }}>
         <label className="initialization-field"><span>新的稳定键</span><input name="new-key" defaultValue={initialValue} autoFocus pattern="[a-z][a-z0-9_]{0,79}" required /></label>
-        <p className="typed-help">稳定键是引用身份；重命名会在当前工作副本中原子更新相关引用。</p>
+        <p className="typed-help">稳定键是引用身份；重命名会原子更新草稿中的相关引用并立即验证。</p>
       </form>
   </EditorDialog>;
 }

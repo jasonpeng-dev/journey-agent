@@ -122,11 +122,9 @@ def _canonical_resource_knowledge(raw: object) -> tuple[dict[str, object], ...]:
 
 
 def _canonical_resource_source_hints(raw: object) -> tuple[PlannerResourceSourceHint, ...]:
-    """Normalize authored public source guidance into the V2 Planner shape."""
+    """Normalize the Resource-owned public projection into the Planner shape."""
 
     candidates: object = raw
-    if isinstance(raw, dict):
-        candidates = raw.get("resource_source_hints", ())
     if not isinstance(candidates, (list, tuple)):
         return ()
     result: list[PlannerResourceSourceHint] = []

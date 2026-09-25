@@ -20,8 +20,7 @@ const expectedModes: Record<SectionMode, string[]> = {
     "derived-states",
     "planning-instructions",
     "planning-recovery",
-    "public-knowledge",
-    "public-references",
+    "terminology-references",
   ],
   HYBRID: ["planning"],
   BROWSER: ["world", "initialization"],
@@ -30,7 +29,7 @@ const expectedModes: Record<SectionMode, string[]> = {
 
 describe("section structure registry", () => {
   it("freezes the authoring and legacy routes into the five product modes", () => {
-    expect(Object.keys(sectionStructureRegistry)).toHaveLength(22);
+    expect(Object.keys(sectionStructureRegistry)).toHaveLength(21);
     for (const [mode, sections] of Object.entries(expectedModes)) {
       expect(Object.values(sectionStructureRegistry).filter((item) => item.mode === mode).map((item) => item.section)).toEqual(sections);
     }
@@ -45,7 +44,10 @@ describe("section structure registry", () => {
       entityKinds: [],
       rootCollections: ["resource_initial_states", "resource_pools", "region_resource_knowledge"],
     });
-    expect(sectionStructure("public-knowledge").owners.rootCollections).toEqual(["resource_source_hints"]);
+    expect(sectionStructure("resources").owners.entityKinds).toEqual(["resource"]);
+    expect(sectionStructure("terminology-references").owners.entityKinds).toEqual(["public_reference"]);
+    expect(sectionStructure("public-knowledge")).toMatchObject({ section: "resources", mode: "COLLECTION" });
+    expect(sectionStructure("public-references")).toMatchObject({ section: "terminology-references", mode: "COLLECTION" });
   });
 
   it("does not infer shell mode or controls from current collection contents", () => {
@@ -66,10 +68,7 @@ describe("section structure registry", () => {
       master: { visible: false, source: "none", create: "none" },
       workspace: { renderer: "initialization" },
     });
-    expect(sectionStructure("public-knowledge")).toMatchObject({
-      mode: "COLLECTION",
-      master: { source: "root-collections" },
-    });
+    expect(sectionStructure("resources")).toMatchObject({ mode: "COLLECTION", master: { source: "entities" } });
   });
 
   it("declares only reachable Advanced JSON ownership without duplicate root fields", () => {
@@ -84,7 +83,7 @@ describe("section structure registry", () => {
     expect(entityRegistry.node.fields.map((field) => field.path)).not.toEqual(expect.arrayContaining(["initial_access", "initial_visibility"]));
     expect(entityRegistry.actor.fields.map((field) => field.path)).not.toEqual(expect.arrayContaining(["initial_node_key", "command_reachability"]));
     expect(entityRegistry.relation.fields.map((field) => field.path)).not.toContain("initial_visibility");
-    expect(entityRegistry.resource.fields.map((field) => field.path)).not.toContain("initial_value");
+    expect(entityRegistry.resource.fields.map((field) => field.path)).toEqual(expect.arrayContaining(["initial_value", "minimum"]));
   });
 
   it("separates configuration checks from validation and publishing", () => {
@@ -92,5 +91,12 @@ describe("section structure registry", () => {
     expect(group?.items).toEqual(["configuration-check", "validation"]);
     expect(sectionLabels["configuration-check"]).toBe("配置检查");
     expect(sectionLabels.validation).toBe("验证与发布");
+  });
+
+  it("places Public References under the Goal System taxonomy", () => {
+    const group = editorTaxonomyGroups.find((entry) => entry.label === "目标系统");
+    expect(group?.items).toContain("terminology-references");
+    expect(editorTaxonomyGroups.some((entry) => String(entry.label) === "公开信息")).toBe(false);
+    expect(sectionLabels["terminology-references"]).toBe("术语与引用");
   });
 });

@@ -42,11 +42,15 @@ export type CompletenessItem = {
   path: string;
   locator?: Locator | null;
   action: "OPEN" | "CREATE" | "CONFIGURE" | "NONE";
+  reference_locator?: Locator | null;
+  reference_owner?: string | null;
 };
+export type ValidationIssue = { severity: "ERROR" | "WARNING"; code: string; path: string; message: string; locator?: Locator | null; type?: string | null };
 export type CompletenessResult = {
   scenario_id: string;
   base_revision: number;
   items: CompletenessItem[];
+  validation_issues?: ValidationIssue[];
   required_missing: number;
   recommended_missing: number;
   validation_issue_count: number;
@@ -55,7 +59,7 @@ export type CompletenessResult = {
 
 export type ValidationResult = {
   scenario_id: string; revision: number; content_hash: string | null; publish_ready: boolean;
-  issues: Array<{ severity: "ERROR" | "WARNING"; code: string; path: string; message: string; locator?: Locator | null }>;
+  issues: ValidationIssue[];
   readiness: Array<{ level: string; passed: boolean; issue_codes: string[] }>;
 };
 
@@ -149,7 +153,21 @@ export type InitializationPreview = {
   revision: number;
   projection: InitializationProjection;
   parity: { published: boolean; initialization_changes: string[]; design_changes: string[] };
+  partial?: boolean;
+  omitted_issue_count?: number;
+  issues?: InitializationPreviewIssue[];
 };
+export type InitializationPreviewIssue = {
+  identity?: string | null;
+  canonical_owner?: string | null;
+  reference_owner?: string | null;
+  field_path?: string | null;
+  locator?: InitializationFinding["locator"];
+  loc?: Array<string | number>;
+  type?: string;
+  msg?: string;
+};
+export type InitializationPreviewFocus = { object_kind: "node" | "actor" | "relation" | "resource"; object_key: string };
 export type WorldPresentationOverrides = {
   entity_detail?: PresentationEntityDetail;
   knowledge_level?: PresentationKnowledgeLevel;

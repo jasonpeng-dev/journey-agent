@@ -16,6 +16,7 @@ from app.scenarios.documents import (
 from app.scenarios.serialization import (
     canonical_document_payload,
     canonical_payload_hash,
+    legacy_resource_source_hint_payload,
     scenario_content_hash,
 )
 
@@ -58,7 +59,15 @@ class ScenarioVersionRepository:
                 "SCENARIO_VERSION_SCHEMA_MISMATCH",
                 "ScenarioVersion schema metadata does not match its snapshot",
             )
-        if record.snapshot_document != canonical_payload:
+        legacy_source_hint_payload = legacy_resource_source_hint_payload(canonical_payload)
+        is_legacy_source_hint_snapshot = (
+            legacy_source_hint_payload is not None
+            and record.snapshot_document == legacy_source_hint_payload
+        )
+        if (
+            record.snapshot_document != canonical_payload
+            and not is_legacy_source_hint_snapshot
+        ):
             raise ScenarioVersionError(
                 "SCENARIO_VERSION_SNAPSHOT_NOT_CANONICAL",
                 "The persisted ScenarioVersion snapshot is not canonical",
@@ -69,7 +78,19 @@ class ScenarioVersionRepository:
         # normalize or rewrite it.
         semantic_hash = scenario_content_hash(record.snapshot_document)
         historical_payload_hash = canonical_payload_hash(canonical_payload)
-        if semantic_hash != record.content_hash and historical_payload_hash != record.content_hash:
+        legacy_semantic_hash = (
+            canonical_payload_hash(legacy_source_hint_payload)
+            if is_legacy_source_hint_snapshot and legacy_source_hint_payload is not None
+            else None
+        )
+        verified_hashes = tuple(
+            dict.fromkeys(
+                value
+                for value in (semantic_hash, historical_payload_hash, legacy_semantic_hash)
+                if value is not None
+            )
+        )
+        if record.content_hash not in verified_hashes:
             raise ScenarioVersionError(
                 "SCENARIO_VERSION_HASH_MISMATCH",
                 "The persisted ScenarioVersion snapshot failed integrity verification",
@@ -90,7 +111,7 @@ class ScenarioVersionRepository:
             content_hash=record.content_hash,
             published_at=record.published_at,
             definition=document,
-            verified_content_hashes=(semantic_hash, historical_payload_hash),
+            verified_content_hashes=verified_hashes,
         )
 
 

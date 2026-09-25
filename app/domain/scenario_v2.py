@@ -8,6 +8,7 @@ decoder; later Phase R stages interpret its rules without generating code.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Literal
@@ -567,6 +568,128 @@ class RelationTypeDefinitionV2(FrozenDefinitionModel):
     description: str = Field(default="", max_length=2000)
 
 
+class ResourceSourceHintV2(FrozenDefinitionModel):
+    """Optional public discovery guidance owned by one Resource."""
+
+    primary_region_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    candidate_region_keys: tuple[StableKey, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def validate_regions(self) -> ResourceSourceHintV2:
+        if self.primary_region_key is None and not self.candidate_region_keys:
+            raise ValueError("Resource source hint needs a primary or candidate Region")
+        _require_unique(self.candidate_region_keys, "Resource source hint candidate Regions")
+        if (
+            self.primary_region_key is not None
+            and self.primary_region_key in self.candidate_region_keys
+        ):
+            raise ValueError("Resource source hint primary Region cannot be a candidate Region")
+        return self
+
+
+def normalize_resource_source_hint_document(document: object) -> object:
+    """Normalize the legacy root collection onto Resource owners in a copy.
+
+    This compatibility boundary intentionally leaves incomplete Drafts
+    otherwise untouched. Full typed validation remains in the document parser.
+    """
+
+    if not isinstance(document, Mapping):
+        return document
+    normalized = deepcopy(dict(document))
+    world = normalized.get("world")
+    resources = world.get("resources") if isinstance(world, dict) else None
+    if isinstance(resources, tuple) and isinstance(world, dict):
+        resources = list(resources)
+        world["resources"] = resources
+    public_knowledge = normalized.get("public_knowledge")
+    legacy_hints = (
+        public_knowledge.get("resource_source_hints")
+        if isinstance(public_knowledge, dict)
+        else None
+    )
+    if legacy_hints is None:
+        if isinstance(public_knowledge, dict) and not public_knowledge:
+            normalized.pop("public_knowledge", None)
+        return normalized
+    if not isinstance(legacy_hints, (list, tuple)):
+        raise ValueError("Legacy public_knowledge.resource_source_hints must be a list")
+    if not isinstance(public_knowledge, dict):
+        raise ValueError("Legacy resource source hints require public_knowledge")
+    if not isinstance(resources, list):
+        if legacy_hints:
+            raise ValueError("Legacy Resource source hints require world.resources")
+        public_knowledge.pop("resource_source_hints", None)
+        if not public_knowledge:
+            normalized.pop("public_knowledge", None)
+        return normalized
+
+    resources_by_key = {
+        item.get("key"): item
+        for item in resources
+        if isinstance(item, dict) and isinstance(item.get("key"), str)
+    }
+    seen: set[str] = set()
+    for legacy_hint in legacy_hints:
+        if not isinstance(legacy_hint, Mapping):
+            raise ValueError("Legacy Resource source hints must contain objects")
+        if set(legacy_hint) - {
+            "resource_key",
+            "primary_region_key",
+            "candidate_region_keys",
+        }:
+            raise ValueError("Legacy Resource source hint contains unsupported fields")
+        resource_key = legacy_hint.get("resource_key")
+        if not isinstance(resource_key, str) or not resource_key:
+            raise ValueError("Legacy Resource source hint requires resource_key")
+        if resource_key in seen:
+            raise ValueError("Legacy Resource source hint Resource keys must be unique")
+        seen.add(resource_key)
+        resource = resources_by_key.get(resource_key)
+        if resource is None:
+            raise ValueError(f"Legacy Resource source hint targets unknown Resource {resource_key}")
+        legacy_value = {
+            key: deepcopy(value)
+            for key, value in legacy_hint.items()
+            if key != "resource_key"
+        }
+        if "source_hint" in resource:
+            if not _source_hint_values_equivalent(resource.get("source_hint"), legacy_value):
+                raise ValueError(
+                    f"Legacy and current Resource source hints conflict for Resource {resource_key}"
+                )
+        else:
+            resource["source_hint"] = legacy_value
+
+    public_knowledge.pop("resource_source_hints", None)
+    if not public_knowledge:
+        normalized.pop("public_knowledge", None)
+    return normalized
+
+
+def _source_hint_values_equivalent(left: object, right: object) -> bool:
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return left is None and right is None
+    left_primary = left.get("primary_region_key")
+    right_primary = right.get("primary_region_key")
+    left_candidates = left.get("candidate_region_keys", ())
+    right_candidates = right.get("candidate_region_keys", ())
+    if not isinstance(left_candidates, (list, tuple)) or not isinstance(
+        right_candidates, (list, tuple)
+    ):
+        return False
+    if any(not isinstance(item, str) for item in (*left_candidates, *right_candidates)):
+        return False
+    # Preserve the authored order used by the existing Planner projection.
+    return left_primary == right_primary and tuple(left_candidates) == tuple(right_candidates)
+
+
 class ResourceDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -585,6 +708,10 @@ class ResourceDefinitionV2(FrozenDefinitionModel):
         default=None,
         min_length=1,
         max_length=80,
+        exclude_if=lambda value: value is None,
+    )
+    source_hint: ResourceSourceHintV2 | None = Field(
+        default=None,
         exclude_if=lambda value: value is None,
     )
 
@@ -996,6 +1123,25 @@ class ActionTargetActorRoleV2(FrozenDefinitionModel):
     required_actor_role_key: StableKey
 
 
+class ActionTargetContractBindingV2(FrozenDefinitionModel):
+    """One authored Action/target Knowledge contract.
+
+    The binding is deliberately separate from Facts.  ``initial_visibility``
+    is the Knowledge state for this exact Action target when a new Game is
+    initialized; it is not a target Truth value.  ``reveal_on_inspect`` is a
+    generic discovery policy used by inspect-capable Actions and keeps the
+    legacy target-discovery behavior expressible without naming a scenario
+    Fact key.
+    """
+
+    target_key: StableKey
+    initial_visibility: Visibility = Visibility.KNOWN
+    reveal_on_inspect: bool = Field(
+        default=False,
+        exclude_if=lambda value: value is False,
+    )
+
+
 class ActionDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -1027,6 +1173,10 @@ class ActionDefinitionV2(FrozenDefinitionModel):
     )
     target_node_type_keys: tuple[StableKey, ...] = ()
     target_actor_roles: tuple[ActionTargetActorRoleV2, ...] = ()
+    target_contracts: tuple[ActionTargetContractBindingV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     operation_bindings: tuple[ActionOperationBindingV2, ...] = ()
     goal_required_slots: tuple[StableKey, ...] = Field(
         default=(),
@@ -1081,6 +1231,10 @@ class ActionDefinitionV2(FrozenDefinitionModel):
         _require_unique(
             (item.target_key for item in self.target_actor_roles),
             "Action target-specific Actor Roles",
+        )
+        _require_unique(
+            (item.target_key for item in self.target_contracts),
+            "Action target contract targets",
         )
         _require_unique((item.role for item in self.operation_bindings), "Action binding roles")
         _require_unique(self.goal_required_slots, "Action Goal required slots")
@@ -1383,12 +1537,17 @@ class RuleDefinitionV2(FrozenDefinitionModel):
         default=RuleTrigger.ACTION,
         exclude_if=lambda value: value == RuleTrigger.ACTION,
     )
+    applicable_target_keys: tuple[StableKey, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     priority: int
     condition: ConditionV2 | None = None
     effects: tuple[EffectV2, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_phase_effects(self) -> RuleDefinitionV2:
+        _require_unique(self.applicable_target_keys, "Rule applicable target keys")
         terminals = [
             effect
             for effect in self.effects
@@ -1398,6 +1557,8 @@ class RuleDefinitionV2(FrozenDefinitionModel):
             raise ValueError("ACTION Rules require action_key")
         if self.trigger == RuleTrigger.STATE and self.action_key is not None:
             raise ValueError("STATE Rules must not declare action_key")
+        if self.trigger == RuleTrigger.STATE and self.applicable_target_keys:
+            raise ValueError("STATE Rules must not declare applicable target keys")
         if self.trigger == RuleTrigger.STATE and self.phase != RulePhase.RESOLVE:
             raise ValueError("STATE Rules must use the RESOLVE phase")
         if self.trigger == RuleTrigger.STATE and terminals:
@@ -1552,55 +1713,6 @@ class RecoveryHintV2(FrozenDefinitionModel):
     hint: str = Field(min_length=1, max_length=2000)
 
 
-class ResourceSourceHintV2(FrozenDefinitionModel):
-    """Authored public background about where a Resource may be found.
-
-    This is discovery guidance only.  It is deliberately separate from
-    Resource Pool Truth: it carries no quantity, availability, facility, or
-    storage identity and does not constrain the legal source choices of an
-    Action.
-    """
-
-    resource_key: StableKey
-    primary_region_key: StableKey | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-    )
-    candidate_region_keys: tuple[StableKey, ...] = Field(
-        default=(),
-        exclude_if=lambda value: not value,
-    )
-
-    @model_validator(mode="after")
-    def validate_regions(self) -> ResourceSourceHintV2:
-        if self.primary_region_key is None and not self.candidate_region_keys:
-            raise ValueError("Resource source hint needs a primary or candidate Region")
-        _require_unique(self.candidate_region_keys, "Resource source hint candidate Regions")
-        if (
-            self.primary_region_key is not None
-            and self.primary_region_key in self.candidate_region_keys
-        ):
-            raise ValueError("Resource source hint primary Region cannot be a candidate Region")
-        return self
-
-
-class PublicKnowledgeDefinitionV2(FrozenDefinitionModel):
-    """Static public discovery metadata authored in a ScenarioVersion."""
-
-    resource_source_hints: tuple[ResourceSourceHintV2, ...] = Field(
-        default=(),
-        exclude_if=lambda value: not value,
-    )
-
-    @model_validator(mode="after")
-    def validate_resource_source_hints(self) -> PublicKnowledgeDefinitionV2:
-        _require_unique(
-            (item.resource_key for item in self.resource_source_hints),
-            "Public resource source hint Resource keys",
-        )
-        return self
-
-
 class PlanningDefinitionV2(FrozenDefinitionModel):
     instructions: tuple[str, ...] = ()
     recovery_hints: tuple[RecoveryHintV2, ...] = ()
@@ -1634,13 +1746,14 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     )
     goal_resolution: GoalResolutionV2
     planning: PlanningDefinitionV2 = Field(default_factory=PlanningDefinitionV2)
-    public_knowledge: PublicKnowledgeDefinitionV2 = Field(
-        default_factory=PublicKnowledgeDefinitionV2,
-        exclude_if=lambda value: not value.resource_source_hints,
-    )
     public_references: tuple[PublicReferenceV2, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_resource_source_hints(cls, value: object) -> object:
+        return normalize_resource_source_hint_document(value)
 
     @property
     def objective_catalog_version(self) -> str:
@@ -1978,7 +2091,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     _validate_resource_initial_states(definition, nodes)
     _validate_resource_pools(definition, nodes)
     _validate_region_resource_knowledge(definition, nodes)
-    _validate_public_knowledge(definition, nodes, resources)
+    _validate_resource_source_hints(definition, nodes)
     _validate_derived_states(definition, nodes, resources, derived_states)
 
     _require_key(nodes, definition.initialization.start_node_key, "start Node")
@@ -2053,6 +2166,35 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 raise ValueError(
                     f"Action {action.key} target-specific Actor Role target lacks its Interaction"
                 )
+        for target_contract in action.target_contracts:
+            if action.target_kind == ActionTargetKind.NODE:
+                target = _require_key(
+                    nodes,
+                    target_contract.target_key,
+                    f"Action {action.key} target contract Node",
+                )
+                if action.required_interaction_key not in target.interaction_keys:
+                    raise ValueError(
+                        f"Action {action.key} target contract target lacks its Interaction"
+                    )
+                if (
+                    action.target_node_type_keys
+                    and target.node_type_key not in action.target_node_type_keys
+                ):
+                    raise ValueError(
+                        f"Action {action.key} target contract target has an invalid Node type"
+                    )
+            else:
+                target_actor = _require_key(
+                    actors,
+                    target_contract.target_key,
+                    f"Action {action.key} target contract Actor",
+                )
+                if action.key not in target_actor.allowed_action_keys:
+                    raise ValueError(
+                        f"Action {action.key} target contract Actor is not eligible "
+                        "for that Action"
+                    )
         if (
             action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
         ) and not definition.metadata.locality.enabled:
@@ -2120,6 +2262,48 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
             if rule.action_key is not None
             else None
         )
+        if rule.applicable_target_keys:
+            if rule_action is None:
+                raise ValueError(
+                    f"Rule {rule.key} applicable targets require an Action"
+                )
+            declared_contract_keys = {
+                item.target_key for item in rule_action.target_contracts
+            }
+            for target_key in rule.applicable_target_keys:
+                if declared_contract_keys and target_key not in declared_contract_keys:
+                    raise ValueError(
+                        f"Rule {rule.key} applicable target is not declared by "
+                        f"Action {rule_action.key} target contracts"
+                    )
+                if rule_action.target_kind == ActionTargetKind.NODE:
+                    target = _require_key(
+                        nodes,
+                        target_key,
+                        f"Rule {rule.key} applicable target Node",
+                    )
+                    if rule_action.required_interaction_key not in target.interaction_keys:
+                        raise ValueError(
+                            f"Rule {rule.key} applicable target lacks its Interaction"
+                        )
+                    if (
+                        rule_action.target_node_type_keys
+                        and target.node_type_key not in rule_action.target_node_type_keys
+                    ):
+                        raise ValueError(
+                            f"Rule {rule.key} applicable target has an invalid Node type"
+                        )
+                else:
+                    target_actor = _require_key(
+                        actors,
+                        target_key,
+                        f"Rule {rule.key} applicable target Actor",
+                    )
+                    if rule_action.key not in target_actor.allowed_action_keys:
+                        raise ValueError(
+                            f"Rule {rule.key} applicable target Actor is not eligible "
+                            "for that Action"
+                        )
         parameters = (
             {parameter.key: parameter for parameter in rule_action.parameters}
             if rule_action is not None
@@ -2691,30 +2875,32 @@ def _validate_region_resource_knowledge(
             raise ValueError("Region Resource Knowledge must target a Region Node")
 
 
-def _validate_public_knowledge(
+def _validate_resource_source_hints(
     definition: ScenarioDefinitionV2,
     nodes: dict[str, NodeDefinitionV2],
-    resources: dict[str, ResourceDefinitionV2],
 ) -> None:
-    hints = definition.public_knowledge.resource_source_hints
-    if not hints:
+    resources_with_hints = [
+        resource for resource in definition.world.resources if resource.source_hint is not None
+    ]
+    if not resources_with_hints:
         return
     locality = definition.metadata.locality
     if not locality.enabled or not locality.scoped_resources:
         raise ValueError("Resource source hints require locality.scoped_resources")
     assert locality.region_node_type_key is not None
-    for hint in hints:
-        _require_key(resources, hint.resource_key, "Public Resource Source Hint Resource")
+    for resource in resources_with_hints:
+        hint = resource.source_hint
+        assert hint is not None
         region_keys = (
             *((hint.primary_region_key,) if hint.primary_region_key is not None else ()),
             *hint.candidate_region_keys,
         )
         for region_key in region_keys:
-            region = _require_key(nodes, region_key, "Public Resource Source Hint Region")
+            region = _require_key(nodes, region_key, "Resource source hint Region")
             if region.node_type_key != locality.region_node_type_key:
-                raise ValueError("Public Resource Source Hint must target a Region Node")
+                raise ValueError("Resource source hint must target a Region Node")
             if region.initial_visibility != Visibility.KNOWN:
-                raise ValueError("Public Resource Source Hint Region must be publicly known")
+                raise ValueError("Resource source hint Region must be publicly known")
 
 
 def _static_facility_region(definition: ScenarioDefinitionV2, facility_key: str) -> str | None:
@@ -2806,6 +2992,7 @@ __all__ = [
     "ActionParameterType",
     "ActionParameters",
     "ActionSemanticReferenceType",
+    "ActionTargetContractBindingV2",
     "ConditionKind",
     "DerivedDependencyKind",
     "DerivedDependencyV2",
@@ -2816,7 +3003,6 @@ __all__ = [
     "FactPresentationRoleV2",
     "LocalityContractV2",
     "NodeFamilyV2",
-    "PublicKnowledgeDefinitionV2",
     "PublicReferenceTypeV2",
     "PublicReferenceV2",
     "RegionResourceKnowledgeInitialStateV2",
@@ -2833,5 +3019,6 @@ __all__ = [
     "TypedValueLabelV2",
     "ValueLabelV2",
     "knowledge_gate_is_revealed",
+    "normalize_resource_source_hint_document",
     "transport_resource_entries",
 ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 from app.domain.scenario_v2 import LocalityContractV2, ScenarioDefinitionV2
@@ -13,6 +14,7 @@ from app.scenarios.documents import parse_scenario_document
 _OPTIONAL_ACTION_FIELDS_WITH_LEGACY_OMISSION = (
     "target_node_type_keys",
     "target_actor_roles",
+    "target_contracts",
     "operation_bindings",
 )
 
@@ -46,6 +48,33 @@ def canonical_document_payload(document: dict[str, Any]) -> dict[str, Any]:
     """
 
     return _canonical_v2_payload(parse_scenario_document(document), document)
+
+
+def legacy_resource_source_hint_payload(
+    canonical_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Reconstruct the prior canonical wire shape for immutable old snapshots."""
+
+    legacy = deepcopy(canonical_payload)
+    world = legacy.get("world")
+    resources = world.get("resources") if isinstance(world, dict) else None
+    if not isinstance(resources, list):
+        return None
+    hints: list[dict[str, Any]] = []
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        source_hint = resource.pop("source_hint", None)
+        if source_hint is None:
+            continue
+        if not isinstance(source_hint, dict) or not isinstance(resource.get("key"), str):
+            return None
+        hints.append({"resource_key": resource["key"], **source_hint})
+    if not hints:
+        return None
+    hints.sort(key=lambda item: item["resource_key"])
+    legacy["public_knowledge"] = {"resource_source_hints": hints}
+    return legacy
 
 
 def _canonical_v2_payload(
@@ -99,6 +128,7 @@ def _canonical_v2_payload(
             if parameter["value_type"] == "ENUM":
                 parameter["allowed_values"].sort(key=_scalar_sort_key)
         action["allowed_actor_capabilities"].sort()
+        action.get("target_contracts", []).sort(key=lambda item: item["target_key"])
         action["expected_outcomes"].sort(key=lambda item: item["code"])
         _sort_authority(action["authority_policy"])
         planning = action["planning"]
@@ -120,8 +150,12 @@ def _canonical_v2_payload(
             if source_action is None:
                 continue
             for field in _OPTIONAL_ACTION_FIELDS_WITH_LEGACY_OMISSION:
-                if field not in source_action and not action[field]:
-                    action.pop(field)
+                # New optional fields may be omitted from ``model_dump`` when
+                # their ``exclude_if`` predicate fires.  Treat a missing
+                # normalized key as the empty legacy-equivalent value so old
+                # snapshots keep their wire shape without raising KeyError.
+                if field not in source_action and not action.get(field):
+                    action.pop(field, None)
             for field, default in _OPTIONAL_ACTION_DEFAULTS_WITH_LEGACY_OMISSION:
                 if field not in source_action and action.get(field) == default:
                     action.pop(field, None)
@@ -172,6 +206,8 @@ def _canonical_v2_payload(
             item["key"],
         )
     )
+    for rule in normalized["rules"]:
+        rule.get("applicable_target_keys", []).sort()
     objectives = normalized.get("objectives", [])
     objectives.sort(key=lambda item: item["key"])
     for objective in objectives:
@@ -202,11 +238,6 @@ def _canonical_v2_payload(
                     gate.get("accepted_values", []).sort(key=_scalar_sort_key)
             state["dependencies"].sort(key=_derived_dependency_sort_key)
     normalized["planning"]["recovery_hints"].sort(key=lambda item: item["failure_code"])
-    public_knowledge = normalized.get("public_knowledge")
-    if isinstance(public_knowledge, dict):
-        hints = public_knowledge.get("resource_source_hints")
-        if isinstance(hints, list):
-            hints.sort(key=lambda item: item["resource_key"])
     public_references = normalized.get("public_references")
     if isinstance(public_references, list):
         public_references.sort(
@@ -321,5 +352,6 @@ __all__ = [
     "canonical_document_payload",
     "canonical_payload_bytes",
     "canonical_payload_hash",
+    "legacy_resource_source_hint_payload",
     "scenario_content_hash",
 ]

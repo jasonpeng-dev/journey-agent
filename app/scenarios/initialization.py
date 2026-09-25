@@ -216,7 +216,7 @@ def analyze_bootstrap(
     for node in definition.world.nodes:
         node_raw = raw_node_by_key.get(node.key, {})
         locator = _locator(section="world-entities", kind="node", key=node.key)
-        for field_name, value in (
+        for field_name, node_value in (
             ("initial_access", node.initial_access.value),
             ("initial_visibility", node.initial_visibility.value),
         ):
@@ -228,7 +228,7 @@ def analyze_bootstrap(
                     BootstrapValueSource.EXPLICIT
                     if isinstance(node_raw, dict) and field_name in node_raw
                     else BootstrapValueSource.MISSING,
-                    value,
+                    node_value,
                     {**locator, "field_path": field_name},
                 )
             )
@@ -240,7 +240,7 @@ def analyze_bootstrap(
         }
         for fact in node.facts:
             fact_raw = raw_fact_by_key.get(fact.key, {})
-            for field_name, value in (
+            for field_name, fact_value in (
                 ("initial_value", fact.initial_value),
                 ("initial_visibility", fact.initial_visibility.value),
             ):
@@ -252,7 +252,7 @@ def analyze_bootstrap(
                         BootstrapValueSource.EXPLICIT
                         if isinstance(fact_raw, dict) and field_name in fact_raw
                         else BootstrapValueSource.MISSING,
-                        value,
+                        fact_value,
                         {**locator, "field_path": f"facts.{fact.key}.{field_name}"},
                     )
                 )
@@ -331,6 +331,9 @@ def analyze_bootstrap(
         else []
     )
     explicit_pool_keys = {item.pool_key for item in definition.initialization.resource_pools}
+    explicit_pools_by_key = {
+        item.pool_key: item for item in definition.initialization.resource_pools
+    }
     legacy_resources = {
         item.resource_key for item in definition.initialization.resource_initial_states
     }
@@ -340,6 +343,7 @@ def analyze_bootstrap(
             if pool.pool_key in explicit_pool_keys
             else BootstrapValueSource.LEGACY_FALLBACK
         )
+        authored_pool = explicit_pools_by_key.get(pool.pool_key)
         findings.append(
             _finding(
                 f"pool:{pool.pool_key}:{pool.resource_key}:{pool.region_key or 'global'}",
@@ -351,10 +355,24 @@ def analyze_bootstrap(
                 else "world.resources[].initial_value",
                 source,
                 {
+                    "pool_key": pool.pool_key,
+                    "resource_key": pool.resource_key,
+                    "region_key": authored_pool.region_key if authored_pool else pool.region_key,
+                    "facility_key": authored_pool.facility_key if authored_pool else None,
                     "quantity": pool.quantity,
                     "reserved": pool.reserved_value,
                     "availability": pool.availability.value,
                     "visibility": pool.visibility.value,
+                    "survey_discoverable": authored_pool.survey_discoverable
+                    if authored_pool
+                    else False,
+                    "availability_requirement": (
+                        authored_pool.availability_requirement.model_dump(
+                            mode="json", exclude_none=True
+                        )
+                        if authored_pool and authored_pool.availability_requirement
+                        else None
+                    ),
                 },
                 _locator(
                     section="initialization",
@@ -373,20 +391,24 @@ def analyze_bootstrap(
     region_type = definition.metadata.locality.region_node_type_key
     regions = [node for node in definition.world.nodes if node.node_type_key == region_type]
     for region in regions:
-        state = configured_regions.get(region.key)
+        region_config = configured_regions.get(region.key)
         findings.append(
             _finding(
                 f"region-knowledge:{region.key}",
                 f"{region.name} · resource knowledge",
                 "initialization.region_resource_knowledge[]",
                 BootstrapValueSource.EXPLICIT
-                if state is not None
+                if region_config is not None
                 else BootstrapValueSource.DEFAULT,
                 {
                     "visibility": (
-                        state.resource_inventory_visibility.value if state else "VISIBLE"
+                        region_config.resource_inventory_visibility.value
+                        if region_config
+                        else "VISIBLE"
                     ),
-                    "survey_completed": state.resource_survey_completed if state else True,
+                    "survey_completed": region_config.resource_survey_completed
+                    if region_config
+                    else True,
                 },
                 _locator(
                     section="initialization",
@@ -396,15 +418,16 @@ def analyze_bootstrap(
                 ),
             )
         )
-    for state in definition.derived_states:
+    for derived_state in definition.derived_states:
+        state = derived_state
         findings.append(
             _finding(
-                f"derived:{state.key}",
+                f"derived:{derived_state.key}",
                 f"{state.name} · initial preview",
-                f"derived_states.{state.key}",
+                f"derived_states.{derived_state.key}",
                 BootstrapValueSource.DERIVED,
                 None,
-                _locator(section="derived-states", kind="derived_state", key=state.key),
+                _locator(section="derived-states", kind="derived_state", key=derived_state.key),
                 owner=FieldUiOwner.DERIVED_READONLY,
             )
         )
@@ -437,10 +460,11 @@ def evaluate_initial_derived_states(
         identity = (pool.region_key, pool.resource_key)
         available = max(0, pool.quantity - pool.reserved_value)
         truth_resources[identity] = truth_resources.get(identity, 0) + available
-        knowledge = region_knowledge.get(pool.region_key)
-        region_known = knowledge is None or (
-            knowledge.resource_inventory_visibility == ResourceInventoryVisibility.VISIBLE
-            and knowledge.resource_survey_completed
+        region_knowledge_state = region_knowledge.get(pool.region_key)
+        region_known = region_knowledge_state is None or (
+            region_knowledge_state.resource_inventory_visibility
+            == ResourceInventoryVisibility.VISIBLE
+            and region_knowledge_state.resource_survey_completed
         )
         if region_known and pool.visibility == ResourcePoolVisibility.VISIBLE:
             known_resources[identity] = known_resources.get(identity, 0) + available
@@ -814,7 +838,6 @@ def bootstrap_parity(
         "derived_states",
         "goal_resolution",
         "planning",
-        "public_knowledge",
         "public_references",
     ):
         if before.get(root) != after.get(root):

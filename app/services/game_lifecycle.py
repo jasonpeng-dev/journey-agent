@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import func, select, update
+from sqlalchemy import func, inspect, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.enums import (
@@ -23,6 +24,7 @@ from app.infrastructure.db.models import (
     ConversationMessage,
     ConversationSession,
     GameInstance,
+    GameInstanceActionTargetKnowledge,
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceMemoryEvent,
@@ -180,7 +182,7 @@ class GameLifecycleService:
             self.db.execute(
                 sql_delete(ConversationSession).where(ConversationSession.id.in_(session_ids))
             )
-        for model in (
+        models: tuple[type[Any], ...] = (
             GameInstanceMemoryEvent,
             GameInstanceActor,
             GameInstanceResourceState,
@@ -188,7 +190,10 @@ class GameLifecycleService:
             GameInstanceRelationKnowledge,
             GameInstanceFactState,
             GameInstanceNodeState,
-        ):
+        )
+        if inspect(self.db.connection()).has_table("game_instance_action_target_knowledge"):
+            models = (*models, GameInstanceActionTargetKnowledge)
+        for model in models:
             self.db.execute(sql_delete(model).where(model.game_instance_id == deleted_id))
         self.db.execute(
             update(GameInstance)

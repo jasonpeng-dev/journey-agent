@@ -37,6 +37,7 @@ from app.domain.scenario_v2 import (
 )
 from app.domain.world import AccessState, Visibility
 from app.engine.locality import LocalityEngineError, resolve_resource_scope
+from app.scenarios.selector_semantics import related_candidate_node_keys
 
 type FactRef = tuple[str, str]
 
@@ -131,6 +132,13 @@ class FactVisibilityMutation:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionTargetKnowledgeMutation:
+    action_key: str
+    target_key: str
+    visibility: Visibility
+
+
+@dataclass(frozen=True, slots=True)
 class NodeVisibilityMutation:
     node_key: str
     visibility: Visibility
@@ -214,6 +222,7 @@ class GenericRuleOutcome:
     failure: RuleFailure | None = None
     fact_updates: tuple[FactMutation, ...] = ()
     fact_visibility_updates: tuple[FactVisibilityMutation, ...] = ()
+    action_target_knowledge_updates: tuple[ActionTargetKnowledgeMutation, ...] = ()
     node_visibility_updates: tuple[NodeVisibilityMutation, ...] = ()
     node_access_updates: tuple[NodeAccessMutation, ...] = ()
     resource_mutations: tuple[ResourceMutation, ...] = ()
@@ -312,6 +321,17 @@ class DeclarativeRuleEngine:
         matches: list[RuleDefinitionV2] = []
         for rule in self.definition.rules:
             if rule.phase != phase or rule.action_key != context.action_key:
+                continue
+            action = self._action(context.action_key)
+            applicability_key = (
+                context.target_actor_key
+                if action.target_kind.value == "ACTOR"
+                else context.target_node_key
+            )
+            if (
+                rule.applicable_target_keys
+                and applicability_key not in rule.applicable_target_keys
+            ):
                 continue
             if rule.condition is None:
                 matches.append(rule)
@@ -609,22 +629,20 @@ class DeclarativeRuleEngine:
         *,
         required_fact_key: str | None,
     ) -> tuple[str, ...]:
-        found: list[str] = []
-        for relation in self.definition.world.relations:
-            if relation.relation_type_key != relation_type_key:
-                continue
-            if direction == RelationDirection.SOURCE and relation.source_node_key == anchor:
-                candidate = relation.target_node_key
-            elif direction == RelationDirection.TARGET and relation.target_node_key == anchor:
-                candidate = relation.source_node_key
-            else:
-                continue
-            node = self.definition.world.node(candidate)
-            if node is not None and (
-                required_fact_key is None or node.fact(required_fact_key) is not None
-            ):
-                found.append(candidate)
-        return tuple(sorted(set(found)))
+        return related_candidate_node_keys(
+            anchor_node_keys=(anchor,),
+            relation_type_key=relation_type_key,
+            direction=direction.value,
+            relation_edges=(
+                (relation.source_node_key, relation.relation_type_key, relation.target_node_key)
+                for relation in self.definition.world.relations
+            ),
+            node_fact_keys={
+                node.key: {fact.key for fact in node.facts}
+                for node in self.definition.world.nodes
+            },
+            required_fact_key=required_fact_key,
+        )
 
     @staticmethod
     def _node(state: DeclarativeRuleState, node_key: str) -> RuleNodeState:
@@ -795,6 +813,11 @@ def merge_rule_outcomes(outcomes: tuple[GenericRuleOutcome, ...]) -> GenericRule
         fact_visibility_updates=tuple(
             item for outcome in outcomes for item in outcome.fact_visibility_updates
         ),
+        action_target_knowledge_updates=tuple(
+            item
+            for outcome in outcomes
+            for item in outcome.action_target_knowledge_updates
+        ),
         node_visibility_updates=tuple(
             item for outcome in outcomes for item in outcome.node_visibility_updates
         ),
@@ -892,6 +915,7 @@ def _compare(left: StrictScalar, operator: ComparisonOperator, right: StrictScal
 
 __all__ = [
     "ActionRuleContext",
+    "ActionTargetKnowledgeMutation",
     "ActorCommandReachabilityMutation",
     "DeclarativeRuleEngine",
     "DeclarativeRuleState",

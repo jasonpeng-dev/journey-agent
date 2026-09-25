@@ -19,7 +19,6 @@ _FACT_LABELS = {
     "passable": "通行状态",
     "heavy_engineering_support": "重型工程支援",
     "heavy_engineering_support_ready": "重型工程支援状态",
-    "repair_profile": "设施类型",
 }
 
 _FACT_VALUE_LABELS: dict[tuple[str, object], str] = {
@@ -54,8 +53,6 @@ def legacy_fact_change(
 ) -> tuple[str, str | int | bool | None] | None:
     """Return the old player label, or ``None`` for a hidden legacy fact."""
 
-    if fact_key == "repair_profile":
-        return None
     label = _FACT_LABELS.get(fact_key)
     if label is None:
         return None

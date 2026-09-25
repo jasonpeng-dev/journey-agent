@@ -519,6 +519,25 @@ class GameInstanceRelationKnowledge(TimestampMixin, Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class GameInstanceActionTargetKnowledge(TimestampMixin, Base):
+    """Instance-owned Knowledge for one exact Action/target contract."""
+
+    __tablename__ = "game_instance_action_target_knowledge"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    action_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    target_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    visibility: Mapped[Visibility] = mapped_column(
+        Enum(Visibility, native_enum=False),
+        default=Visibility.KNOWN,
+        server_default=Visibility.KNOWN.value,
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class GameInstanceActor(TimestampMixin, Base):
     """Instance-owned runtime actor materialized from the exact ScenarioVersion."""
 

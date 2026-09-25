@@ -288,8 +288,14 @@ class PlayerActionReportFormatter:
     ) -> str | int | bool | None:
         value_labels = getattr(fact, "value_labels", ())
         for item in value_labels:
-            if type(item.value) is type(value) and item.value == value:
-                return item.label
+            label = getattr(item, "label", None)
+            item_value = getattr(item, "value", None)
+            if (
+                type(item_value) is type(value)
+                and item_value == value
+                and isinstance(label, (str, int, bool))
+            ):
+                return label
         if isinstance(value, bool):
             return "是" if value else "否"
         if isinstance(value, int):

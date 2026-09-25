@@ -23,6 +23,7 @@ vi.mock("./api", () => ({
   api: {
     draft: vi.fn(),
     analyzeWorkingCopyReferences: vi.fn(),
+    completeness: vi.fn(),
     transformWorkingCopy: vi.fn(),
     saveDraft: vi.fn(),
     validateDraft: vi.fn(),
@@ -34,7 +35,7 @@ const draft = {
   scenario_id: "scenario-1",
   revision: 1,
   definition_document: {
-    metadata: { key: "scenario-1", name: "测试场景" },
+    metadata: { key: "scenario-1", name: "测试场景", locality: { region_node_type_key: "region" } },
     initialization: {
       start_node_key: "central",
       primary_actor_key: "operator",
@@ -46,10 +47,13 @@ const draft = {
       key: "scenario-1",
       name: "测试世界",
       node_types: [{ key: "region", name: "区域" }],
-      nodes: [{ key: "central", name: "中央区", node_type_key: "region" }],
+      nodes: [
+        { key: "central", name: "中央区", node_type_key: "region" },
+        { key: "north", name: "北部区域", node_type_key: "region" },
+      ],
       relation_types: [{ key: "located_in", name: "位于" }],
       relations: [{ key: "located_in", source_node_key: "central", relation_type_key: "located_in", target_node_key: "central", initial_visibility: "VISIBLE" }],
-      resources: [{ key: "relief", name: "救援物资" }],
+      resources: [{ key: "relief", name: "救援物资", source_hint: { primary_region_key: "central" } }],
     },
     actors: {
       roles: [{ key: "coordinator", name: "协调员" }],
@@ -57,7 +61,6 @@ const draft = {
     },
     rules: [{ key: "stabilize", phase: "RESOLVE", trigger: "STATE", action_key: "", priority: 1 }],
     planning: { instructions: ["优先保障生命安全", "保留替代方案"], recovery_hints: [{ failure_code: "BLOCKED", hint: "重新检查道路" }] },
-    public_knowledge: { resource_source_hints: [{ resource_key: "relief", primary_region_key: "central", candidate_region_keys: [] }] },
     public_references: [{ term: "中央区", ref_type: "REGION", ref_key: "central" }],
   },
   validation_status: "VALID",
@@ -99,6 +102,7 @@ function LocationProbe() {
 beforeEach(() => {
   vi.mocked(api.draft).mockResolvedValue(draft);
   vi.mocked(api.analyzeWorkingCopyReferences).mockResolvedValue({ scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [] });
+  vi.mocked(api.completeness).mockResolvedValue({ scenario_id: "scenario-1", base_revision: 1, items: [], required_missing: 0, recommended_missing: 0, validation_issue_count: 0, reference_edge_count: 0 });
   vi.mocked(api.transformWorkingCopy).mockImplementation(async (_id, _revision, document) => ({ scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [], definition_document: structuredClone(document) }));
   vi.mocked(api.saveDraft).mockResolvedValue(draft);
   vi.mocked(api.validateDraft).mockResolvedValue({ scenario_id: "scenario-1", revision: 1, content_hash: null, publish_ready: false, issues: [], readiness: [] });
@@ -150,15 +154,14 @@ describe("Editor section state ownership", () => {
       "goal-resolution": { category: "目标系统", label: "目标解析" },
       "planning-instructions": { category: "规划策略", label: "全局规划指引" },
       "planning-recovery": { category: "规划策略", label: "失败恢复策略" },
-      "public-knowledge": { category: "公开信息", label: "资源来源提示" },
-      "public-references": { category: "公开信息", label: "公共引用" },
+      "terminology-references": { category: "目标系统", label: "术语与引用" },
     });
     expect(editorSectionTaxonomy).not.toHaveProperty("objectives");
 
     renderEditor();
     const heading = await screen.findByTestId("editor-taxonomy-heading");
     expect(screen.queryByRole("link", { name: "目标" })).not.toBeInTheDocument();
-    expect(heading).toHaveTextContent("公开信息/公共引用");
+    expect(heading).toHaveTextContent("目标系统/术语与引用");
     expect(screen.queryByText("Working copy")).not.toBeInTheDocument();
     expect(document.querySelector(".editor-toolbar-subtitle")).not.toBeInTheDocument();
     expect(screen.queryByText("编辑 公共引用 配置")).not.toBeInTheDocument();
@@ -170,8 +173,8 @@ describe("Editor section state ownership", () => {
   it("derives master list, selection, and create affordance from every active section", async () => {
     renderEditor();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "公共引用" })).toBeInTheDocument());
-    expectSection({ heading: "公共引用", item: "中央区", kind: "公共引用", count: "1", createButton: "公共引用" });
+    await waitFor(() => expect(screen.getByRole("heading", { name: "术语与引用" })).toBeInTheDocument());
+    expectSection({ heading: "术语与引用", item: "中央区", kind: "术语引用", count: "1", createButton: "术语引用" });
 
     fireEvent.click(screen.getByRole("link", { name: "资源定义" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "资源定义" })).toBeInTheDocument());
@@ -188,15 +191,15 @@ describe("Editor section state ownership", () => {
     expect(screen.getByRole("button", { name: /参与者/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /角色/ })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("link", { name: "公共引用" }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "公共引用" })).toBeInTheDocument());
-    expectSection({ heading: "公共引用", item: "中央区", kind: "公共引用", count: "1", createButton: "公共引用" });
+    fireEvent.click(screen.getByRole("link", { name: "术语与引用" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "术语与引用" })).toBeInTheDocument());
+    expectSection({ heading: "术语与引用", item: "中央区", kind: "术语引用", count: "1", createButton: "术语引用" });
     expect(api.saveDraft).not.toHaveBeenCalled();
   });
 
   it("keeps browser history navigation section-scoped and clean", async () => {
     renderEditor();
-    await waitFor(() => expect(screen.getByRole("heading", { name: "公共引用" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "术语与引用" })).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("link", { name: "资源定义" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "资源定义" })).toBeInTheDocument());
@@ -231,7 +234,9 @@ describe("Editor section state ownership", () => {
     expect(screen.queryByText("Typed 编辑器")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "草稿检查与发布" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "运行准备度" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "问题" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "发布门槛" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "前往配置检查" })).toHaveAttribute("href", "/scenarios/scenario-1/edit/configuration-check");
+    expect(screen.queryByText(/POOL_QUANTITY|SCENARIO_DOCUMENT_SCHEMA_INVALID/)).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "预览/测试当前草稿" })).toBeInTheDocument();
   });
 
@@ -243,7 +248,7 @@ describe("Editor section state ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: /资源池/ }));
     fireEvent.click(screen.getByRole("button", { name: /central_pool/ }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "中央区 · 救援物资", level: 4 })).toBeInTheDocument());
-    expect(screen.getByLabelText(/数量/)).toBeInTheDocument();
+    expect(screen.getByText("数量")).toBeInTheDocument();
     expect(screen.getByText("未修改")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "全局规划指引" }));
@@ -317,24 +322,30 @@ describe("Editor section state ownership", () => {
     expect(screen.getByRole("heading", { name: "BLOCKED", level: 3 })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "＋ 失败恢复策略" }));
+    const creationDialog = await screen.findByRole("dialog", { name: /失败恢复策略/ });
+    expect(screen.getByText("未修改")).toBeInTheDocument();
+    fireEvent.change(within(creationDialog).getByLabelText(/\u5931\u8d25\u4ee3\u7801/), { target: { value: "RECOVERED" } });
+    fireEvent.click(within(creationDialog).getByRole("button", { name: "创建" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "RECOVERED", level: 3 })).toBeInTheDocument());
+    const hintField = document.querySelector('[data-field-path$=".hint"] textarea');
+    expect(hintField).not.toBeNull();
+    if (!hintField) throw new Error("Expected recovery hint detail field.");
+    fireEvent.change(hintField, { target: { value: "Retry the route" } });
     expect(screen.getByText("有未保存修改")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("请填写失败恢复策略。")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "↑" }));
-    expect(screen.getByRole("heading", { name: "FAILURE", level: 3 })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "↓" }));
+    expect(screen.getByText("RECOVERED", { selector: "output.stable-identity-value" })).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("RECOVERED")).not.toBeInTheDocument();
 
     vi.mocked(api.transformWorkingCopy).mockImplementationOnce(async (_id, _revision, document) => {
       const definition = structuredClone(document) as typeof draft.definition_document;
-      definition.planning.recovery_hints = definition.planning.recovery_hints.filter((item) => item.failure_code !== "FAILURE");
+      definition.planning.recovery_hints = definition.planning.recovery_hints.filter((item) => item.failure_code !== "RECOVERED");
       return { scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [], definition_document: definition };
     });
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
-    const dialog = await screen.findByRole("dialog", { name: "删除「失败代码 · FAILURE」？" });
+    const dialog = await screen.findByRole("dialog", { name: "删除「失败代码 · RECOVERED」？" });
     fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
     await waitFor(() => expect(screen.getByText("请选择或新增一条失败恢复策略。")).toBeInTheDocument());
-    expect(screen.queryByDisplayValue("请填写失败恢复策略。")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Retry the route")).not.toBeInTheDocument();
   });
-
   it("replays a validation locator into the matching root collection item", async () => {
     vi.mocked(api.validateDraft).mockResolvedValue({
       scenario_id: "scenario-1",
@@ -348,10 +359,17 @@ describe("Editor section state ownership", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "验证与发布" })).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: "验证当前草稿" }));
-    fireEvent.click(await screen.findByText(/POOL_QUANTITY/));
+    fireEvent.click(screen.getByRole("link", { name: "前往配置检查" }));
+    await waitFor(() => expect(screen.getAllByRole("heading", { name: "配置检查" })).toHaveLength(2));
+    const quantityIssue = await screen.findByRole("link", { name: "定位到数量" });
+    expect(quantityIssue).toHaveAttribute("href", "/scenarios/scenario-1/edit/initialization?domain=resources&group=resource-pools&item=pool%3Acentral_pool%3Arelief%3Acentral&focus_path=initialization.resource_pools.central_pool.quantity");
+    fireEvent.click(quantityIssue);
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "中央区 · 救援物资", level: 4 })).toBeInTheDocument());
-    expect(screen.getByLabelText(/数量/)).toBeInTheDocument();
+    const quantityField = document.querySelector<HTMLInputElement>('[data-field-path="initialization.resource_pools.central_pool.quantity"] input');
+    expect(quantityField).not.toBeNull();
+    await waitFor(() => expect(quantityField).toHaveFocus());
+    expect(quantityField?.closest("[data-field-path]")).toHaveClass("is-focus-highlighted");
   });
 
   it("guards deletion of a referenced resource pool", async () => {
@@ -373,35 +391,25 @@ describe("Editor section state ownership", () => {
     const dialog = await screen.findByRole("dialog", { name: "无法删除「central_pool」" });
     expect(within(dialog).getByText("规则")).toBeInTheDocument();
     expect(dialog).toHaveTextContent("stabilize");
-    expect(within(dialog).getByText("rules.0.condition.resource_pool_key")).toBeInTheDocument();
-    expect(within(dialog).getByRole("link", { name: "前往" })).toHaveAttribute("href", expect.stringContaining("/scenarios/scenario-1/edit/rules/stabilize"));
+    expect(within(dialog).queryByText("rules.0.condition.resource_pool_key")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("link", { name: "前往stabilize" })).toHaveAttribute("href", expect.stringContaining("/scenarios/scenario-1/edit/rules/stabilize"));
     expect(within(dialog).queryByRole("button", { name: "删除" })).not.toBeInTheDocument();
   });
 
-  it("keeps Resource Source Hint authoring collection-only and splits relation authoring", async () => {
-    renderEditor("/scenarios/scenario-1/edit/public-knowledge");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "资源来源提示" })).toBeInTheDocument());
-    const publicKnowledgeMaster = document.querySelector<HTMLElement>(".object-panel")!;
-    expect(within(publicKnowledgeMaster).getByText("1", { selector: ".object-count" })).toBeInTheDocument();
-    expect(within(publicKnowledgeMaster).getByRole("button", { name: "＋ 资源来源提示" })).toBeInTheDocument();
-    expect(publicKnowledgeMaster.querySelector(".collection-list-group")).toBeNull();
-    expect(screen.queryByText("资源发现知识")).not.toBeInTheDocument();
-    expect(screen.getByText("救援物资")).toBeInTheDocument();
-    expect(screen.getByText("主要来源：中央区")).toBeInTheDocument();
-    expect(screen.getByText("资源 · relief")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "资源来源提示配置" })).not.toBeInTheDocument();
+  it("owns source hints on Resources and redirects old Resource Hint locators", async () => {
+    renderEditor("/scenarios/scenario-1/edit/public-knowledge?owner=collection&collection=resource_source_hints&item=%5B%22relief%22%5D");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "救援物资", level: 3 })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/resources/relief?focus_path=source_hint"));
+    expect(screen.getByLabelText("主要区域")).toHaveValue("central");
+    expect(screen.getByRole("link", { name: "资源定义" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "公开信息" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "资源来源提示" })).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "救援物资" } });
-    expect(screen.getByText("资源 · relief")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("搜索"), { target: { value: "relief" } });
-    expect(screen.getByText("救援物资")).toBeInTheDocument();
-    fireEvent.click(within(publicKnowledgeMaster).getByRole("button", { name: /救援物资/ }));
-    expect(screen.getByRole("heading", { name: "救援物资", level: 3 })).toBeInTheDocument();
-    expect(screen.getByText("资源来源提示 · 可编辑对象")).toBeInTheDocument();
-    expect(screen.queryByText("集合项")).not.toBeInTheDocument();
-    expect(screen.queryByText(/public_knowledge\.resource_source_hints\.\d+/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("资源")).toBeDisabled();
-    expect(screen.getByText(/资源在创建来源提示时确定/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("主要区域"), { target: { value: "north" } });
+    expect(screen.getByText("有未保存修改")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清除来源提示" }));
+    expect(screen.getByText(/\u6765\u6e90\u63d0\u793a\u7531\u8d44\u6e90\u5b9a\u4e49/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "清除来源提示" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "关系类型" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "关系类型" })).toBeInTheDocument());
@@ -414,78 +422,31 @@ describe("Editor section state ownership", () => {
     expect(screen.getByText("关系实例 · located_in")).toBeInTheDocument();
   });
 
-  it("creates a Resource Source Hint only after choosing an unused Resource and keeps its semantic identity", async () => {
-    const customDraft = structuredClone(draft);
-    customDraft.definition_document.world.resources = [...customDraft.definition_document.world.resources, { key: "water", name: "饮用水" }];
-    customDraft.definition_document.world.nodes = [...customDraft.definition_document.world.nodes, { key: "north", name: "北部区域", node_type_key: "region" }];
-    vi.mocked(api.draft).mockResolvedValueOnce(customDraft);
+  it("explains a Region delete block from a Resource source hint", async () => {
+    vi.mocked(api.transformWorkingCopy).mockRejectedValueOnce(new ApiError("referenced", 409, "SCENARIO_OBJECT_REFERENCED", {
+      references: [{
+        source: { object_kind: "resource", object_key: "relief", field_path: "source_hint.primary_region_key" },
+        target: { object_kind: "node", object_key: "central", field_path: null },
+      }],
+    }));
+    renderEditor("/scenarios/scenario-1/edit/world-entities/central");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "中央区", level: 3 })).toBeInTheDocument());
 
-    renderEditor("/scenarios/scenario-1/edit/public-knowledge");
-    await waitFor(() => expect(screen.getByRole("button", { name: "＋ 资源来源提示" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "＋ 资源来源提示" }));
-
-    const dialog = screen.getByRole("dialog", { name: "新增资源来源提示" });
-    expect(document.querySelector(".object-count")).toHaveTextContent("1");
-    expect(dialog).not.toHaveTextContent("new_resource");
-    expect(dialog).not.toHaveTextContent("new_region");
-    expect(within(dialog).getByRole("button", { name: "创建" })).toBeDisabled();
-    const resourceField = within(dialog).getByLabelText(/资源/);
-    expect(resourceField).toHaveDisplayValue("选择已有资源…");
-    expect(within(resourceField).queryByRole("option", { name: /救援物资/ })).not.toBeInTheDocument();
-
-    fireEvent.change(resourceField, { target: { value: "water" } });
-    fireEvent.change(within(dialog).getByLabelText("主要区域"), { target: { value: "central" } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "创建" }));
-
-    expect(screen.queryByRole("dialog", { name: "新增资源来源提示" })).not.toBeInTheDocument();
-    expect(document.querySelector(".object-count")).toHaveTextContent("2");
-    expect(screen.getByRole("heading", { name: "饮用水", level: 3 })).toBeInTheDocument();
-    expect(screen.getByText("资源来源提示 · 可编辑对象")).toBeInTheDocument();
-    expect(screen.getByLabelText("资源")).toBeDisabled();
-    expect(screen.getByLabelText("资源")).toHaveValue("water");
-    expect(screen.getByLabelText("主要区域")).toHaveValue("central");
-    expect(screen.queryByText(/public_knowledge\.resource_source_hints\.\d+/)).not.toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("主要区域"), { target: { value: "north" } });
-    expect(screen.getByText("有未保存修改")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "候选区域：添加" }));
-    fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: /中央区/ }));
-    expect(screen.getByText("中央区", { selector: ".value-chip" })).toBeInTheDocument();
-
-    vi.mocked(api.transformWorkingCopy).mockImplementationOnce(async (_id, _revision, document) => {
-      const transformed = structuredClone(document);
-      const knowledge = transformed.public_knowledge as { resource_source_hints: Array<{ resource_key: string }> };
-      knowledge.resource_source_hints = knowledge.resource_source_hints.filter((item) => item.resource_key !== "water");
-      return { scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [], definition_document: transformed };
-    });
-    fireEvent.click(screen.getByRole("button", { name: "删除" }));
-    const deleteDialog = await screen.findByRole("dialog", { name: "删除「饮用水」？" });
-    fireEvent.click(within(deleteDialog).getByRole("button", { name: "删除" }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "救援物资", level: 3 })).toBeInTheDocument());
-    expect(document.querySelector(".object-count")).toHaveTextContent("1");
-  });
-
-  it("routes Resource ownership correctly when Resource Source Hints have no Resource candidates", async () => {
-    const customDraft = structuredClone(draft);
-    customDraft.definition_document.world.resources = [];
-    customDraft.definition_document.public_knowledge.resource_source_hints = [];
-    vi.mocked(api.draft).mockResolvedValueOnce(customDraft);
-
-    renderEditor("/scenarios/scenario-1/edit/public-knowledge");
-    await waitFor(() => expect(screen.getByRole("button", { name: "＋ 资源来源提示" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "＋ 资源来源提示" }));
-    const dialog = screen.getByRole("dialog", { name: "新增资源来源提示" });
-    expect(within(dialog).getByText("暂无可选资源")).toBeInTheDocument();
-    expect(within(dialog).getByRole("link", { name: "前往资源定义" })).toHaveAttribute("href", "/scenarios/scenario-1/edit/resources");
-    expect(within(dialog).getByRole("button", { name: "创建" })).toBeDisabled();
-    expect(within(dialog).queryByLabelText(/资源/)).not.toBeInTheDocument();
-    expect(document.querySelector(".object-count")).toHaveTextContent("0");
+    fireEvent.click(screen.getByRole("button", { name: "删除节点" }));
+    const dialog = await screen.findByRole("dialog", { name: "无法删除「中央区」" });
+    expect(dialog).toHaveTextContent("资源「救援物资」的来源提示正在使用该区域");
+    expect(dialog).toHaveTextContent("主要区域");
+    expect(within(dialog).queryByText("source_hint.primary_region_key")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("link", { name: /前往资源/ })).toHaveAttribute(
+      "href",
+      "/scenarios/scenario-1/edit/resources/relief?focus_path=source_hint.primary_region_key",
+    );
   });
 
   it("normalizes unqualified relation type links to the dedicated route", async () => {
     renderEditor("/scenarios/scenario-1/edit/relations/located_in");
     await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/relation-types/located_in"));
-    expect(screen.getAllByLabelText("显示名称").some((element) => (element as HTMLInputElement).value === "位于")).toBe(true);
+    expect(screen.getAllByText("located_in", { selector: "output.stable-identity-value" }).length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("来源节点")).not.toBeInTheDocument();
   });
 
@@ -493,19 +454,21 @@ describe("Editor section state ownership", () => {
     renderEditor("/scenarios/scenario-1/edit/relations/located_in?kind=relation_type");
     await waitFor(() => {
       expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/relation-types/located_in");
-      expect(screen.getAllByLabelText("显示名称").some((element) => (element as HTMLInputElement).value === "位于")).toBe(true);
+      expect(screen.getAllByText("located_in", { selector: "output.stable-identity-value" }).length).toBeGreaterThan(0);
     });
     expect(screen.getByTestId("editor-location")).not.toHaveTextContent("kind=");
   });
 
-  it("normalizes the legacy relation instance query without changing its route", async () => {
+  it("preserves the relation discriminator for a colliding legacy relation locator", async () => {
     renderEditor("/scenarios/scenario-1/edit/relations/located_in?kind=relation");
     await waitFor(() => {
-      expect(screen.getByLabelText("来源节点")).toBeInTheDocument();
+      expect(screen.getByText("central__located_in__central", { selector: "output.stable-identity-value" })).toBeInTheDocument();
       expect(screen.queryAllByLabelText("显示名称")).toHaveLength(0);
-      expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/relations/located_in");
-      expect(screen.getByTestId("editor-location")).not.toHaveTextContent("kind=");
+      expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/relations/located_in?kind=relation");
     });
+    const targetHrefs = screen.getAllByRole("link", { name: /前往/ }).map((link) => link.getAttribute("href"));
+    expect(targetHrefs).toContain("/scenarios/scenario-1/edit/world-entities/central");
+    expect(targetHrefs).toContain("/scenarios/scenario-1/edit/relation-types/located_in");
   });
 
   it("keeps the current relation type deep link canonical", async () => {

@@ -31,11 +31,13 @@ from app.domain.scenario_v2 import (
     ConditionKind,
     ConditionV2,
     NodeSelectorKind,
+    RuleDefinitionV2,
     ScenarioDefinitionV2,
     relation_identity,
 )
 from app.domain.world import Visibility
 from app.infrastructure.db.models import (
+    GameInstanceActionTargetKnowledge,
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
@@ -181,7 +183,7 @@ class SharedKnowledgeProjection:
 
         return tuple(
             {
-                "resource_key": hint.resource_key,
+                "resource_key": resource.key,
                 **(
                     {"primary_region_key": hint.primary_region_key}
                     if hint.primary_region_key is not None
@@ -193,11 +195,30 @@ class SharedKnowledgeProjection:
                     else {}
                 ),
             }
-            for hint in sorted(
-                self.definition.public_knowledge.resource_source_hints,
-                key=lambda item: item.resource_key,
-            )
+            for resource in sorted(self.definition.world.resources, key=lambda item: item.key)
+            if (hint := resource.source_hint) is not None
         )
+
+    def known_action_target_rows(self) -> tuple[GameInstanceActionTargetKnowledge, ...]:
+        """Return only explicit Action target contracts currently known.
+
+        Old ScenarioVersions have no contract rows and continue through their
+        legacy selector projection.  A missing table is therefore treated as
+        an empty compatibility channel rather than a second visibility source.
+        """
+
+        try:
+            return tuple(
+                self.db.scalars(
+                    select(GameInstanceActionTargetKnowledge).where(
+                        GameInstanceActionTargetKnowledge.game_instance_id
+                        == self.scope.game_instance_id,
+                        GameInstanceActionTargetKnowledge.visibility == Visibility.KNOWN,
+                    )
+                )
+            )
+        except SQLAlchemyError:
+            return ()
 
     def known_action_requirements(
         self,
@@ -465,14 +486,43 @@ class SharedKnowledgeProjection:
             if item.get("relation_key") is not None
         }
         known_pool_keys = {item.pool_key for item in self.visible_resource_pools()}
+        known_actor_keys = {
+            row.actor_key
+            for row in self.db.scalars(
+                select(GameInstanceActor).where(
+                    GameInstanceActor.game_instance_id == self.scope.game_instance_id
+                )
+            )
+        }
+        known_action_targets = {
+            (row.action_key, row.target_key) for row in self.known_action_target_rows()
+        }
         role_names = {role.key: role.name for role in self.definition.actors.roles}
         self._target_owned_resource_requirement_keys.clear()
         selector_rules_by_action: dict[
             str,
-            list[tuple[tuple[tuple[ConditionV2, bool], ...], tuple[ConditionV2, ...]]],
+            list[
+                tuple[
+                    RuleDefinitionV2,
+                    tuple[tuple[ConditionV2, bool], ...],
+                    tuple[ConditionV2, ...],
+                ]
+            ],
+        ] = defaultdict(list)
+        preflight_rules_by_action: dict[
+            str,
+            list[
+                tuple[
+                    RuleDefinitionV2,
+                    tuple[tuple[ConditionV2, bool], ...],
+                    tuple[ConditionV2, ...],
+                ]
+            ],
         ] = defaultdict(list)
         for rule in self.definition.rules:
             if rule.phase.value != "PREFLIGHT":
+                continue
+            if rule.action_key is None:
                 continue
             leaves = self._condition_leaves_with_polarity(rule.condition)
             selector_conditions = tuple(
@@ -483,11 +533,12 @@ class SharedKnowledgeProjection:
                 and condition.node.kind == NodeSelectorKind.CURRENT_TARGET
                 and condition.kind in {ConditionKind.FACT_EQUALS, ConditionKind.FACT_IN}
             )
+            preflight_rules_by_action[rule.action_key].append(
+                (rule, leaves, selector_conditions)
+            )
             if selector_conditions:
-                if rule.action_key is None:
-                    continue
                 selector_rules_by_action[rule.action_key].append(
-                    (leaves, selector_conditions)
+                    (rule, leaves, selector_conditions)
                 )
 
         result: list[dict[str, Any]] = []
@@ -506,24 +557,92 @@ class SharedKnowledgeProjection:
                 item.target_key: item.required_actor_role_key
                 for item in action.target_actor_roles
             }
-            eligible_targets = tuple(
-                sorted(
-                    node.key
-                    for node in self.definition.world.nodes
-                    if node.key in known_nodes
-                    and action.required_interaction_key in node.interaction_keys
-                    and (
-                        not action.target_node_type_keys
-                        or node.node_type_key in action.target_node_type_keys
+            if action.target_contracts:
+                declared_targets = {
+                    contract.target_key
+                    for contract in action.target_contracts
+                    if (action.key, contract.target_key) in known_action_targets
+                }
+                if action.target_kind.value == "ACTOR":
+                    eligible_targets = tuple(
+                        sorted(declared_targets.intersection(known_actor_keys))
+                    )
+                else:
+                    eligible_targets = tuple(
+                        sorted(
+                            node.key
+                            for node in self.definition.world.nodes
+                            if node.key in declared_targets
+                            and node.key in known_nodes
+                            and action.required_interaction_key in node.interaction_keys
+                            and (
+                                not action.target_node_type_keys
+                                or node.node_type_key in action.target_node_type_keys
+                            )
+                        )
+                    )
+            else:
+                eligible_targets = tuple(
+                    sorted(
+                        node.key
+                        for node in self.definition.world.nodes
+                        if node.key in known_nodes
+                        and action.required_interaction_key in node.interaction_keys
+                        and (
+                            not action.target_node_type_keys
+                            or node.node_type_key in action.target_node_type_keys
+                        )
                     )
                 )
+            # Explicit Action target contracts are the new typed authority.
+            # Legacy selector Facts are consulted only by snapshots that do
+            # not declare the explicit contract channel.  New explicit Rule
+            # applicability keeps the remaining PREFLIGHT requirements while
+            # dropping stale selector-bearing rules, so the legacy Fact is
+            # never evaluated twice.
+            all_preflight_rules = preflight_rules_by_action.get(action.key, [])
+            has_explicit_applicability = any(
+                rule.applicable_target_keys
+                for rule, _leaves, _selectors in all_preflight_rules
             )
-            selector_rules = selector_rules_by_action.get(action.key, [])
+            projection_rules: tuple[
+                tuple[
+                    RuleDefinitionV2,
+                    tuple[tuple[ConditionV2, bool], ...],
+                    tuple[ConditionV2, ...],
+                ],
+                ...,
+            ]
+            if action.target_contracts:
+                projection_rules = tuple(
+                    (rule, leaves, tuple())
+                    for rule, leaves, selector_conditions in all_preflight_rules
+                    if not selector_conditions
+                )
+                require_rule_match = False
+            elif has_explicit_applicability:
+                # Applicability is a design-time Rule filter.  It cannot
+                # create a Player/Planner-visible target contract by itself.
+                # Without the independent Action/target Knowledge channel,
+                # only universal preflight requirements remain projectable.
+                projection_rules = tuple(
+                    (rule, leaves, tuple())
+                    for rule, leaves, selector_conditions in all_preflight_rules
+                    if not selector_conditions and not rule.applicable_target_keys
+                )
+                require_rule_match = False
+            else:
+                projection_rules = tuple(selector_rules_by_action.get(action.key, []))
+                require_rule_match = bool(projection_rules)
             unique_target_key = eligible_targets[0] if len(eligible_targets) == 1 else None
             for target_key in eligible_targets:
                 matched_rules = [
-                    (leaves, selector_conditions)
-                    for leaves, selector_conditions in selector_rules
+                    (rule, leaves, selector_conditions)
+                    for rule, leaves, selector_conditions in projection_rules
+                    if (
+                        not rule.applicable_target_keys
+                        or target_key in rule.applicable_target_keys
+                    )
                     if all(
                         self._target_selector_matches(
                             condition,
@@ -534,9 +653,10 @@ class SharedKnowledgeProjection:
                         for condition in selector_conditions
                     )
                 ]
-                if selector_rules and not matched_rules:
+                if require_rule_match and not matched_rules:
                     # A target-specific authored identity is not enough to
-                    # make a hidden target contract player/planner-visible.
+                    # make a target contract visible when an explicit rule
+                    # applicability list is the only rule source.
                     continue
 
                 requirement: dict[str, Any] = {"action_key": action.key}
@@ -547,7 +667,7 @@ class SharedKnowledgeProjection:
                 if required_actor_role is not None:
                     requirement["required_actor_role_key"] = required_actor_role
 
-                for leaves, selector_conditions in matched_rules:
+                for _rule, leaves, selector_conditions in matched_rules:
                     selector_ids = {id(condition) for condition in selector_conditions}
                     for condition, positive in leaves:
                         if id(condition) in selector_ids:
@@ -624,16 +744,20 @@ class SharedKnowledgeProjection:
                 # The target has passed the shared Knowledge gate above.  Only
                 # now may the generic planner helper join deterministic target
                 # effect metadata for this one authorized target.
-                effect_contract = planner_target_contracts(
-                    self.definition,
-                    action,
-                    known_node_keys=known_nodes,
-                    known_facts=known_facts,
-                    known_relation_keys=known_relation_keys,
-                    known_pool_keys=known_pool_keys,
-                    allowed_target_keys={target_key},
-                    include_authored_hidden_target_effects=True,
-                ).get(target_key, {})
+                effect_contract = (
+                    planner_target_contracts(
+                        self.definition,
+                        action,
+                        known_node_keys=known_nodes,
+                        known_facts=known_facts,
+                        known_relation_keys=known_relation_keys,
+                        known_pool_keys=known_pool_keys,
+                        allowed_target_keys={target_key},
+                        include_authored_hidden_target_effects=True,
+                    ).get(target_key, {})
+                    if action.target_kind.value == "NODE"
+                    else {}
+                )
                 effects = effect_contract.get("effects")
                 if isinstance(effects, list) and effects:
                     requirement["effects"] = [dict(item) for item in effects]
@@ -641,7 +765,7 @@ class SharedKnowledgeProjection:
                 # A bare target applicability marker is useful to the Planner
                 # only when it carries a target binding/effect.  Do not send
                 # empty inspect/travel markers to the Player DTO.
-                if not any(
+                if not action.target_contracts and not any(
                     requirement.get(key)
                     for key in (
                         "required_actor_role_key",
@@ -1159,14 +1283,14 @@ class SharedKnowledgeProjection:
                 pool.availability == ResourcePoolAvailability.AVAILABLE
                 for pool in pools
             )
-            requirements: list[dict[str, Any]] = []
+            availability_requirements: list[dict[str, Any]] = []
             for pool in pools:
-                requirement = pool.availability_requirement
-                if not isinstance(requirement, dict):
+                availability_requirement = pool.availability_requirement
+                if not isinstance(availability_requirement, dict):
                     continue
-                node_key = requirement.get("node_key")
-                fact_key = requirement.get("fact_key")
-                expected = requirement.get("value")
+                node_key = availability_requirement.get("node_key")
+                fact_key = availability_requirement.get("fact_key")
+                expected = availability_requirement.get("value")
                 if (
                     not isinstance(node_key, str)
                     or not isinstance(fact_key, str)
@@ -1174,7 +1298,7 @@ class SharedKnowledgeProjection:
                     or type(expected) not in {str, int, bool}
                 ):
                     continue
-                requirements.append(
+                availability_requirements.append(
                     {
                         "key": f"resource_availability:{target_key}:{resource_key}"
                         f":fact:{node_key}:{fact_key}",
@@ -1206,7 +1330,7 @@ class SharedKnowledgeProjection:
                         "desired_value": "AVAILABLE",
                         "status": "SATISFIED" if available else "UNSATISFIED",
                     }],
-                    "requirements": requirements,
+                    "requirements": availability_requirements,
                 }
             )
         return tuple(bindings)
@@ -1930,9 +2054,9 @@ def _public_predicate_status(current: Any, predicate: dict[str, Any]) -> str:
 def _source_predicate_is_satisfied(current: Any, predicate: dict[str, Any]) -> bool:
     operator = predicate.get("operator")
     if operator == "EQ":
-        return current == predicate.get("value")
+        return bool(current == predicate.get("value"))
     if operator == "NE":
-        return current != predicate.get("value")
+        return bool(current != predicate.get("value"))
     values = predicate.get("values")
     if operator == "IN":
         return isinstance(values, list) and current in values
@@ -1947,13 +2071,13 @@ def _source_predicate_is_satisfied(current: Any, predicate: dict[str, Any]) -> b
     ):
         return False
     if operator == "GT":
-        return current > expected
+        return bool(current > expected)
     if operator == "GTE":
-        return current >= expected
+        return bool(current >= expected)
     if operator == "LT":
-        return current < expected
+        return bool(current < expected)
     if operator == "LTE":
-        return current <= expected
+        return bool(current <= expected)
     return False
 
 

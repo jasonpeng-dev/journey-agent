@@ -17,6 +17,7 @@ class ScenarioValidationIssue:
     path: str
     message: str
     severity: Literal["ERROR", "WARNING"] = "ERROR"
+    type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,7 @@ class ScenarioDefinitionValidator:
                         code="SCENARIO_DOCUMENT_SCHEMA_INVALID",
                         path=".".join(str(part) for part in error["loc"]),
                         message=str(error["msg"]),
+                        type=str(error["type"]),
                     )
                     for error in exc.errors()[:20]
                 ),

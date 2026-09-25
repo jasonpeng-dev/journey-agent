@@ -15,8 +15,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.domain.scenario_v2 import normalize_resource_source_hint_document
 from app.scenarios.authoring import ReferenceEdge, reference_index
-from app.scenarios.validation import ScenarioDefinitionValidator
+from app.scenarios.validation import ScenarioDefinitionValidator, ScenarioValidationIssue
 
 CompletenessLevel = Literal[
     "COMPLETE",
@@ -48,6 +49,8 @@ class CompletenessItem:
     path: str
     locator: dict[str, str | None] | None = None
     action: Literal["OPEN", "CREATE", "CONFIGURE", "NONE"] = "OPEN"
+    reference_locator: dict[str, str | None] | None = None
+    reference_owner: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +58,7 @@ class CompletenessResult:
     items: tuple[CompletenessItem, ...]
     validation_issue_count: int
     reference_edge_count: int
+    validation_issues: tuple[ScenarioValidationIssue, ...] = ()
 
     @property
     def required_missing(self) -> int:
@@ -77,7 +81,7 @@ def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _locator(object_kind: str, object_key: object, field_path: str) -> dict[str, str | None]:
+def _locator(object_kind: str, object_key: object, field_path: str | None) -> dict[str, str | None]:
     return {
         "object_kind": object_kind,
         "object_key": object_key if isinstance(object_key, str) and object_key else None,
@@ -96,6 +100,8 @@ def _add(
     path: str,
     locator: dict[str, str | None] | None = None,
     action: Literal["OPEN", "CREATE", "CONFIGURE", "NONE"] = "OPEN",
+    reference_locator: dict[str, str | None] | None = None,
+    reference_owner: str | None = None,
 ) -> None:
     items.append(
         CompletenessItem(
@@ -107,6 +113,8 @@ def _add(
             path=path,
             locator=locator,
             action=action,
+            reference_locator=reference_locator,
+            reference_owner=reference_owner,
         )
     )
 
@@ -189,17 +197,12 @@ def _target_exists(document: dict[str, Any], edge: ReferenceEdge) -> bool:
             isinstance(item, dict) and item.get("failure_code") == identity
             for item in _objects(_object(document.get("planning")).get(collection))
         )
-    if target.object_kind == "public_knowledge" and target.field_path:
-        collection, _, identity = target.field_path.partition(".")
-        return collection == "resource_source_hints" and any(
-            isinstance(item, dict) and item.get("resource_key") == identity
-            for item in _objects(_object(document.get("public_knowledge")).get(collection))
-        )
     nested_kinds = {
         "action_parameter",
         "action_outcome",
         "action_binding",
         "action_target_role",
+        "action_target_contract",
         "action_authority_limit",
         "action_authority_approval",
         "actor_doctrine",
@@ -229,26 +232,27 @@ def _target_exists(document: dict[str, Any], edge: ReferenceEdge) -> bool:
             "action_outcome": "expected_outcomes",
             "action_binding": "operation_bindings",
             "action_target_role": "target_actor_roles",
+            "action_target_contract": "target_contracts",
             "action_authority_limit": "authority_policy",
             "action_authority_approval": "authority_policy",
             "actor_doctrine": "doctrine",
             "actor_authority_limit": "authority_policy",
             "actor_authority_approval": "authority_policy",
         }
-        value: object = parent.get(collection_by_kind[target.object_kind])
+        nested_value: object = parent.get(collection_by_kind[target.object_kind])
         if target.object_kind in {
             "action_authority_limit",
             "actor_authority_limit",
             "action_authority_approval",
             "actor_authority_approval",
         }:
-            value = _object(value).get(
+            nested_value = _object(nested_value).get(
                 "autonomous_limits"
                 if target.object_kind.endswith("limit")
                 else "approval_required_values"
             )
         identity_field = "code" if target.object_kind == "action_outcome" else "key"
-        if target.object_kind in {"action_binding", "action_target_role"}:
+        if target.object_kind in {"action_binding", "action_target_role", "action_target_contract"}:
             identity_field = "role" if target.object_kind == "action_binding" else "target_key"
         return any(
             isinstance(item, dict)
@@ -260,7 +264,7 @@ def _target_exists(document: dict[str, Any], edge: ReferenceEdge) -> bool:
                     == nested_key
                 )
             )
-            for item in _objects(value)
+            for item in _objects(nested_value)
         )
     return True
 
@@ -321,12 +325,15 @@ def _unhandled_runtime_failure_codes(document: dict[str, Any]) -> list[str]:
 
 
 def evaluate_completeness(document: dict[str, Any]) -> CompletenessResult:
+    normalized = normalize_resource_source_hint_document(document)
+    if not isinstance(normalized, dict):
+        raise TypeError("Scenario completeness document must be an object")
+    document = normalized
     items: list[CompletenessItem] = []
     metadata = _object(document.get("metadata"))
     world = _object(document.get("world"))
     actors = _object(document.get("actors"))
     initialization = _object(document.get("initialization"))
-    public_knowledge = _object(document.get("public_knowledge"))
     node_types = _objects(world.get("node_types"))
     nodes = _objects(world.get("nodes"))
     resources = _objects(world.get("resources"))
@@ -560,23 +567,21 @@ def evaluate_completeness(document: dict[str, Any]) -> CompletenessResult:
             action="CONFIGURE",
         )
 
-    source_hints = _objects(public_knowledge.get("resource_source_hints"))
-    hinted_resources = {_text(item.get("resource_key")) for item in source_hints}
     initialization_pools = _objects(initialization.get("resource_pools"))
     pooled_resources = {_text(item.get("resource_key")) for item in initialization_pools}
     for resource in resources:
         resource_key = _text(resource.get("key"))
-        if resource_key and resource_key not in hinted_resources:
+        if resource_key and not isinstance(resource.get("source_hint"), dict):
             _add(
                 items,
                 key=f"resource:{resource_key}:public-source",
                 title=f"为资源「{_text(resource.get('name')) or resource_key}」补充公共来源知识",
                 level="OPTIONAL_ENHANCEMENT",
                 dependency_kind="RECOMMENDED",
-            message="资源可以独立有效；公共来源知识用于帮助玩家发现它。",
-            path="public_knowledge.resource_source_hints",
-                locator=_locator("public_knowledge", resource_key, "resource_source_hints"),
-                action="CREATE",
+                message="资源可以独立有效；来源提示用于帮助玩家发现它。",
+                path=f"world.resources.{resource_key}.source_hint",
+                locator=_locator("resource", resource_key, "source_hint"),
+                action="CONFIGURE",
             )
         if resource_key and resource_key not in pooled_resources:
             _add(
@@ -612,33 +617,52 @@ def evaluate_completeness(document: dict[str, Any]) -> CompletenessResult:
         for edge in edges
         if edge.target.object_kind != "planning" and not _target_exists(document, edge)
     ]
-    if broken_edges:
-        first = broken_edges[0]
+    for edge in broken_edges:
+        source = edge.source
+        target = edge.target
+        source_identity = ":".join(
+            (source.object_kind, source.object_key or "", source.field_path or "")
+        )
+        target_identity = ":".join(
+            (target.object_kind, target.object_key or "", target.field_path or "")
+        )
         _add(
             items,
-            key="references.dangling",
-            title="修复悬空引用",
+            key=f"references.dangling:{source_identity}:{target_identity}",
+            title="修复无法解析的引用",
             level="INCOMPLETE_REQUIRED",
             dependency_kind="SEMANTIC_REQUIRED",
-            message="当前工作副本包含无法解析的引用；请前往引用位置修复或删除引用。",
-            path=first.source.field_path or "references",
+            message="此字段引用的对象不存在或无法解析，请修正引用或移除它。",
+            path=source.field_path or "references",
             locator={
-                "object_kind": first.source.object_kind,
-                "object_key": first.source.object_key,
-                "field_path": first.source.field_path,
+                "object_kind": source.object_kind,
+                "object_key": source.object_key,
+                "field_path": source.field_path,
             },
             action="OPEN",
+            reference_locator={
+                "object_kind": target.object_kind,
+                "object_key": target.object_key,
+                "field_path": target.field_path,
+            },
+            reference_owner=target.object_kind,
         )
 
     try:
         validation = ScenarioDefinitionValidator().validate(document)
         validation_issue_count = len(validation.issues)
         validation_issues = validation.issues
-    except Exception as exc:  # authoring guidance must survive malformed drafts
+    except Exception:  # authoring guidance must survive malformed drafts
         validation_issue_count = 1
         validation_issues = ()
         validation = None
-        validation_message = f"当前工作文档无法完成结构验证：{exc}"
+        validation_issues = (
+            ScenarioValidationIssue(
+                code="SCENARIO_DOCUMENT_VALIDATION_UNAVAILABLE",
+                path="schema_version",
+                message="当前工作副本无法完成结构检查。",
+            ),
+        )
     if validation_issue_count and not any(
         item.key == "scenario-definition.validation" for item in items
     ):
@@ -649,7 +673,11 @@ def evaluate_completeness(document: dict[str, Any]) -> CompletenessResult:
             title="修复场景结构或发布约束",
             level="INCOMPLETE_REQUIRED",
             dependency_kind="HARD_REQUIRED",
-            message=issue.message if issue is not None else validation_message,
+            message=(
+                issue.message
+                if issue is not None
+                else "当前工作副本无法完成结构检查，请检查场景结构。"
+            ),
             path=issue.path if issue is not None else "schema_version",
             action="OPEN",
         )
@@ -658,6 +686,7 @@ def evaluate_completeness(document: dict[str, Any]) -> CompletenessResult:
         items=tuple(items),
         validation_issue_count=validation_issue_count,
         reference_edge_count=len(edges),
+        validation_issues=tuple(validation_issues),
     )
 
 

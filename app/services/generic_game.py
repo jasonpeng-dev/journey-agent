@@ -28,6 +28,7 @@ from app.domain.resources import (
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionBehavior,
+    ActionDefinitionV2,
     ActionParameters,
     ActionTargetKind,
     EffectKind,
@@ -48,6 +49,7 @@ from app.engine.locality import (
 )
 from app.engine.rules import (
     ActionRuleContext,
+    ActionTargetKnowledgeMutation,
     ActorCommandReachabilityMutation,
     DeclarativeRuleEngine,
     DeclarativeRuleState,
@@ -69,6 +71,7 @@ from app.engine.rules import (
 )
 from app.infrastructure.db.models import (
     GameInstance,
+    GameInstanceActionTargetKnowledge,
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceMemoryEvent,
@@ -191,6 +194,7 @@ class GenericGameService:
             ),
         )
         state = self._locked_state(definition)
+        self._require_action_target_contract(action, target_node_key)
         if action.target_kind == ActionTargetKind.NODE:
             target_state = state.nodes[target_node_key]
             if (
@@ -313,6 +317,18 @@ class GenericGameService:
             ).visibility
             != RelationVisibility.VISIBLE
         )
+        newly_known_action_targets: set[tuple[str, str]] = set()
+        for item in outcome.action_target_knowledge_updates:
+            if item.visibility != Visibility.KNOWN:
+                continue
+            target_row = self.db.get(
+                GameInstanceActionTargetKnowledge,
+                (self.scope.game_instance_id, item.action_key, item.target_key),
+            )
+            if target_row is not None and getattr(
+                target_row.visibility, "value", target_row.visibility
+            ) != Visibility.KNOWN.value:
+                newly_known_action_targets.add((item.action_key, item.target_key))
         # Region inventory knowledge is persisted in its own table, so it is
         # not represented by the ordinary Fact/Node/Relation visibility
         # collections above. Keep the public delta explicit and only emit it
@@ -405,6 +421,30 @@ class GenericGameService:
                     key=f"{node_key}.{fact_key}",
                     name=fact.name,
                     value=row.truth_value,
+                )
+            )
+        for action_key, target_key in sorted(newly_known_action_targets):
+            action = next((item for item in definition.actions if item.key == action_key), None)
+            target_name = next(
+                (
+                    item.name
+                    for item in definition.world.nodes
+                    if item.key == target_key
+                ),
+                next(
+                    (
+                        item.name
+                        for item in definition.actors.actor_profiles
+                        if item.key == target_key
+                    ),
+                    target_key,
+                ),
+            )
+            knowledge_changes.append(
+                PlayerKnowledgeChange(
+                    kind="ACTION_TARGET_REVEALED",
+                    key=f"{action_key}.{target_key}",
+                    name=f"{action.name if action is not None else action_key} · {target_name}",
                 )
             )
         knowledge_changes.extend(region_resource_knowledge_changes)
@@ -502,6 +542,7 @@ class GenericGameService:
             ),
         )
         state = self._locked_state(definition, lock=False)
+        self._require_action_target_contract(action, target_node_key)
         if action.target_kind == ActionTargetKind.NODE:
             target_state = state.nodes[target_node_key]
             if (
@@ -676,6 +717,21 @@ class GenericGameService:
                 outcome,
                 fact_visibility_updates=outcome.fact_visibility_updates
                 + self._inspect_reveals(target_node_key, definition, state),
+                action_target_knowledge_updates=tuple(
+                    [*outcome.action_target_knowledge_updates]
+                    + [
+                        ActionTargetKnowledgeMutation(
+                            action_key=candidate_action.key,
+                            target_key=contract.target_key,
+                            visibility=Visibility.KNOWN,
+                        )
+                        for candidate_action in definition.actions
+                        for contract in candidate_action.target_contracts
+                        if candidate_action.target_kind == ActionTargetKind.NODE
+                        if contract.reveal_on_inspect
+                        and contract.target_key == target_node_key
+                    ]
+                ),
             )
         if action.behavior == ActionBehavior.REPAIR_COMMUNICATIONS:
             if outcome.failure is not None:
@@ -1105,6 +1161,36 @@ class GenericGameService:
                 decision.reason_code, "The Action requires an approved Instance decision"
             )
 
+    def _require_action_target_contract(
+        self,
+        action: ActionDefinitionV2,
+        target_key: str,
+    ) -> None:
+        """Require an explicit Action target contract to be known before use."""
+
+        if not action.target_contracts:
+            return
+        if not any(contract.target_key == target_key for contract in action.target_contracts):
+            raise GenericGameError(
+                "ACTION_TARGET_INVALID",
+                "The target is not part of the Action target contract",
+            )
+        row = self.db.get(
+            GameInstanceActionTargetKnowledge,
+            (self.scope.game_instance_id, action.key, target_key),
+        )
+        if row is None:
+            raise GenericGameError(
+                "ACTION_TARGET_KNOWLEDGE_MISSING",
+                "The Action target Knowledge row is missing",
+            )
+        if getattr(row.visibility, "value", row.visibility) != Visibility.KNOWN.value:
+            raise GenericGameError(
+                "ACTION_TARGET_UNAVAILABLE",
+                "The Action target contract is not known in this Instance",
+                retryable=True,
+            )
+
     def _locked_state(
         self,
         definition: ScenarioDefinitionV2,
@@ -1126,6 +1212,9 @@ class GenericGameService:
         relation_knowledge_query = select(GameInstanceRelationKnowledge).where(
             GameInstanceRelationKnowledge.game_instance_id == self.scope.game_instance_id
         )
+        target_contract_knowledge_query = select(GameInstanceActionTargetKnowledge).where(
+            GameInstanceActionTargetKnowledge.game_instance_id == self.scope.game_instance_id
+        )
         actor_query = select(GameInstanceActor).where(
             GameInstanceActor.game_instance_id == self.scope.game_instance_id
         )
@@ -1145,6 +1234,11 @@ class GenericGameService:
             if self._supports_relation_knowledge_schema()
             else []
         )
+        target_contract_knowledge = (
+            self.db.scalars(target_contract_knowledge_query).all()
+            if self._supports_action_target_knowledge_schema()
+            else []
+        )
         actors = self.db.scalars(actor_query).all()
         expected_initial_resources = {
             (item.resource_key, item.region_key, item.pool_key)
@@ -1160,6 +1254,11 @@ class GenericGameService:
             and node.node_type_key == definition.metadata.locality.region_node_type_key
         }
         expected_relations = {relation_identity(item) for item in definition.world.relations}
+        expected_target_contracts = {
+            (action.key, contract.target_key)
+            for action in definition.actions
+            for contract in action.target_contracts
+        }
         if (
             {row.node_key for row in nodes} != {node.key for node in definition.world.nodes}
             or {(row.node_key, row.fact_key) for row in facts}
@@ -1178,6 +1277,23 @@ class GenericGameService:
             or (
                 self._supports_relation_knowledge_schema()
                 and {row.relation_key for row in relation_knowledge} != expected_relations
+            )
+            or (
+                expected_target_contracts
+                and not self._supports_action_target_knowledge_schema()
+            )
+            or (
+                self._supports_action_target_knowledge_schema()
+                and {
+                    (row.action_key, row.target_key)
+                    for row in target_contract_knowledge
+                }
+                != expected_target_contracts
+            )
+            or any(
+                getattr(row.visibility, "value", row.visibility)
+                not in {item.value for item in Visibility}
+                for row in target_contract_knowledge
             )
             or any(
                 row.visibility not in {item.value for item in RelationVisibility}
@@ -1530,6 +1646,22 @@ class GenericGameService:
                 )
             relation_row.visibility = relation_mutation.visibility
             relation_row.version += 1
+        for target_mutation in outcome.action_target_knowledge_updates:
+            target_row = self.db.get(
+                GameInstanceActionTargetKnowledge,
+                (
+                    self.scope.game_instance_id,
+                    target_mutation.action_key,
+                    target_mutation.target_key,
+                ),
+            )
+            if target_row is None:
+                raise GenericGameError(
+                    "ACTION_TARGET_KNOWLEDGE_MISSING",
+                    "A Rule referenced missing Action target Knowledge",
+                )
+            target_row.visibility = target_mutation.visibility
+            target_row.version += 1
         pool_rows = self.db.scalars(
             select(GameInstanceResourceState).where(
                 GameInstanceResourceState.game_instance_id == self.scope.game_instance_id
@@ -1714,6 +1846,15 @@ class GenericGameService:
     def _supports_relation_knowledge_schema(self) -> bool:
         try:
             inspect(self.db.connection()).get_columns("game_instance_relation_knowledge")
+        except Exception:
+            return False
+        return True
+
+    def _supports_action_target_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns(
+                "game_instance_action_target_knowledge"
+            )
         except Exception:
             return False
         return True

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "./api";
@@ -52,6 +52,11 @@ const draft = {
   updated_at: "2026-09-15T00:00:00Z",
 };
 
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="editor-location">{location.pathname}{location.search}</output>;
+}
+
 beforeEach(() => {
   vi.mocked(api.draft).mockResolvedValue(draft);
   vi.mocked(api.analyzeWorkingCopyReferences).mockResolvedValue({ scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [] });
@@ -65,6 +70,7 @@ function renderEditor() {
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={["/scenarios/scenario-1/edit/public-references"]}>
+        <LocationProbe />
         <Routes>
           <Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} />
           <Route path="/scenarios/:scenarioId/edit/:section/:objectKey" element={<EditorPage />} />
@@ -75,22 +81,23 @@ function renderEditor() {
 }
 
 describe("Editor public-reference section isolation", () => {
-  it("does not retain public references after navigating to world entities", async () => {
+  it("redirects the legacy route into Goal System and does not retain references after navigation", async () => {
     renderEditor();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "公共引用" })).toBeInTheDocument());
-    expect(screen.getAllByText(/公共引用/).length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "术语与引用" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/terminology-references"));
+    expect(screen.getAllByText(/术语引用/).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("link", { name: "世界实体" }));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "世界实体" })).toBeInTheDocument());
     expect(screen.getByText("节点 · central_district")).toBeInTheDocument();
-    expect(screen.queryByText("公共引用 · central_district")).not.toBeInTheDocument();
+    expect(screen.queryByText("术语引用 · central_district")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "资源定义" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "资源定义" })).toBeInTheDocument());
     expect(screen.getByText("资源 · water")).toBeInTheDocument();
-    expect(screen.queryByText(/公共引用 ·/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/术语引用 ·/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "规则" }));
     await waitFor(() => expect(screen.getByRole("heading", { name: "规则" })).toBeInTheDocument());
@@ -102,9 +109,9 @@ describe("Editor public-reference section isolation", () => {
     expect(screen.getByText("参与者 · operator")).toBeInTheDocument();
     expect(screen.queryByText("规则 · stabilize")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("link", { name: "公共引用" }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "公共引用" })).toBeInTheDocument());
-    expect(screen.getAllByText(/公共引用 · REGION:/)).toHaveLength(2);
+    fireEvent.click(screen.getByRole("link", { name: "术语与引用" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "术语与引用" })).toBeInTheDocument());
+    expect(screen.getAllByText(/术语引用 · REGION:/)).toHaveLength(2);
     expect(screen.queryByText("参与者 · operator")).not.toBeInTheDocument();
   });
 
@@ -112,15 +119,12 @@ describe("Editor public-reference section isolation", () => {
     renderEditor();
     const reference = await screen.findByRole("link", { name: /Central District/ });
     fireEvent.click(reference);
-    await waitFor(() => expect(screen.getByLabelText("公共术语")).toHaveValue("Central District"));
+    await waitFor(() => expect(screen.getAllByText("Central District", { selector: "output.stable-identity-value" }).length).toBeGreaterThan(0));
 
     fireEvent.click(screen.getByRole("button", { name: "显示检查器" }));
-    expect(screen.getByLabelText("语义身份")).toHaveValue("REGION:central_district:Central District");
+    expect(screen.getByText("REGION:central_district:Central District", { selector: "output.stable-identity-value" })).toBeInTheDocument();
     expect(screen.queryByLabelText("稳定键")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重命名稳定键" })).not.toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("公共术语"), { target: { value: "Central Core" } });
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Central Core", level: 3 })).toBeInTheDocument());
-    expect(screen.getByText("有未保存修改")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Central District")).not.toBeInTheDocument();
   });
 });

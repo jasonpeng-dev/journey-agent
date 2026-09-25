@@ -22,6 +22,20 @@ function entityOptions(document: JsonObject, kind: EntityKind): ReferenceOption[
  * for both a saved Draft and an unsaved Working Copy.
  */
 export function referenceOptions(document: JsonObject, domain: ReferenceDomain): ReferenceOption[] {
+  if (domain === "region") {
+    const metadata = document.metadata && typeof document.metadata === "object" && !Array.isArray(document.metadata)
+      ? document.metadata as JsonObject
+      : {};
+    const locality = metadata.locality && typeof metadata.locality === "object" && !Array.isArray(metadata.locality)
+      ? metadata.locality as JsonObject
+      : {};
+    const regionType = typeof locality.region_node_type_key === "string" ? locality.region_node_type_key : null;
+    if (!regionType) return [];
+    return sectionObjects(document, "world")
+      .filter((item) => item.kind === "node" && item.value.node_type_key === regionType)
+      .map((item) => ({ key: item.key, name: item.name }));
+  }
+
   if (domain === "fact") {
     return sectionObjects(document, "world")
       .filter((item) => item.kind === "node")

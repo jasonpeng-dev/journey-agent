@@ -5,6 +5,7 @@ export type FieldType = "text" | "textarea" | "boolean" | "integer" | "number" |
 export type ReferenceDomain =
   | "node_type"
   | "node"
+  | "region"
   | "relation_type"
   | "fact"
   | "resource"
@@ -16,6 +17,9 @@ export type ReferenceDomain =
   | "derived_state"
   | "relation";
 
+export type RequirednessClass = "SCHEMA_REQUIRED" | "VARIANT_REQUIRED" | "PUBLISH_REQUIRED" | "RUNTIME_REQUIRED" | "REFERENCE_REQUIRED" | "DEFAULTED" | "OPTIONAL" | "SYSTEM" | "DERIVED" | "LEGACY";
+export type NavigationClass = "FORWARD_REQUIRED" | "FORWARD_OPTIONAL" | "BACKREFERENCE" | "WORKFLOW_HANDOFF" | "INTERNAL_ONLY" | "NO_UI_NAVIGATION";
+
 export type FieldMetadata = {
   path: string;
   type: FieldType;
@@ -24,6 +28,9 @@ export type FieldMetadata = {
   referenceDomain?: ReferenceDomain;
   multiline?: boolean;
   advanced?: boolean;
+  requiredness?: RequirednessClass;
+  navigation?: NavigationClass;
+  minItems?: number;
 };
 
 export type EntityMetadata = {
@@ -64,58 +71,60 @@ export const V2_ENUMS = {
 } as const;
 
 const field = (path: string, type: FieldType, metadata: Omit<FieldMetadata, "path" | "type"> = {}): FieldMetadata => ({ path, type, ...metadata });
+const requiredField = (path: string, type: FieldType, metadata: Omit<FieldMetadata, "path" | "type" | "requiredness"> = {}): FieldMetadata => field(path, type, { ...metadata, requiredness: type === "reference" ? "REFERENCE_REQUIRED" : "SCHEMA_REQUIRED" });
+const conditionalField = (path: string, type: FieldType, metadata: Omit<FieldMetadata, "path" | "type" | "requiredness"> = {}): FieldMetadata => field(path, type, { ...metadata, requiredness: "VARIANT_REQUIRED" });
 
 export const entityRegistry: Record<EntityKind, EntityMetadata> = {
   node_type: {
     kind: "node_type", section: "node-types", label: "节点类型", collectionPath: ["world", "node_types"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
+    fields: [field("key", "text"), requiredField("name", "text"), field("description", "textarea")],
   },
   node: {
     kind: "node", section: "world-entities", label: "节点", collectionPath: ["world", "nodes"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("node_type_key", "reference", { referenceDomain: "node_type" }), field("interaction_keys", "multi-reference", { referenceDomain: "interaction" })],
+    fields: [field("key", "text"), requiredField("name", "text"), field("description", "textarea"), requiredField("node_type_key", "reference", { referenceDomain: "node_type", navigation: "FORWARD_REQUIRED" }), field("interaction_keys", "multi-reference", { referenceDomain: "interaction", navigation: "FORWARD_OPTIONAL" })],
   },
   relation_type: {
     kind: "relation_type", section: "relation-types", label: "关系类型", collectionPath: ["world", "relation_types"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
+    fields: [field("key", "text"), requiredField("name", "text"), field("description", "textarea")],
   },
   relation: {
     kind: "relation", section: "relations", label: "关系实例", collectionPath: ["world", "relations"],
-    fields: [field("key", "text"), field("source_node_key", "reference", { referenceDomain: "node" }), field("relation_type_key", "reference", { referenceDomain: "relation_type" }), field("target_node_key", "reference", { referenceDomain: "node" })],
+    fields: [field("key", "text"), requiredField("source_node_key", "reference", { referenceDomain: "node", navigation: "FORWARD_REQUIRED" }), requiredField("relation_type_key", "reference", { referenceDomain: "relation_type", navigation: "FORWARD_REQUIRED" }), requiredField("target_node_key", "reference", { referenceDomain: "node", navigation: "FORWARD_REQUIRED" })],
   },
   resource: {
     kind: "resource", section: "resources", label: "资源", collectionPath: ["world", "resources"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("minimum", "integer"), field("maximum", "integer"), field("reservation_supported", "boolean"), field("unit", "text"), field("display_unit", "text")],
+    fields: [field("key", "text"), requiredField("name", "text"), field("description", "textarea"), requiredField("initial_value", "integer"), requiredField("minimum", "integer"), field("maximum", "integer"), field("reservation_supported", "boolean"), field("unit", "text"), field("display_unit", "text")],
   },
   role: {
     kind: "role", section: "roles", label: "角色", collectionPath: ["actors", "roles"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("capabilities", "multi-enum", { enum: V2_ENUMS.capabilities })],
+    fields: [field("key", "text"), requiredField("name", "text"), field("description", "textarea"), requiredField("capabilities", "multi-enum", { enum: V2_ENUMS.capabilities, minItems: 1 })],
   },
   actor: {
     kind: "actor", section: "actors", label: "参与者档案", collectionPath: ["actors", "actor_profiles"],
-    fields: [field("key", "text"), field("name", "text"), field("role_key", "reference", { referenceDomain: "role" }), field("persona", "textarea"), field("allowed_action_keys", "multi-reference", { referenceDomain: "action" })],
+    fields: [field("key", "text"), requiredField("name", "text"), requiredField("role_key", "reference", { referenceDomain: "role", navigation: "FORWARD_REQUIRED" }), requiredField("persona", "textarea"), field("allowed_action_keys", "multi-reference", { referenceDomain: "action", navigation: "FORWARD_OPTIONAL", requiredness: "DEFAULTED" })],
     nested: ["doctrine", "authority_policy"],
   },
   interaction: {
     kind: "interaction", section: "interactions", label: "交互能力", collectionPath: ["interactions"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea")],
+    fields: [field("key", "text"), requiredField("name", "text"), field("description", "textarea")],
   },
   action: {
     kind: "action", section: "actions", label: "行动", collectionPath: ["actions"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("required_interaction_key", "reference", { referenceDomain: "interaction" }), field("execution_mode", "enum", { enum: V2_ENUMS.executionMode }), field("behavior", "enum", { enum: V2_ENUMS.behavior }), field("locality", "enum", { enum: V2_ENUMS.locality }), field("target_kind", "enum", { enum: V2_ENUMS.targetKind }), field("target_node_type_keys", "multi-reference", { referenceDomain: "node_type" }), field("target_semantic_reference_type", "enum", { enum: V2_ENUMS.actionTargetReference }), field("required_actor_role_key", "reference", { referenceDomain: "role" }), field("allowed_actor_capabilities", "multi-enum", { enum: V2_ENUMS.capabilities }), field("source_relation_type_key", "reference", { referenceDomain: "relation_type" })],
-    nested: ["parameters", "expected_outcomes", "planning", "target_actor_roles", "operation_bindings", "goal_required_slots", "authority_policy"],
+    fields: [field("key", "text"), requiredField("name", "text"), field("description", "textarea"), requiredField("required_interaction_key", "reference", { referenceDomain: "interaction", navigation: "FORWARD_REQUIRED" }), requiredField("execution_mode", "enum", { enum: V2_ENUMS.executionMode }), field("behavior", "enum", { enum: V2_ENUMS.behavior }), field("locality", "enum", { enum: V2_ENUMS.locality }), field("target_kind", "enum", { enum: V2_ENUMS.targetKind }), field("target_node_type_keys", "multi-reference", { referenceDomain: "node_type", navigation: "FORWARD_OPTIONAL" }), field("target_semantic_reference_type", "enum", { enum: V2_ENUMS.actionTargetReference }), field("required_actor_role_key", "reference", { referenceDomain: "role", navigation: "FORWARD_OPTIONAL" }), requiredField("allowed_actor_capabilities", "multi-enum", { enum: V2_ENUMS.capabilities, minItems: 1 }), field("source_relation_type_key", "reference", { referenceDomain: "relation_type", navigation: "FORWARD_OPTIONAL" })],
+    nested: ["parameters", "expected_outcomes", "planning", "target_actor_roles", "target_contracts", "operation_bindings", "goal_required_slots", "authority_policy"],
   },
   rule: {
     kind: "rule", section: "rules", label: "规则", collectionPath: ["rules"],
-    fields: [field("key", "text"), field("phase", "enum", { enum: V2_ENUMS.phase }), field("trigger", "enum", { enum: V2_ENUMS.trigger }), field("action_key", "reference", { referenceDomain: "action" }), field("priority", "integer")],
+    fields: [field("key", "text"), requiredField("phase", "enum", { enum: V2_ENUMS.phase }), field("trigger", "enum", { enum: V2_ENUMS.trigger }), conditionalField("action_key", "reference", { referenceDomain: "action", navigation: "FORWARD_REQUIRED" }), field("applicable_target_keys", "multi-reference", { navigation: "FORWARD_OPTIONAL" }), requiredField("priority", "integer")],
     nested: ["condition", "effects"],
   },
   derived_state: {
     kind: "derived_state", section: "derived-states", label: "派生状态", collectionPath: ["derived_states"],
-    fields: [field("key", "text"), field("name", "text"), field("description", "textarea"), field("value_type", "enum", { enum: V2_ENUMS.factType }), field("available_value", "text"), field("unavailable_value", "text")],
+    fields: [field("key", "text"), requiredField("name", "text"), field("description", "textarea"), requiredField("value_type", "enum", { enum: V2_ENUMS.factType }), requiredField("available_value", "text"), requiredField("unavailable_value", "text")],
     nested: ["dependencies"],
   },
   public_reference: {
-    kind: "public_reference", section: "public-references", label: "公共引用", collectionPath: ["public_references"],
+    kind: "public_reference", section: "terminology-references", label: "术语引用", collectionPath: ["public_references"],
     fields: [field("term", "text"), field("ref_type", "enum", { enum: V2_ENUMS.publicReferenceType }), field("ref_key", "text")],
   },
 };
@@ -124,8 +133,7 @@ export const rootFieldRegistry: Record<string, readonly FieldMetadata[]> = {
   metadata: [field("key", "text"), field("name", "text"), field("description", "textarea")],
   goal_resolution: [field("allow_llm_fallback", "boolean"), field("clarification_prompt", "textarea"), field("quick_inputs", "text"), field("world_goal_state_catalog", "boolean")],
   planning: [field("instructions", "text")],
-  public_knowledge: [],
-  initialization: [field("start_node_key", "reference", { referenceDomain: "node" }), field("primary_actor_key", "reference", { referenceDomain: "actor" })],
+  initialization: [requiredField("start_node_key", "reference", { referenceDomain: "node", navigation: "FORWARD_REQUIRED" }), requiredField("primary_actor_key", "reference", { referenceDomain: "actor", navigation: "FORWARD_REQUIRED" })],
 };
 
 export function metadataForKind(kind: EntityKind): EntityMetadata {

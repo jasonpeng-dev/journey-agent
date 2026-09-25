@@ -78,7 +78,7 @@ const entityCapabilities: SectionStructure["capabilities"] = {
   advancedJson: "none",
 };
 
-const declarations: Record<EditorSection, StructureDeclaration> = {
+const declarations: Partial<Record<EditorSection, StructureDeclaration>> = {
   overview: declaration(
     "overview",
     "SINGLETON",
@@ -146,15 +146,7 @@ const declarations: Record<EditorSection, StructureDeclaration> = {
     { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
     "root-collection",
   ),
-  "public-knowledge": declaration(
-    "public-knowledge",
-    "COLLECTION",
-    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: true, itemIdentity: "collection-identity" },
-    { renderer: "root-collection", title: "selected-item", selection: "root-owner" },
-    { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
-    "root-collection",
-  ),
-  "public-references": declaration("public-references", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, rename: false }, "mixed-entity"),
+  "terminology-references": declaration("terminology-references", "COLLECTION", entityMaster, entityWorkspace, { ...entityCapabilities, rename: false }, "mixed-entity"),
   "configuration-check": declaration(
     "configuration-check",
     "WORKFLOW",
@@ -182,10 +174,17 @@ function resolveOwners(section: EditorSection): SectionStructure["owners"] {
   };
 }
 
-export const sectionStructureRegistry: Record<EditorSection, SectionStructure> = Object.fromEntries(
+export const sectionStructureRegistry: Partial<Record<EditorSection, SectionStructure>> = Object.fromEntries(
   Object.entries(declarations).map(([section, value]) => [section, { ...value, owners: resolveOwners(section as EditorSection) }]),
-) as Record<EditorSection, SectionStructure>;
+) as Partial<Record<EditorSection, SectionStructure>>;
 
 export function sectionStructure(section: EditorSection): SectionStructure {
-  return sectionStructureRegistry[section];
+  const compatibleSection = section === "public-knowledge"
+    ? "resources"
+    : section === "public-references"
+      ? "terminology-references"
+      : section;
+  const structure = sectionStructureRegistry[section] ?? sectionStructureRegistry[compatibleSection];
+  if (!structure) throw new Error(`Unsupported editor section: ${section}`);
+  return structure;
 }

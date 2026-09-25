@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Never
 from uuid import UUID
 
@@ -54,7 +56,10 @@ from app.api.schemas.phase_d import (
 )
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import (
+    ScenarioDefinitionV2,
+    normalize_resource_source_hint_document,
+)
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.infrastructure.db.session import get_db
 from app.scenarios.authoring import ReferenceEdge, locator_for_path, reference_index
@@ -250,14 +255,486 @@ def preview_initialization(
             "parity": bootstrap_parity(definition, published),
         }
     except ValidationError as exc:
+        focus = request.focus
+        validation_issues = exc.errors(include_url=False, include_context=False)
+        partial_document = _document_without_unfocused_invalid_entities(
+            request.definition_document,
+            validation_issues,
+            focus.object_kind if focus is not None else None,
+            focus.object_key if focus is not None else None,
+        )
+        if partial_document is not None:
+            try:
+                partial_definition = ScenarioDefinitionV2.model_validate(partial_document)
+            except ValidationError:
+                pass
+            else:
+                projection = initialization_projection(partial_definition, partial_document)
+                return {
+                    "revision": draft.revision,
+                    "projection": _focus_initialization_projection(
+                        projection, focus.object_kind, focus.object_key
+                    ) if focus is not None else projection,
+                    "parity": {
+                        "published": False,
+                        "initialization_changes": [],
+                        "design_changes": [],
+                    },
+                    "partial": True,
+                    "omitted_issue_count": len(exc.errors()),
+                    "issues": _initialization_preview_issues(
+                        request.definition_document, validation_issues
+                    ),
+                }
         raise AppError(
             code="SCENARIO_INITIALIZATION_PREVIEW_INVALID",
             message="The working document cannot produce an initialization preview",
             status_code=422,
-            details={"issues": exc.errors(include_url=False)},
+            details={
+                "issues": _initialization_preview_issues(
+                    request.definition_document, validation_issues
+                )
+            },
         ) from exc
     except ScenarioLifecycleError as exc:
         _raise_http(exc)
+
+
+_INITIALIZATION_PREVIEW_COLLECTIONS: dict[tuple[str, ...], str] = {
+    ("world", "nodes"): "node",
+    ("world", "node_types"): "node_type",
+    ("world", "relations"): "relation",
+    ("world", "relation_types"): "relation_type",
+    ("world", "resources"): "resource",
+    ("actors", "roles"): "role",
+    ("actors", "actor_profiles"): "actor",
+    ("interactions",): "interaction",
+    ("actions",): "action",
+    ("rules",): "rule",
+    ("objectives",): "objective",
+    ("derived_states",): "derived_state",
+    ("public_references",): "public_reference",
+    ("initialization", "resource_pools"): "resource_pool",
+    ("initialization", "region_resource_knowledge"): "region_resource_knowledge",
+    ("initialization", "resource_initial_states"): "legacy_resource",
+}
+
+_INITIALIZATION_REFERENCE_ISSUE_PATTERNS: tuple[
+    tuple[re.Pattern[str], tuple[str, ...], str, str, str], ...
+] = (
+    (
+        re.compile(r"^Node ([a-z][a-z0-9_]*) type references unknown key\b", re.I),
+        ("world", "nodes"),
+        "node",
+        "node_type_key",
+        "node-types",
+    ),
+    (
+        re.compile(r"^Node ([a-z][a-z0-9_]*) Interaction references unknown key\b", re.I),
+        ("world", "nodes"),
+        "node",
+        "interaction_keys",
+        "interactions",
+    ),
+    (
+        re.compile(r"^Actor ([a-z][a-z0-9_]*) Role references unknown key\b", re.I),
+        ("actors", "actor_profiles"),
+        "actor",
+        "role_key",
+        "roles",
+    ),
+    (
+        re.compile(r"^Actor ([a-z][a-z0-9_]*) initial Node references unknown key\b", re.I),
+        ("actors", "actor_profiles"),
+        "actor",
+        "initial_node_key",
+        "world-entities",
+    ),
+    (
+        re.compile(r"^Actor ([a-z][a-z0-9_]*) allowed Action references unknown key\b", re.I),
+        ("actors", "actor_profiles"),
+        "actor",
+        "allowed_action_keys",
+        "actions",
+    ),
+    (
+        re.compile(r"^Action ([a-z][a-z0-9_]*) Interaction references unknown key\b", re.I),
+        ("actions",),
+        "action",
+        "required_interaction_key",
+        "interactions",
+    ),
+    (
+        re.compile(r"^Action ([a-z][a-z0-9_]*) target Node type references unknown key\b", re.I),
+        ("actions",),
+        "action",
+        "target_node_type_keys",
+        "node-types",
+    ),
+    (
+        re.compile(r"^Action ([a-z][a-z0-9_]*) required Actor Role references unknown key\b", re.I),
+        ("actions",),
+        "action",
+        "required_actor_role_key",
+        "roles",
+    ),
+    (
+        re.compile(
+            r"^Action ([a-z][a-z0-9_]*) source Relation Type references unknown key\b",
+            re.I,
+        ),
+        ("actions",),
+        "action",
+        "source_relation_type_key",
+        "relation-types",
+    ),
+)
+
+
+def _initialization_reference_issue_target(
+    document: dict[str, Any], issue: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    message = issue.get("msg")
+    if not isinstance(message, str):
+        return None
+    normalized_message = re.sub(r"^Value error,\s*", "", message, flags=re.I)
+    for (
+        pattern,
+        collection_path,
+        kind,
+        field_path,
+        reference_owner,
+    ) in _INITIALIZATION_REFERENCE_ISSUE_PATTERNS:
+        match = pattern.match(normalized_message)
+        if not match:
+            continue
+        identity = match.group(1)
+        collection: Any = document
+        for component in collection_path:
+            collection = collection.get(component) if isinstance(collection, dict) else None
+        if not isinstance(collection, list):
+            return None
+        matches = [
+            index
+            for index, item in enumerate(collection)
+            if isinstance(item, dict) and item.get("key") == identity
+        ]
+        if len(matches) != 1:
+            return None
+        return {
+            "collection_path": collection_path,
+            "index": matches[0],
+            "kind": kind,
+            "identity": identity,
+            "field_path": field_path,
+            "canonical_owner": "world-entities" if kind == "node" else (
+                "actors" if kind == "actor" else "actions"
+            ),
+            "reference_owner": reference_owner,
+        }
+    return None
+
+
+def _document_without_unfocused_invalid_entities(
+    document: dict[str, Any],
+    issues: Sequence[Mapping[str, Any]],
+    focus_kind: str | None,
+    focus_key: str | None,
+) -> dict[str, Any] | None:
+    """Drop only malformed, unrelated entity rows for a current-object projection.
+
+    This read-only projection aid never changes the submitted Working Copy and
+    refuses to prune singleton configuration or the focused entity.
+    """
+
+    candidate = deepcopy(document)
+    removals: dict[tuple[str, ...], set[int]] = {}
+    for issue in issues:
+        location = issue.get("loc")
+        if not isinstance(location, (tuple, list)):
+            return None
+        parts = list(location)
+        if parts and parts[0] == "body":
+            parts.pop(0)
+        collection_path = next(
+            (
+                path
+                for path in _INITIALIZATION_PREVIEW_COLLECTIONS
+                if tuple(parts[: len(path)]) == path
+            ),
+            None,
+        )
+        index_part = (
+            parts[len(collection_path)]
+            if collection_path is not None and len(parts) > len(collection_path)
+            else None
+        )
+        reference_target: dict[str, Any] | None = None
+        if (
+            collection_path is None
+            or not isinstance(index_part, int)
+            or isinstance(index_part, bool)
+        ):
+            reference_target = _initialization_reference_issue_target(document, issue)
+            if reference_target is None:
+                return None
+            collection_path = reference_target["collection_path"]
+            index_part = reference_target["index"]
+        collection: Any = candidate
+        for key in collection_path:
+            if not isinstance(collection, dict):
+                return None
+            collection = collection.get(key)
+        if not isinstance(collection, list) or not (0 <= index_part < len(collection)):
+            return None
+        item = collection[index_part]
+        if not isinstance(item, dict):
+            return None
+        kind = _INITIALIZATION_PREVIEW_COLLECTIONS[collection_path]
+        key = item.get("key")
+        if kind == "relation":
+            key = item.get("key") or relation_identity_from_document(item)
+        elif kind == "resource_pool":
+            key = item.get("pool_key")
+        elif kind == "region_resource_knowledge":
+            key = item.get("region_key")
+        elif kind == "legacy_resource":
+            key = item.get("resource_key")
+        if focus_kind is not None and kind == focus_kind and key == focus_key:
+            return None
+        removals.setdefault(collection_path, set()).add(index_part)
+
+    if not removals:
+        return None
+    for collection_path, indexes in removals.items():
+        collection = candidate
+        for key in collection_path:
+            collection = collection[key]
+        for index in sorted(indexes, reverse=True):
+            collection.pop(index)
+    return candidate
+
+
+def _initialization_preview_issues(
+    document: dict[str, Any], issues: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Attach stable authoring identity and canonical locator to validation evidence."""
+
+    owner_by_path = {
+        ("world", "nodes"): "world-entities",
+        ("world", "node_types"): "node-types",
+        ("world", "relations"): "relations",
+        ("world", "relation_types"): "relation-types",
+        ("world", "resources"): "resources",
+        ("actors", "roles"): "roles",
+        ("actors", "actor_profiles"): "actors",
+        ("interactions",): "interactions",
+        ("actions",): "actions",
+        ("rules",): "rules",
+        ("objectives",): "objectives",
+        ("derived_states",): "derived-states",
+        ("public_references",): "public-references",
+        ("initialization", "resource_pools"): "initialization",
+        ("initialization", "region_resource_knowledge"): "initialization",
+        ("initialization", "resource_initial_states"): "initialization",
+    }
+    kind_by_path = {
+        ("world", "nodes"): "node",
+        ("world", "node_types"): "node_type",
+        ("world", "relations"): "relation",
+        ("world", "relation_types"): "relation_type",
+        ("world", "resources"): "resource",
+        ("actors", "roles"): "role",
+        ("actors", "actor_profiles"): "actor",
+        ("interactions",): "interaction",
+        ("actions",): "action",
+        ("rules",): "rule",
+        ("objectives",): "objective",
+        ("derived_states",): "derived_state",
+        ("public_references",): "public_reference",
+        ("initialization", "resource_pools"): "resource_pool",
+        ("initialization", "region_resource_knowledge"): "region_resource_knowledge",
+        ("initialization", "resource_initial_states"): "legacy_resource",
+    }
+
+    enriched: list[dict[str, Any]] = []
+    for issue in issues:
+        result = dict(issue)
+        raw_location = issue.get("loc")
+        parts = list(raw_location) if isinstance(raw_location, (tuple, list)) else []
+        if parts and parts[0] == "body":
+            parts.pop(0)
+        collection_path = next(
+            (path for path in owner_by_path if tuple(parts[: len(path)]) == path), None
+        )
+        if collection_path is not None:
+            index = parts[len(collection_path)] if len(parts) > len(collection_path) else None
+            if isinstance(index, int) and not isinstance(index, bool):
+                collection: Any = document
+                for component in collection_path:
+                    collection = collection.get(component) if isinstance(collection, dict) else None
+                if isinstance(collection, list) and 0 <= index < len(collection):
+                    item = collection[index]
+                    if isinstance(item, dict):
+                        kind = kind_by_path[collection_path]
+                        key: Any = item.get("key")
+                        if kind == "relation":
+                            key = item.get("key") or relation_identity_from_document(item)
+                        elif kind == "resource_pool":
+                            key = item.get("pool_key")
+                        elif kind == "region_resource_knowledge":
+                            key = item.get("region_key")
+                        elif kind == "legacy_resource":
+                            key = item.get("resource_key")
+                        rest = [str(part) for part in parts[len(collection_path) + 1 :]]
+                        identity_kind = kind
+                        if kind == "node" and len(rest) >= 2 and rest[0] == "facts":
+                            facts = item.get("facts")
+                            fact_index = rest[1]
+                            if isinstance(facts, list) and fact_index.isdigit():
+                                fact = (
+                                    facts[int(fact_index)]
+                                    if int(fact_index) < len(facts)
+                                    else None
+                                )
+                                if isinstance(fact, dict) and isinstance(fact.get("key"), str):
+                                    identity_kind = "fact"
+                                    key = f"{key}:{fact['key']}"
+                                    rest = ["facts", fact["key"], *rest[2:]]
+                        field_path = ".".join(rest) or None
+                        result.update(
+                            {
+                                "identity": f"{identity_kind}:{key}" if key else None,
+                                "canonical_owner": owner_by_path[collection_path],
+                                "field_path": field_path,
+                                "locator": {
+                                    "section": owner_by_path[collection_path],
+                                    "object_kind": kind,
+                                    "object_key": str(key) if key is not None else None,
+                                    "field_path": field_path,
+                                },
+                            }
+                        )
+        if "locator" not in result:
+            reference_target = _initialization_reference_issue_target(document, issue)
+            if reference_target is not None:
+                result.update(
+                    {
+                        "identity": f"{reference_target['kind']}:{reference_target['identity']}",
+                        "canonical_owner": reference_target["canonical_owner"],
+                        "field_path": reference_target["field_path"],
+                        "reference_owner": reference_target["reference_owner"],
+                        "locator": {
+                            "section": reference_target["canonical_owner"],
+                            "object_kind": reference_target["kind"],
+                            "object_key": reference_target["identity"],
+                            "field_path": reference_target["field_path"],
+                        },
+                    }
+                )
+                enriched.append(result)
+                continue
+            root = parts[0] if parts else ""
+            root_owner = {
+                "metadata": "overview",
+                "initialization": "initialization",
+                "planning": "planning-instructions",
+                "goal_resolution": "goal-resolution",
+            }.get(str(root), "configuration-check")
+            field_path = ".".join(str(part) for part in parts[1:]) or None
+            result.update(
+                {
+                    "identity": str(root) if root else None,
+                    "canonical_owner": root_owner,
+                    "field_path": field_path,
+                    "locator": {
+                        "section": root_owner,
+                        "object_kind": str(root) if root else None,
+                        "object_key": None,
+                        "field_path": field_path,
+                    },
+                }
+            )
+        enriched.append(result)
+    return enriched
+
+
+def relation_identity_from_document(item: dict[str, Any]) -> str:
+    return "__".join(
+        str(item.get(field, ""))
+        for field in ("source_node_key", "relation_type_key", "target_node_key")
+    )
+
+
+def _focus_initialization_projection(
+    projection: dict[str, Any], focus_kind: str, focus_key: str
+) -> dict[str, Any]:
+    domains: list[dict[str, Any]] = []
+    for domain in projection.get("domains", []):
+        groups = []
+        for group in domain.get("groups", []):
+            items = []
+            for item in group.get("items", []):
+                locator = item.get("locator", {})
+                context = item.get("context", {})
+                matches = (
+                    locator.get("object_kind") == focus_kind
+                    and locator.get("object_key") == focus_key
+                ) or (
+                    focus_kind == "resource" and context.get("resource_key") == focus_key
+                )
+                if matches:
+                    items.append(item)
+            if items:
+                groups.append({**group, "items": items})
+        if groups:
+            domains.append({**domain, "groups": groups})
+
+    def belongs_to_focus(finding: dict[str, Any]) -> bool:
+        identity = finding.get("identity", "")
+        if not isinstance(identity, str):
+            return False
+        if focus_kind == "node":
+            return identity.startswith((f"node:{focus_key}:", f"fact:{focus_key}:"))
+        if focus_kind == "actor":
+            return identity.startswith(f"actor:{focus_key}:")
+        if focus_kind == "relation":
+            return identity.startswith(f"relation:{focus_key}:")
+        if focus_kind == "resource":
+            parts = identity.split(":")
+            return len(parts) > 2 and parts[0] == "pool" and parts[2] == focus_key
+        return False
+
+    findings = [
+        finding
+        for finding in projection.get("findings", [])
+        if belongs_to_focus(finding)
+    ]
+    summary = {
+        "nodes": sum(
+            len(group["items"])
+            for domain in domains if domain["id"] == "nodes"
+            for group in domain["groups"]
+        ),
+        "actors": sum(
+            len(group["items"])
+            for domain in domains if domain["id"] == "actors"
+            for group in domain["groups"]
+        ),
+        "resource_pools": sum(
+            len(group["items"])
+            for domain in domains if domain["id"] == "resources"
+            for group in domain["groups"]
+        ),
+        "relations": sum(
+            len(group["items"])
+            for domain in domains if domain["id"] == "relations"
+            for group in domain["groups"]
+        ),
+        "derived_states": 0,
+        "warnings": sum(finding.get("severity") != "INFO" for finding in findings),
+    }
+    return {"domains": domains, "findings": findings, "summary": summary}
 
 
 @router.post(
@@ -548,8 +1025,14 @@ def preview_working_copy_completeness(
                     path=item.path,
                     locator=item.locator,
                     action=item.action,
+                    reference_locator=item.reference_locator,
+                    reference_owner=item.reference_owner,
                 )
                 for item in result.items
+            ],
+            validation_issues=[
+                _validation_issue(issue, request.definition_document)
+                for issue in result.validation_issues
             ],
             required_missing=result.required_missing,
             recommended_missing=result.recommended_missing,
@@ -756,10 +1239,24 @@ def _scenario_detail(db: Session, scenario: Scenario) -> ScenarioDetailResponse:
 
 
 def _draft_response(draft: ScenarioDraft) -> DraftResponse:
+    try:
+        definition_document = normalize_resource_source_hint_document(
+            draft.definition_document
+        )
+    except ValueError as exc:
+        raise ScenarioLifecycleError(
+            "SCENARIO_RESOURCE_SOURCE_HINT_NORMALIZATION_FAILED",
+            str(exc),
+        ) from exc
+    if not isinstance(definition_document, dict):
+        raise ScenarioLifecycleError(
+            "SCENARIO_DRAFT_DOCUMENT_INVALID",
+            "The Scenario Draft document must be an object",
+        )
     return DraftResponse(
         scenario_id=draft.scenario_id,
         revision=draft.revision,
-        definition_document=draft.definition_document,
+        definition_document=definition_document,
         validation_status=draft.validation_status,
         validation_issues=[
             ValidationIssueResponse(
@@ -817,6 +1314,7 @@ def _validation_issue(
         path=issue.path,
         message=issue.message,
         locator=locator,
+        type=issue.type,
     )
 
 

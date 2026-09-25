@@ -529,6 +529,7 @@ def _simple_source_requirement_predicate(condition: Any) -> dict[str, object] | 
     ):
         return None
 
+    operator: str | None = None
     if condition.kind == ConditionKind.FACT_NOT_EQUALS:
         operator = "EQ"
     elif condition.kind == ConditionKind.FACT_EQUALS:
@@ -861,6 +862,8 @@ def planner_target_contracts(
         for rule in definition.rules:
             if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
                 continue
+            if rule.applicable_target_keys and target_key not in rule.applicable_target_keys:
+                continue
             if not _condition_matches_target(
                 rule.condition,
                 target_key,
@@ -921,9 +924,15 @@ def planner_target_contracts(
     for rule in definition.rules:
         if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
             continue
+        if rule.applicable_target_keys:
+            eligible_rule_targets = set(rule.applicable_target_keys)
+        else:
+            eligible_rule_targets = eligible_targets
         if not _has_current_target_condition(rule.condition):
             continue
         for target_key in eligible_targets:
+            if target_key not in eligible_rule_targets:
+                continue
             if not _condition_matches_target(
                 rule.condition,
                 target_key,

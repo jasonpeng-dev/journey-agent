@@ -243,10 +243,18 @@ class DraftRevisionRequest(ApiModel):
     expected_revision: int = Field(ge=1)
 
 
+class InitializationPreviewFocus(ApiModel):
+    """Optional entity scope for a truthful partial working-copy preview."""
+
+    object_kind: Literal["node", "actor", "relation", "resource"]
+    object_key: str = Field(min_length=1, max_length=160)
+
+
 class InitializationPreviewRequest(DraftRevisionRequest):
     """A read-only projection request for the browser working document."""
 
     definition_document: dict[str, Any]
+    focus: InitializationPreviewFocus | None = None
 
 
 class DraftPublishRequest(DraftRevisionRequest):
@@ -385,6 +393,7 @@ class ValidationIssueResponse(ApiModel):
     path: str
     message: str
     locator: ObjectLocator | None = None
+    type: str | None = None
 
 
 class ReadinessCheckResponse(ApiModel):
@@ -490,12 +499,15 @@ class CompletenessItemResponse(ApiModel):
     path: str
     locator: ObjectLocator | None = None
     action: Literal["OPEN", "CREATE", "CONFIGURE", "NONE"] = "OPEN"
+    reference_locator: ObjectLocator | None = None
+    reference_owner: str | None = None
 
 
 class DraftCompletenessResponse(ApiModel):
     scenario_id: UUID
     base_revision: int = Field(ge=1)
     items: list[CompletenessItemResponse]
+    validation_issues: list[ValidationIssueResponse] = Field(default_factory=list)
     required_missing: int = Field(ge=0)
     recommended_missing: int = Field(ge=0)
     validation_issue_count: int = Field(ge=0)

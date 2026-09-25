@@ -12,6 +12,15 @@ export type BrowserFixture = {
   actionName: string;
 };
 
+export type TargetApplicabilityFixture = {
+  gameId: string;
+  scenarioName: string;
+  actionKey: string;
+  actionName: string;
+  knownTargetKey: string;
+  hiddenTargetKey: string;
+};
+
 export type GameSummary = {
   id: string;
   scenario_version_id: string;
@@ -92,6 +101,53 @@ export function appendFixtureTask(gameId: string): void {
   const fixtureDatabaseUrl = process.env.DATABASE_URL
     ?? `sqlite+pysqlite:///${path.resolve(fixtureDb).replace(/\\/g, "/")}`;
   execFileSync(python, [script, "append", gameId], {
+    cwd: repositoryRoot,
+    env: { ...process.env, DATABASE_URL: fixtureDatabaseUrl, E2E_FIXTURE_DB: fixtureDb },
+    encoding: "utf8",
+  });
+}
+
+export function targetApplicabilityFixture(): TargetApplicabilityFixture {
+  const frontendRoot = path.basename(process.cwd()) === "frontend"
+    ? process.cwd()
+    : path.resolve(process.cwd(), "frontend");
+  const repositoryRoot = path.resolve(frontendRoot, "..");
+  const fixtureDb = process.env.E2E_FIXTURE_DB;
+  if (!fixtureDb) {
+    throw new Error(
+      "Target applicability E2E requires E2E_FIXTURE_DB pointing at the isolated seeded test database.",
+    );
+  }
+  const python = process.env.E2E_PYTHON
+    ?? path.resolve(repositoryRoot, ".venv", "Scripts", "python.exe");
+  const script = path.resolve(frontendRoot, "e2e", "prepare_history_fixture.py");
+  const fixtureDatabaseUrl = process.env.DATABASE_URL
+    ?? `sqlite+pysqlite:///${path.resolve(fixtureDb).replace(/\\/g, "/")}`;
+  const output = execFileSync(python, [script, "target"], {
+    cwd: repositoryRoot,
+    env: { ...process.env, DATABASE_URL: fixtureDatabaseUrl, E2E_FIXTURE_DB: fixtureDb },
+    encoding: "utf8",
+  });
+  return JSON.parse(output.trim()) as TargetApplicabilityFixture;
+}
+
+export function revealTargetApplicabilityFixture(gameId: string, targetKey: string): void {
+  const frontendRoot = path.basename(process.cwd()) === "frontend"
+    ? process.cwd()
+    : path.resolve(process.cwd(), "frontend");
+  const repositoryRoot = path.resolve(frontendRoot, "..");
+  const fixtureDb = process.env.E2E_FIXTURE_DB;
+  if (!fixtureDb) {
+    throw new Error(
+      "Target applicability E2E requires E2E_FIXTURE_DB pointing at the isolated seeded test database.",
+    );
+  }
+  const python = process.env.E2E_PYTHON
+    ?? path.resolve(repositoryRoot, ".venv", "Scripts", "python.exe");
+  const script = path.resolve(frontendRoot, "e2e", "prepare_history_fixture.py");
+  const fixtureDatabaseUrl = process.env.DATABASE_URL
+    ?? `sqlite+pysqlite:///${path.resolve(fixtureDb).replace(/\\/g, "/")}`;
+  execFileSync(python, [script, "target-reveal", gameId, targetKey], {
     cwd: repositoryRoot,
     env: { ...process.env, DATABASE_URL: fixtureDatabaseUrl, E2E_FIXTURE_DB: fixtureDb },
     encoding: "utf8",

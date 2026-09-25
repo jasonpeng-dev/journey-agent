@@ -9,9 +9,13 @@ remain authoritative elsewhere.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
+
+from app.domain.scenario_v2 import normalize_resource_source_hint_document
+from app.scenarios.selector_semantics import related_candidate_node_keys
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +29,14 @@ class ObjectLocator:
 class ReferenceEdge:
     source: ObjectLocator
     target: ObjectLocator
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentityRecord:
+    scope: str
+    identity: str
+    signature: tuple[object, ...]
+    target: ObjectLocator | None
 
 
 class DraftAuthoringError(ValueError):
@@ -57,7 +69,6 @@ _KEY_FIELDS = {
     "node_type": "key",
     "node": "key",
     "relation_type": "key",
-    "relation": "key",
     "resource": "key",
     "role": "key",
     "actor": "key",
@@ -72,7 +83,6 @@ _ROOT_OBJECTS = {
     "initialization": "initialization",
     "goal_resolution": "goal_resolution",
     "planning": "planning",
-    "public_knowledge": "public_knowledge",
     "engine_contract": "engine_contract",
 }
 
@@ -80,7 +90,6 @@ _ROOT_OBJECTS = {
 # Their identities are still explicit authoring identities, so mutations must
 # use this table rather than array indexes or display labels.
 _ROOT_COLLECTIONS: dict[str, tuple[str, str, str]] = {
-    "resource_source_hints": ("public_knowledge", "resource_source_hints", "resource_key"),
     "recovery_hints": ("planning", "recovery_hints", "failure_code"),
     "resource_initial_states": ("initialization", "resource_initial_states", "resource_key"),
     "resource_pools": ("initialization", "resource_pools", "pool_key"),
@@ -96,6 +105,7 @@ _NESTED_COLLECTIONS: dict[tuple[str, str], tuple[str, str]] = {
     ("action", "expected_outcomes"): ("action_outcome", "code"),
     ("action", "operation_bindings"): ("action_binding", "role"),
     ("action", "target_actor_roles"): ("action_target_role", "composite"),
+    ("action", "target_contracts"): ("action_target_contract", "target_key"),
     ("action", "authority_policy.autonomous_limits"): (
         "action_authority_limit",
         "parameter_key",
@@ -124,6 +134,7 @@ _NODE_REFERENCE_FIELDS = {
     "anchor_node_key",
     "scope_node_key",
     "region_key",
+    "primary_region_key",
     "facility_key",
 }
 _ACTOR_REFERENCE_FIELDS = {"primary_actor_key", "actor_key"}
@@ -145,6 +156,7 @@ _LIST_REFERENCE_FIELDS = {
     "interaction_keys": "interaction",
     "allowed_action_keys": "action",
     "target_node_type_keys": "node_type",
+    "applicable_target_keys": None,  # resolved from the Rule's Action target kind
     "candidate_region_keys": "node",
     "goal_required_slots": None,  # semantic slot identities, not catalog keys
 }
@@ -403,11 +415,6 @@ def _fact_target(
     required_fact: bool = False,
 ) -> ObjectLocator | None:
     node_key = _explicit_node_key(value)
-    if node_key is None and required_fact:
-        selector = value.get("node")
-        if isinstance(selector, dict):
-            anchor_node_key = selector.get("anchor_node_key")
-            node_key = anchor_node_key if isinstance(anchor_node_key, str) else None
     if node_key is None and source is not None and source.object_kind == "node":
         node_key = source.object_key
     if node_key is None:
@@ -454,8 +461,22 @@ def _action_target_node_keys(
 ) -> set[str] | None:
     action_key = _action_key_for_source(document, source)
     action = _object(document, "action", action_key) if action_key is not None else None
-    if not isinstance(action, dict) or action.get("target_kind", "NODE") != "NODE":
+    if not isinstance(action, dict):
         return None
+    if action.get("target_kind", "NODE") == "ACTOR":
+        return set()
+
+    contracts = action.get("target_contracts")
+    if isinstance(contracts, list) and contracts:
+        contract_keys = {
+            target_key
+            for contract in contracts
+            if isinstance(contract, dict)
+            and isinstance((target_key := contract.get("target_key")), str)
+            and target_key
+        }
+        if contract_keys:
+            return contract_keys
 
     roles = action.get("target_actor_roles")
     explicit: set[str] = set()
@@ -483,6 +504,68 @@ def _action_target_node_keys(
     }
 
 
+def _related_selector_node_keys(
+    document: dict[str, Any],
+    selector: dict[str, Any],
+    source: ObjectLocator | None,
+    *,
+    required_fact_key: str | None,
+) -> tuple[str, ...] | None:
+    relation_type_key = selector.get("relation_type_key")
+    direction = selector.get("direction")
+    if not isinstance(relation_type_key, str) or not relation_type_key:
+        return None
+    typed_relation_type_key = relation_type_key
+    if not isinstance(direction, str) or direction not in {"SOURCE", "TARGET"}:
+        return None
+
+    anchor_node_key = selector.get("anchor_node_key")
+    if isinstance(anchor_node_key, str) and anchor_node_key:
+        anchors: set[str] | None = {anchor_node_key}
+    elif anchor_node_key is None:
+        action_key = _action_key_for_source(document, source)
+        anchors = _action_target_node_keys(document, source) if action_key is not None else None
+    else:
+        return None
+    if anchors is None:
+        return None
+
+    world = document.get("world")
+    relations = world.get("relations") if isinstance(world, dict) else None
+    nodes = world.get("nodes") if isinstance(world, dict) else None
+    relation_edges: list[tuple[str, str, str]] = []
+    for relation in relations or ():
+        if not isinstance(relation, dict):
+            continue
+        source_node_key = relation.get("source_node_key")
+        relation_type_key = relation.get("relation_type_key")
+        target_node_key = relation.get("target_node_key")
+        if (
+            isinstance(source_node_key, str)
+            and isinstance(relation_type_key, str)
+            and isinstance(target_node_key, str)
+        ):
+            relation_edges.append((source_node_key, relation_type_key, target_node_key))
+    node_fact_keys = {
+        node_key: {
+            fact["key"]
+            for fact in node.get("facts", ())
+            if isinstance(fact, dict) and isinstance(fact.get("key"), str)
+        }
+        for node in nodes or ()
+        if isinstance(node, dict)
+        and isinstance((node_key := _object_key("node", node)), str)
+    }
+    return related_candidate_node_keys(
+        anchor_node_keys=anchors,
+        relation_type_key=typed_relation_type_key,
+        direction=direction,
+        relation_edges=relation_edges,
+        node_fact_keys=node_fact_keys,
+        required_fact_key=required_fact_key,
+    )
+
+
 def _fact_targets(
     document: dict[str, Any],
     container: dict[str, Any],
@@ -491,6 +574,38 @@ def _fact_targets(
     *,
     required_fact: bool = False,
 ) -> tuple[ObjectLocator, ...]:
+    selector = container if required_fact else container.get("node")
+    if isinstance(selector, dict) and selector.get("kind") == "RELATED":
+        candidate_fact_key = (
+            fact_key
+            if required_fact
+            else selector.get("required_fact_key")
+            if isinstance(selector.get("required_fact_key"), str)
+            else None
+        )
+        related_candidates = _related_selector_node_keys(
+            document,
+            selector,
+            source,
+            required_fact_key=candidate_fact_key,
+        )
+        if related_candidates is None:
+            # Incomplete or runtime-dynamic anchors cannot be narrowed safely.
+            # Keep the wildcard so delete remains conservative.
+            return (ObjectLocator("node", None, f"facts.{fact_key}"),)
+        return tuple(
+            ObjectLocator("node", node_key, f"facts.{fact_key}")
+            for node_key in related_candidates
+            if _node_has_fact(
+                next(
+                    (node for node in (_collection(document, "node") or [])
+                     if isinstance(node, dict) and _object_key("node", node) == node_key),
+                    {},
+                ),
+                fact_key,
+            )
+        )
+
     direct = _fact_target(container, fact_key, source, required_fact=required_fact)
     if direct is None or direct.object_key is not None:
         return (direct,) if direct is not None else ()
@@ -509,7 +624,7 @@ def _fact_targets(
         # expanded by reference_index to every authored Node carrying the Fact.
         return (direct,)
 
-    candidates = [
+    candidate_nodes = [
         node
         for node in (_collection(document, "node") or [])
         if isinstance(node, dict)
@@ -524,20 +639,22 @@ def _fact_targets(
         kind = container.get("kind")
         if kind == "FACT_EQUALS" and "value" in container:
             expected = container.get("value")
-            candidates = [
-                node for node in candidates if _fact_initial_value(node, fact_key) == expected
+            candidate_nodes = [
+                node
+                for node in candidate_nodes
+                if _fact_initial_value(node, fact_key) == expected
             ]
         elif kind == "FACT_IN" and isinstance(container.get("values"), list):
             expected_values = container["values"]
-            candidates = [
+            candidate_nodes = [
                 node
-                for node in candidates
+                for node in candidate_nodes
                 if _fact_initial_value(node, fact_key) in expected_values
             ]
 
     return tuple(
         ObjectLocator("node", node_key, f"facts.{fact_key}")
-        for node in candidates
+        for node in candidate_nodes
         if isinstance((node_key := _object_key("node", node)), str)
     )
 
@@ -555,6 +672,29 @@ def _reference_targets(
         return _fact_targets(document, container, value, source)
     if field == "required_fact_key":
         return _fact_targets(document, container, value, source, required_fact=True)
+    if field == "parameter_key" and source is not None and source.object_kind == "actor":
+        actor = _object(document, "actor", source.object_key or "")
+        allowed = actor.get("allowed_action_keys") if isinstance(actor, dict) else None
+        if not isinstance(allowed, list):
+            return ()
+        targets: list[ObjectLocator] = []
+        for action_key in allowed:
+            if not isinstance(action_key, str):
+                continue
+            action = _object(document, "action", action_key)
+            parameters = action.get("parameters") if isinstance(action, dict) else None
+            if isinstance(parameters, list) and any(
+                isinstance(parameter, dict) and parameter.get("key") == value
+                for parameter in parameters
+            ):
+                targets.append(
+                    ObjectLocator(
+                        "action_parameter",
+                        f"{action_key}:{value}",
+                        f"parameters.{value}",
+                    )
+                )
+        return tuple(targets)
     target = _reference_target(document, container, field, value, source)
     return (target,) if target is not None else ()
 
@@ -582,6 +722,11 @@ def _reference_target(
         return ObjectLocator("node_type", value)
     if list_kind == "node":
         return ObjectLocator("node", value)
+    if field == "applicable_target_keys":
+        action_key = _action_key_for_source(document, source)
+        action = _object(document, "action", action_key) if action_key is not None else None
+        target_kind = action.get("target_kind") if isinstance(action, dict) else "NODE"
+        return ObjectLocator("actor" if target_kind == "ACTOR" else "node", value)
     if field in _NODE_REFERENCE_FIELDS:
         return ObjectLocator("node", value)
     if field in _NODE_TYPE_REFERENCE_FIELDS:
@@ -608,7 +753,12 @@ def _reference_target(
         return _fact_target(container, value, source, required_fact=True)
     if field == "pool_key":
         return _pool_target(value)
-    if field in {"parameter_key", "outcome_code"}:
+    if field in {
+        "parameter_key",
+        "outcome_code",
+        "success_outcome_codes",
+        "wait_success_outcome_codes",
+    }:
         action_key = _action_key_for_source(document, source)
         if action_key is None:
             return None
@@ -685,6 +835,9 @@ def _expand_dynamic_fact_edges(
         if target.object_kind != "node" or target.object_key is not None:
             expanded.append(edge)
             continue
+        if not isinstance(target.field_path, str):
+            expanded.append(edge)
+            continue
         prefix, separator, fact_key = target.field_path.partition("facts.")
         if prefix or not separator or not fact_key:
             expanded.append(edge)
@@ -705,11 +858,218 @@ def _expand_dynamic_fact_edges(
 
 
 def reference_index(document: dict[str, Any]) -> tuple[ReferenceEdge, ...]:
+    # Legacy Draft/snapshot payloads are normalized once at this compatibility
+    # boundary so every reference consumer sees Resource-owned source hints.
+    canonical = normalize_resource_source_hint_document(document)
+    if not isinstance(canonical, dict):
+        raise TypeError("Scenario authoring document must be an object")
     edges: list[ReferenceEdge] = []
-    _walk(document, document, (), None, None, edges)
-    edges = _expand_dynamic_fact_edges(document, edges)
-    edges.extend(_locality_passability_edges(document))
+    _walk(canonical, canonical, (), None, None, edges)
+    edges = _expand_dynamic_fact_edges(canonical, edges)
+    edges.extend(_locality_passability_edges(canonical))
     return tuple(edges)
+
+
+def _identity_manifest(document: dict[str, Any]) -> dict[tuple[str, str], _IdentityRecord]:
+    records: dict[tuple[str, str], _IdentityRecord] = {}
+
+    for object_kind in _COLLECTIONS:
+        for index, item in enumerate(_collection(document, object_kind) or ()):
+            if not isinstance(item, dict):
+                continue
+            identity = _object_key(object_kind, item)
+            has_identity = identity is not None
+            if identity is None:
+                # Keep a slot for malformed or incomplete authored objects.
+                # If a generic replacement clears an existing identity, this
+                # synthetic record makes it a same-scope replacement instead
+                # of making the object disappear from the transition check.
+                identity = f"::missing-identity::{index}"
+            signature: tuple[object, ...] = (identity,) if has_identity else ("missing_identity",)
+            if object_kind == "relation" and has_identity:
+                endpoints = tuple(
+                    item.get(field)
+                    for field in ("source_node_key", "relation_type_key", "target_node_key")
+                )
+                explicit_key = item.get("key")
+                # Endpoints remain immutable composite identity components
+                # even when a legacy or future document has an explicit key.
+                signature = ("relation", explicit_key, *endpoints)
+            record = _IdentityRecord(
+                f"entity:{object_kind}",
+                identity,
+                signature,
+                ObjectLocator(object_kind, identity) if has_identity else None,
+            )
+            records[(record.scope, record.identity)] = record
+
+    for node in _collection(document, "node") or ():
+        if not isinstance(node, dict):
+            continue
+        node_key = _object_key("node", node)
+        facts = node.get("facts")
+        if not isinstance(node_key, str) or not isinstance(facts, list):
+            continue
+        for index, fact in enumerate(facts):
+            if not isinstance(fact, dict):
+                continue
+            fact_key = fact.get("key")
+            has_identity = isinstance(fact_key, str) and bool(fact_key)
+            if not has_identity:
+                fact_key = f"::missing-identity::{index}"
+            record = _IdentityRecord(
+                "nested:fact",
+                f"{node_key}:{fact_key}",
+                (node_key, fact_key) if has_identity else ("missing_identity",),
+                ObjectLocator("node", node_key, f"facts.{fact_key}") if has_identity else None,
+            )
+            records[(record.scope, record.identity)] = record
+
+    for (parent_kind, collection), (nested_kind, _) in _NESTED_COLLECTIONS.items():
+        for parent in _collection(document, parent_kind) or ():
+            if not isinstance(parent, dict):
+                continue
+            parent_key = _object_key(parent_kind, parent)
+            if parent_key is None:
+                continue
+            values = _nested_collection_values(parent, collection)
+            if values is None:
+                continue
+            for index, nested in enumerate(values):
+                if not isinstance(nested, dict):
+                    continue
+                nested_key = _nested_identity(nested_kind, nested)
+                has_identity = nested_key is not None
+                if nested_key is None:
+                    nested_key = f"::missing-identity::{index}"
+                target = (
+                    _nested_locator(document, parent_kind, parent_key, collection, nested_key)
+                    if has_identity
+                    else None
+                )
+                if target is None and has_identity:
+                    continue
+                record = _IdentityRecord(
+                    f"nested:{parent_kind}:{collection}",
+                    f"{parent_key}:{nested_key}",
+                    (parent_key, nested_key) if has_identity else ("missing_identity",),
+                    target,
+                )
+                records[(record.scope, record.identity)] = record
+
+    for collection, (_root_key, _collection_key, identity_field) in _ROOT_COLLECTIONS.items():
+        values = _root_collection(document, collection)
+        for index, item in enumerate(values or ()):
+            if not isinstance(item, dict):
+                continue
+            raw_identity = item.get(identity_field)
+            if isinstance(raw_identity, str) and raw_identity:
+                has_identity = True
+                identity = raw_identity
+            else:
+                has_identity = False
+                identity = f"::missing-identity::{index}"
+            root_target: ObjectLocator | None = None
+            if has_identity and collection == "resource_pools":
+                root_target = ObjectLocator("initialization", None, f"resource_pools.{identity}")
+            elif has_identity and collection == "recovery_hints":
+                root_target = ObjectLocator("planning", None, f"recovery_hints.{identity}")
+            record = _IdentityRecord(
+                f"root:{collection}",
+                identity,
+                (identity,) if has_identity else ("missing_identity",),
+                root_target,
+            )
+            records[(record.scope, record.identity)] = record
+
+    return records
+
+
+def validate_generic_identity_transition(
+    previous_document: dict[str, Any],
+    next_document: dict[str, Any],
+) -> None:
+    """Reject identity replacement through ordinary whole-document Draft save.
+
+    Adds and unreferenced deletes remain possible through Draft save. A rename
+    must use ``rename_key`` through the dedicated rename operation, which
+    validates the key and rewrites references atomically before persistence.
+    A remove-plus-add in the same identity scope is treated as an attempted
+    replacement and must be split into a guarded delete and a later create.
+    """
+
+    previous = _identity_manifest(previous_document)
+    next_records = _identity_manifest(next_document)
+    added_keys = next_records.keys() - previous.keys()
+
+    if any(
+        next_records[key].signature == ("missing_identity",)
+        for key in added_keys
+    ):
+        raise DraftAuthoringError(
+            "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION",
+            "New authored objects must receive their identity when they are created",
+        )
+
+    if any(
+        next_records[key].scope == "entity:relation"
+        and (
+            len(next_records[key].signature) != 5
+            or next_records[key].signature[0] != "relation"
+            or not all(
+                isinstance(endpoint, str) and endpoint.strip()
+                for endpoint in next_records[key].signature[2:]
+            )
+        )
+        for key in added_keys
+    ):
+        raise DraftAuthoringError(
+            "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION",
+            "Composite Relation identity must be complete when the Relation is created",
+        )
+
+    for key in previous.keys() & next_records.keys():
+        if previous[key].signature != next_records[key].signature:
+            raise DraftAuthoringError(
+                "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION",
+                "Identity-bearing fields cannot be changed by generic Draft replacement",
+            )
+
+    removed_by_scope: dict[str, list[_IdentityRecord]] = {}
+    added_by_scope: dict[str, list[_IdentityRecord]] = {}
+    for key in previous.keys() - next_records.keys():
+        removed_by_scope.setdefault(previous[key].scope, []).append(previous[key])
+    for key in added_keys:
+        added_by_scope.setdefault(next_records[key].scope, []).append(next_records[key])
+
+    for scope, removed in removed_by_scope.items():
+        if added_by_scope.get(scope):
+            raise DraftAuthoringError(
+                "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION",
+                "Identity replacement must use Rename or separate delete and create operations",
+            )
+        targets = [record.target for record in removed if record.target is not None]
+        if not targets:
+            continue
+        used_by = tuple(
+            edge
+            for edge in _safe_reference_index(previous_document)
+            if any(
+                edge.target.object_kind == target.object_kind
+                and edge.target.object_key == target.object_key
+                and (
+                    target.field_path is None
+                    or edge.target.field_path == target.field_path
+                )
+                for target in targets
+            )
+        )
+        if used_by:
+            raise DraftAuthoringError(
+                "SCENARIO_OBJECT_REFERENCED",
+                "A referenced identity cannot be removed by generic Draft replacement",
+                references=used_by,
+            )
 
 
 def _walk(
@@ -776,8 +1136,15 @@ def _rewrite_references(
         for key, child in list(value.items()):
             if isinstance(child, list):
                 for index, item in enumerate(child):
+                    targets = _reference_targets(document, value, key, item, current_source)
                     target = _reference_target(document, value, key, item, current_source)
-                    if _target_matches(target, object_kind, old_key):
+                    if (
+                        any(
+                            _target_matches(candidate, object_kind, old_key)
+                            for candidate in targets
+                        )
+                        and _target_matches(target, object_kind, old_key)
+                    ):
                         children = value[key]
                         assert isinstance(children, list)
                         children[index] = new_key
@@ -793,8 +1160,12 @@ def _rewrite_references(
                             source_path=current_source_path,
                         )
             else:
+                targets = _reference_targets(document, value, key, child, current_source)
                 target = _reference_target(document, value, key, child, current_source)
-                if _target_matches(target, object_kind, old_key):
+                if (
+                    any(_target_matches(candidate, object_kind, old_key) for candidate in targets)
+                    and _target_matches(target, object_kind, old_key)
+                ):
                     value[key] = new_key
                 else:
                     _rewrite_references(
@@ -835,21 +1206,17 @@ def rename_key(
     new_key: str,
     protected_document: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", new_key):
+        raise DraftAuthoringError(
+            "SCENARIO_OBJECT_KEY_INVALID",
+            "The new object key must use lowercase letters, digits, and underscores",
+        )
     key_field = _KEY_FIELDS.get(object_kind)
     if key_field is None:
-        if object_kind == "relation" and _object(document, object_kind, old_key) is not None:
-            target = _object(document, object_kind, old_key)
-            if target is None or not isinstance(target.get("key"), str):
-                raise DraftAuthoringError(
-                    "SCENARIO_OBJECT_KIND_UNSUPPORTED",
-                    "Only explicit Relation keys can be renamed",
-                )
-            key_field = "key"
-        else:
-            raise DraftAuthoringError(
-                "SCENARIO_OBJECT_KIND_UNSUPPORTED",
-                "Unsupported stable-key object kind",
-            )
+        raise DraftAuthoringError(
+            "SCENARIO_OBJECT_KIND_UNSUPPORTED",
+            "Unsupported stable-key object kind",
+        )
     target = _object(document, object_kind, old_key)
     if target is None:
         raise DraftAuthoringError("SCENARIO_OBJECT_NOT_FOUND", "The Draft object does not exist")
@@ -864,16 +1231,16 @@ def rename_key(
     if _object(document, object_kind, new_key) is not None:
         raise DraftAuthoringError("SCENARIO_OBJECT_KEY_CONFLICT", "The new object key is in use")
     changed = deepcopy(document)
-    changed_target = _object(changed, object_kind, old_key)
-    assert changed_target is not None
-    changed_target[key_field] = new_key
     _rewrite_references(
         changed,
-        document=changed,
+        document=document,
         object_kind=object_kind,
         old_key=old_key,
         new_key=new_key,
     )
+    changed_target = _object(changed, object_kind, old_key)
+    assert changed_target is not None
+    changed_target[key_field] = new_key
     return changed
 
 
@@ -1147,4 +1514,5 @@ __all__ = [
     "locator_for_path",
     "reference_index",
     "rename_key",
+    "validate_generic_identity_transition",
 ]

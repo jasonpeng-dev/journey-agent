@@ -56,6 +56,159 @@ def test_draft_revision_conflict_and_invalid_publish_diagnostics(session: Sessio
     )
 
 
+def test_generic_draft_replace_rejects_action_derived_and_relation_identity_mutations(
+    session: Session,
+) -> None:
+    scenario = _scenario(session)
+    service = ScenarioService(session)
+    original = service.get_draft(scenario.id).definition_document
+
+    changed_action = deepcopy(original)
+    action = next(item for item in changed_action["actions"] if item["key"] == "treat_patient")
+    action["key"] = "treat_patient_v2"
+    with pytest.raises(ScenarioLifecycleError) as action_error:
+        service.replace_draft(
+            scenario.id, expected_revision=1, definition_document=changed_action
+        )
+    assert action_error.value.code == "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION"
+
+    blank_action_key = deepcopy(original)
+    next(item for item in blank_action_key["actions"] if item["key"] == "treat_patient")["key"] = ""
+    with pytest.raises(ScenarioLifecycleError) as blank_action_error:
+        service.replace_draft(
+            scenario.id, expected_revision=1, definition_document=blank_action_key
+        )
+    assert blank_action_error.value.code == "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION"
+
+    changed_relation = deepcopy(original)
+    changed_relation["world"]["relations"][0]["target_node_key"] = "triage_room"
+    with pytest.raises(ScenarioLifecycleError) as relation_error:
+        service.replace_draft(
+            scenario.id, expected_revision=1, definition_document=changed_relation
+        )
+    assert relation_error.value.code == "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION"
+
+    definition_document = _contract_scenario_document()
+    definition_document["metadata"]["key"] = "generic_contract_derived_identity"
+    definition_document["world"]["key"] = "generic_contract_derived_identity"
+    definition_document["derived_states"] = [
+        {
+            "key": "status_summary",
+            "name": "Status summary",
+            "description": "",
+            "value_type": "BOOLEAN",
+            "available_value": True,
+            "unavailable_value": False,
+            "dependencies": [
+                {
+                    "kind": "FACT",
+                    "node_key": "patient_one",
+                    "fact_key": "stable",
+                    "accepted_values": [True],
+                }
+            ],
+        }
+    ]
+    derived_scenario = ScenarioDefinitionRepository(session).persist_initial_draft(
+        ScenarioDefinitionV2.model_validate(definition_document)
+    )
+    derived_document = ScenarioService(session).get_draft(derived_scenario.id).definition_document
+    renamed_derived = deepcopy(derived_document)
+    renamed_derived["derived_states"][0]["key"] = "status_summary_v2"
+    with pytest.raises(ScenarioLifecycleError) as derived_error:
+        ScenarioService(session).replace_draft(
+            derived_scenario.id,
+            expected_revision=1,
+            definition_document=renamed_derived,
+        )
+    assert derived_error.value.code == "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION"
+
+
+def test_safe_draft_action_rename_persists_and_rewrites_all_inbound_references(
+    session: Session,
+) -> None:
+    scenario = _scenario(session)
+    service = ScenarioService(session)
+
+    renamed = service.rename_draft_key(
+        scenario.id,
+        expected_revision=1,
+        object_kind="action",
+        old_key="treat_patient",
+        new_key="treat_patient_v2",
+    )
+
+    assert renamed.revision == 2
+    actions = {item["key"] for item in renamed.definition_document["actions"]}
+    assert "treat_patient_v2" in actions and "treat_patient" not in actions
+    actor = next(
+        item
+        for item in renamed.definition_document["actors"]["actor_profiles"]
+        if item["key"] == "doctor_lee"
+    )
+    assert "treat_patient_v2" in actor["allowed_action_keys"]
+    assert "treat_patient" not in actor["allowed_action_keys"]
+    assert all(
+        edge.target.object_key != "treat_patient"
+        for edge in service.references(scenario.id)
+        if edge.target.object_kind == "action"
+    )
+
+
+def test_generic_draft_replace_requires_complete_relation_identity_at_creation(
+    session: Session,
+) -> None:
+    scenario = _scenario(session)
+    service = ScenarioService(session)
+    incomplete = service.get_draft(scenario.id).definition_document
+    incomplete["world"]["relations"].append(
+        {
+            "key": "new_relation",
+            "source_node_key": "",
+            "relation_type_key": "",
+            "target_node_key": "",
+        }
+    )
+    with pytest.raises(ScenarioLifecycleError) as incomplete_creation:
+        service.replace_draft(scenario.id, expected_revision=1, definition_document=incomplete)
+    assert incomplete_creation.value.code == "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION"
+    persisted = service.get_draft(scenario.id)
+    assert persisted.revision == 1
+    assert all(
+        item.get("key") != "new_relation"
+        for item in persisted.definition_document["world"]["relations"]
+    )
+
+    complete = deepcopy(persisted.definition_document)
+    complete["world"]["relations"].append(
+        {
+            "key": "new_relation",
+            "source_node_key": "patient_one",
+            "relation_type_key": "contains",
+            "target_node_key": "triage_room",
+        }
+    )
+    created = service.replace_draft(scenario.id, expected_revision=1, definition_document=complete)
+
+    changed = deepcopy(created.definition_document)
+    relation = next(
+        item for item in changed["world"]["relations"] if item.get("key") == "new_relation"
+    )
+    relation["target_node_key"] = "patient_one"
+    with pytest.raises(ScenarioLifecycleError) as blocked:
+        service.replace_draft(
+            scenario.id, expected_revision=created.revision, definition_document=changed
+        )
+    assert blocked.value.code == "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION"
+    persisted_after_change = service.get_draft(scenario.id)
+    assert persisted_after_change.revision == created.revision
+    assert next(
+        item
+        for item in persisted_after_change.definition_document["world"]["relations"]
+        if item.get("key") == "new_relation"
+    )["target_node_key"] == "triage_room"
+
+
 def test_publish_increments_versions_and_semantic_no_change_is_rejected(session: Session) -> None:
     scenario = _scenario(session)
     service = ScenarioService(session)

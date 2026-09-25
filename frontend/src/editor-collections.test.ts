@@ -8,14 +8,12 @@ import {
   rootCollectionIdentity,
   rootCollectionIdentityLabel,
   rootCollectionItem,
-  rootCollectionItems,
   rootCollectionSelectionForPath,
   type RootCollectionKey,
 } from "./editor-collections";
 import type { JsonObject } from "./editor";
 
 const identityCases: Array<[RootCollectionKey, JsonObject, string]> = [
-  ["resource_source_hints", { resource_key: "water" }, JSON.stringify(["water"])],
   ["recovery_hints", { failure_code: "BLOCKED" }, JSON.stringify(["BLOCKED"])],
   ["resource_initial_states", { resource_key: "water", scope_node_key: "north" }, JSON.stringify(["water", "north"])],
   ["resource_pools", { pool_key: "north_water" }, JSON.stringify(["north_water"])],
@@ -33,17 +31,6 @@ describe("root collection durable identity", () => {
     expect(rootCollectionIdentityLabel("resource_initial_states", { resource_key: "water", scope_node_key: null }))
       .toBe("资源 · water / 作用域 · 全局");
     expect(rootCollectionIdentityLabel("resource_pools", { pool_key: "north_water" })).toBe("资源池 · north_water");
-  });
-
-  it("resolves Resource Source Hint titles through Resource and Region names with safe fallback", () => {
-    const root = { resource_source_hints: [
-      { resource_key: "water", primary_region_key: "north", candidate_region_keys: [] },
-      { resource_key: "missing", primary_region_key: "unknown", candidate_region_keys: [] },
-    ] };
-    const document = { world: { resources: [{ key: "water", name: "应急用水" }], nodes: [{ key: "north", name: "北部工业区" }] } };
-    const items = rootCollectionItems("public-knowledge", root, document);
-    expect(items[0]).toMatchObject({ title: "应急用水", summary: "主要来源：北部工业区", identityLabel: "资源 · water" });
-    expect(items[1]).toMatchObject({ title: "missing", summary: "主要来源：unknown", identityLabel: "资源 · missing" });
   });
 
   it("keeps selection on the same item after reorder and removal before it", () => {
@@ -80,28 +67,36 @@ describe("root collection durable identity", () => {
     const selection = { owner: "collection" as const, collection: "recovery_hints" as const, identity: JSON.stringify(["SECOND"]) };
 
     expect(replaceRootCollectionItem(root, selection, { failure_code: "FIRST", hint: "duplicate" })).toMatchObject({ ok: false });
-    expect(replaceRootCollectionItem(root, selection, { failure_code: "RENAMED", hint: "two" })).toMatchObject({
+    expect(replaceRootCollectionItem(root, selection, { failure_code: "RENAMED", hint: "two" })).toMatchObject({ ok: false });
+    expect(replaceRootCollectionItem(root, selection, { failure_code: "SECOND", hint: "updated" })).toMatchObject({
       ok: true,
-      selection: { identity: JSON.stringify(["RENAMED"]) },
+      selection: { identity: JSON.stringify(["SECOND"]) },
+      root: { recovery_hints: [{ failure_code: "FIRST", hint: "one" }, { failure_code: "SECOND", hint: "updated" }] },
     });
   });
 
-  it.each(identityCases.filter(([collection]) => collection !== "resource_source_hints"))("creates a uniquely addressable %s item", (collection) => {
-    const first = appendRootCollectionItem({}, collection);
+  it.each(identityCases)("creates a uniquely addressable %s item", (collection, firstItem, firstIdentity) => {
+    const suffix = "second";
+    const secondItem: JsonObject = collection === "recovery_hints"
+      ? { failure_code: "SECOND", hint: "Second" }
+      : collection === "resource_initial_states"
+        ? { resource_key: "oil", scope_node_key: null, value: 0, reserved_value: 0 }
+        : collection === "resource_pools"
+          ? { pool_key: `${firstItem.pool_key}_${suffix}`, resource_key: "oil" }
+          : { region_key: "south", resource_inventory_visibility: "VISIBLE", resource_survey_completed: false };
+    const first = appendRootCollectionItem({}, collection, firstItem);
     expect(first.ok).toBe(true);
     if (!first.ok || !first.selection) return;
-    const second = appendRootCollectionItem(first.root, collection);
+    expect(first.selection.identity).toBe(firstIdentity);
+    const second = appendRootCollectionItem(first.root, collection, secondItem);
     expect(second.ok).toBe(true);
     if (!second.ok || !second.selection) return;
     expect(second.selection.identity).not.toBe(first.selection.identity);
     expect(rootCollectionItem(second.root, second.selection)).not.toBeNull();
   });
 
-  it("requires an explicit Resource identity before appending a source hint", () => {
-    const result = appendRootCollectionItem({}, "resource_source_hints");
-    expect(result).toEqual({ ok: false, reason: "资源来源提示必须先选择已有资源。" });
-    expect(JSON.stringify(result)).not.toContain("new_resource");
-    expect(JSON.stringify(result)).not.toContain("new_region");
+  it.each(identityCases)("rejects an incomplete %s identity at creation", (collection) => {
+    expect(appendRootCollectionItem({}, collection, {})).toMatchObject({ ok: false });
   });
 
   it("maps a validation array path to durable item identity", () => {

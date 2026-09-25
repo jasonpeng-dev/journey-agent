@@ -54,7 +54,10 @@ describe("shared editor form primitives", () => {
     render(<AdvancedSection value={{ keep: true }} onChange={onChange} path="action.authority_policy" label="Authority policy" />);
 
     expect(screen.queryByLabelText(/权限策略 JSON/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /权限策略/ }));
+    const fallbackToggle = screen.getByRole("button", { name: /未识别结构/ });
+    expect(fallbackToggle).toHaveTextContent("未支持的结构");
+    expect(screen.getByText(/当前结构无法由可视编辑器完整编辑/)).toBeInTheDocument();
+    fireEvent.click(fallbackToggle);
     const textarea = screen.getByLabelText(/权限策略 JSON/);
     fireEvent.change(textarea, { target: { value: "{" } });
     fireEvent.blur(textarea);

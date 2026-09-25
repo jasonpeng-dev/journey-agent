@@ -5,6 +5,7 @@ import {
   factDisplayValue,
   facilityStatusDisplayValue,
 } from "./knowledgePresentation";
+import { typedScalarDisplay } from "./components/editor/typed-values";
 import {
   legacyFactDisplayValue,
   legacyFacilityStatusDisplayValue,
@@ -113,6 +114,27 @@ describe("accepted standard PLAY presentation contract", () => {
     expect(factDisplayValue(operational)).toBe("未运行");
     expect(factDisplayValue(power)).toBe("未供电");
     expect(factDisplayValue(power)).not.toMatch(/UNAVAILABLE|AVAILABLE/);
+  });
+
+  it("uses the same authored value label in Editor and PLAY projections", () => {
+    const definition = {
+      value_type: "ENUM",
+      allowed_values: ["AVAILABLE", "UNAVAILABLE"],
+      value_labels: [
+        { value: "AVAILABLE", label: "已供电", detail_label: "已供电" },
+        { value: "UNAVAILABLE", label: "未供电", detail_label: "未供电" },
+      ],
+    };
+    const authoredLabel = typedScalarDisplay("AVAILABLE", definition);
+    const playerFact = {
+      ...fact("power_supply", "供电状态", "AVAILABLE", "HEADER_SECONDARY"),
+      value_label: authoredLabel,
+      detail_value_label: authoredLabel,
+      presentation_role: "HEADER_SECONDARY" as const,
+    };
+
+    expect(factDisplayValue(playerFact)).toBe(authoredLabel);
+    expect(factDisplayValue(playerFact)).toBe("已供电");
   });
 
   it("keeps A, B, and producer-owned C adjacent after final ordering", () => {

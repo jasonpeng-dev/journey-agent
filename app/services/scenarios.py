@@ -11,7 +11,10 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v2 import (
+    ScenarioDefinitionV2,
+    normalize_resource_source_hint_document,
+)
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.scenarios.authoring import (
     DraftAuthoringError,
@@ -23,6 +26,7 @@ from app.scenarios.authoring import (
     locator_for_path,
     reference_index,
     rename_key,
+    validate_generic_identity_transition,
 )
 from app.scenarios.completeness import CompletenessResult, evaluate_completeness
 from app.scenarios.serialization import canonical_document, scenario_content_hash
@@ -143,6 +147,51 @@ class ScenarioService:
         definition_document: dict[str, Any],
     ) -> ScenarioDraft:
         """Optimistically replace a Draft without requiring it to be publishable."""
+
+        try:
+            normalized_document = normalize_resource_source_hint_document(definition_document)
+        except ValueError as exc:
+            raise ScenarioLifecycleError(
+                "SCENARIO_RESOURCE_SOURCE_HINT_NORMALIZATION_FAILED",
+                str(exc),
+            ) from exc
+        if not isinstance(normalized_document, dict):
+            raise ScenarioLifecycleError(
+                "SCENARIO_DRAFT_DOCUMENT_INVALID",
+                "The Scenario Draft document must be an object",
+            )
+        definition_document = normalized_document
+        scenario = self._scenario(scenario_id, lock=False)
+        self._require_mutable(scenario)
+        _require_scenario_identity(definition_document, scenario.key)
+        current = self._draft(scenario_id, lock=False)
+        if current.revision != expected_revision:
+            raise ScenarioLifecycleError(
+                "SCENARIO_DRAFT_CONFLICT",
+                "The Scenario Draft revision changed before this update",
+            )
+        try:
+            validate_generic_identity_transition(current.definition_document, definition_document)
+        except DraftAuthoringError as exc:
+            raise ScenarioLifecycleError(
+                exc.code,
+                exc.message,
+                details=_authoring_error_details(exc),
+            ) from exc
+        return self._replace_draft_document(
+            scenario_id,
+            expected_revision=expected_revision,
+            definition_document=definition_document,
+        )
+
+    def _replace_draft_document(
+        self,
+        scenario_id: UUID,
+        *,
+        expected_revision: int,
+        definition_document: dict[str, Any],
+    ) -> ScenarioDraft:
+        """Persist a document after an explicit, already-authorized transform."""
 
         scenario = self._scenario(scenario_id, lock=False)
         self._require_mutable(scenario)
@@ -287,7 +336,7 @@ class ScenarioService:
         scenario = self._scenario(scenario_id, lock=False)
         self._require_mutable(scenario)
         version = self.get_version(scenario_id, version_id)
-        draft = self.replace_draft(
+        draft = self._replace_draft_document(
             scenario_id,
             expected_revision=expected_revision,
             definition_document=version.snapshot_document,
@@ -477,7 +526,7 @@ class ScenarioService:
                 exc.message,
                 details=_authoring_error_details(exc),
             ) from exc
-        return self.replace_draft(
+        return self._replace_draft_document(
             scenario_id,
             expected_revision=expected_revision,
             definition_document=changed,
@@ -504,7 +553,7 @@ class ScenarioService:
                 exc.message,
                 details=_authoring_error_details(exc),
             ) from exc
-        return self.replace_draft(
+        return self._replace_draft_document(
             scenario_id,
             expected_revision=expected_revision,
             definition_document=changed,

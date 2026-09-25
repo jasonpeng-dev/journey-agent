@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { referenceOptions } from "./components/editor/ReferencePicker";
-import { addObject as addEditorObject, filterDraftObjects, nodeSemanticView, objectIdentity, replaceObject, ruleDisplayTitle, sectionDefinition, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
+import { addObject as addEditorObject, appendNestedIdentityFromDialog, filterDraftObjects, nodeSemanticView, objectIdentity, replaceObject, ruleDisplayTitle, sectionDefinition, sectionObjects, sectionRegistry, sections, updateObjectName } from "./editor";
 import { entityRegistry, factInitialValueMetadata } from "./editor-registry";
 import { addObject, defaultArrayItem, kindsBySection } from "./templates";
 
@@ -19,7 +19,7 @@ describe("editor draft helpers", () => {
   });
 
   it("adds generic objects and edits their structured value", () => {
-    const added = addObject({ world: { nodes: [] } }, "node");
+    const added = addObject({ world: { node_types: [{ key: "facility", name: "Facility" }], nodes: [] } }, "node", { key: "harbor", name: "Harbor", node_type_key: "facility" });
     const node = sectionObjects(added.document, "world")[0];
     const changed = replaceObject(added.document, "world", node.key, { ...node.value, name: "Harbor" });
     expect(sectionObjects(changed, "world")[0].name).toBe("Harbor");
@@ -27,19 +27,33 @@ describe("editor draft helpers", () => {
 
   it("creates the first generic authoring objects in a blank scenario without inferred dependencies", () => {
     let blank = {};
-    for (const kind of ["node_type", "node", "role", "actor", "interaction", "action"] as const) blank = addObject(blank, kind).document;
+    blank = addObject(blank, "node_type", { key: "facility", name: "Facility" }).document;
+    blank = addObject(blank, "node", { key: "harbor", name: "Harbor", node_type_key: "facility" }).document;
+    blank = addObject(blank, "role", { key: "operator", name: "Operator" }).document;
+    blank = addObject(blank, "actor", { key: "mira", name: "Mira", role_key: "operator", initial_node_key: "harbor", persona: "Field operator" }).document;
+    blank = addObject(blank, "interaction", { key: "inspect", name: "Inspect" }).document;
+    blank = addObject(blank, "action", { key: "repair", name: "Repair", required_interaction_key: "inspect" }).document;
 
     expect(sectionObjects(blank, "node-types")).toHaveLength(1);
-    expect(sectionObjects(blank, "world-entities")[0].value.node_type_key).toBe("");
+    expect(sectionObjects(blank, "world-entities")[0].value.node_type_key).toBe("facility");
     expect(sectionObjects(blank, "roles")).toHaveLength(1);
-    expect(sectionObjects(blank, "actors")[0].value.role_key).toBe("");
+    expect(sectionObjects(blank, "actors")[0].value.role_key).toBe("operator");
     expect(sectionObjects(blank, "interactions")).toHaveLength(1);
-    expect(sectionObjects(blank, "actions")[0].value.required_interaction_key).toBe("");
+    expect(sectionObjects(blank, "actions")[0].value.required_interaction_key).toBe("inspect");
+  });
+
+  it("validates Action and Actor stable keys at the creation boundary", () => {
+    const withRoleAndNode = { world: { nodes: [{ key: "harbor" }] }, actors: { roles: [{ key: "operator" }] } };
+    expect(() => addEditorObject(withRoleAndNode, "actor", { key: "Bad Actor", name: "Mira", role_key: "operator", initial_node_key: "harbor", persona: "Field operator" })).toThrow(/稳定键/);
+    expect(() => addEditorObject({ interactions: [{ key: "inspect" }] }, "action", { key: "Bad Action", name: "Repair", required_interaction_key: "inspect" })).toThrow(/稳定键/);
   });
 
   it("creates engine-supported AST shapes", () => {
     expect(defaultArrayItem("conditions")).toMatchObject({ kind: "FACT_EQUALS" });
     expect(defaultArrayItem("effects")).toMatchObject({ kind: "EMIT_OUTCOME" });
+    for (const field of ["facts", "parameters", "expected_outcomes", "operation_bindings", "dependencies", "resource_pools", "region_resource_knowledge", "recovery_hints"]) {
+      expect(defaultArrayItem(field)).toBeNull();
+    }
   });
 
   it("registers every V2 authoring section without adding semantic collections", () => {
@@ -129,19 +143,68 @@ describe("editor draft helpers", () => {
     expect(filterDraftObjects(objects, "repair_preflight")).toHaveLength(1);
   });
 
-  it("keeps sibling relation kinds distinct when their identities match", () => {
+  it("prevents generic Relation endpoint edits after composite identity is complete", () => {
     const original = { world: {
       relation_types: [{ key: "same", name: "Same type" }],
       relations: [{ key: "same", source_node_key: "a", relation_type_key: "same", target_node_key: "b" }],
     } };
     const changed = replaceObject(original, "relations", "same", { key: "same", source_node_key: "b", relation_type_key: "same", target_node_key: "a" }, "relation");
     expect(sectionObjects(changed, "relation-types").find((item) => item.kind === "relation_type")?.value.name).toBe("Same type");
-    expect(sectionObjects(changed, "relations").find((item) => item.kind === "relation")?.value.source_node_key).toBe("b");
+    expect(sectionObjects(changed, "relations").find((item) => item.kind === "relation")?.value.source_node_key).toBe("a");
+  });
+
+  it("requires the complete Relation composite identity at creation and locks it afterward", () => {
+    expect(() => addEditorObject({ world: { nodes: [{ key: "a" }], relation_types: [{ key: "connected_to" }], relations: [] } }, "relation", {})).toThrow();
+    const added = addEditorObject({ world: { nodes: [{ key: "a", name: "A" }, { key: "b", name: "B" }], relation_types: [{ key: "connected_to", name: "Connected to" }], relations: [] } }, "relation", {
+      source_node_key: "a", relation_type_key: "connected_to", target_node_key: "b",
+    });
+    const locked = replaceObject(added.document, "relations", added.key, {
+      ...sectionObjects(added.document, "relations")[0].value,
+      source_node_key: "b", target_node_key: "a",
+    }, "relation");
+    expect(sectionObjects(added.document, "relations")[0].value).toMatchObject({ source_node_key: "a", relation_type_key: "connected_to", target_node_key: "b" });
+    expect(sectionObjects(locked, "relations")[0].value).toMatchObject({ source_node_key: "a", relation_type_key: "connected_to", target_node_key: "b" });
+  });
+
+  it.each(["action", "derived_state"] as const)("blocks generic %s key changes", (kind) => {
+    const key = kind === "action" ? "inspect" : "summary";
+    const section = kind === "action" ? "actions" : "derived-states";
+    const document = { [section === "actions" ? "actions" : "derived_states"]: [{ key, name: "Original" }] };
+    const changed = replaceObject(document, section, key, { key: `${key}_renamed`, name: "Original" }, kind);
+    expect(sectionObjects(changed, section).find((item) => item.kind === kind)?.key).toBe(key);
+  });
+
+  it("only appends nested identities through the explicit dialog mutation", () => {
+    const original = { actions: [{ key: "repair", name: "Repair", parameters: [] }] };
+    const withParameter = { ...original.actions[0], parameters: [{ key: "dose", name: "Dose", value_type: "INTEGER", required: true }] };
+    expect(replaceObject(original, "actions", "repair", withParameter, "action")).toEqual(original);
+
+    const created = appendNestedIdentityFromDialog(original, "actions", "repair", withParameter, "action");
+    expect((created?.actions as Array<Record<string, unknown>>)[0].parameters).toEqual(withParameter.parameters);
+    expect(appendNestedIdentityFromDialog(created!, "actions", "repair", {
+      ...withParameter,
+      parameters: [...withParameter.parameters, { key: "dose", name: "Duplicate", value_type: "INTEGER", required: true }],
+    }, "action")).toBeNull();
+    expect(appendNestedIdentityFromDialog(original, "actions", "repair", {
+      ...withParameter,
+      key: "other_action",
+    }, "action")).toBeNull();
+    expect(appendNestedIdentityFromDialog(original, "actions", "repair", {
+      ...withParameter,
+      parameters: [{ key: "", name: "", value_type: "STRING", required: true }],
+    }, "action")).toBeNull();
+    const incompleteDetail = appendNestedIdentityFromDialog(original, "actions", "repair", {
+      ...withParameter,
+      parameters: [{ key: "dose", name: "", value_type: "STRING", required: true }],
+    }, "action");
+    expect((incompleteDetail?.actions as Array<Record<string, unknown>>)[0].parameters).toEqual([
+      { key: "dose", name: "", value_type: "STRING", required: true },
+    ]);
   });
 
   it("creates and derives a complete PublicReference composite identity", () => {
-    const added = addEditorObject({ world: { nodes: [{ key: "central", name: "Central" }], resources: [] }, public_references: [] }, "public_reference");
-    const reference = sectionObjects(added.document, "public-references")[0];
+    const added = addEditorObject({ world: { nodes: [{ key: "central", name: "Central" }], resources: [] }, public_references: [] }, "public_reference", { term: "New reference", ref_type: "NODE", ref_key: "central" });
+    const reference = sectionObjects(added.document, "terminology-references")[0];
     expect(reference.key).toBe("NODE:central:New reference");
     expect(objectIdentity("public_reference", reference.value)).toBe(reference.key);
   });

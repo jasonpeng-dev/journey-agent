@@ -6,7 +6,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.infrastructure.db.models import Scenario, ScenarioVersion
+from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
+from app.scenarios.serialization import legacy_resource_source_hint_payload
 
 
 def _create_example(client: TestClient, *, key: str = "clinic_one") -> dict[str, object]:
@@ -35,6 +36,7 @@ def test_blank_draft_is_editable_but_cannot_publish(client: TestClient) -> None:
     assert draft.status_code == 200
     assert draft.json()["revision"] == 1
     assert draft.json()["definition_document"]["world"]["nodes"] == []
+    assert "public_knowledge" not in draft.json()["definition_document"]
 
     incomplete = {"metadata": {"key": "blank_case", "name": "Still Draft"}}
     saved = client.put(
@@ -65,6 +67,44 @@ def test_blank_draft_is_editable_but_cannot_publish(client: TestClient) -> None:
     )
     assert publish.status_code == 409
     assert publish.json()["error"]["code"] == "SCENARIO_DRAFT_INVALID"
+
+
+def test_legacy_draft_get_is_read_only_and_manual_save_persists_current_shape(
+    client: TestClient,
+    session: Session,
+) -> None:
+    created = _create_example(client, key="legacy_source_hint_draft")
+    scenario_id = UUID(str(created["id"]))
+    draft = session.scalar(select(ScenarioDraft).where(ScenarioDraft.scenario_id == scenario_id))
+    assert draft is not None
+    legacy_document = legacy_resource_source_hint_payload(draft.definition_document)
+    assert legacy_document is not None
+    draft.definition_document = deepcopy(legacy_document)
+    session.flush()
+    stored_legacy_document = deepcopy(draft.definition_document)
+
+    opened = client.get(f"/api/v1/scenarios/{scenario_id}/draft")
+    assert opened.status_code == 200, opened.text
+    opened_document = opened.json()["definition_document"]
+    assert "public_knowledge" not in opened_document
+    hinted_resource = next(
+        item for item in opened_document["world"]["resources"] if "source_hint" in item
+    )
+    assert "resource_key" not in hinted_resource["source_hint"]
+    assert hinted_resource["source_hint"]
+
+    session.refresh(draft)
+    assert draft.definition_document == stored_legacy_document
+
+    saved = client.put(
+        f"/api/v1/scenarios/{scenario_id}/draft",
+        json={"expected_revision": 1, "definition_document": opened_document},
+    )
+    assert saved.status_code == 200, saved.text
+    session.refresh(draft)
+    assert saved.json()["revision"] == 2
+    assert "public_knowledge" not in draft.definition_document
+    assert draft.definition_document == opened_document
 
 
 def test_initialization_preview_is_readonly_and_uses_the_working_document(
@@ -559,7 +599,235 @@ def test_working_copy_completeness_is_readonly_and_tolerates_temporary_invalid_s
     assert payload["base_revision"] == draft["revision"]
     assert payload["required_missing"] > 0
     assert payload["validation_issue_count"] > 0
+    assert payload["validation_issues"]
+    assert all(
+        "code" in issue and "path" in issue and "type" in issue
+        for issue in payload["validation_issues"]
+    )
     assert any(item["key"] == "initialization.start-node" for item in payload["items"])
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == draft["revision"]
+    assert persisted["definition_document"] == draft["definition_document"]
+
+
+def test_working_copy_completeness_returns_nested_action_outcome_locator_without_writing(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="nested_outcome_completeness")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    working = deepcopy(draft["definition_document"])
+    action = working["actions"][0]
+    outcome = action["expected_outcomes"][0]
+    outcome.pop("name", None)
+
+    response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/completeness",
+        json={"expected_revision": draft["revision"], "definition_document": working},
+    )
+
+    assert response.status_code == 200, response.text
+    issue = next(
+        issue for issue in response.json()["validation_issues"]
+        if issue["path"].endswith("expected_outcomes.0.name")
+    )
+    assert issue["type"] == "missing"
+    assert issue["locator"] == {
+        "object_kind": "action",
+        "object_key": action["key"],
+        "field_path": "expected_outcomes.0.name",
+    }
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == draft["revision"]
+    assert persisted["definition_document"] == draft["definition_document"]
+
+
+def test_invalid_initialization_preview_returns_json_safe_validation_details(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="invalid_initialization_preview")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    working = deepcopy(draft["definition_document"])
+    resource = next(
+        item for item in working["world"]["resources"] if item.get("source_hint")
+    )
+    resource["source_hint"] = {
+        "primary_region_key": None,
+        "candidate_region_keys": [],
+    }
+
+    response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/initialization-preview",
+        json={
+            "expected_revision": draft["revision"],
+            "definition_document": working,
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    payload = response.json()["error"]
+    assert payload["code"] == "SCENARIO_INITIALIZATION_PREVIEW_INVALID"
+    assert payload["details"]["issues"]
+    assert all("ctx" not in issue for issue in payload["details"]["issues"])
+
+
+def test_incomplete_focused_node_preview_returns_structured_field_locator(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="incomplete_focused_node_preview")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    working = deepcopy(draft["definition_document"])
+    existing = working["world"]["nodes"][0]
+    incomplete = deepcopy(existing)
+    incomplete["key"] = "new_incomplete_node"
+    incomplete["name"] = ""
+    working["world"]["nodes"].append(incomplete)
+
+    response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/initialization-preview",
+        json={
+            "expected_revision": draft["revision"],
+            "definition_document": working,
+            "focus": {"object_kind": "node", "object_key": "new_incomplete_node"},
+        },
+    )
+
+    assert response.status_code == 422, response.text
+    issue = response.json()["error"]["details"]["issues"][0]
+    assert issue["loc"][-1] == "name"
+    assert "ctx" not in issue
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == draft["revision"]
+    assert persisted["definition_document"] == draft["definition_document"]
+
+
+def test_unfocused_incomplete_node_returns_partial_workspace_projection_with_recovery_locator(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="unfocused_incomplete_node_preview")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    working = deepcopy(draft["definition_document"])
+    existing_key = working["world"]["nodes"][0]["key"]
+    working["world"]["nodes"].append({"key": "new_incomplete_node", "name": ""})
+
+    response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/initialization-preview",
+        json={
+            "expected_revision": draft["revision"],
+            "definition_document": working,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["partial"] is True
+    assert payload["omitted_issue_count"] == len(payload["issues"]) >= 1
+    assert all(issue["identity"] == "node:new_incomplete_node" for issue in payload["issues"])
+    assert all(issue["canonical_owner"] == "world-entities" for issue in payload["issues"])
+    name_issue = next(issue for issue in payload["issues"] if issue["field_path"] == "name")
+    assert name_issue["locator"] == {
+        "section": "world-entities",
+        "object_kind": "node",
+        "object_key": "new_incomplete_node",
+        "field_path": "name",
+    }
+    projected_ids = [
+        item["id"]
+        for domain in payload["projection"]["domains"]
+        for group in domain["groups"]
+        for item in group["items"]
+    ]
+    assert f"node:{existing_key}" in projected_ids
+    assert "node:new_incomplete_node" not in projected_ids
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == draft["revision"]
+    assert persisted["definition_document"] == draft["definition_document"]
+
+
+def test_unfocused_missing_node_type_is_attributed_and_pruned_for_partial_preview(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="unfocused_missing_node_type_preview")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    working = deepcopy(draft["definition_document"])
+    incomplete = deepcopy(working["world"]["nodes"][0])
+    incomplete["key"] = "unrelated_missing_type_node"
+    incomplete["name"] = "Unrelated incomplete node"
+    incomplete["node_type_key"] = "missing_node_type"
+    working["world"]["nodes"].append(incomplete)
+
+    response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/initialization-preview",
+        json={
+            "expected_revision": draft["revision"],
+            "definition_document": working,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["partial"] is True
+    issue = next(
+        issue
+        for issue in payload["issues"]
+        if issue.get("identity") == "node:unrelated_missing_type_node"
+    )
+    assert issue["canonical_owner"] == "world-entities"
+    assert issue["field_path"] == "node_type_key"
+    assert issue["reference_owner"] == "node-types"
+    assert issue["locator"] == {
+        "section": "world-entities",
+        "object_kind": "node",
+        "object_key": "unrelated_missing_type_node",
+        "field_path": "node_type_key",
+    }
+    projected_ids = [
+        item["id"]
+        for domain in payload["projection"]["domains"]
+        for group in domain["groups"]
+        for item in group["items"]
+    ]
+    assert "node:unrelated_missing_type_node" not in projected_ids
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == draft["revision"]
+    assert persisted["definition_document"] == draft["definition_document"]
+
+
+def test_focused_initialization_preview_survives_an_unrelated_incomplete_node(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="partial_focused_node_preview")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    working = deepcopy(draft["definition_document"])
+    focus_key = working["world"]["nodes"][0]["key"]
+    working["world"]["nodes"].append({"key": "unrelated_incomplete_node", "name": ""})
+
+    response = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/initialization-preview",
+        json={
+            "expected_revision": draft["revision"],
+            "definition_document": working,
+            "focus": {"object_kind": "node", "object_key": focus_key},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["partial"] is True
+    assert payload["omitted_issue_count"] >= 1
+    projected_ids = [
+        item["id"]
+        for domain in payload["projection"]["domains"]
+        for group in domain["groups"]
+        for item in group["items"]
+    ]
+    assert f"node:{focus_key}" in projected_ids
+    assert "node:unrelated_incomplete_node" not in projected_ids
     persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
     assert persisted["revision"] == draft["revision"]
     assert persisted["definition_document"] == draft["definition_document"]

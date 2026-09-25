@@ -143,8 +143,7 @@ export const sectionLabels: Record<string, string> = {
   "derived-states": "派生状态",
   initialization: "初始化",
   "goal-resolution": "目标解析",
-  "public-knowledge": "资源来源提示",
-  "public-references": "公共引用",
+  "terminology-references": "术语与引用",
   "configuration-check": "配置检查",
   overview: "概览",
   world: "世界总览",
@@ -163,10 +162,9 @@ export const editorTaxonomyGroups = [
   { label: "世界模型", items: ["world", "node-types", "world-entities", "relation-types", "relations", "resources"] },
   { label: "参与者", items: ["roles", "actors"] },
   { label: "行为系统", items: ["interactions", "actions", "rules"] },
-  { label: "目标系统", items: ["derived-states", "goal-resolution"] },
+  { label: "目标系统", items: ["derived-states", "goal-resolution", "terminology-references"] },
   { label: "规划策略", items: ["planning-instructions", "planning-recovery"] },
   { label: "初始化", items: ["initialization"] },
-  { label: "公开信息", items: ["public-knowledge", "public-references"] },
   { label: "检查与发布", items: ["configuration-check", "validation"] },
 ] as const;
 
@@ -181,7 +179,7 @@ export const kindLabels: Record<string, string> = {
   relation_type: "关系类型",
   relation: "关系实例",
   derived_state: "派生状态",
-  public_reference: "公共引用",
+  public_reference: "术语引用",
   node_type: "节点类型",
   node: "节点",
   resource: "资源",
@@ -219,6 +217,9 @@ const fieldLabels: Record<string, string> = {
   autonomous_limits: "自主权限上限",
   approval_required_values: "需要批准的值",
   required_interaction_key: "所需交互能力",
+  target_node_type_keys: "目标节点类型",
+  required_actor_role_key: "所需参与者角色",
+  source_relation_type_key: "来源关系类型",
   execution_mode: "执行方式",
   parameters: "参数",
   allowed_actor_capabilities: "参与者所需能力",
@@ -228,6 +229,18 @@ const fieldLabels: Record<string, string> = {
   supporting_effects: "辅助效果",
   success_outcome_codes: "成功结果代码",
   wait_success_outcome_codes: "等待成功结果代码",
+  value_type: "值类型",
+  region_key: "区域",
+  derived_key: "派生状态",
+  scope_node_key: "作用节点",
+  pool_key: "资源池键",
+  availability: "可用状态",
+  availability_requirement: "可用条件",
+  command_reachability: "指挥可达性",
+  goal_addressable: "可用于目标",
+  ref_type: "引用类型",
+  ref_key: "引用对象",
+  trigger: "触发条件",
   hints: "规划提示",
   phase: "阶段",
   action_key: "行动",
@@ -243,7 +256,7 @@ const fieldLabels: Record<string, string> = {
   fact_key: "事实",
   node_key: "节点",
   resource_key: "资源",
-  parameter_key: "参数",
+  parameter_key: "行动参数",
   completion_requirements: "完成要求",
   prerequisites: "前置条件",
   requirements: "要求",
@@ -286,6 +299,7 @@ const fieldLabels: Record<string, string> = {
   direction: "方向",
   relation_direction: "关系方向",
   amount: "数量",
+  quantity: "数量",
   literal: "固定值",
   multiplier: "倍数",
   memory_key: "记忆键",
@@ -298,6 +312,42 @@ export function uiLabel(value: string | null | undefined): string {
   if (!value) return "—";
   return labels[value] ?? value.replaceAll("_", " ");
 }
+
+export type PlatformEnumDomain =
+  | "node_access"
+  | "resource_pool_availability"
+  | "node_knowledge"
+  | "relation_visibility"
+  | "resource_inventory_visibility"
+  | "resource_pool_visibility"
+  | "derived_knowledge"
+  | "presentation_role"
+  | "command_reachability"
+  | "capability"
+  | "execution_mode"
+  | "action_behavior"
+  | "locality"
+  | "target_kind"
+  | "value_type"
+  | "action_target_reference"
+  | "rule_phase"
+  | "rule_trigger"
+  | "condition_kind"
+  | "effect_kind"
+  | "comparison"
+  | "value_source"
+  | "selector_kind"
+  | "relation_direction"
+  | "resource_scope"
+  | "derived_dependency"
+  | "public_reference_type"
+  | "operation_binding_source"
+  | "access"
+  | "visibility"
+  | "reachability"
+  | "availability"
+  | "source"
+  | "generic";
 
 const enumLabels: Record<string, Record<string, string>> = {
   generic: {
@@ -326,6 +376,52 @@ const enumLabels: Record<string, Record<string, string>> = {
   reachability: { ONLINE: "在线", DISCONNECTED: "失联" },
   availability: { AVAILABLE: "可用", UNAVAILABLE: "不可用" },
   value_type: { STRING: "文本", ENUM: "枚举", INTEGER: "整数", BOOLEAN: "布尔值" },
+  node_access: { AVAILABLE: "可用", LOCKED: "锁定" },
+  resource_pool_availability: { AVAILABLE: "可用", UNAVAILABLE: "不可用" },
+  node_knowledge: { KNOWN: "已知", HIDDEN: "隐藏" },
+  derived_knowledge: { KNOWN: "已知", UNKNOWN: "未知" },
+  presentation_role: { HEADER_PRIMARY: "主要标题", HEADER_SECONDARY: "次要标题", BODY_MAIN: "正文", SUPPORTING: "辅助内容", REQUIREMENT_ONLY: "仅用于目标要求" },
+  relation_visibility: { VISIBLE: "可见", HIDDEN: "隐藏" },
+  resource_inventory_visibility: { VISIBLE: "可见", HIDDEN: "隐藏" },
+  resource_pool_visibility: { VISIBLE: "可见", HIDDEN: "隐藏" },
+  command_reachability: { ONLINE: "在线", DISCONNECTED: "中断" },
+  capability: { PLAN: "规划", EXECUTE_ACTION: "执行行动", INSPECT_STATE: "检查状态", LOGISTICS: "后勤保障" },
+  execution_mode: { IMMEDIATE: "立即执行", ASYNC: "异步结算" },
+  action_behavior: {
+    RULE: "规则驱动", TRAVEL: "移动", INSPECT: "检查", REPAIR_COMMUNICATIONS: "修复通信",
+    CLEAR_TRANSPORT: "清理交通", TRANSPORT_RESOURCE: "运输资源", RELAY_MESSAGE: "传递信息",
+    SURVEY_RESOURCES: "调查资源", SUPPLY_POWER: "供电", DEPLOY_HEAVY_ENGINEERING_SUPPORT: "部署重型工程支援",
+  },
+  locality: {
+    NONE: "无局部限制", LOCAL_TARGET: "目标本地", FACILITY_REGION: "设施所在区域",
+    TRANSPORT_ENDPOINT: "交通端点", ACTOR_REGION: "参与者所在区域", REGION: "区域",
+  },
+  target_kind: { NODE: "节点", ACTOR: "参与者" },
+  action_target_reference: { NODE: "节点", REGION: "区域", FACILITY: "设施", RESOURCE: "资源", ACTOR: "参与者" },
+  rule_phase: { PREFLIGHT: "执行前检查", RESOLVE: "结算" },
+  rule_trigger: { ACTION: "行动触发", STATE: "状态触发" },
+  condition_kind: {
+    ALL: "全部满足", ANY: "任一满足", NOT: "取反", FACT_EQUALS: "事实等于", FACT_NOT_EQUALS: "事实不等于",
+    FACT_IN: "事实属于集合", FACT_COMPARE: "事实比较", RESOURCE_COMPARE: "资源比较",
+    PARAMETER_COMPARE: "参数比较", NODE_VISIBLE: "节点可见", NODE_ACCESSIBLE: "节点可访问", RELATION_EXISTS: "关系存在",
+  },
+  effect_kind: {
+    SET_FACT: "设置事实", REVEAL_FACT: "揭示事实", HIDE_FACT: "隐藏事实", REVEAL_NODE: "揭示节点",
+    HIDE_NODE: "隐藏节点", SET_NODE_ACCESS: "设置节点访问状态", ADJUST_RESOURCE: "调整资源",
+    RESERVE_RESOURCE: "预留资源", RELEASE_RESOURCE: "释放资源", EMIT_OUTCOME: "产生成功结果",
+    EMIT_FAILURE: "产生失败结果", WRITE_MEMORY_EVENT: "写入记忆事件",
+    SET_ACTOR_COMMAND_REACHABILITY: "设置参与者指挥可达性", SET_RELATION_VISIBILITY: "设置关系可见性",
+    SET_REGION_RESOURCE_VISIBILITY: "设置区域资源可见性", SET_RESOURCE_POOL_VISIBILITY: "设置资源池可见性",
+    SET_RESOURCE_POOL_AVAILABILITY: "设置资源池可用性", REVEAL_TARGET_REGION_FACILITY_FACTS: "揭示目标区域设施事实",
+  },
+  comparison: { EQ: "等于", NE: "不等于", LT: "小于", LTE: "小于等于", GT: "大于", GTE: "大于等于" },
+  value_source: { LITERAL: "固定值", PARAMETER: "参数" },
+  selector_kind: { CURRENT_TARGET: "当前目标", ACTION_SOURCE: "行动来源", EXPLICIT: "指定对象", RELATED: "关联对象" },
+  relation_direction: { SOURCE: "来源端", TARGET: "目标端" },
+  resource_scope: { EXPLICIT: "指定节点", ACTOR_CURRENT_REGION: "参与者当前区域", CURRENT_TARGET_REGION: "当前目标区域" },
+  derived_dependency: { FACT: "事实依赖", RESOURCE_AT_LEAST: "资源下限依赖", DERIVED_STATE: "派生状态依赖" },
+  public_reference_type: { NODE: "节点", REGION: "区域", RESOURCE: "资源", DERIVED_STATE: "派生状态", ACTION: "行动", ACTOR: "参与者" },
+  operation_binding_source: { EXPLICIT: "明确指定", EXECUTION_START_ACTOR_REGION: "行动开始时参与者所在区域" },
   source: {
     EXPLICIT: "显式配置",
     DEFAULT: "系统默认",
@@ -336,6 +432,13 @@ const enumLabels: Record<string, Record<string, string>> = {
     INVALID: "无效",
   },
 };
+
+/** Translate a platform-owned enum only when the caller supplies its semantic domain. */
+export function platformEnumLabel(domain: PlatformEnumDomain | undefined, value: string | null | undefined): string {
+  if (!value) return "—";
+  if (!domain) return value;
+  return enumLabels[domain]?.[value] ?? value;
+}
 
 export function displayEnumValue(enumType: string, value: string | null | undefined): string {
   if (!value) return "—";
@@ -390,15 +493,17 @@ const editorLabels: Record<string, string> = {
   "Clarification prompt": "澄清提示",
   "Quick inputs": "快捷输入",
   "World goal state catalog": "世界目标状态目录",
-  "Resource source hints": "资源来源提示",
-  "Add source hint": "添加来源提示",
-  "Resource source hint": "资源来源提示",
+  "Source hint": "来源提示",
+  "Primary region": "主要区域",
+  "Candidate regions": "候选区域",
+  "Clear source hint": "清除来源提示",
+  "Optional discovery guidance": "可选的发现指引，用于提示玩家可能在哪里找到该资源。",
+  "No source hint configured": "尚未配置来源提示。选择主要区域或添加候选区域后保存。",
   "Public term": "公共术语",
   "Reference type": "引用类型",
   "Reference key": "引用键",
   "Collection item": "集合项",
   "Singleton config": "单例配置",
-  "Public knowledge": "资源来源提示",
   "Authority policy": "权限策略",
   "Reveal target region facility facts": "揭示目标区域设施事实",
   "Add requirement": "添加要求",
@@ -424,8 +529,23 @@ const editorLabels: Record<string, string> = {
   "Add outcome": "添加结果",
   "Add parameter": "添加参数",
   "Add target role": "添加目标角色",
+  "Action key": "稳定键",
+  "Target contracts": "目标信息可见性",
+  "Target contract": "目标信息",
+  "Add target contract": "添加目标信息",
+  "Target identity": "目标",
+  "Initial visibility": "初始可见性",
+  "Reveal on inspect": "检查后揭示",
+  "Add target actor role": "添加目标参与者角色",
+  "Target and Role identity": "目标与角色",
+  "Target Node": "目标节点",
+  "Target Actor": "目标参与者",
+  "No eligible target exists yet.": "暂无可用目标，请先创建目标对象。",
+  "No eligible target Nodes exist yet.": "暂无可用目标节点，请先创建世界实体。",
+  "No Roles exist yet.": "暂无可用角色，请先创建角色。",
+  "Go to target owner": "前往目标对象",
+  "Binding role": "绑定角色",
   Action: "行动",
-  "Candidate regions": "候选区域",
   Default: "默认值",
   Dependency: "依赖",
   Direction: "方向",
@@ -437,7 +557,6 @@ const editorLabels: Record<string, string> = {
   "Allowed values (Advanced JSON)": "允许值（高级 JSON）",
   "Goal required slots": "目标必需槽位",
   Phase: "阶段",
-  "Primary region": "主要区域",
   Priority: "优先级",
   Prerequisite: "前置条件",
   Requirement: "要求",
@@ -550,6 +669,7 @@ const editorLabels: Record<string, string> = {
   "Autonomous limit": "自主权限上限",
   "Approval-required values": "需要批准的值",
   "Add doctrine": "添加行为准则",
+  Doctrine: "行为准则",
   "Add limit": "添加权限上限",
   "Add approval rule": "添加审批规则",
   Parameters: "参数",

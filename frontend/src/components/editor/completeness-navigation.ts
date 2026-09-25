@@ -19,11 +19,12 @@ export function completenessLocatorHref(locator: Locator | null | undefined, sce
     return `/scenarios/${scenarioId}/edit/planning-instructions`;
   }
   if (locator.object_kind === "public_knowledge") {
-    if (locator.object_key && locator.field_path?.startsWith("resource_source_hints")) return `/scenarios/${scenarioId}/edit/public-knowledge?owner=collection&collection=resource_source_hints&item=${encodeURIComponent(JSON.stringify([locator.object_key]))}`;
-    return `/scenarios/${scenarioId}/edit/public-knowledge`;
+    return locator.object_key
+      ? `/scenarios/${scenarioId}/edit/resources/${encodeURIComponent(locator.object_key)}?focus_path=source_hint`
+      : `/scenarios/${scenarioId}/edit/resources?focus_path=source_hint`;
   }
   if (entityKinds.has(locator.object_kind) && locator.object_key) {
-    const section = locator.object_kind === "relation_type" ? "relation-types" : locator.object_kind === "public_reference" ? "public-references" : locator.object_kind === "derived_state" ? "derived-states" : locator.object_kind === "node_type" ? "node-types" : locator.object_kind === "resource" ? "resources" : locator.object_kind === "role" ? "roles" : locator.object_kind === "actor" ? "actors" : locator.object_kind === "interaction" ? "interactions" : locator.object_kind === "action" ? "actions" : locator.object_kind === "rule" ? "rules" : locator.object_kind === "relation" ? "relations" : "world-entities";
+    const section = locator.object_kind === "relation_type" ? "relation-types" : locator.object_kind === "public_reference" ? "terminology-references" : locator.object_kind === "derived_state" ? "derived-states" : locator.object_kind === "node_type" ? "node-types" : locator.object_kind === "resource" ? "resources" : locator.object_kind === "role" ? "roles" : locator.object_kind === "actor" ? "actors" : locator.object_kind === "interaction" ? "interactions" : locator.object_kind === "action" ? "actions" : locator.object_kind === "rule" ? "rules" : locator.object_kind === "relation" ? "relations" : "world-entities";
     return `/scenarios/${scenarioId}/edit/${section}/${encodeURIComponent(locator.object_key)}${locator.field_path ? `?focus_path=${encodeURIComponent(locator.field_path)}` : ""}`;
   }
   if (locator.object_kind.startsWith("action_") && locator.object_key) {

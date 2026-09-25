@@ -19,6 +19,7 @@ from app.domain.resources import (
     valid_resource_state_identity,
 )
 from app.domain.scenario_v2 import ScenarioDefinitionV2, relation_identity
+from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentPlan,
@@ -26,6 +27,7 @@ from app.infrastructure.db.models import (
     AgentTask,
     ConversationSession,
     GameInstance,
+    GameInstanceActionTargetKnowledge,
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
@@ -55,6 +57,7 @@ class RuntimeSnapshot:
     resources: tuple[GameInstanceResourceState, ...]
     region_knowledge: tuple[GameInstanceRegionResourceKnowledge, ...]
     relation_knowledge: tuple[GameInstanceRelationKnowledge, ...]
+    action_target_knowledge: tuple[GameInstanceActionTargetKnowledge, ...]
     actors: tuple[GameInstanceActor, ...]
 
 
@@ -119,6 +122,21 @@ class GameMaterializer:
                 .order_by(GameInstanceRelationKnowledge.relation_key)
             )
         )
+        supports_action_target_knowledge = inspect(connection).has_table(
+            "game_instance_action_target_knowledge"
+        )
+        action_target_knowledge: tuple[Any, ...] = tuple(
+            self.db.scalars(
+                select(GameInstanceActionTargetKnowledge)
+                .where(GameInstanceActionTargetKnowledge.game_instance_id == source.id)
+                .order_by(
+                    GameInstanceActionTargetKnowledge.action_key,
+                    GameInstanceActionTargetKnowledge.target_key,
+                )
+            )
+            if supports_action_target_knowledge
+            else ()
+        )
         actors: tuple[Any, ...] = tuple(
             self.db.scalars(
                 select(GameInstanceActor)
@@ -137,12 +155,33 @@ class GameMaterializer:
         }
         expected_relations = {relation_identity(item) for item in definition.world.relations}
         expected_actor_keys = {item.key for item in definition.actors.actor_profiles}
+        expected_action_target_keys = {
+            (action.key, contract.target_key)
+            for action in definition.actions
+            for contract in action.target_contracts
+        }
         if (
             {item.node_key for item in nodes} != set(node_definitions)
             or {(item.node_key, item.fact_key) for item in facts} != fact_keys
             or {item.region_key for item in region_knowledge} != expected_regions
             or {item.relation_key for item in relation_knowledge} != expected_relations
             or {item.actor_key for item in actors} != expected_actor_keys
+            or (
+                expected_action_target_keys
+                and not supports_action_target_knowledge
+            )
+            or (
+                supports_action_target_knowledge
+                and {
+                    (item.action_key, item.target_key) for item in action_target_knowledge
+                }
+                != expected_action_target_keys
+            )
+            or any(
+                getattr(item.visibility, "value", item.visibility)
+                not in {value.value for value in Visibility}
+                for item in action_target_knowledge
+            )
         ):
             raise MaterializationError(
                 "MATERIALIZATION_RUNTIME_INVALID",
@@ -180,6 +219,7 @@ class GameMaterializer:
             resources=resources,
             region_knowledge=region_knowledge,
             relation_knowledge=relation_knowledge,
+            action_target_knowledge=action_target_knowledge,
             actors=actors,
         )
 
@@ -268,6 +308,17 @@ class GameMaterializer:
                     version=1,
                 )
             )
+        if snapshot.action_target_knowledge:
+            for row in snapshot.action_target_knowledge:
+                self.db.add(
+                    GameInstanceActionTargetKnowledge(
+                        game_instance_id=target.id,
+                        action_key=row.action_key,
+                        target_key=row.target_key,
+                        visibility=row.visibility,
+                        version=1,
+                    )
+                )
         profiles = {item.key: item for item in definition.actors.actor_profiles}
         roles = {item.key: item for item in definition.actors.roles}
         primary_key = definition.initialization.primary_actor_key

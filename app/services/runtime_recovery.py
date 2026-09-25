@@ -16,11 +16,13 @@ from app.domain.enums import (
 from app.domain.resources import resource_pool_initial_states, valid_resource_state_identity
 from app.domain.runtime_scope import GameInstanceId, RuntimeScope
 from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2, relation_identity
+from app.domain.world import Visibility
 from app.infrastructure.db.models import (
     ActionDecisionRequest,
     AgentTask,
     ConversationSession,
     GameInstance,
+    GameInstanceActionTargetKnowledge,
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceMemoryEvent,
@@ -189,6 +191,16 @@ class RuntimeRecoveryService:
             if self._supports_relation_knowledge_schema()
             else []
         )
+        supports_action_target_knowledge = self._supports_action_target_knowledge_schema()
+        action_target_knowledge_rows = (
+            self.db.scalars(
+                select(GameInstanceActionTargetKnowledge).where(
+                    GameInstanceActionTargetKnowledge.game_instance_id == instance.id
+                )
+            ).all()
+            if supports_action_target_knowledge
+            else []
+        )
         actor_rows = self.db.scalars(
             select(GameInstanceActor).where(GameInstanceActor.game_instance_id == instance.id)
         ).all()
@@ -206,6 +218,11 @@ class RuntimeRecoveryService:
             and node.node_type_key == definition.metadata.locality.region_node_type_key
         }
         relation_keys = {relation_identity(item) for item in definition.world.relations}
+        expected_action_target_keys = {
+            (action.key, contract.target_key)
+            for action in definition.actions
+            for contract in action.target_contracts
+        }
         if (
             len(node_rows) != len(nodes)
             or len(fact_rows) != sum(len(node.facts) for node in nodes)
@@ -232,6 +249,19 @@ class RuntimeRecoveryService:
                 row.visibility not in {item.value for item in RelationVisibility}
                 for row in relation_knowledge_rows
             )
+            or (expected_action_target_keys and not supports_action_target_knowledge)
+            or (
+                supports_action_target_knowledge
+                and {
+                    (row.action_key, row.target_key) for row in action_target_knowledge_rows
+                }
+                != expected_action_target_keys
+            )
+            or any(
+                getattr(row.visibility, "value", row.visibility)
+                not in {item.value for item in Visibility}
+                for row in action_target_knowledge_rows
+            )
             or {actor.actor_key for actor in actor_rows} != actor_keys
             or any(
                 row.command_reachability not in {item.value for item in CommandReachability}
@@ -243,6 +273,15 @@ class RuntimeRecoveryService:
     def _supports_relation_knowledge_schema(self) -> bool:
         try:
             inspect(self.db.connection()).get_columns("game_instance_relation_knowledge")
+        except Exception:
+            return False
+        return True
+
+    def _supports_action_target_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns(
+                "game_instance_action_target_knowledge"
+            )
         except Exception:
             return False
         return True
