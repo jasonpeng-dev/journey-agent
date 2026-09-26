@@ -5,6 +5,7 @@ import { editorLocatorFromValidation, editorLocatorHref } from "./editor-locator
 const document = {
   metadata: { key: "demo" },
   initialization: { start_node_key: "room", primary_actor_key: "medic", resource_pools: [{ pool_key: "pool-a", resource_key: "water", region_key: "central" }], region_resource_knowledge: [{ region_key: "central" }] },
+  goal_resolution: { quick_inputs: ["Find the hospital", "Protect the bridge"] },
   planning: { instructions: ["First instruction", "Second instruction"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Retry" }] },
   world: { nodes: [{ key: "room", node_type_key: "facility", facts: [{ key: "ready" }] }], node_types: [{ key: "facility" }], relations: [{ source_node_key: "room", relation_type_key: "located_in", target_node_key: "central" }], resources: [{ key: "water", name: "Water", source_hint: { primary_region_key: "central" } }] },
   actors: { actor_profiles: [{ key: "medic", role_key: "medic_role" }] },
@@ -16,8 +17,9 @@ describe("owner-aware editor locators", () => {
     expect(editorLocatorFromValidation({ object_kind: "action", object_key: "repair", field_path: "description" }, document)).toEqual({ owner: "entity", section: "actions", kind: "action", objectKey: "repair", fieldPath: "description" });
     expect(editorLocatorFromValidation({ object_kind: "relation_type", object_key: "located_in", field_path: "name" }, document)).toEqual({ owner: "entity", section: "relation-types", kind: "relation_type", objectKey: "located_in", fieldPath: "name" });
     expect(editorLocatorFromValidation({ object_kind: "relation", object_key: "same", field_path: "source_node_key" }, document)).toEqual({ owner: "entity", section: "relations", kind: "relation", objectKey: "same", fieldPath: "source_node_key" });
-    expect(editorLocatorFromValidation({ object_kind: "planning", object_key: null, field_path: "recovery_hints.0.hint" }, document)).toEqual({ owner: "root-collection", section: "planning-recovery", collection: "recovery_hints", identity: JSON.stringify(["BLOCKED"]), fieldPath: "recovery_hints.0.hint" });
+    expect(editorLocatorFromValidation({ object_kind: "planning", object_key: null, field_path: "recovery_hints.0.hint" }, document)).toEqual({ owner: "singleton", section: "planning-instructions", fieldPath: "recovery_hints.0.hint" });
     expect(editorLocatorFromValidation({ object_kind: "planning", object_key: null, field_path: "instructions.1" }, document)).toEqual({ owner: "planning-instruction", section: "planning-instructions", index: 1, fieldPath: "instructions.1" });
+    expect(editorLocatorFromValidation({ object_kind: "goal_resolution", object_key: null, field_path: "quick_inputs.1" }, document)).toEqual({ owner: "quick-input", section: "goal-resolution", index: 1, fieldPath: "quick_inputs.1" });
     expect(editorLocatorFromValidation({ object_kind: "resource", object_key: "water", field_path: "source_hint.primary_region_key" }, document)).toEqual({ owner: "entity", section: "resources", kind: "resource", objectKey: "water", fieldPath: "source_hint.primary_region_key" });
     expect(editorLocatorFromValidation({ object_kind: "public_knowledge", object_key: "water", field_path: "source_hint.primary_region_key" }, document)).toEqual({ owner: "entity", section: "resources", kind: "resource", objectKey: "water", fieldPath: "source_hint" });
     expect(editorLocatorFromValidation({ object_kind: "public_reference", object_key: "REGION:central:Central", field_path: "term" }, document)).toEqual({ owner: "entity", section: "terminology-references", kind: "public_reference", objectKey: "REGION:central:Central", fieldPath: "term" });
@@ -47,6 +49,8 @@ describe("owner-aware editor locators", () => {
       .toBe("/scenarios/scenario-1/edit/validation?focus_path=world.nodes.0.key");
     expect(editorLocatorHref({ owner: "planning-instruction", section: "planning-instructions", index: 1, fieldPath: "instructions.1" }, "scenario-1"))
       .toBe("/scenarios/scenario-1/edit/planning-instructions?owner=instruction&item=1&focus_path=instructions.1");
+    expect(editorLocatorHref({ owner: "quick-input", section: "goal-resolution", index: 1, fieldPath: "quick_inputs.1" }, "scenario-1"))
+      .toBe("/scenarios/scenario-1/edit/goal-resolution?owner=quick-input&item=1&focus_path=quick_inputs.1");
     expect(editorLocatorHref({ owner: "initialization-item", section: "initialization", domain: "nodes", group: "node-type:facility", item: "node:room", fieldPath: "world.nodes.room.initial_access" }, "scenario-1"))
       .toBe("/scenarios/scenario-1/edit/initialization?domain=nodes&group=node-type%3Afacility&item=node%3Aroom&focus_path=world.nodes.room.initial_access");
   });

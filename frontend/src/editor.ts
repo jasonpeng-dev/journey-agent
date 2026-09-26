@@ -17,13 +17,14 @@ export const sections = [
   "initialization",
   "goal-resolution",
   "planning-instructions",
-  "planning-recovery",
   "terminology-references",
   "configuration-check",
   "validation",
 ] as const;
 
-export const legacySections = ["world", "actors", "interactions", "planning", "public-knowledge", "public-references"] as const;
+// Removed authoring routes remain accepted as legacy aliases so stale links
+// can be redirected safely to the singleton planning guidance owner.
+export const legacySections = ["world", "actors", "interactions", "planning", "planning-recovery", "public-knowledge", "public-references"] as const;
 
 export type EditorSection = (typeof sections)[number] | (typeof legacySections)[number];
 
@@ -72,7 +73,6 @@ export const sectionRegistry: SectionDefinition[] = [
   { id: "initialization", labelKey: "initialization", rootPath: ["initialization"] },
   { id: "goal-resolution", labelKey: "goal_resolution", rootPath: ["goal_resolution"] },
   { id: "planning-instructions", labelKey: "planning_instructions", rootPath: ["planning"] },
-  { id: "planning-recovery", labelKey: "planning_recovery", rootPath: ["planning"] },
   { id: "terminology-references", labelKey: "terminology_references", entityKinds: ["public_reference"] },
   { id: "configuration-check", labelKey: "configuration_check" },
   { id: "validation", labelKey: "validation" },

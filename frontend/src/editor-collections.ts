@@ -22,7 +22,9 @@ export type RootSingletonSelection = {
 
 export type RootInstructionSelection = { owner: "instruction"; index: number };
 
-export type RootOwnerSelection = RootCollectionSelection | RootSingletonSelection | RootInstructionSelection;
+export type RootQuickInputSelection = { owner: "quick-input"; index: number };
+
+export type RootOwnerSelection = RootCollectionSelection | RootSingletonSelection | RootInstructionSelection | RootQuickInputSelection;
 
 export type RootSingletonOwnerDefinition = {
   key: RootSingletonOwnerKey;
@@ -45,9 +47,6 @@ export type RootCollectionItem = RootCollectionSelection & {
 };
 
 const definitions: Partial<Record<EditorSection, RootCollectionDefinition[]>> = {
-  "planning-recovery": [
-    { key: "recovery_hints", label: "失败恢复策略", singularLabel: "失败恢复策略" },
-  ],
   initialization: [
     { key: "resource_initial_states", label: "资源初始状态", singularLabel: "资源初始状态" },
     { key: "resource_pools", label: "资源池", singularLabel: "资源池" },
@@ -251,7 +250,5 @@ export function rootSingletonOwners(section: string): RootSingletonOwnerDefiniti
 }
 
 export function rootCollectionLabel(collection: RootCollectionKey): string {
-  return rootCollectionDefinitions("initialization").concat(
-    rootCollectionDefinitions("planning-recovery"),
-  ).find((definition) => definition.key === collection)?.singularLabel ?? collection;
+  return rootCollectionDefinitions("initialization").find((definition) => definition.key === collection)?.singularLabel ?? collection;
 }

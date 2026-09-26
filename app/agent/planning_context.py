@@ -36,6 +36,8 @@ from app.agent.provider import (
     PlanningContext,
     PlanningContinuity,
 )
+from app.agent.recovery import GenericRecoveryPolicy, failure_event_from_json
+from app.domain.failures import FailureEvent, normalize_legacy_failure
 from app.domain.formal_goal import FormalGoalContract
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
@@ -62,6 +64,16 @@ from app.infrastructure.db.models import (
 )
 from app.services.derived_state import evaluate_derived_states
 from app.services.knowledge_projection import SharedKnowledgeProjection
+
+# Product-owned Planner policy.  Scenario text may add soft guidance, but it
+# cannot redefine these legality and Knowledge boundaries.
+GENERIC_PLANNER_POLICY: tuple[str, ...] = (
+    "Hidden Truth is never usable by the Planner or provider.",
+    "UNKNOWN is not equivalent to false, zero, unavailable, or blocked.",
+    "Unknown Resource availability cannot be consumed or transported.",
+    "Known blockers must be resolved before dependent Actions execute.",
+    "Static allowed_action_keys describe capability/role permission, not current executability.",
+)
 
 
 def _planner_parameter_schema(action: ActionDefinitionV2) -> list[dict[str, object]]:
@@ -734,29 +746,7 @@ class PlanningContextBuilder:
             relevant_targets=tuple(relevant_targets),
             operation_goal=operation_goal,
             previous_execution_context=self._previous_execution(task, replan_reason),
-            scenario_planning_hints={
-                "instructions": list(definition.planning.instructions),
-                "recovery_hints": [
-                    item.model_dump(mode="json") for item in definition.planning.recovery_hints
-                ],
-                "generic_rules": [
-                    (
-                        "allowed_action_keys are static capability/role permission, "
-                        "not current executability."
-                    ),
-                    "KNOWN_BLOCKED conditions must be resolved before execution.",
-                    "UNKNOWN is not equivalent to false, zero, or unavailable.",
-                    "Do not consume or transport resources whose availability is not known.",
-                    (
-                        "Target-specific known requirements are in the shared target Knowledge "
-                        "projection and its known_target_action_requirements adapter."
-                    ),
-                    (
-                        "Use planner_constraints, planner_effects, and target_contracts "
-                        "to order steps."
-                    ),
-                ],
-            },
+            author_planning_instructions=tuple(definition.planning.instructions),
         )
 
     build_context = build
@@ -1393,6 +1383,9 @@ class PlanningContextBuilder:
         failed: dict[str, object] | None = None
         player_visible_result: dict[str, object] | None = None
         newly_learned_knowledge: list[object] = []
+        canonical_event: FailureEvent | None = failure_event_from_json(
+            (task.objective_resolution_metadata or {}).get("last_failure_event")
+        )
         operation = self.db.scalar(
             select(WorldOperation)
             .where(
@@ -1408,6 +1401,24 @@ class PlanningContextBuilder:
                 newly_learned_knowledge = list(raw_knowledge_changes)
             failure = outcome.get("failure")
             if isinstance(failure, dict):
+                if canonical_event is None:
+                    canonical_event = failure_event_from_json(failure.get("failure_event"))
+                if canonical_event is None:
+                    canonical_event = normalize_legacy_failure(
+                        failure,
+                        action_key=(
+                            str(operation.action_key) if operation.action_key is not None else None
+                        ),
+                        actor_key=(
+                            str(operation.actor_key) if operation.actor_key is not None else None
+                        ),
+                        target_key=(
+                            str(operation.target_key) if operation.target_key is not None else None
+                        ),
+                        knowledge_changes=tuple(
+                            item for item in newly_learned_knowledge if isinstance(item, dict)
+                        ),
+                    )
                 player_visible_result = {
                     "outcome_code": outcome.get("outcome_code"),
                     "knowledge_changes": newly_learned_knowledge,
@@ -1418,6 +1429,9 @@ class PlanningContextBuilder:
                     },
                 }
             else:
+                # A later successful operation supersedes any stale metadata
+                # snapshot from an earlier failed cycle.
+                canonical_event = None
                 player_visible_result = {
                     "outcome_code": outcome.get("outcome_code"),
                     "knowledge_changes": outcome.get("knowledge_changes", []),
@@ -1434,6 +1448,16 @@ class PlanningContextBuilder:
                     }
                     if step.status.value == "FAILED":
                         failed = {**item, "failure_code": step.failure_code}
+                        step_event = failure_event_from_json(
+                            (step.actual_result or {}).get("failure_event")
+                            if isinstance(step.actual_result, dict)
+                            else None
+                        )
+                        if step_event is not None:
+                            canonical_event = step_event
+                            failed["failure_event"] = step_event.model_dump(
+                                mode="json", exclude_none=True
+                            )
                     else:
                         completed.append(item)
         if (
@@ -1441,15 +1465,33 @@ class PlanningContextBuilder:
             and operation is None
             and replan_reason is None
             and task.last_error_code is None
+            and canonical_event is None
         ):
             return {}
+        relevant_blocker: object = replan_reason or task.last_error_code
+        if canonical_event is not None:
+            legacy = canonical_event.to_legacy()
+            player_visible_result = {
+                **(player_visible_result or {}),
+                "failure": legacy.model_dump(mode="json", exclude_none=True),
+                "failure_event": canonical_event.model_dump(mode="json", exclude_none=True),
+            }
+            policy_context = GenericRecoveryPolicy().evaluate(canonical_event)
+            relevant_blocker = policy_context.relevant_blocker or relevant_blocker
+            if not newly_learned_knowledge and canonical_event.knowledge_changes:
+                newly_learned_knowledge = [dict(item) for item in canonical_event.knowledge_changes]
         return {
             "previous_plan_summary": plan.strategy_summary if plan is not None else None,
             "previous_plan_version": plan.version if plan is not None else None,
             "failed_or_current_step": failed,
             "player_visible_result": player_visible_result or failed,
             "newly_learned_knowledge": newly_learned_knowledge,
-            "relevant_blocker": replan_reason or task.last_error_code,
+            "relevant_blocker": relevant_blocker,
+            **(
+                {"failure_event": canonical_event.model_dump(mode="json", exclude_none=True)}
+                if canonical_event is not None
+                else {}
+            ),
             "completed_steps": completed,
         }
 

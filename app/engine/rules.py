@@ -12,6 +12,22 @@ from app.domain.enums import (
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
+from app.domain.failure_messages import format_failure_message
+from app.domain.failures import (
+    ActorEvidence,
+    AuthorityEvidence,
+    FactEvidence,
+    FailureDomain,
+    FailureEvent,
+    FailureKind,
+    FailurePhase,
+    GenericEvidence,
+    ParameterEvidence,
+    ResourceEvidence,
+    TargetEvidence,
+    TransportEvidence,
+    normalize_legacy_failure,
+)
 from app.domain.resources import is_runtime_known_inflow_pool, resource_state_key
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
@@ -43,10 +59,23 @@ type FactRef = tuple[str, str]
 
 
 class RuleEngineError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        failure_event: FailureEvent | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self._failure_event = failure_event
+
+    @property
+    def failure_event(self) -> FailureEvent:
+        """Normalize rule contract/runtime errors without making them gameplay."""
+
+        return self._failure_event or normalize_legacy_failure(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +243,12 @@ class RuleFailure:
     message: str
     retryable: bool
 
+    @property
+    def failure_event(self) -> FailureEvent:
+        """Normalize the legacy producer without changing its wire shape."""
+
+        return normalize_legacy_failure(self)
+
 
 @dataclass(frozen=True, slots=True)
 class GenericRuleOutcome:
@@ -235,6 +270,7 @@ class GenericRuleOutcome:
     resource_pool_visibility_updates: tuple[ResourcePoolVisibilityMutation, ...] = ()
     resource_pool_availability_updates: tuple[ResourcePoolAvailabilityMutation, ...] = ()
     relation_visibility_updates: tuple[RelationVisibilityMutation, ...] = ()
+    failure_event: FailureEvent | None = None
 
 
 class DeclarativeRuleEngine:
@@ -458,6 +494,7 @@ class DeclarativeRuleEngine:
         relation_visibility: list[RelationVisibilityMutation] = []
         outcome_code: str | None = None
         failure: RuleFailure | None = None
+        generated_failure_event: FailureEvent | None = None
         for effect in rule.effects:
             nodes = self._effect_nodes(effect, state, context)
             if effect.kind == EffectKind.SET_FACT:
@@ -508,6 +545,20 @@ class DeclarativeRuleEngine:
                     code=effect.failure_code,
                     message=effect.message,
                     retryable=effect.retryable,
+                )
+            elif effect.kind == EffectKind.BLOCK_ACTION:
+                generated_failure_event = self._block_action_failure_event(
+                    rule,
+                    state,
+                    context,
+                )
+                failure = RuleFailure(
+                    code=generated_failure_event.code,
+                    message=generated_failure_event.message or "Action precondition is unmet",
+                    # This compatibility value is derived by the backend so
+                    # v2 recovery consumers keep their replan behavior.  It
+                    # is never authored in a v3 document.
+                    retryable=True,
                 )
             elif effect.kind == EffectKind.WRITE_MEMORY_EVENT:
                 assert effect.memory_key and effect.memory_content
@@ -561,6 +612,15 @@ class DeclarativeRuleEngine:
             selected_rule_key=rule.key,
             outcome_code=outcome_code,
             failure=failure,
+            failure_event=(
+                generated_failure_event
+                if generated_failure_event is not None
+                else (
+                    self._failure_event(failure, rule, state, context)
+                    if failure is not None
+                    else None
+                )
+            ),
             fact_updates=tuple(facts),
             fact_visibility_updates=tuple(fact_visibility),
             node_visibility_updates=tuple(node_visibility),
@@ -574,6 +634,284 @@ class DeclarativeRuleEngine:
             resource_pool_availability_updates=tuple(resource_pool_availability),
             relation_visibility_updates=tuple(relation_visibility),
         )
+
+    def _block_action_failure_event(
+        self,
+        rule: RuleDefinitionV2,
+        state: DeclarativeRuleState,
+        context: ActionRuleContext,
+    ) -> FailureEvent:
+        """Derive a canonical blocker from a v3 semantic Rule effect."""
+
+        evidence = self._condition_evidence(rule.condition, state, context)
+        primary = evidence[0] if evidence else GenericEvidence(
+            details={"rule_key": rule.key, "condition": None}
+        )
+        if isinstance(primary, ResourceEvidence):
+            kind = (
+                FailureKind.KNOWLEDGE_UNKNOWN
+                if primary.knowledge_status == "UNKNOWN"
+                else FailureKind.RESOURCE_INSUFFICIENT
+            )
+        elif isinstance(primary, TransportEvidence) and primary.passable is False:
+            kind = FailureKind.TRAVEL_BLOCKED
+        else:
+            kind = FailureKind.PRECONDITION_UNMET
+        phase = (
+            FailurePhase.PREFLIGHT
+            if rule.phase == RulePhase.PREFLIGHT
+            else FailurePhase.RESOLVE
+        )
+        event = FailureEvent(
+            domain=FailureDomain.ACTION_RUNTIME,
+            kind=kind,
+            code=kind.value,
+            phase=phase,
+            evidence=primary,
+            additional_evidence=evidence[1:],
+            action_key=context.action_key or None,
+            actor_key=context.actor_key,
+            target_key=context.target_node_key or context.target_actor_key,
+            legacy_retryable=True,
+            producer="DeclarativeRuleEngine",
+            metadata={
+                "rule_key": rule.key,
+                "rule_phase": rule.phase.value,
+                "rule_trigger": rule.trigger.value,
+                "authoring_effect": EffectKind.BLOCK_ACTION.value,
+            },
+        )
+        return event.model_copy(
+            update={
+                "message": format_failure_message(
+                    event,
+                    display_names=self._failure_display_names(),
+                )
+            }
+        )
+
+    def _failure_display_names(self) -> dict[str, str]:
+        """Build a generic authored-name map for the message formatter."""
+
+        names: dict[str, str] = {}
+        for node in self.definition.world.nodes:
+            names[node.key] = node.name
+            for fact in node.facts:
+                names[f"{node.key}.{fact.key}"] = f"{node.name} · {fact.name}"
+                names[fact.key] = fact.name
+        for resource in self.definition.world.resources:
+            names[resource.key] = resource.name
+        for node_type in self.definition.world.node_types:
+            names[node_type.key] = node_type.name
+        return names
+
+    def _failure_event(
+        self,
+        failure: RuleFailure,
+        rule: RuleDefinitionV2,
+        state: DeclarativeRuleState,
+        context: ActionRuleContext,
+    ) -> FailureEvent:
+        """Build a typed event while preserving the authored legacy failure.
+
+        Failure effects remain the compatibility producer.  The condition that
+        selected that effect is the source of structured evidence; extraction
+        is deliberately best-effort so a diagnostic adapter cannot change rule
+        execution behavior if a malformed legacy condition reaches this path.
+        """
+
+        evidence = self._condition_evidence(rule.condition, state, context)
+        primary = evidence[0] if evidence else GenericEvidence(
+            details={
+                "rule_key": rule.key,
+                "condition": None,
+            }
+        )
+        additional = evidence[1:] if evidence else ()
+        phase = (
+            FailurePhase.PREFLIGHT
+            if rule.phase == RulePhase.PREFLIGHT
+            else FailurePhase.RESOLVE
+        )
+        return normalize_legacy_failure(
+            failure,
+            domain=FailureDomain.ACTION_RUNTIME,
+            phase=phase,
+            producer="DeclarativeRuleEngine",
+            evidence=primary,
+            additional_evidence=additional,
+            action_key=context.action_key or None,
+            actor_key=context.actor_key,
+            target_key=context.target_node_key or context.target_actor_key,
+            metadata={
+                "rule_key": rule.key,
+                "rule_phase": rule.phase.value,
+                "rule_trigger": rule.trigger.value,
+            },
+        )
+
+    def _condition_evidence(
+        self,
+        condition: ConditionV2 | None,
+        state: DeclarativeRuleState,
+        context: ActionRuleContext,
+    ) -> tuple[
+        ResourceEvidence
+        | FactEvidence
+        | TransportEvidence
+        | ActorEvidence
+        | TargetEvidence
+        | ParameterEvidence
+        | AuthorityEvidence
+        | GenericEvidence,
+        ...,
+    ]:
+        """Extract evidence from the condition that selected a failure rule."""
+
+        if condition is None:
+            return ()
+        if condition.kind in {ConditionKind.ALL, ConditionKind.ANY}:
+            return tuple(
+                item
+                for nested in condition.conditions
+                for item in self._condition_evidence(nested, state, context)
+            )
+        if condition.kind == ConditionKind.NOT and condition.condition is not None:
+            return self._condition_evidence(condition.condition, state, context)
+
+        raw = condition.model_dump(mode="json", exclude_none=True)
+        try:
+            if condition.kind in {
+                ConditionKind.FACT_EQUALS,
+                ConditionKind.FACT_NOT_EQUALS,
+                ConditionKind.FACT_IN,
+                ConditionKind.FACT_COMPARE,
+            }:
+                assert condition.node is not None and condition.fact_key is not None
+                node_key = self._one_node(condition.node, state, context)
+                fact = self._fact(state, node_key, condition.fact_key)
+                known = fact.visibility == Visibility.KNOWN
+                accepted_values = (
+                    (condition.value,)
+                    if condition.kind in {
+                        ConditionKind.FACT_EQUALS,
+                        ConditionKind.FACT_NOT_EQUALS,
+                        ConditionKind.FACT_COMPARE,
+                    }
+                    and condition.value is not None
+                    else tuple(condition.values)
+                )
+                raw["resolved_node_key"] = node_key
+                raw["knowledge_status"] = fact.visibility.value
+                return (
+                    FactEvidence(
+                        node_key=node_key,
+                        fact_key=condition.fact_key,
+                        required=condition.value,
+                        accepted_values=accepted_values,
+                        actual=fact.value if known else None,
+                        knowledge_status=fact.visibility.value,
+                        raw=raw,
+                    ),
+                )
+            if condition.kind == ConditionKind.RESOURCE_COMPARE:
+                assert condition.resource_key is not None and condition.value is not None
+                scope_key = self._resource_scope(condition.resource_scope, context)
+                try:
+                    available = self._resource_value(state, condition.resource_key, scope_key)
+                    knowledge_status = "KNOWN"
+                except RuleEngineError as exc:
+                    available = None
+                    knowledge_status = "UNKNOWN"
+                    raw["resolution_error"] = exc.code
+                required = condition.value
+                deficit = (
+                    required - available
+                    if isinstance(required, int)
+                    and not isinstance(required, bool)
+                    and isinstance(available, int)
+                    and not isinstance(available, bool)
+                    and required > available
+                    else None
+                )
+                raw["operator"] = condition.operator.value if condition.operator else None
+                raw["scope_key"] = scope_key
+                return (
+                    ResourceEvidence(
+                        resource_key=condition.resource_key,
+                        required=required,
+                        available=available,
+                        deficit=deficit,
+                        knowledge_status=knowledge_status,
+                        scope_key=scope_key,
+                        source_key=context.source_node_key,
+                        target_key=context.target_node_key,
+                        raw=raw,
+                    ),
+                )
+            if condition.kind == ConditionKind.PARAMETER_COMPARE:
+                assert condition.parameter_key is not None and condition.value is not None
+                actual = context.parameters.get(condition.parameter_key)
+                raw["operator"] = condition.operator.value if condition.operator else None
+                return (
+                    ParameterEvidence(
+                        parameter_key=condition.parameter_key,
+                        required=condition.value,
+                        actual=actual,
+                        validation_error=(
+                            "comparison condition matched"
+                            if actual is not None
+                            else "parameter value unavailable"
+                        ),
+                        parameters=dict(context.parameters),
+                        raw=raw,
+                    ),
+                )
+            if condition.kind in {ConditionKind.NODE_VISIBLE, ConditionKind.NODE_ACCESSIBLE}:
+                assert condition.node is not None
+                node_key = self._one_node(condition.node, state, context)
+                node = self._node(state, node_key)
+                return (
+                    TargetEvidence(
+                        target_key=node_key,
+                        required=(
+                            condition.visibility.value
+                            if condition.visibility is not None
+                            else condition.access.value
+                            if condition.access is not None
+                            else None
+                        ),
+                        actual=(
+                            node.visibility.value
+                            if condition.kind == ConditionKind.NODE_VISIBLE
+                            else node.access.value
+                        ),
+                        raw={**raw, "resolved_node_key": node_key},
+                    ),
+                )
+            if condition.kind == ConditionKind.RELATION_EXISTS:
+                assert condition.node is not None
+                anchor = self._one_node(condition.node, state, context)
+                raw["resolved_anchor_key"] = anchor
+                return (
+                    GenericEvidence(
+                        details={
+                            "condition_kind": condition.kind.value,
+                            "anchor_node_key": anchor,
+                            "relation_type_key": condition.relation_type_key,
+                            "direction": (
+                                condition.relation_direction.value
+                                if condition.relation_direction is not None
+                                else None
+                            ),
+                        },
+                        raw=raw,
+                    ),
+                )
+        except (AssertionError, KeyError, RuleEngineError, ValueError) as exc:
+            raw["evidence_resolution_error"] = type(exc).__name__
+            return (GenericEvidence(details=raw, raw=raw),)
+        return (GenericEvidence(details=raw, raw=raw),)
 
     def _effect_nodes(
         self,
@@ -694,7 +1032,7 @@ class DeclarativeRuleEngine:
                 target_node_key=context.target_node_key,
             )
         except LocalityEngineError as exc:
-            raise RuleEngineError(exc.code, exc.message) from exc
+            raise RuleEngineError(exc.code, exc.message, failure_event=exc.failure_event) from exc
 
     def _resource_key(self, scope: object, context: ActionRuleContext) -> str | None:
         return self._resource_scope(scope, context)
@@ -807,6 +1145,10 @@ def merge_rule_outcomes(outcomes: tuple[GenericRuleOutcome, ...]) -> GenericRule
         ),
         failure=next(
             (item.failure for item in outcomes if item.failure is not None),
+            None,
+        ),
+        failure_event=next(
+            (item.failure_event for item in outcomes if item.failure_event is not None),
             None,
         ),
         fact_updates=tuple(item for outcome in outcomes for item in outcome.fact_updates),

@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agent.recovery import failure_event_from_json
 from app.api.schemas.phase_d import (
     GameSummaryResponse,
     MissionRoadmapResponse,
@@ -64,6 +65,7 @@ from app.domain.enums import (
     StepExecutionType,
     WorldOperationStatus,
 )
+from app.domain.failures import FailureKind
 from app.domain.formal_goal import FormalGoalContract
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import (
@@ -1868,7 +1870,20 @@ def _plan_display_reason(
         return None
     action = _action_definition(definition, failed_step)
     failure_code = (failed_step.failure_code or "").upper()
-    if "BLOCKED" in failure_code:
+    typed_failure = failure_event_from_json(
+        (failed_step.actual_result or {}).get("failure_event")
+        if isinstance(failed_step.actual_result, dict)
+        else None
+    )
+    if typed_failure is not None and typed_failure.kind == FailureKind.TRAVEL_BLOCKED:
+        return "发现通道受阻"
+    # Historical rows written before FailureEvent existed retain an exact-code
+    # compatibility path.  Do not infer transport semantics from a substring.
+    if typed_failure is None and failure_code in {
+        "KNOWN_TRANSPORT_BLOCKED",
+        "TRAVEL_BLOCKED",
+        "TRANSPORT_BLOCKED",
+    }:
         return "发现通道受阻"
     if action is not None and action.behavior == ActionBehavior.TRAVEL:
         return "前往区域失败"

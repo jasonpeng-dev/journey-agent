@@ -100,7 +100,7 @@ class FormalGoalScenarioProofV1(FormalGoalModel):
 
     scenario_version_id: UUID
     scenario_content_hash: HashText
-    scenario_schema_version: Literal[2] = 2
+    scenario_schema_version: Literal[2, 3] = 2
 
 
 class FormalGoalObjectiveSourceV1(FormalGoalModel):
@@ -1196,10 +1196,10 @@ def _fact_for_dynamic_candidate(
 
 
 def _validate_scenario_snapshot(snapshot: ScenarioVersionSnapshot) -> None:
-    if snapshot.schema_version != 2 or snapshot.definition.schema_version != 2:
+    if snapshot.schema_version not in {2, 3} or snapshot.definition.schema_version != 2:
         raise FormalGoalError(
             "FORMAL_GOAL_SCENARIO_SCHEMA_UNSUPPORTED",
-            "Formal Goal V1 requires an exact Scenario schema v2 snapshot",
+            "Formal Goal V1 requires an exact supported Scenario snapshot",
         )
     try:
         expected_hash = scenario_content_hash(snapshot.definition.model_dump(mode="json"))

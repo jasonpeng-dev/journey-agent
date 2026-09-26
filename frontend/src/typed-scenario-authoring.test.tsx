@@ -900,19 +900,17 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expect(onInitializationChange).not.toHaveBeenCalled();
     cleanup();
     render(<TypedEditor section="planning" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }] }} document={document} onChange={vi.fn()} />);
-    expect(screen.getByDisplayValue("Plan safely")).toBeInTheDocument();
+    expect(screen.getByText("从左侧选择一个对象", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Plan safely")).not.toBeInTheDocument();
     cleanup();
     const onGoalResolutionChange = vi.fn();
-    render(<TypedEditor section="goal-resolution" value={{ allow_llm_fallback: true, clarification_prompt: "Clarify", quick_inputs: ["First", "Second"], world_goal_state_catalog: false }} document={document} onChange={onGoalResolutionChange} />);
-    expect(screen.getByLabelText("允许模型辅助回退")).toHaveDisplayValue("是");
-    expect(screen.getByLabelText("世界目标状态目录")).toHaveDisplayValue("否");
-    fireEvent.change(screen.getByLabelText("世界目标状态目录"), { target: { value: "true" } });
-    expect(onGoalResolutionChange).toHaveBeenLastCalledWith(expect.objectContaining({ world_goal_state_catalog: true }));
-    expect(window.document.querySelector('[data-field-path="goal_resolution.clarification_prompt"] textarea')).toHaveValue("Clarify");
-    expect(screen.getByDisplayValue("First")).toBeInTheDocument();
-    expect(screen.getByText(/仅用于填充玩家的目标输入/)).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole("button", { name: "上移" })[1]);
-    expect(onGoalResolutionChange).toHaveBeenLastCalledWith(expect.objectContaining({ quick_inputs: ["Second", "First"] }));
+    render(<TypedEditor section="goal-resolution" value={{ quick_inputs: ["First", "Second"] }} document={document} collectionSelection={{ owner: "quick-input", index: 1 }} onChange={onGoalResolutionChange} onQuickInputChange={(index, content) => onGoalResolutionChange({ quick_inputs: ["First", content] })} onQuickInputMove={() => onGoalResolutionChange({ quick_inputs: ["Second", "First"] })} onQuickInputRemove={vi.fn()} />);
+    expect(screen.getByLabelText("目标文本")).toHaveValue("Second");
+    expect(screen.queryByLabelText("????????")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("????")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("????????")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("目标文本"), { target: { value: "Updated" } });
+    expect(onGoalResolutionChange).toHaveBeenLastCalledWith({ quick_inputs: ["First", "Updated"] });
   });
 
   it("edits and clears the optional source hint on its Resource owner", () => {
@@ -951,50 +949,25 @@ describe("typed ScenarioDefinition v2 authoring", () => {
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ source_hint: { primary_region_key: "north", candidate_region_keys: [] } }));
   });
 
-  it("marks Goal Resolution clarification as schema-required and clears its inline error", () => {
-    const onChange = vi.fn();
-    const { rerender } = render(<TypedEditor section="goal-resolution" value={{ allow_llm_fallback: true, quick_inputs: [], world_goal_state_catalog: false }} document={document} onChange={onChange} />);
-    const prompt = window.document.querySelector('[data-field-path="goal_resolution.clarification_prompt"]');
-    expect(prompt?.querySelector(".required-marker")).toBeInTheDocument();
-    expect(prompt?.querySelector('[role="alert"]')).toHaveTextContent(/\u5fc5\u586b/);
-    fireEvent.change(within(prompt as HTMLElement).getByRole("textbox"), { target: { value: "Ask what the player means." } });
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ clarification_prompt: "Ask what the player means." }));
-    rerender(<TypedEditor section="goal-resolution" value={{ allow_llm_fallback: true, clarification_prompt: "Ask what the player means.", quick_inputs: [], world_goal_state_catalog: false }} document={document} onChange={onChange} />);
-    expect(window.document.querySelector('[data-field-path="goal_resolution.clarification_prompt"] [role="alert"]')).toBeNull();
+  it("does not expose retired Goal Resolution platform policy fields", () => {
+    render(<TypedEditor section="goal-resolution" value={{ quick_inputs: [] }} document={document} onChange={vi.fn()} />);
+    expect(screen.getByText("从左侧选择一个对象")).toBeInTheDocument();
+    expect(screen.queryByLabelText("????????")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("????")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("????????")).not.toBeInTheDocument();
   });
 
-  it("uses master-detail rendering for root collection sections", () => {
-    const onCollectionChange = vi.fn();
-    const recoveryProps = { document, collectionSelection: { owner: "collection" as const, collection: "recovery_hints" as const, identity: JSON.stringify(["BLOCKED"]) }, onChange: vi.fn(), onCollectionChange, onCollectionRemove: vi.fn(), onCollectionMove: vi.fn() };
-    const { rerender } = render(<TypedEditor section="planning-recovery" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "" }, { failure_code: "RETRY", hint: "Try again" }] }} {...recoveryProps} />);
-
-    expect(screen.getByText("BLOCKED")).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("BLOCKED")).not.toBeInTheDocument();
-    const recoveryHint = window.document.querySelector('[data-field-path="planning.recovery_hints.0.hint"]');
-    expect(screen.getByText("BLOCKED", { selector: "output.stable-identity-value" })).toBeInTheDocument();
-    expect(recoveryHint?.querySelector(".required-marker")).toBeInTheDocument();
-    expect(recoveryHint?.querySelector('[role="alert"]')).toHaveTextContent(/\u5fc5\u586b/);
-    expect(screen.queryByDisplayValue("RETRY")).not.toBeInTheDocument();
+  it("removes recovery hint authoring and falls back to planning instructions", () => {
+    render(<TypedEditor section="planning-recovery" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }] }} document={document} collectionSelection={null} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} />);
+    expect(screen.getByText("从左侧选择一个对象")).toBeInTheDocument();
+    expect(screen.queryByText("BLOCKED")).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue("Plan safely")).not.toBeInTheDocument();
-    expect(recoveryHint?.closest("article")).toBeNull();
-
-    fireEvent.change(recoveryHint?.querySelector("textarea") as HTMLTextAreaElement, { target: { value: "Inspect deliberately" } });
-    expect(onCollectionChange).toHaveBeenCalledWith(expect.objectContaining({ failure_code: "BLOCKED", hint: "Inspect deliberately" }));
-    rerender(<TypedEditor section="planning-recovery" value={{ instructions: ["Plan safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect deliberately" }, { failure_code: "RETRY", hint: "Try again" }] }} {...recoveryProps} />);
-    expect(window.document.querySelector('[data-field-path="planning.recovery_hints.0.hint"] [role="alert"]')).toBeNull();
 
     cleanup();
     const onInstructionChange = vi.fn();
-    render(<TypedEditor section="planning-instructions" value={{ instructions: ["Plan safely", "Recover safely"], recovery_hints: [{ failure_code: "BLOCKED", hint: "Inspect again" }] }} document={document} collectionSelection={{ owner: "instruction", index: 1 }} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} onInstructionChange={onInstructionChange} />);
+    render(<TypedEditor section="planning-instructions" value={{ instructions: ["Plan safely", "Recover safely"] }} document={document} collectionSelection={{ owner: "instruction", index: 1 }} onChange={vi.fn()} onCollectionChange={vi.fn()} onCollectionRemove={vi.fn()} onInstructionChange={onInstructionChange} />);
     expect(screen.getByDisplayValue("Recover safely")).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("Plan safely")).not.toBeInTheDocument();
-    expect(screen.queryByDisplayValue("BLOCKED")).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("Recover safely").closest("section")).toBeNull();
-    expect(screen.queryByText("planning.instructions.1")).not.toBeInTheDocument();
-    expect(screen.queryByText("技术详情")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByDisplayValue("Recover safely"), { target: { value: "Recover deliberately" } });
-    expect(onInstructionChange).toHaveBeenCalledWith(1, "Recover deliberately");
-
+    expect(screen.queryByText("BLOCKED")).not.toBeInTheDocument();
   });
 
   it("keeps unknown future AST variants editable through an isolated JSON fallback", () => {

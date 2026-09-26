@@ -71,6 +71,7 @@ from app.agent.provider import (
     provider_call_start_metadata,
     provider_validation_diagnostics,
 )
+from app.agent.recovery import GenericRecoveryPolicy, RecoveryDecision, normalize_runtime_failure
 from app.domain.action_invocation import (
     ActionInvocationBinding,
     action_operation_binding_contract,
@@ -91,6 +92,13 @@ from app.domain.enums import (
     ResourcePoolVisibility,
     StepExecutionType,
     WorldOperationStatus,
+)
+from app.domain.failures import (
+    FailureDomain,
+    FailureEvent,
+    FailureKind,
+    FailurePhase,
+    normalize_legacy_failure,
 )
 from app.domain.formal_goal import (
     AdHocActionCompletedRequirementCandidateV1,
@@ -313,6 +321,18 @@ class GenericAgentError(ValueError):
         self.code = code
         self.message = message
         self.details = dict(details or {})
+
+    @property
+    def failure_event(self) -> FailureEvent:
+        """Typed Validator/Planner view without changing the legacy exception."""
+
+        return normalize_legacy_failure(
+            self,
+            domain=FailureDomain.PLAN_VALIDATION,
+            phase=FailurePhase.VALIDATION,
+            kind=FailureKind.VALIDATOR_REJECTED,
+            metadata=self.details,
+        )
 
 
 PLAN_INVALIDATED_BY_NEW_KNOWLEDGE = "PLAN_INVALIDATED_BY_NEW_KNOWLEDGE"
@@ -3537,16 +3557,32 @@ class GenericAgentService:
             step.actual_result = operation.outcome
             step.completed_at = datetime.now(UTC)
             task.status = AgentTaskStatus.ACTIVE
+            operation_outcome = operation.outcome if isinstance(operation.outcome, dict) else {}
             failure_payload = (
-                operation.outcome.get("failure") if isinstance(operation.outcome, dict) else None
+                operation_outcome.get("failure")
             )
             if isinstance(failure_payload, dict) and failure_payload.get("code"):
-                failure_code = str(failure_payload["code"])
+                failure_event = normalize_runtime_failure(
+                    failure_payload,
+                    action_key=step.action_intent,
+                    actor_key=step.assigned_actor_key,
+                    target_key=(
+                        str(step.tool_arguments.get("target_key"))
+                        if step.tool_arguments.get("target_key") is not None
+                        else None
+                    ),
+                    knowledge_changes=tuple(
+                        item
+                        for item in operation_outcome.get("knowledge_changes", [])
+                        if isinstance(item, dict)
+                    ),
+                )
                 self._record_action_failure(
                     task,
                     step,
-                    failure_code,
-                    retryable=bool(failure_payload.get("retryable", False)),
+                    failure_event.code,
+                    retryable=bool(failure_event.legacy_retryable),
+                    failure_event=failure_event,
                     replan=replan_on_failure,
                 )
                 self.db.flush()
@@ -3591,6 +3627,7 @@ class GenericAgentService:
                     step,
                     exc.code,
                     retryable=exc.retryable,
+                    failure_event=exc.failure_event,
                     replan=replan_on_failure,
                 )
                 self.db.flush()
@@ -3608,6 +3645,19 @@ class GenericAgentService:
                     step,
                     failure.code,
                     retryable=failure.retryable,
+                    failure_event=(
+                        result.applied.outcome.failure_event
+                        or normalize_runtime_failure(
+                            failure,
+                            action_key=step.action_intent,
+                            actor_key=step.assigned_actor_key,
+                            target_key=(
+                                str(step.tool_arguments.get("target_key"))
+                                if step.tool_arguments.get("target_key") is not None
+                                else None
+                            ),
+                        )
+                    ),
                     replan=replan_on_failure,
                 )
                 self.db.flush()
@@ -3619,6 +3669,14 @@ class GenericAgentService:
                 step.status = AgentStepStatus.SUCCEEDED
                 step.completed_at = datetime.now(UTC)
         if step.status == AgentStepStatus.SUCCEEDED:
+            # The canonical failure context is current-cycle state, not a
+            # permanent second history ledger.  Older failure_code/task fields
+            # remain intact for compatibility and audit projections.
+            metadata = dict(task.objective_resolution_metadata or {})
+            if "last_failure_event" in metadata or "last_recovery_context" in metadata:
+                metadata.pop("last_failure_event", None)
+                metadata.pop("last_recovery_context", None)
+                task.objective_resolution_metadata = metadata
             # A successful public Knowledge acquisition is real progress.  The
             # replan guard limits consecutive replans that make no progress;
             # carrying that counter across a newly revealed Fact, Route, or
@@ -4298,6 +4356,7 @@ class GenericAgentService:
                 repair_attempt=repair_attempt,
                 repair_diagnostics=diagnostics,
                 anti_regression_memory=anti_regression_memory,
+                author_planning_instructions=tuple(definition.planning.instructions),
             )
             planning_attempt = PlanningAttempt(
                 cycle_id=planning_cycle.id,
@@ -7668,16 +7727,55 @@ class GenericAgentService:
         code: str,
         *,
         retryable: bool,
+        failure_event: FailureEvent | None = None,
         replan: bool = True,
     ) -> None:
+        event = failure_event or normalize_legacy_failure(
+            {
+                "code": code,
+                "retryable": retryable,
+                "action_key": step.action_intent,
+                "actor_key": step.assigned_actor_key,
+                "target_key": step.tool_arguments.get("target_key"),
+            }
+        )
+        if event.legacy_retryable is None:
+            event = event.model_copy(update={"legacy_retryable": retryable})
+        policy = GenericRecoveryPolicy(max_replans=self.MAX_REPLANS).evaluate(
+            event,
+            execution_context={
+                "state_changed": self._step_has_knowledge_changes(step),
+                "knowledge_changed": self._step_has_knowledge_changes(step),
+            },
+            replan_count=task.replan_count,
+            # V3 BLOCK_ACTION has no authored retryability.  Its event is
+            # already a backend-derived semantic blocker, so use the
+            # canonical kind/evidence policy.  V2 EMIT_FAILURE and intrinsic
+            # historical producers retain the compatibility parity lane.
+            legacy_mode=event.metadata.get("authoring_effect") != EffectKind.BLOCK_ACTION.value,
+        )
         step.status = AgentStepStatus.FAILED
         step.failure_code = code
         task.last_error_code = code
+        event_payload = event.model_dump(mode="json", exclude_none=True)
+        step.actual_result = {
+            **(step.actual_result or {}),
+            "failure_event": event_payload,
+            "recovery_context": policy.model_dump(mode="json", exclude_none=True),
+        }
+        task_metadata = dict(task.objective_resolution_metadata or {})
+        task.objective_resolution_metadata = {
+            **task_metadata,
+            "last_failure_event": event_payload,
+            "last_recovery_context": policy.model_dump(mode="json", exclude_none=True),
+        }
         self.retire_failed_plan_suffix(task, step)
-        if retryable and replan:
+        if policy.decision == RecoveryDecision.REPLAN and replan:
             self.plan(task, reason=code)
-        elif not retryable:
+        elif policy.decision in {RecoveryDecision.BLOCK, RecoveryDecision.SYSTEM_ERROR}:
             task.status = AgentTaskStatus.BLOCKED
+        elif policy.decision == RecoveryDecision.PLAYER_DECISION:
+            task.status = AgentTaskStatus.REQUIRES_PLAYER_DECISION
 
     def retire_failed_plan_suffix(self, task: AgentTask, failed_step: AgentStep) -> None:
         """Retire the unreachable suffix after an Action failure.
@@ -12390,7 +12488,11 @@ def _structured_plan_diagnostic(
     ):
         diagnostic["code"] = "ACTION_PRECONDITION_FAILED"
     if "dimension" not in diagnostic:
-        blocker = _diagnostic_blocker(exc.code, action)
+        blocker = _diagnostic_blocker(
+            exc.code,
+            action,
+            failure_event=exc.failure_event.model_copy(update={"action_key": action.key}),
+        )
         if blocker:
             dimension = blocker.get("type", "ACTION_PRECONDITION")
             diagnostic["dimension"] = dimension
@@ -12470,7 +12572,54 @@ def _diagnostic_with_step_id(
 def _diagnostic_blocker(
     failure_code: str,
     action: ActionDefinitionV2,
+    *,
+    failure_event: FailureEvent | None = None,
 ) -> dict[str, object] | None:
+    """Project a public blocker from typed evidence, then legacy code fallback."""
+
+    if failure_event is not None:
+        if failure_event.kind == FailureKind.TRAVEL_BLOCKED:
+            return {
+                "type": "TRANSPORT_PASSABILITY",
+                "current_value": "KNOWN_BLOCKED",
+                "required_value": "PASSABLE",
+                "unknown_value": "MAY_ATTEMPT",
+            }
+        if failure_event.kind == FailureKind.RESOURCE_INSUFFICIENT:
+            evidence = failure_event.evidence
+            result: dict[str, object] = {
+                "type": "RESOURCE_QUANTITY",
+                "current_value": "KNOWN_INSUFFICIENT",
+                "required_value": "REQUESTED_AMOUNT",
+            }
+            if evidence is not None:
+                payload = evidence.model_dump(mode="json", exclude_none=True)
+                for key in ("resource_key", "required", "available", "deficit", "scope_key"):
+                    if key in payload:
+                        result[key] = payload[key]
+            return result
+        if failure_event.kind == FailureKind.KNOWLEDGE_UNKNOWN:
+            return {
+                "type": "RESOURCE_KNOWLEDGE",
+                "required_value": "KNOWN_VISIBLE_AVAILABLE",
+                "unknown_value": "NOT_USABLE",
+            }
+        if failure_event.kind == FailureKind.LOCALITY_INVALID:
+            return {"type": "LOCALITY", "contract": action.locality.value}
+        if failure_event.kind == FailureKind.ACTOR_UNAVAILABLE:
+            return {
+                "type": "COMMAND_REACHABILITY",
+                "current_value": CommandReachability.DISCONNECTED.value,
+                "required_value": CommandReachability.ONLINE.value,
+            }
+        if failure_event.kind == FailureKind.AUTHORITY_BLOCKED:
+            return {
+                "type": "AUTHORITY",
+                "required_value": "AUTHORIZED",
+                "current_value": "BLOCKED",
+            }
+        if failure_event.kind == FailureKind.PRECONDITION_UNMET:
+            return {"type": "ACTION_PRECONDITION", "failure_code": failure_event.code}
     if failure_code == "ACTOR_COMMAND_DISCONNECTED":
         return {
             "type": "COMMAND_REACHABILITY",

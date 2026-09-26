@@ -60,7 +60,7 @@ export const V2_ENUMS = {
   phase: ["PREFLIGHT", "RESOLVE"],
   trigger: ["ACTION", "STATE"],
   conditionKind: ["ALL", "ANY", "NOT", "FACT_EQUALS", "FACT_NOT_EQUALS", "FACT_IN", "FACT_COMPARE", "RESOURCE_COMPARE", "PARAMETER_COMPARE", "NODE_VISIBLE", "NODE_ACCESSIBLE", "RELATION_EXISTS"],
-  effectKind: ["SET_FACT", "REVEAL_FACT", "HIDE_FACT", "REVEAL_NODE", "HIDE_NODE", "SET_NODE_ACCESS", "ADJUST_RESOURCE", "RESERVE_RESOURCE", "RELEASE_RESOURCE", "EMIT_OUTCOME", "EMIT_FAILURE", "WRITE_MEMORY_EVENT", "SET_ACTOR_COMMAND_REACHABILITY", "SET_RELATION_VISIBILITY", "SET_REGION_RESOURCE_VISIBILITY", "SET_RESOURCE_POOL_VISIBILITY", "SET_RESOURCE_POOL_AVAILABILITY", "REVEAL_TARGET_REGION_FACILITY_FACTS"],
+  effectKind: ["SET_FACT", "REVEAL_FACT", "HIDE_FACT", "REVEAL_NODE", "HIDE_NODE", "SET_NODE_ACCESS", "ADJUST_RESOURCE", "RESERVE_RESOURCE", "RELEASE_RESOURCE", "EMIT_OUTCOME", "BLOCK_ACTION", "EMIT_FAILURE", "WRITE_MEMORY_EVENT", "SET_ACTOR_COMMAND_REACHABILITY", "SET_RELATION_VISIBILITY", "SET_REGION_RESOURCE_VISIBILITY", "SET_RESOURCE_POOL_VISIBILITY", "SET_RESOURCE_POOL_AVAILABILITY", "REVEAL_TARGET_REGION_FACILITY_FACTS"],
   comparison: ["EQ", "NE", "LT", "LTE", "GT", "GTE"],
   valueSource: ["LITERAL", "PARAMETER"],
   selectorKind: ["CURRENT_TARGET", "ACTION_SOURCE", "EXPLICIT", "RELATED"],
@@ -131,7 +131,7 @@ export const entityRegistry: Record<EntityKind, EntityMetadata> = {
 
 export const rootFieldRegistry: Record<string, readonly FieldMetadata[]> = {
   metadata: [field("key", "text"), field("name", "text"), field("description", "textarea")],
-  goal_resolution: [field("allow_llm_fallback", "boolean"), field("clarification_prompt", "textarea"), field("quick_inputs", "text"), field("world_goal_state_catalog", "boolean")],
+  goal_resolution: [field("quick_inputs", "text")],
   planning: [field("instructions", "text")],
   initialization: [requiredField("start_node_key", "reference", { referenceDomain: "node", navigation: "FORWARD_REQUIRED" }), requiredField("primary_actor_key", "reference", { referenceDomain: "actor", navigation: "FORWARD_REQUIRED" })],
 };

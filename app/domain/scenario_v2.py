@@ -253,6 +253,11 @@ class EffectKind(StrEnum):
     RELEASE_RESOURCE = "RELEASE_RESOURCE"
     EMIT_OUTCOME = "EMIT_OUTCOME"
     EMIT_FAILURE = "EMIT_FAILURE"
+    # Current authoring (v3) uses this typed semantic instead of allowing
+    # authors to provide failure code/message/retryability metadata.  It is
+    # accepted by the v2 normalized runtime model as a backend-derived
+    # compatibility representation; legacy v2 EMIT_FAILURE remains intact.
+    BLOCK_ACTION = "BLOCK_ACTION"
     WRITE_MEMORY_EVENT = "WRITE_MEMORY_EVENT"
     SET_ACTOR_COMMAND_REACHABILITY = "SET_ACTOR_COMMAND_REACHABILITY"
     SET_RELATION_VISIBILITY = "SET_RELATION_VISIBILITY"
@@ -1498,6 +1503,32 @@ class EffectV2(FrozenDefinitionModel):
         elif self.kind == EffectKind.EMIT_FAILURE:
             if self.failure_code is None or not self.message:
                 raise ValueError("EMIT_FAILURE requires failure_code/message")
+        elif self.kind == EffectKind.BLOCK_ACTION:
+            if any(
+                value is not None
+                for value in (
+                    self.node,
+                    self.fact_key,
+                    self.value,
+                    self.access,
+                    self.resource_key,
+                    self.resource_scope,
+                    self.amount,
+                    self.outcome_code,
+                    self.failure_code,
+                    self.message,
+                    self.memory_key,
+                    self.memory_content,
+                    self.actor_key,
+                    self.relation_key,
+                    self.command_reachability,
+                    self.region_key,
+                    self.pool_key,
+                    self.visibility,
+                    self.availability,
+                )
+            ) or self.retryable:
+                raise ValueError("BLOCK_ACTION cannot carry failure metadata or mutations")
         elif self.kind == EffectKind.WRITE_MEMORY_EVENT and (
             self.memory_key is None or not self.memory_content
         ):
@@ -1551,7 +1582,11 @@ class RuleDefinitionV2(FrozenDefinitionModel):
         terminals = [
             effect
             for effect in self.effects
-            if effect.kind in {EffectKind.EMIT_OUTCOME, EffectKind.EMIT_FAILURE}
+            if effect.kind in {
+                EffectKind.EMIT_OUTCOME,
+                EffectKind.EMIT_FAILURE,
+                EffectKind.BLOCK_ACTION,
+            }
         ]
         if self.trigger == RuleTrigger.ACTION and self.action_key is None:
             raise ValueError("ACTION Rules require action_key")
@@ -1564,8 +1599,11 @@ class RuleDefinitionV2(FrozenDefinitionModel):
         if self.trigger == RuleTrigger.STATE and terminals:
             raise ValueError("STATE Rules may not emit Action outcomes or failures")
         if self.phase == RulePhase.PREFLIGHT:
-            if any(effect.kind != EffectKind.EMIT_FAILURE for effect in self.effects):
-                raise ValueError("PREFLIGHT rules may only emit a deterministic failure")
+            if any(
+                effect.kind not in {EffectKind.EMIT_FAILURE, EffectKind.BLOCK_ACTION}
+                for effect in self.effects
+            ):
+                raise ValueError("PREFLIGHT rules may only emit a deterministic blocker")
         elif self.trigger == RuleTrigger.ACTION and len(terminals) != 1:
             raise ValueError("A RESOLVE rule requires exactly one outcome or failure Effect")
         return self

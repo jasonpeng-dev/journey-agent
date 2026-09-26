@@ -17,6 +17,17 @@ from app.domain.enums import (
     ResourcePoolAvailability,
     ResourcePoolVisibility,
 )
+from app.domain.failures import (
+    ActorEvidence,
+    FailureDomain,
+    FailureEvent,
+    FailureKind,
+    FailurePhase,
+    GenericEvidence,
+    ResourceEvidence,
+    TransportEvidence,
+    normalize_legacy_failure,
+)
 from app.domain.resources import (
     RUNTIME_KNOWN_INFLOW_POOL_KEY,
     is_runtime_known_inflow_pool,
@@ -87,11 +98,25 @@ from app.services.knowledge_projection import resource_knowledge_status
 
 
 class GenericGameError(ValueError):
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        failure_event: FailureEvent | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        self._failure_event = failure_event
+
+    @property
+    def failure_event(self) -> FailureEvent:
+        """Typed view of this legacy runtime error; recovery still reads retryable."""
+
+        return self._failure_event or normalize_legacy_failure(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +269,11 @@ class GenericGameService:
                 action.behavior != ActionBehavior.SURVEY_RESOURCES
                 or exc.code != "RULE_RESOLUTION_NOT_FOUND"
             ):
-                raise GenericGameError(exc.code, exc.message) from exc
+                raise GenericGameError(
+                    exc.code,
+                    exc.message,
+                    failure_event=exc.failure_event,
+                ) from exc
             outcome = GenericRuleOutcome(
                 selected_rule_key=f"generic:{action.key}",
                 outcome_code=next(
@@ -273,7 +302,12 @@ class GenericGameService:
             try:
                 target_region = region_for_node(definition, target_node_key)
             except LocalityEngineError as exc:
-                raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+                raise GenericGameError(
+                    exc.code,
+                    exc.message,
+                    retryable=exc.retryable,
+                    failure_event=exc.failure_event,
+                ) from exc
             outcome = replace(
                 outcome,
                 fact_visibility_updates=(
@@ -469,6 +503,23 @@ class GenericGameService:
                     name=relation.relation_type_key,
                 )
             )
+        if outcome.failure_event is not None:
+            outcome = replace(
+                outcome,
+                failure_event=outcome.failure_event.model_copy(
+                    update={
+                        "knowledge_changes": tuple(
+                            {
+                                "kind": item.kind,
+                                "key": item.key,
+                                "name": item.name,
+                                "value": item.value,
+                            }
+                            for item in knowledge_changes
+                        )
+                    }
+                ),
+            )
         return AppliedRuleResult(
             outcome=outcome,
             runtime_revision=instance.runtime_revision,
@@ -619,7 +670,12 @@ class GenericGameService:
                 target_actor_node_key=target_actor_current_node_key,
             )
         except LocalityEngineError as exc:
-            raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+            raise GenericGameError(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                failure_event=exc.failure_event,
+            ) from exc
 
     @staticmethod
     def _require_command_reachability(
@@ -636,18 +692,66 @@ class GenericGameService:
             raise GenericGameError(
                 "RUNTIME_ACTOR_REACHABILITY_INVALID",
                 "The Actor command reachability value is invalid",
+                failure_event=normalize_legacy_failure(
+                    {
+                        "code": "RUNTIME_ACTOR_REACHABILITY_INVALID",
+                        "message": "The Actor command reachability value is invalid",
+                        "retryable": False,
+                        "details": {"actual": actor.command_reachability},
+                    },
+                    domain=FailureDomain.INTERNAL,
+                    producer="GenericGameService",
+                    phase=FailurePhase.VALIDATION,
+                    evidence=GenericEvidence(
+                        details={"actor_key": actor.actor_key, "actual": actor.command_reachability}
+                    ),
+                ),
             ) from exc
         if reachability != CommandReachability.ONLINE:
             raise GenericGameError(
                 "ACTOR_COMMAND_DISCONNECTED",
                 "A disconnected Actor cannot receive an ordinary Action",
                 retryable=True,
+                failure_event=normalize_legacy_failure(
+                    {
+                        "code": "ACTOR_COMMAND_DISCONNECTED",
+                        "message": "A disconnected Actor cannot receive an ordinary Action",
+                        "retryable": True,
+                    },
+                    domain=FailureDomain.ACTION_RUNTIME,
+                    producer="GenericGameService",
+                    phase=FailurePhase.EXECUTION,
+                    actor_key=actor.actor_key,
+                    evidence=ActorEvidence(
+                        actor_key=actor.actor_key,
+                        required=CommandReachability.ONLINE.value,
+                        actual=reachability.value,
+                        reachability=reachability.value,
+                    ),
+                ),
             )
         if action.behavior == ActionBehavior.RELAY_MESSAGE:
             if target_actor is None:
                 raise GenericGameError(
                     "RELAY_TARGET_INVALID",
                     "Relay requires an active target Actor",
+                    failure_event=normalize_legacy_failure(
+                        {
+                            "code": "RELAY_TARGET_INVALID",
+                            "message": "Relay requires an active target Actor",
+                            "retryable": False,
+                        },
+                        domain=FailureDomain.ACTION_RUNTIME,
+                        producer="GenericGameService",
+                        phase=FailurePhase.VALIDATION,
+                        actor_key=actor.actor_key,
+                        target_key=None,
+                        evidence=ActorEvidence(
+                            actor_key=actor.actor_key,
+                            required="ACTIVE_TARGET_ACTOR",
+                            actual="MISSING",
+                        ),
+                    ),
                 )
             try:
                 target_reachability = CommandReachability(target_actor.command_reachability)
@@ -655,12 +759,46 @@ class GenericGameService:
                 raise GenericGameError(
                     "RUNTIME_ACTOR_REACHABILITY_INVALID",
                     "The target Actor command reachability value is invalid",
+                    failure_event=normalize_legacy_failure(
+                        {
+                            "code": "RUNTIME_ACTOR_REACHABILITY_INVALID",
+                            "message": "The target Actor command reachability value is invalid",
+                            "retryable": False,
+                            "details": {"actual": target_actor.command_reachability},
+                        },
+                        domain=FailureDomain.INTERNAL,
+                        producer="GenericGameService",
+                        phase=FailurePhase.VALIDATION,
+                        actor_key=target_actor.actor_key,
+                        evidence=ActorEvidence(
+                            actor_key=target_actor.actor_key,
+                            actual=target_actor.command_reachability,
+                        ),
+                    ),
                 ) from exc
             if target_reachability != CommandReachability.DISCONNECTED:
                 raise GenericGameError(
                     "RELAY_TARGET_NOT_DISCONNECTED",
                     "Relay requires a disconnected target Actor",
                     retryable=True,
+                    failure_event=normalize_legacy_failure(
+                        {
+                            "code": "RELAY_TARGET_NOT_DISCONNECTED",
+                            "message": "Relay requires a disconnected target Actor",
+                            "retryable": True,
+                        },
+                        domain=FailureDomain.ACTION_RUNTIME,
+                        producer="GenericGameService",
+                        phase=FailurePhase.EXECUTION,
+                        actor_key=actor.actor_key,
+                        target_key=target_actor.actor_key,
+                        evidence=ActorEvidence(
+                            actor_key=target_actor.actor_key,
+                            required=CommandReachability.DISCONNECTED.value,
+                            actual=target_reachability.value,
+                            reachability=target_reachability.value,
+                        ),
+                    ),
                 )
 
     def _apply_behavior(
@@ -682,6 +820,22 @@ class GenericGameService:
                 raise GenericGameError(
                     "RELAY_TARGET_INVALID",
                     "Relay requires an active target Actor",
+                    failure_event=normalize_legacy_failure(
+                        {
+                            "code": "RELAY_TARGET_INVALID",
+                            "message": "Relay requires an active target Actor",
+                            "retryable": False,
+                        },
+                        domain=FailureDomain.ACTION_RUNTIME,
+                        producer="GenericGameService",
+                        phase=FailurePhase.VALIDATION,
+                        actor_key=actor.actor_key,
+                        evidence=ActorEvidence(
+                            actor_key=actor.actor_key,
+                            required="ACTIVE_TARGET_ACTOR",
+                            actual="MISSING",
+                        ),
+                    ),
                 )
             updates = [
                 item
@@ -703,6 +857,15 @@ class GenericGameService:
                     code="TRAVEL_BLOCKED",
                     message="The one-hop Transport is currently blocked",
                     reveal=self._passability_reveal(definition, connector, state),
+                    action_key=action.key,
+                    target_key=target_node_key,
+                    evidence=TransportEvidence(
+                        transport_key=connector,
+                        source_region=region_for_node(definition, actor.current_node_key),
+                        target_region=region_for_node(definition, target_node_key),
+                        passable=False,
+                        knowledge_status="KNOWN",
+                    ),
                 )
             return replace(
                 outcome,
@@ -739,7 +902,12 @@ class GenericGameService:
             try:
                 region = region_for_node(definition, target_node_key)
             except LocalityEngineError as exc:
-                raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+                raise GenericGameError(
+                    exc.code,
+                    exc.message,
+                    retryable=exc.retryable,
+                    failure_event=exc.failure_event,
+                ) from exc
             fact_reveals = self._facility_region_reveals(region, definition, state)
             return replace(
                 outcome,
@@ -762,6 +930,13 @@ class GenericGameService:
                     code="RESOURCE_SURVEY_ALREADY_COMPLETED",
                     message="The target Region has already completed a resource survey",
                     retryable=False,
+                    action_key=action.key,
+                    target_key=target_node_key,
+                    evidence=ResourceEvidence(
+                        knowledge_status="KNOWN",
+                        scope_key=region,
+                        raw={"survey_completed": True},
+                    ),
                 )
             reveal_pools = tuple(
                 ResourcePoolVisibilityMutation(
@@ -798,19 +973,28 @@ class GenericGameService:
             if outcome.failure is not None:
                 return outcome
             connector = self._connector(definition, actor.current_node_key, target_node_key)
+            source_region = region_for_node(definition, actor.current_node_key)
+            target_region = region_for_node(definition, target_node_key)
             if not self._is_passable(definition, connector, state):
                 return self._blocked_outcome(
                     outcome,
                     code="TRANSPORT_BLOCKED",
                     message="The one-hop Transport is currently blocked",
                     reveal=self._passability_reveal(definition, connector, state),
+                    action_key=action.key,
+                    target_key=target_node_key,
+                    evidence=TransportEvidence(
+                        transport_key=connector,
+                        source_region=source_region,
+                        target_region=target_region,
+                        passable=False,
+                        knowledge_status="KNOWN",
+                    ),
                 )
             try:
                 cargo = transport_resource_entries(parameters)
             except ValueError as exc:
                 raise GenericGameError("TRANSPORT_PARAMETERS_INVALID", str(exc)) from exc
-            source_region = region_for_node(definition, actor.current_node_key)
-            target_region = region_for_node(definition, target_node_key)
             resource_keys = {item.key for item in definition.world.resources}
             mutations: list[ResourceMutation] = []
             for resource_key, amount in cargo:
@@ -828,12 +1012,32 @@ class GenericGameService:
                             code="TRANSPORT_RESOURCE_INSUFFICIENT",
                             message="The source Region lacks the requested Resource amount",
                             retryable=True,
+                            action_key=action.key,
+                            target_key=target_node_key,
+                            evidence=ResourceEvidence(
+                                resource_key=resource_key,
+                                required=amount,
+                                available=0,
+                                deficit=amount,
+                                knowledge_status="KNOWN",
+                                scope_key=source_region,
+                                target_key=target_region,
+                            ),
                         )
                     return self._blocked_outcome(
                         outcome,
                         code="TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
                         message="The source Region Resource inventory is not known",
                         retryable=True,
+                        action_key=action.key,
+                        target_key=target_node_key,
+                        evidence=ResourceEvidence(
+                            resource_key=resource_key,
+                            required=amount,
+                            knowledge_status="UNKNOWN",
+                            scope_key=source_region,
+                            target_key=target_region,
+                        ),
                     )
                 free_by_pool = {
                     pool.pool_key: max(
@@ -856,12 +1060,33 @@ class GenericGameService:
                             code="TRANSPORT_RESOURCE_KNOWLEDGE_UNKNOWN",
                             message="The source Region Resource inventory is not known",
                             retryable=True,
+                            action_key=action.key,
+                            target_key=target_node_key,
+                            evidence=ResourceEvidence(
+                                resource_key=resource_key,
+                                required=amount,
+                                available=available,
+                                knowledge_status="UNKNOWN",
+                                scope_key=source_region,
+                                target_key=target_region,
+                            ),
                         )
                     return self._blocked_outcome(
                         outcome,
                         code="TRANSPORT_RESOURCE_INSUFFICIENT",
                         message="The source Region lacks the requested Resource amount",
                         retryable=True,
+                        action_key=action.key,
+                        target_key=target_node_key,
+                        evidence=ResourceEvidence(
+                            resource_key=resource_key,
+                            required=amount,
+                            available=available,
+                            deficit=max(amount - available, 0),
+                            knowledge_status="KNOWN",
+                            scope_key=source_region,
+                            target_key=target_region,
+                        ),
                     )
                 remaining = amount
                 for pool in source_pools:
@@ -925,6 +1150,13 @@ class GenericGameService:
                     action.key,
                     "TRANSPORT_NOT_CONFIRMED_BLOCKED",
                     "The Transport must be known to be blocked before it can be cleared",
+                    target_key=target_node_key,
+                    kind=FailureKind.PRECONDITION_UNMET,
+                    evidence=TransportEvidence(
+                        transport_key=target_node_key,
+                        passable=(fact.value if fact is not None else None),
+                        knowledge_status=(fact.visibility.value if fact is not None else "UNKNOWN"),
+                    ),
                 )
         if action.behavior != ActionBehavior.SUPPLY_POWER:
             return None
@@ -934,6 +1166,15 @@ class GenericGameService:
                 action.key,
                 "SUPPLY_POWER_SOURCE_INVALID",
                 "The declared power source does not exist",
+                target_key=target_node_key,
+                kind=FailureKind.PRECONDITION_UNMET,
+                evidence=GenericEvidence(
+                    details={
+                        "source_key": source_node_key,
+                        "target_key": target_node_key,
+                        "reason": "SOURCE_NOT_FOUND",
+                    }
+                ),
             )
         source_state = state.nodes[source_node_key]
         target_state = state.nodes.get(target_node_key)
@@ -946,6 +1187,15 @@ class GenericGameService:
                 action.key,
                 "SUPPLY_POWER_RELATION_UNKNOWN",
                 "The power source and target are not both known",
+                target_key=target_node_key,
+                kind=FailureKind.PRECONDITION_UNMET,
+                evidence=GenericEvidence(
+                    details={
+                        "source_key": source_node_key,
+                        "target_key": target_node_key,
+                        "reason": "SOURCE_OR_TARGET_UNKNOWN",
+                    }
+                ),
             )
         relation = next(
             (
@@ -969,6 +1219,16 @@ class GenericGameService:
                 action.key,
                 "SUPPLY_POWER_RELATION_UNKNOWN",
                 "No known direct power relation connects the source and target",
+                target_key=target_node_key,
+                kind=FailureKind.PRECONDITION_UNMET,
+                evidence=GenericEvidence(
+                    details={
+                        "source_key": source_node_key,
+                        "target_key": target_node_key,
+                        "relation_type_key": action.source_relation_type_key,
+                        "reason": "RELATION_UNKNOWN",
+                    }
+                ),
             )
         # Source qualification is intentionally declarative.  Scenario data
         # expresses operational, generation-capability, relay, or other
@@ -979,10 +1239,28 @@ class GenericGameService:
         return None
 
     @staticmethod
-    def _behavior_failure(action_key: str, code: str, message: str) -> GenericRuleOutcome:
+    def _behavior_failure(
+        action_key: str,
+        code: str,
+        message: str,
+        *,
+        evidence: object | None = None,
+        target_key: str | None = None,
+        kind: FailureKind | None = None,
+    ) -> GenericRuleOutcome:
+        failure = RuleFailure(code=code, message=message, retryable=True)
         return GenericRuleOutcome(
             selected_rule_key=f"generic:{action_key}",
-            failure=RuleFailure(code=code, message=message, retryable=True),
+            failure=failure,
+            failure_event=normalize_legacy_failure(
+                failure,
+                phase=FailurePhase.EXECUTION,
+                producer="GenericGameService",
+                action_key=action_key,
+                target_key=target_key,
+                evidence=evidence,  # type: ignore[arg-type]
+                kind=kind,
+            ),
         )
 
     @staticmethod
@@ -1046,11 +1324,24 @@ class GenericGameService:
         message: str,
         retryable: bool = True,
         reveal: tuple[FactVisibilityMutation, ...] = (),
+        evidence: object | None = None,
+        action_key: str | None = None,
+        target_key: str | None = None,
     ) -> GenericRuleOutcome:
+        resolved_action_key = action_key or outcome.selected_rule_key.removeprefix("generic:")
+        failure = RuleFailure(code=code, message=message, retryable=retryable)
         return GenericRuleOutcome(
             selected_rule_key=outcome.selected_rule_key,
             outcome_code=None,
-            failure=RuleFailure(code=code, message=message, retryable=retryable),
+            failure=failure,
+            failure_event=normalize_legacy_failure(
+                failure,
+                phase=FailurePhase.EXECUTION,
+                producer="GenericGameService",
+                action_key=resolved_action_key or None,
+                target_key=target_key,
+                evidence=evidence,  # type: ignore[arg-type]
+            ),
             fact_visibility_updates=reveal,
         )
 
@@ -1067,7 +1358,12 @@ class GenericGameService:
                 target_node_key,
             )
         except LocalityEngineError as exc:
-            raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+            raise GenericGameError(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                failure_event=exc.failure_event,
+            ) from exc
 
     @staticmethod
     def _is_passable(
@@ -1078,7 +1374,12 @@ class GenericGameService:
         try:
             value = passability_fact(definition, transport_key, state)
         except LocalityEngineError as exc:
-            raise GenericGameError(exc.code, exc.message, retryable=exc.retryable) from exc
+            raise GenericGameError(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                failure_event=exc.failure_event,
+            ) from exc
         return value is None or value[1]
 
     @staticmethod
@@ -1763,6 +2064,16 @@ class GenericGameService:
                     "RESOURCE_SOURCE_UNKNOWN",
                     "No public Resource source is known",
                     retryable=True,
+                    failure_event=self._resource_failure_event(
+                        code="RESOURCE_SOURCE_UNKNOWN",
+                        message="No public Resource source is known",
+                        retryable=True,
+                        resource_key=mutation.resource_key,
+                        required=remaining,
+                        available=None,
+                        scope_key=mutation.scope_node_key,
+                        knowledge_status="UNKNOWN",
+                    ),
                 )
             inventory_status = resource_knowledge_status(
                 inventory_visibility=(
@@ -1786,12 +2097,33 @@ class GenericGameService:
                     "KNOWN_RESOURCE_INSUFFICIENT",
                     "Known available Resource quantity is insufficient",
                     retryable=True,
+                    failure_event=self._resource_failure_event(
+                        code="KNOWN_RESOURCE_INSUFFICIENT",
+                        message="Known available Resource quantity is insufficient",
+                        retryable=True,
+                        resource_key=mutation.resource_key,
+                        required=remaining,
+                        available=0,
+                        scope_key=mutation.scope_node_key,
+                        knowledge_status="KNOWN",
+                        deficit=remaining,
+                    ),
                 )
             if not rows and inventory_status == "UNKNOWN":
                 raise GenericGameError(
                     "RESOURCE_INVENTORY_UNKNOWN",
                     "The Resource inventory is not known or available",
                     retryable=True,
+                    failure_event=self._resource_failure_event(
+                        code="RESOURCE_INVENTORY_UNKNOWN",
+                        message="The Resource inventory is not known or available",
+                        retryable=True,
+                        resource_key=mutation.resource_key,
+                        required=remaining,
+                        available=None,
+                        scope_key=mutation.scope_node_key,
+                        knowledge_status="UNKNOWN",
+                    ),
                 )
             free_by_pool = {row.pool_key: max(0, row.value - row.reserved_value) for row in rows}
             available = sum(free_by_pool.values())
@@ -1807,11 +2139,32 @@ class GenericGameService:
                         "RESOURCE_INVENTORY_UNKNOWN",
                         "The Resource inventory is not known or available",
                         retryable=True,
+                        failure_event=self._resource_failure_event(
+                            code="RESOURCE_INVENTORY_UNKNOWN",
+                            message="The Resource inventory is not known or available",
+                            retryable=True,
+                            resource_key=mutation.resource_key,
+                            required=remaining,
+                            available=available,
+                            scope_key=mutation.scope_node_key,
+                            knowledge_status="UNKNOWN",
+                        ),
                     )
                 raise GenericGameError(
                     "KNOWN_RESOURCE_INSUFFICIENT",
                     "Known available Resource quantity is insufficient",
                     retryable=True,
+                    failure_event=self._resource_failure_event(
+                        code="KNOWN_RESOURCE_INSUFFICIENT",
+                        message="Known available Resource quantity is insufficient",
+                        retryable=True,
+                        resource_key=mutation.resource_key,
+                        required=remaining,
+                        available=available,
+                        scope_key=mutation.scope_node_key,
+                        knowledge_status="KNOWN",
+                        deficit=max(remaining - available, 0),
+                    ),
                 )
             for row in rows:
                 if remaining <= 0:
@@ -1827,6 +2180,34 @@ class GenericGameService:
                 )
                 remaining -= consumed
         return tuple(expanded)
+
+    @staticmethod
+    def _resource_failure_event(
+        *,
+        code: str,
+        message: str,
+        retryable: bool,
+        resource_key: str,
+        required: int,
+        available: int | None,
+        scope_key: str | None,
+        knowledge_status: str,
+        deficit: int | None = None,
+    ) -> FailureEvent:
+        return normalize_legacy_failure(
+            {"code": code, "message": message, "retryable": retryable},
+            domain=FailureDomain.ACTION_RUNTIME,
+            phase=FailurePhase.EXECUTION,
+            producer="GenericGameService",
+            evidence=ResourceEvidence(
+                resource_key=resource_key,
+                required=required,
+                available=available,
+                deficit=deficit,
+                knowledge_status=knowledge_status,
+                scope_key=scope_key,
+            ),
+        )
 
     def _fact_row(self, node_key: str, fact_key: str) -> GameInstanceFactState:
         row = self.db.get(

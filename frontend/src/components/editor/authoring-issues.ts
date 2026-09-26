@@ -119,11 +119,9 @@ function issueReasonKey(source: AuthoringIssueSource, code: string, type: string
 function domainFor(locator: Locator | null): string {
   const kind = locator?.object_kind ?? "";
   if (["node", "node_type", "relation", "relation_type", "resource", "resource_pool", "region_resource_knowledge", "legacy_resource"].includes(kind)) return "世界模型";
-  if (["role", "actor"].includes(kind)) return "参与者";
-  if (["interaction", "action", "rule"].includes(kind) || kind.startsWith("action_")) return "行为系统";
-  if (["derived_state", "goal_resolution", "public_reference"].includes(kind)) return "目标系统";
-  if (kind === "planning") return "规划策略";
-  if (kind === "initialization") return "初始化";
+  if (["role", "actor", "interaction", "action", "rule"].includes(kind) || kind.startsWith("action_")) return "角色与行动";
+  if (["derived_state", "goal_resolution", "public_reference", "planning"].includes(kind)) return "目标与规划";
+  if (kind === "initialization") return "初始化与发布";
   if (kind === "metadata") return "概览";
   return "场景结构";
 }
@@ -133,7 +131,7 @@ function ownerTarget(kind: string | null, document: JsonObject): EditorLocator |
   if (kind === "initialization" || kind === "resource_pool" || kind === "region_resource_knowledge" || kind === "legacy_resource") {
     return { owner: "singleton", section: "initialization", fieldPath: null };
   }
-  if (kind === "planning") return { owner: "singleton", section: "planning-recovery", fieldPath: null };
+  if (kind === "planning") return { owner: "singleton", section: "planning-instructions", fieldPath: null };
   if (kind === "metadata") return { owner: "singleton", section: "overview", fieldPath: null };
   if (!entityKinds.has(kind as EntityKind)) return null;
   return editorLocatorFromValidation({ object_kind: kind, object_key: null, field_path: null }, document)
@@ -143,7 +141,7 @@ function ownerTarget(kind: string | null, document: JsonObject): EditorLocator |
 function ownerActionLabel(owner: string | null): string | null {
   if (!owner) return null;
   if (owner === "initialization" || owner === "resource_pool" || owner === "region_resource_knowledge" || owner === "legacy_resource") return "前往初始化";
-  if (owner === "planning") return "前往规划策略";
+  if (owner === "planning") return "前往规划指引";
   if (owner === "metadata") return "前往场景概览";
   return `前往${kindLabels[owner] ?? "所属对象"}`;
 }

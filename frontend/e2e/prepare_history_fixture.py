@@ -57,6 +57,10 @@ def generic_authoring_definition() -> ScenarioDefinitionV2:
     """Add a typed binary enum to the isolated browser authoring scenario."""
 
     payload = GENERIC_TEST.model_dump(mode="json")
+    payload.setdefault("goal_resolution", {})["quick_inputs"] = [
+        "E2E quick target one",
+        "E2E quick target two",
+    ]
     nodes = payload.get("world", {}).get("nodes", [])
     node = next(
         candidate

@@ -14,9 +14,7 @@ export function completenessLocatorHref(locator: Locator | null | undefined, sce
     return `/scenarios/${scenarioId}/edit/initialization`;
   }
   if (locator.object_kind === "planning") {
-    const [collection, identity] = (locator.field_path ?? "").split(".");
-    if (collection === "recovery_hints" && identity) return `/scenarios/${scenarioId}/edit/planning-recovery?owner=collection&collection=recovery_hints&item=${encodeURIComponent(JSON.stringify([identity]))}`;
-    return `/scenarios/${scenarioId}/edit/planning-instructions`;
+    return `/scenarios/${scenarioId}/edit/planning-instructions${locator.field_path ? `?focus_path=${encodeURIComponent(locator.field_path)}` : ""}`;
   }
   if (locator.object_kind === "public_knowledge") {
     return locator.object_key

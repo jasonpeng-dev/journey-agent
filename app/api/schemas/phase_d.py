@@ -419,7 +419,7 @@ class ScenarioVersionSummaryResponse(ApiModel):
     id: UUID
     scenario_id: UUID
     version_number: int = Field(ge=1)
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     content_hash: str = Field(min_length=64, max_length=64)
     published_at: datetime
 

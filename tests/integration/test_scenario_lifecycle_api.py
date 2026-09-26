@@ -6,7 +6,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agent.provider import PlannerInput, PlanRequest
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
+from app.scenarios.documents import parse_scenario_document_versioned
 from app.scenarios.serialization import legacy_resource_source_hint_payload
 
 
@@ -35,7 +37,10 @@ def test_blank_draft_is_editable_but_cannot_publish(client: TestClient) -> None:
     draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft")
     assert draft.status_code == 200
     assert draft.json()["revision"] == 1
-    assert draft.json()["definition_document"]["world"]["nodes"] == []
+    document = draft.json()["definition_document"]
+    assert document["schema_version"] == 3
+    assert "recovery_hints" not in document["planning"]
+    assert document["world"]["nodes"] == []
     assert "public_knowledge" not in draft.json()["definition_document"]
 
     incomplete = {"metadata": {"key": "blank_case", "name": "Still Draft"}}
@@ -67,6 +72,45 @@ def test_blank_draft_is_editable_but_cannot_publish(client: TestClient) -> None:
     )
     assert publish.status_code == 409
     assert publish.json()["error"]["code"] == "SCENARIO_DRAFT_INVALID"
+
+
+def test_planning_instruction_save_reload_reaches_provider_payload(
+    client: TestClient,
+) -> None:
+    """The current authoring instruction survives the complete draft boundary."""
+
+    created = _create_example(client, key="planning_instruction_provider_boundary")
+    scenario_id = created["id"]
+    initial = client.get(f"/api/v1/scenarios/{scenario_id}/draft")
+    assert initial.status_code == 200, initial.text
+    initial_payload = initial.json()
+    working = deepcopy(initial_payload["definition_document"])
+    instruction = "优先确认当前区域的公开前置动作"
+    working["planning"]["instructions"].append(instruction)
+
+    saved = client.put(
+        f"/api/v1/scenarios/{scenario_id}/draft",
+        json={
+            "expected_revision": initial_payload["revision"],
+            "definition_document": working,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    reloaded = client.get(f"/api/v1/scenarios/{scenario_id}/draft")
+    assert reloaded.status_code == 200, reloaded.text
+    document = reloaded.json()["definition_document"]
+    authored = parse_scenario_document_versioned(document)
+    instructions = tuple(authored.planning.instructions)
+    assert instruction in instructions
+
+    payload = PlanRequest(
+        call_type="INITIAL_PLAN",
+        planner_input=PlannerInput(),
+        author_planning_instructions=instructions,
+    ).provider_payload()
+    assert instruction in payload["author_planning_instructions"]
+    assert "recovery_hints" not in payload
 
 
 def test_legacy_draft_get_is_read_only_and_manual_save_persists_current_shape(

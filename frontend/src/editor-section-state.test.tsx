@@ -59,6 +59,7 @@ const draft = {
       roles: [{ key: "coordinator", name: "协调员" }],
       actor_profiles: [{ key: "operator", name: "值班员", role_key: "coordinator" }],
     },
+    goal_resolution: { quick_inputs: ["修复中央区", "确保医院运行"] },
     rules: [{ key: "stabilize", phase: "RESOLVE", trigger: "STATE", action_key: "", priority: 1 }],
     planning: { instructions: ["优先保障生命安全", "保留替代方案"], recovery_hints: [{ failure_code: "BLOCKED", hint: "重新检查道路" }] },
     public_references: [{ term: "中央区", ref_type: "REGION", ref_key: "central" }],
@@ -145,23 +146,22 @@ describe("Editor section state ownership", () => {
       "relation-types": { category: "世界模型", label: "关系类型" },
       relations: { category: "世界模型", label: "关系实例" },
       resources: { category: "世界模型", label: "资源定义" },
-      roles: { category: "参与者", label: "角色" },
-      actors: { category: "参与者", label: "参与者" },
-      interactions: { category: "行为系统", label: "交互" },
-      actions: { category: "行为系统", label: "行动" },
-      rules: { category: "行为系统", label: "规则" },
-      "derived-states": { category: "目标系统", label: "派生状态" },
-      "goal-resolution": { category: "目标系统", label: "目标解析" },
-      "planning-instructions": { category: "规划策略", label: "全局规划指引" },
-      "planning-recovery": { category: "规划策略", label: "失败恢复策略" },
-      "terminology-references": { category: "目标系统", label: "术语与引用" },
+      roles: { category: "角色与行动", label: "角色" },
+      actors: { category: "角色与行动", label: "参与者" },
+      interactions: { category: "角色与行动", label: "交互" },
+      actions: { category: "角色与行动", label: "行动" },
+      rules: { category: "角色与行动", label: "规则" },
+      "derived-states": { category: "目标与规划", label: "派生状态" },
+      "goal-resolution": { category: "目标与规划", label: "快捷目标" },
+      "planning-instructions": { category: "目标与规划", label: "规划指引" },
+      "terminology-references": { category: "目标与规划", label: "术语与引用" },
     });
     expect(editorSectionTaxonomy).not.toHaveProperty("objectives");
 
     renderEditor();
     const heading = await screen.findByTestId("editor-taxonomy-heading");
     expect(screen.queryByRole("link", { name: "目标" })).not.toBeInTheDocument();
-    expect(heading).toHaveTextContent("目标系统/术语与引用");
+    expect(heading).toHaveTextContent("目标与规划/术语与引用");
     expect(screen.queryByText("Working copy")).not.toBeInTheDocument();
     expect(document.querySelector(".editor-toolbar-subtitle")).not.toBeInTheDocument();
     expect(screen.queryByText("编辑 公共引用 配置")).not.toBeInTheDocument();
@@ -251,51 +251,38 @@ describe("Editor section state ownership", () => {
     expect(screen.getByText("数量")).toBeInTheDocument();
     expect(screen.getByText("未修改")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("link", { name: "全局规划指引" }));
+    fireEvent.click(screen.getByRole("link", { name: "规划指引" }));
     await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/planning-instructions"));
-    expect(screen.getByTestId("editor-taxonomy-heading")).toHaveTextContent("规划策略");
+    expect(screen.getByTestId("editor-taxonomy-heading")).toHaveTextContent("目标与规划");
     const instructionMaster = document.querySelector<HTMLElement>(".object-panel")!;
-    expect(within(instructionMaster).getByText("全局规划指引")).toBeInTheDocument();
+    expect(within(instructionMaster).getByText("规划指引")).toBeInTheDocument();
     expect(within(instructionMaster).getByText("2", { selector: ".object-count" })).toBeInTheDocument();
     expect(within(instructionMaster).getByRole("button", { name: "＋ 规划指引" })).toBeInTheDocument();
     expect(instructionMaster.querySelector(".collection-list-group")).toBeNull();
-    expect(screen.getByText("请选择或新增一条规划指引。")).toBeInTheDocument();
+    expect(screen.getByText("从左侧选择一个对象")).toBeInTheDocument();
     expect(instructionMaster.querySelector(".collection-list-item.selected")).toBeNull();
     expect(screen.getByRole("button", { name: /规划指引 1 优先保障生命安全/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /规划指引 2 保留替代方案/ }));
     expect(screen.getByRole("heading", { name: "规划指引 2", level: 3 })).toBeInTheDocument();
-    expect(screen.getByText("规划指引 · 可编辑对象")).toBeInTheDocument();
+    expect(screen.getByText("编辑当前规划指引")).toBeInTheDocument();
     expect(screen.getByDisplayValue("保留替代方案")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("优先保障生命安全")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "↑" }));
     expect(screen.getByRole("heading", { name: "规划指引 1", level: 3 })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "↓" }));
     expect(screen.getByRole("heading", { name: "规划指引 2", level: 3 })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("link", { name: "失败恢复策略" }));
-    await waitFor(() => expect(screen.getByText("请选择或新增一条失败恢复策略。")).toBeInTheDocument());
-    const recoveryMaster = document.querySelector<HTMLElement>(".object-panel")!;
-    expect(within(recoveryMaster).getByRole("button", { name: "＋ 失败恢复策略" })).toBeInTheDocument();
-    expect(recoveryMaster.querySelector(".collection-list-group")).toBeNull();
-    expect(recoveryMaster.querySelector(".collection-list-item.selected")).toBeNull();
-    fireEvent.click(within(recoveryMaster).getByRole("button", { name: /BLOCKED/ }));
-    expect(screen.getByRole("heading", { name: "BLOCKED", level: 3 })).toBeInTheDocument();
-    expect(screen.getByText("失败恢复策略 · 可编辑对象")).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("优先保障生命安全")).not.toBeInTheDocument();
-    expect(screen.getByText("未修改")).toBeInTheDocument();
+
   });
 
-  it("restores a root collection selection from a durable deep link", async () => {
-    const identity = encodeURIComponent(JSON.stringify(["BLOCKED"]));
-    renderEditor(`/scenarios/scenario-1/edit/planning?owner=collection&collection=recovery_hints&item=${identity}`);
-
-    await waitFor(() => expect(screen.getByRole("heading", { name: "BLOCKED", level: 3 })).toBeInTheDocument());
-    expect(screen.getByDisplayValue("重新检查道路")).toBeInTheDocument();
-    expect(screen.getByText("未修改")).toBeInTheDocument();
-  });
+   it("falls back from the removed recovery route to planning instructions", async () => {
+     renderEditor(`/scenarios/scenario-1/edit/planning-recovery?owner=collection&collection=recovery_hints&item=${encodeURIComponent(JSON.stringify(["BLOCKED"]))}`);
+     await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/planning-instructions"));
+     expect(screen.queryByText("BLOCKED")).not.toBeInTheDocument();
+   });
 
   it("adds, reorders, edits, and deletes planning instructions through the standard detail header", async () => {
     renderEditor("/scenarios/scenario-1/edit/planning-instructions");
-    await waitFor(() => expect(screen.getByText("请选择或新增一条规划指引。")).toBeInTheDocument());
+     await waitFor(() => expect(screen.getByText("从左侧选择一个对象")).toBeInTheDocument());
     expect(document.querySelector(".collection-list-item.selected")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /规划指引 1/ }));
     expect(screen.getByRole("heading", { name: "规划指引 1", level: 3 })).toBeInTheDocument();
@@ -314,37 +301,35 @@ describe("Editor section state ownership", () => {
     expect(document.querySelector(".object-count")).toHaveTextContent("2");
   });
 
-  it("creates and deletes a uniquely addressable recovery strategy", async () => {
-    renderEditor("/scenarios/scenario-1/edit/planning-recovery");
-    await waitFor(() => expect(screen.getByText("请选择或新增一条失败恢复策略。")).toBeInTheDocument());
-    expect(document.querySelector(".collection-list-item.selected")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /BLOCKED/ }));
-    expect(screen.getByRole("heading", { name: "BLOCKED", level: 3 })).toBeInTheDocument();
+   it("does not expose recovery strategy creation", async () => {
+     renderEditor("/scenarios/scenario-1/edit/planning-recovery");
+     await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/planning-instructions"));
+     expect(screen.queryByRole("button", { name: /失败恢复/ })).not.toBeInTheDocument();
+   });
 
-    fireEvent.click(screen.getByRole("button", { name: "＋ 失败恢复策略" }));
-    const creationDialog = await screen.findByRole("dialog", { name: /失败恢复策略/ });
-    expect(screen.getByText("未修改")).toBeInTheDocument();
-    fireEvent.change(within(creationDialog).getByLabelText(/\u5931\u8d25\u4ee3\u7801/), { target: { value: "RECOVERED" } });
-    fireEvent.click(within(creationDialog).getByRole("button", { name: "创建" }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "RECOVERED", level: 3 })).toBeInTheDocument());
-    const hintField = document.querySelector('[data-field-path$=".hint"] textarea');
-    expect(hintField).not.toBeNull();
-    if (!hintField) throw new Error("Expected recovery hint detail field.");
-    fireEvent.change(hintField, { target: { value: "Retry the route" } });
+  it("uses the same ordered master-detail contract for quick targets", async () => {
+    renderEditor("/scenarios/scenario-1/edit/goal-resolution");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "快捷目标" })).toBeInTheDocument());
+    const master = document.querySelector<HTMLElement>(".object-panel")!;
+    expect(within(master).getByText("快捷目标")).toBeInTheDocument();
+    expect(within(master).getByText("2", { selector: ".object-count" })).toBeInTheDocument();
+    expect(within(master).getByRole("button", { name: "＋ 快捷目标" })).toBeInTheDocument();
+    expect(screen.getByText("从左侧选择一个对象")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /快捷目标 2 确保医院运行/ }));
+    expect(screen.getByRole("heading", { name: "快捷目标 2", level: 3 })).toBeInTheDocument();
+    expect(screen.getByLabelText("目标文本")).toHaveValue("确保医院运行");
+    expect(screen.queryByLabelText("澄清提示")).not.toBeInTheDocument();
+    fireEvent.click(within(master).getByRole("button", { name: "＋ 快捷目标" }));
+    expect(screen.getByRole("heading", { name: "快捷目标 3", level: 3 })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("目标文本"), { target: { value: "新的快捷目标" } });
     expect(screen.getByText("有未保存修改")).toBeInTheDocument();
-    expect(screen.getByText("RECOVERED", { selector: "output.stable-identity-value" })).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("RECOVERED")).not.toBeInTheDocument();
-
-    vi.mocked(api.transformWorkingCopy).mockImplementationOnce(async (_id, _revision, document) => {
-      const definition = structuredClone(document) as typeof draft.definition_document;
-      definition.planning.recovery_hints = definition.planning.recovery_hints.filter((item) => item.failure_code !== "RECOVERED");
-      return { scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [], definition_document: definition };
-    });
+    fireEvent.click(screen.getByRole("button", { name: "↑" }));
+    expect(screen.getByRole("heading", { name: "快捷目标 2", level: 3 })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
-    const dialog = await screen.findByRole("dialog", { name: "删除「失败代码 · RECOVERED」？" });
+    const dialog = await screen.findByRole("dialog", { name: "删除「快捷目标 2」？" });
     fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
-    await waitFor(() => expect(screen.getByText("请选择或新增一条失败恢复策略。")).toBeInTheDocument());
-    expect(screen.queryByDisplayValue("Retry the route")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("新的快捷目标")).not.toBeInTheDocument();
+    expect(master.querySelector(".object-count")).toHaveTextContent("2");
   });
   it("replays a validation locator into the matching root collection item", async () => {
     vi.mocked(api.validateDraft).mockResolvedValue({

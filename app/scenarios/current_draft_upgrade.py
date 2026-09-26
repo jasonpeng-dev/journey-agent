@@ -10,6 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import Scenario, ScenarioDraft
+from app.scenarios.migration import (
+    CurrentV3MigrationPreview,
+    preview_current_v3_migration,
+)
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
 
 
@@ -23,6 +27,15 @@ class ScenarioDraftUpgradeResult:
     relation_count: int
     quick_input_count: int
     objective_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentV3DraftMigrationResult:
+    scenario_id: str
+    changed: bool
+    revision_before: int
+    revision_after: int
+    preview: CurrentV3MigrationPreview
 
 
 def upgrade_scenario_draft_to_current_definition(
@@ -105,7 +118,68 @@ def upgrade_scenario_draft_to_current_definition(
     )
 
 
+def migrate_current_v3_draft(
+    db: Session,
+    *,
+    target_scenario_id: UUID,
+    expected_revision: int,
+) -> CurrentV3DraftMigrationResult:
+    """Apply the current v3 GoalResolution cleanup through Draft lifecycle.
+
+    Only a mutable Draft whose document is schema v3 is eligible.  The
+    document transform is detached and validated before ``replace_draft``
+    performs the canonical optimistic-concurrency mutation, so normal revision,
+    validation-status and hash-reset semantics are preserved.
+    """
+
+    scenario = db.get(Scenario, target_scenario_id)
+    if scenario is None:
+        raise ScenarioLifecycleError("SCENARIO_NOT_FOUND", "The target Scenario does not exist")
+    draft = db.get(ScenarioDraft, target_scenario_id)
+    if draft is None:
+        raise ScenarioLifecycleError(
+            "SCENARIO_DRAFT_NOT_FOUND",
+            "The target Scenario has no editable Draft",
+        )
+    if draft.revision != expected_revision:
+        raise ScenarioLifecycleError(
+            "SCENARIO_DRAFT_CONFLICT",
+            "The target Draft revision changed before the migration",
+        )
+    if draft.definition_document.get("schema_version") != 3:
+        raise ScenarioLifecycleError(
+            "SCENARIO_DRAFT_NOT_CURRENT_V3",
+            "The target Draft is not a current schema v3 document",
+        )
+
+    before = deepcopy(draft.definition_document)
+    preview = preview_current_v3_migration(before)
+    if preview.target_document == before:
+        return CurrentV3DraftMigrationResult(
+            scenario_id=str(target_scenario_id),
+            changed=False,
+            revision_before=expected_revision,
+            revision_after=expected_revision,
+            preview=preview,
+        )
+
+    migrated = ScenarioService(db).replace_draft(
+        target_scenario_id,
+        expected_revision=expected_revision,
+        definition_document=preview.target_document,
+    )
+    return CurrentV3DraftMigrationResult(
+        scenario_id=str(target_scenario_id),
+        changed=True,
+        revision_before=expected_revision,
+        revision_after=migrated.revision,
+        preview=preview,
+    )
+
+
 __all__ = [
+    "CurrentV3DraftMigrationResult",
     "ScenarioDraftUpgradeResult",
+    "migrate_current_v3_draft",
     "upgrade_scenario_draft_to_current_definition",
 ]

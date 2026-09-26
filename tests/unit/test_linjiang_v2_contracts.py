@@ -707,6 +707,9 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     dependencies = payload["known_world"]["unknown_dependencies"]
     assert all(item.get("dependency_id") for item in dependencies)
     assert len({item["dependency_id"] for item in dependencies}) == len(dependencies)
+    assert [item["dependency_id"] for item in dependencies] == sorted(
+        item["dependency_id"] for item in dependencies
+    )
     resource_dependencies = {
         item["resource_key"]: item
         for item in dependencies

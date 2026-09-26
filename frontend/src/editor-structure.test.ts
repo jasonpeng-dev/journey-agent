@@ -5,7 +5,7 @@ import { entityRegistry, rootFieldRegistry } from "./editor-registry";
 import { editorTaxonomyGroups, sectionLabels } from "./ui";
 
 const expectedModes: Record<SectionMode, string[]> = {
-  SINGLETON: ["overview", "goal-resolution"],
+  SINGLETON: ["overview"],
   COLLECTION: [
     "node-types",
     "world-entities",
@@ -18,6 +18,7 @@ const expectedModes: Record<SectionMode, string[]> = {
     "actions",
     "rules",
     "derived-states",
+    "goal-resolution",
     "planning-instructions",
     "planning-recovery",
     "terminology-references",
@@ -28,6 +29,16 @@ const expectedModes: Record<SectionMode, string[]> = {
 };
 
 describe("section structure registry", () => {
+  it("uses the final five product groups without duplicate responsibility shells", () => {
+    expect(editorTaxonomyGroups).toEqual([
+      { label: "概览", items: ["overview"] },
+      { label: "世界模型", items: ["world", "node-types", "world-entities", "relation-types", "relations", "resources"] },
+      { label: "角色与行动", items: ["roles", "actors", "interactions", "actions", "rules"] },
+      { label: "目标与规划", items: ["derived-states", "goal-resolution", "planning-instructions", "terminology-references"] },
+      { label: "初始化与发布", items: ["initialization", "configuration-check", "validation"] },
+    ]);
+  });
+
   it("freezes the authoring and legacy routes into the five product modes", () => {
     expect(Object.keys(sectionStructureRegistry)).toHaveLength(21);
     for (const [mode, sections] of Object.entries(expectedModes)) {
@@ -87,14 +98,14 @@ describe("section structure registry", () => {
   });
 
   it("separates configuration checks from validation and publishing", () => {
-    const group = editorTaxonomyGroups.find((entry) => entry.label === "检查与发布");
-    expect(group?.items).toEqual(["configuration-check", "validation"]);
+    const group = editorTaxonomyGroups.find((entry) => entry.label === "初始化与发布");
+    expect(group?.items).toEqual(["initialization", "configuration-check", "validation"]);
     expect(sectionLabels["configuration-check"]).toBe("配置检查");
     expect(sectionLabels.validation).toBe("验证与发布");
   });
 
-  it("places Public References under the Goal System taxonomy", () => {
-    const group = editorTaxonomyGroups.find((entry) => entry.label === "目标系统");
+  it("places Public References under the Goals and Planning taxonomy", () => {
+    const group = editorTaxonomyGroups.find((entry) => entry.label === "目标与规划");
     expect(group?.items).toContain("terminology-references");
     expect(editorTaxonomyGroups.some((entry) => String(entry.label) === "公开信息")).toBe(false);
     expect(sectionLabels["terminology-references"]).toBe("术语与引用");

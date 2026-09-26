@@ -116,11 +116,11 @@ const declarations: Partial<Record<EditorSection, StructureDeclaration>> = {
   ),
   "goal-resolution": declaration(
     "goal-resolution",
-    "SINGLETON",
-    { visible: false, source: "none", label: "section", searchable: false, create: "none", grouped: false, itemIdentity: "none" },
-    { renderer: "root", title: "section", selection: "none" },
-    { create: false, rename: false, delete: false, inspector: false, advancedJson: "none" },
-    "singleton",
+    "COLLECTION",
+    { visible: true, source: "root-collections", label: "section", searchable: true, create: "root-collection-item", grouped: false, itemIdentity: "collection-identity" },
+    { renderer: "root-collection", title: "selected-item", selection: "root-owner" },
+    { create: true, rename: false, delete: true, inspector: false, advancedJson: "none" },
+    "root-collection",
   ),
   planning: declaration(
     "planning",

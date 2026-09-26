@@ -106,7 +106,7 @@ function consumerHref(edge: ReferenceEdge, scenarioId: string, document: JsonObj
     return `/scenarios/${scenarioId}/edit/initialization`;
   }
   if (kind === "metadata") return `/scenarios/${scenarioId}/edit/overview${fieldPath ? `?focus_path=${encodeURIComponent(fieldPath)}` : ""}`;
-  if (kind === "planning") return `/scenarios/${scenarioId}/edit/${fieldPath?.startsWith("recovery_hints") ? "planning-recovery" : "planning-instructions"}${fieldPath ? `?focus_path=${encodeURIComponent(fieldPath)}` : ""}`;
+  if (kind === "planning") return `/scenarios/${scenarioId}/edit/planning-instructions${fieldPath ? `?focus_path=${encodeURIComponent(fieldPath)}` : ""}`;
   if (kind === "action_parameter" || kind === "action_outcome") {
     const [actionKey, nestedKey] = (key ?? "").split(":", 2);
     const nestedPath = kind === "action_parameter" ? `parameters.${nestedKey}` : `expected_outcomes.${nestedKey}`;

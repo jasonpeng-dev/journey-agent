@@ -32,6 +32,7 @@ import {
 } from "./editor/FormPrimitives";
 import { referenceOptions } from "./editor/ReferencePicker";
 import { IdentityCreationDialog, type IdentityCreationField, type IdentityCreationValues, type IdentityOption } from "./editor/IdentityCreationDialog";
+import { OrderedStringCollectionDetail } from "./editor/OrderedStringCollectionWorkspace";
 import { ValueLabelList } from "./editor/ValueLabelEditor";
 import { editorLabel, platformEnumLabel, type PlatformEnumDomain } from "../ui";
 import { moveItem, type MoveDirection } from "../editor-order";
@@ -55,7 +56,7 @@ function OwnerLink({ to, children, className }: { to: string; children: ReactNod
   return <AuthoringActionButton className={className} intent="navigate" to={to}>{children}</AuthoringActionButton>;
 }
 
-const EFFECT_KINDS = V2_ENUMS.effectKind;
+const EFFECT_KINDS = V2_ENUMS.effectKind.filter((kind) => kind !== "EMIT_FAILURE");
 const CONDITION_KINDS = V2_ENUMS.conditionKind;
 
 function enumDomainForChoices(choices: readonly string[]): PlatformEnumDomain | undefined {
@@ -389,8 +390,8 @@ function defaultEffect(kind: string): JsonObject {
   if (["REVEAL_NODE", "HIDE_NODE"].includes(kind)) return { kind, node: { kind: "CURRENT_TARGET" } };
   if (kind === "SET_NODE_ACCESS") return { kind, node: { kind: "CURRENT_TARGET" }, access: "AVAILABLE" };
   if (["ADJUST_RESOURCE", "RESERVE_RESOURCE", "RELEASE_RESOURCE"].includes(kind)) return { kind, resource_key: "", resource_scope: { kind: "ACTOR_CURRENT_REGION" }, amount: { source: "LITERAL", literal: 1, multiplier: 1 } };
-  if (kind === "EMIT_FAILURE") return { kind, failure_code: "", message: "", retryable: false };
-  if (kind === "EMIT_OUTCOME") return { kind, outcome_code: "", retryable: false };
+  if (kind === "BLOCK_ACTION") return { kind };
+  if (kind === "EMIT_OUTCOME") return { kind, outcome_code: "" };
   if (kind === "WRITE_MEMORY_EVENT") return { kind, memory_key: "", memory_content: "" };
   if (kind === "SET_ACTOR_COMMAND_REACHABILITY") return { kind, actor_key: "", command_reachability: "ONLINE" };
   if (kind === "SET_RELATION_VISIBILITY") return { kind, relation_key: "", visibility: "VISIBLE" };
@@ -402,6 +403,9 @@ function defaultEffect(kind: string): JsonObject {
 
 function EffectEditor({ value, document, path, onChange, outcomeOptions, outcomeOwnerHref, onRemove, onMove, moveIndex, moveCount }: { value: JsonObject; document: JsonObject; path: string; onChange: Change; outcomeOptions: IdentityOption[]; outcomeOwnerHref?: string; onRemove?: () => void; onMove?: (direction: MoveDirection) => void; moveIndex?: number; moveCount?: number }) {
   const kind = typeof value.kind === "string" ? value.kind : "EMIT_OUTCOME";
+  if (kind === "EMIT_FAILURE") {
+    return <ListCard title="兼容的旧失败效果" onRemove={onRemove} onMove={onMove} moveIndex={moveIndex} moveCount={moveCount}><p className="typed-help">旧版本失败元数据仅用于兼容读取，当前规则请使用“阻止行动”表达阻塞语义。</p></ListCard>;
+  }
   if (!(EFFECT_KINDS as readonly string[]).includes(kind)) {
     return <ListCard title={`未知效果 · ${kind}`} onRemove={onRemove} onMove={onMove} moveIndex={moveIndex} moveCount={moveCount}><AdvancedJson value={value} onChange={(next) => onChange(clone(next))} path={path} label="未知效果 JSON" /></ListCard>;
   }
@@ -415,7 +419,7 @@ function EffectEditor({ value, document, path, onChange, outcomeOptions, outcome
   const inferredOutcomeOwnerHref = scenarioId && typeof ownerRule?.action_key === "string"
     ? `/scenarios/${scenarioId}/edit/actions/${encodeURIComponent(ownerRule.action_key)}`
     : scenarioId ? `/scenarios/${scenarioId}/edit/actions` : "../actions";
-  return <ListCard title={`效果 · ${platformEnumLabel("effect_kind", kind)}`} summary={cardSummary(value.fact_key, value.resource_key, value.outcome_code, value.failure_code)} onRemove={onRemove} onMove={onMove} moveIndex={moveIndex} moveCount={moveCount}>
+  return <ListCard title={`效果 · ${platformEnumLabel("effect_kind", kind)}`} summary={cardSummary(value.fact_key, value.resource_key, value.outcome_code)} onRemove={onRemove} onMove={onMove} moveIndex={moveIndex} moveCount={moveCount}>
     <EnumField value={kind} onChange={(next) => onChange({ ...defaultEffect(next), key: value.key })} path={path + ".kind"} label="Effect kind" choices={EFFECT_KINDS} required />
     {factKinds.includes(kind) && <>
       <NodeSelectorEditor value={clone(value.node)} document={document} path={path + ".node"} onChange={(next) => update("node", next)} required />
@@ -430,11 +434,7 @@ function EffectEditor({ value, document, path, onChange, outcomeOptions, outcome
       <IntegerExpressionEditor value={value.amount} path={path + ".amount"} onChange={(next) => update("amount", next)} />
     </>}
     {kind === "EMIT_OUTCOME" && <OptionSelect value={value.outcome_code} onChange={(next) => update("outcome_code", next)} options={outcomeOptions} path={path + ".outcome_code"} label="Expected outcome" placeholder="请选择已有结果" required headingAddon={<OwnerLink className="field-owner-link" to={outcomeOwnerHref ?? inferredOutcomeOwnerHref}>前往行动结果</OwnerLink>} />}
-    {kind === "EMIT_FAILURE" && <>
-      <TextField value={value.failure_code} onChange={(next) => update("failure_code", next)} path={path + ".failure_code"} label="Failure code" required />
-      <TextField value={value.message} onChange={(next) => update("message", next)} path={path + ".message"} label="Message" multiline required />
-    </>}
-    {["EMIT_OUTCOME", "EMIT_FAILURE"].includes(kind) && <BooleanField value={value.retryable} onChange={(next) => update("retryable", next)} path={path + ".retryable"} label="Retryable" />}
+     {kind === "BLOCK_ACTION" && <p className="typed-help">阻止行动：由后端失败分类与恢复策略统一处理，不在场景规则中填写失败代码、消息或重试策略。</p>}
     {kind === "WRITE_MEMORY_EVENT" && <>
       <TextField value={value.memory_key} onChange={(next) => update("memory_key", next)} path={path + ".memory_key"} label="Memory key" required />
       <TextField value={value.memory_content} onChange={(next) => update("memory_content", next)} path={path + ".memory_content"} label="Memory content" multiline required />
@@ -906,15 +906,11 @@ function InitializationEditor({ value }: { value: JsonObject; document: JsonObje
   </div>;
 }
 
-function PlanningEditor({ value, onChange }: { value: JsonObject; onChange: Change }) {
-  const hints = arrayOf(value.recovery_hints);
-  return <div className="typed-specialized-editor">
-    <StringListField value={value.instructions} onChange={(next) => onChange(setField(value, "instructions", next))} path="planning.instructions" label="Planning instructions" />
-    <section className="nested-list"><h4>恢复提示</h4>{hints.map((item) => <div className="readonly-field" key={String(item.failure_code ?? "")}><code>{String(item.failure_code ?? "")}</code><span>{String(item.hint ?? "")}</span></div>)}
-      <FieldActionRow><OwnerLink to="../planning-recovery">前往规划恢复</OwnerLink></FieldActionRow>
-    </section>
-  </div>;
+function PlanningEditor({ value }: { value: JsonObject }) {
+  const instructions = stringsOf(value.instructions);
+  return <OrderedStringCollectionDetail itemLabelPrefix="规划指引" items={instructions} selectedIndex={null} onChange={() => undefined} onMove={() => undefined} onDelete={() => undefined} fieldLabel="指引内容" multiline emptyDetailTitle="从左侧选择一个对象" emptyDetailDescription="选择或新建对象后，在这里编辑它的结构化字段。" showHeader={false} />;
 }
+
 export function ResourceSourceHintEditor({ value, document, path, onChange }: { value: unknown; document: JsonObject; path: string; onChange: (value: JsonObject | null) => void }) {
   const hint = clone(value);
   const configured = value !== null && typeof value === "object" && !Array.isArray(value);
@@ -932,8 +928,10 @@ export function ResourceSourceHintEditor({ value, document, path, onChange }: { 
   return <section className="nested-list resource-source-hint-editor"><div className="typed-array-heading"><h4>{editorLabel("Source hint")} <span className="required-marker">*</span></h4><button type="button" className="small danger" onClick={() => onChange(null)}>{editorLabel("Clear source hint")}</button></div><p className="typed-help">来源区域必须引用现有的区域节点。</p><div className="typed-grid"><ReferenceField value={hint.primary_region_key} onChange={(next) => update("primary_region_key", next || null)} path={`${path}.primary_region_key`} label="主要区域" domain="region" document={document} /><div className="form-field-full"><MultiValuePicker value={hint.candidate_region_keys} onChange={(next) => update("candidate_region_keys", next)} path={`${path}.candidate_region_keys`} label="候选区域" options={options} headingAddon={candidateHeadingAddon} /></div></div>{!hasAnyRegion && <p className="field-error" role="alert">请选择主要区域或添加至少一个候选区域。</p>}</section>;
 }
 
-function GoalResolutionEditor({ value, onChange }: { value: JsonObject; onChange: Change }) {
-  return <div className="typed-specialized-editor"><BooleanField value={value.allow_llm_fallback} onChange={(next) => onChange(setField(value, "allow_llm_fallback", next))} path="goal_resolution.allow_llm_fallback" label="Allow LLM fallback" /><TextField value={value.clarification_prompt} onChange={(next) => onChange(setField(value, "clarification_prompt", next))} path="goal_resolution.clarification_prompt" label="澄清提示" multiline required /><StringListField value={value.quick_inputs} onChange={(next) => onChange(setField(value, "quick_inputs", next))} path="goal_resolution.quick_inputs" label="快速输入" help="仅用于填充玩家的目标输入；玩家仍可编辑，提交后仍由目标解析器处理。" /><BooleanField value={value.world_goal_state_catalog} onChange={(next) => onChange(setField(value, "world_goal_state_catalog", next))} path="goal_resolution.world_goal_state_catalog" label="世界目标状态目录" /></div>;
+function GoalResolutionEditor({ value, selection, onQuickInputChange, onQuickInputMove, onQuickInputRemove }: { value: JsonObject; selection: RootOwnerSelection | null; onQuickInputChange?: (index: number, content: string) => void; onQuickInputMove?: (index: number, direction: MoveDirection) => void; onQuickInputRemove?: (index: number) => void }) {
+  const items = stringsOf(value.quick_inputs);
+  const selectedIndex = selection?.owner === "quick-input" ? selection.index : null;
+  return <OrderedStringCollectionDetail itemLabelPrefix="快捷目标" items={items} selectedIndex={selectedIndex} onChange={(index, content) => onQuickInputChange?.(index, content)} onMove={(index, direction) => onQuickInputMove?.(index, direction)} onDelete={(index) => onQuickInputRemove?.(index)} fieldLabel="目标文本" showHeader={false} emptyDetailTitle="从左侧选择一个对象" emptyDetailDescription="选择或新建对象后，在这里编辑它的结构化字段。" />;
 }
 
 function PublicKnowledgeEditor({ value }: { value: JsonObject; document: JsonObject; onChange: Change }) {
@@ -957,11 +955,10 @@ function collectionRootPath(section: "initialization" | "planning" | "public-kno
   return section === "public-knowledge" ? "public_knowledge" : section;
 }
 
-function CollectionDetailEditor({ section, selection, index, value, onChange, onRemove, onMove, moveCount }: { section: "initialization" | "planning" | "public-knowledge"; selection: RootCollectionSelection; index: number; value: JsonObject; document?: JsonObject; onChange: Change; onRemove: () => void; onMove?: (direction: MoveDirection) => void; moveCount?: number }) {
+function CollectionDetailEditor({ section, selection, index, value, onRemove, onMove, moveCount }: { section: "initialization" | "planning" | "public-knowledge"; selection: RootCollectionSelection; index: number; value: JsonObject; document?: JsonObject; onRemove: () => void; onMove?: (direction: MoveDirection) => void; moveCount?: number }) {
   const path = `${collectionRootPath(section)}.${selection.collection}.${index}`;
-  const update = (key: string, next: unknown) => onChange(setField(value, key, next));
   if (selection.collection === "resource_initial_states") return <article className="collection-detail-editor"><h4>旧版资源初始状态</h4><IdentityValue value={value.resource_key} path={`${path}.resource_key`} label="资源身份" /><IdentityValue value={value.scope_node_key ?? "global"} path={`${path}.scope_node_key`} label="范围身份" /><p>此兼容集合仅支持只读查看，当前数据请使用初始化正式所有者。</p><FieldActionRow><OwnerLink to="../initialization">前往初始化</OwnerLink></FieldActionRow></article>;
-  return <article className="collection-detail-editor"><header className="collection-detail-heading"><div><p className="panel-kicker">{editorLabel("Collection item")}</p><h4>{rootCollectionLabel(selection.collection)}</h4></div><span className="collection-detail-actions"><ReorderControls index={index} count={moveCount ?? 1} onMove={onMove} /><button type="button" className="small danger" onClick={onRemove}>删除此项</button></span></header>{selection.collection === "recovery_hints" && <div className="typed-grid"><TextField value={value.failure_code} onChange={(next) => update("failure_code", next)} path={`${path}.failure_code`} label="失败代码（稳定身份）" readOnly /><div className="form-field-full"><TextField value={value.hint} onChange={(next) => update("hint", next)} path={`${path}.hint`} label="失败恢复策略" multiline required /></div></div>}</article>;
+  return <article className="collection-detail-editor"><header className="collection-detail-heading"><div><p className="panel-kicker">{editorLabel("Collection item")}</p><h4>{rootCollectionLabel(selection.collection)}</h4></div><span className="collection-detail-actions"><ReorderControls index={index} count={moveCount ?? 1} onMove={onMove} /><button type="button" className="small danger" onClick={onRemove}>删除此项</button></span></header></article>;
 }
 
 function selectedCollection(value: JsonObject, selection: RootOwnerSelection | null): { index: number; value: JsonObject } | null {
@@ -977,28 +974,20 @@ function CollectionEmptyState({ label }: { label: string }) {
   return <div className="collection-empty-state"><strong>{label}</strong><p>请从左侧列表选择或新建一项。</p></div>;
 }
 
-export function MasterDetailInitializationEditor({ value, document, selection, onChange, onCollectionChange, onCollectionRemove, onCollectionMove }: { value: JsonObject; document: JsonObject; selection: RootOwnerSelection | null; onChange: Change; onCollectionChange: (value: JsonObject) => void; onCollectionRemove: () => void; onCollectionMove?: (direction: MoveDirection) => void }) {
+export function MasterDetailInitializationEditor({ value, document, selection, onChange, onCollectionRemove, onCollectionMove }: { value: JsonObject; document: JsonObject; selection: RootOwnerSelection | null; onChange: Change; onCollectionRemove: () => void; onCollectionMove?: (direction: MoveDirection) => void }) {
   const selected = selectedCollection(value, selection);
   const update = (key: string, next: unknown) => onChange(setField(value, key, next));
   if (selection?.owner === "singleton") {
     return <div className="typed-specialized-editor"><section className="root-singleton-card"><div className="root-singleton-heading"><div><p className="panel-kicker">初始化</p><h4>初始化入口</h4></div></div><div className="typed-grid"><ReferenceField value={value.start_node_key} onChange={(next) => update("start_node_key", next)} path="initialization.start_node_key" label="起始节点" domain="node" document={document} required /><ReferenceField value={value.primary_actor_key} onChange={(next) => update("primary_actor_key", next)} path="initialization.primary_actor_key" label="主要参与者" domain="actor" document={document} required /></div></section></div>;
   }
-  return <div className="typed-specialized-editor">{selected && selection?.owner === "collection" ? <CollectionDetailEditor section="initialization" selection={selection} index={selected.index} value={selected.value} document={document} onChange={onCollectionChange} onRemove={onCollectionRemove} onMove={selection.collection === "recovery_hints" ? onCollectionMove : undefined} moveCount={collectionLength(value, selection.collection)} /> : <CollectionEmptyState label="请选择初始化配置或集合项" />}</div>;
+  return <div className="typed-specialized-editor">{selected && selection?.owner === "collection" ? <CollectionDetailEditor section="initialization" selection={selection} index={selected.index} value={selected.value} document={document} onRemove={onCollectionRemove} onMove={onCollectionMove} moveCount={collectionLength(value, selection.collection)} /> : <CollectionEmptyState label="请选择初始化配置或集合项" />}</div>;
 }
 
 export function MasterDetailPlanningEditor(props: { page: "instructions" | "recovery"; value: JsonObject; document: JsonObject; selection: RootOwnerSelection | null; onChange: Change; onCollectionChange: (value: JsonObject) => void; onCollectionRemove: () => void; onCollectionMove?: (direction: MoveDirection) => void; onInstructionChange?: (index: number, content: string) => void; onInstructionRemove?: (index: number) => void; onInstructionMove?: (index: number, direction: MoveDirection) => void }) {
-  const { page, value, selection, onCollectionChange, onInstructionChange } = props;
-  if (page === "instructions") {
-    if (selection?.owner !== "instruction") return <CollectionEmptyState label="请选择或新增一条规划指引。" />;
-    const instructions = stringsOf(value.instructions);
-    const content = instructions[selection.index];
-    if (content === undefined) return <CollectionEmptyState label="请选择或新增一条规划指引。" />;
-    return <div className="typed-specialized-editor planning-detail-fields"><TextField value={content} onChange={(next) => onInstructionChange?.(selection.index, next)} path={`planning.instructions.${selection.index}`} label="指引内容" multiline /></div>;
-  }
-  const selected = selectedCollection(value, selection);
-  if (!selected || selection?.owner !== "collection") return <div className="typed-specialized-editor"><CollectionEmptyState label="请选择或新增一条失败恢复策略。" /></div>;
-  const path = `planning.${selection.collection}.${selected.index}`;
-  return <div className="typed-specialized-editor planning-detail-fields"><div className="typed-grid"><TextField value={selected.value.failure_code} onChange={() => undefined} path={`${path}.failure_code`} label="失败代码（稳定身份）" readOnly /><div className="form-field-full"><TextField value={selected.value.hint} onChange={(next) => onCollectionChange(setField(selected.value, "hint", next))} path={`${path}.hint`} label="恢复策略" multiline required /></div></div></div>;
+  const { value, selection, onInstructionChange } = props;
+  const instructions = stringsOf(value.instructions);
+  const selectedIndex = selection?.owner === "instruction" ? selection.index : null;
+  return <OrderedStringCollectionDetail itemLabelPrefix="规划指引" items={instructions} selectedIndex={selectedIndex} onChange={(index, content) => onInstructionChange?.(index, content)} onMove={(index, direction) => props.onInstructionMove?.(index, direction)} onDelete={(index) => props.onInstructionRemove?.(index)} fieldLabel="指引内容" multiline showHeader={false} emptyDetailTitle="从左侧选择一个对象" emptyDetailDescription="选择或新建对象后，在这里编辑它的结构化字段。" />;
 }
 
 export function MasterDetailPublicKnowledgeEditor({ value, selection }: { value: JsonObject; document: JsonObject; selection: RootOwnerSelection | null; onCollectionChange: (value: JsonObject) => void; onCollectionRemove: () => void; onCollectionMove?: (direction: MoveDirection) => void }) {

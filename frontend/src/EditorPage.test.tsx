@@ -499,7 +499,7 @@ describe("EditorPage topology interaction contract", () => {
     await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/configuration-check"));
     fireEvent.click(screen.getByRole("link", { name: "初始化" }));
     await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/initialization"));
-    fireEvent.click(screen.getByRole("link", { name: "全局规划指引" }));
+    fireEvent.click(screen.getByRole("link", { name: "规划指引" }));
     await waitFor(() => expect(screen.getByTestId("editor-location")).toHaveTextContent("/edit/planning-instructions"));
     expect(screen.queryByRole("dialog", { name: "放弃当前修改？" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("link", { name: "世界实体" }));

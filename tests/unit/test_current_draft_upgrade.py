@@ -9,6 +9,7 @@ from app.domain.scenario_v2 import ScenarioDefinitionV2
 from app.infrastructure.db.models import ScenarioDraft, ScenarioVersion
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from app.scenarios.current_draft_upgrade import (
+    migrate_current_v3_draft,
     upgrade_scenario_draft_to_current_definition,
 )
 from app.services.scenarios import ScenarioLifecycleError, ScenarioService
@@ -244,3 +245,44 @@ def test_linjiang_source_produces_current_semantic_counts_without_hardcoded_targ
         result.quick_input_count,
         result.objective_count,
     ) == (4, 48, 6, 0)
+
+
+def test_current_v3_draft_migration_uses_normal_lifecycle_and_is_idempotent(
+    session: Session,
+) -> None:
+    service = ScenarioService(session)
+    scenario = service.create_blank(key="current_v3_cleanup", name="Current V3 cleanup")
+    draft = session.get(ScenarioDraft, scenario.id)
+    assert draft is not None
+    before = deepcopy(draft.definition_document)
+    before["goal_resolution"].update(
+        allow_llm_fallback=False,
+        clarification_prompt="legacy prompt",
+        world_goal_state_catalog=False,
+        quick_inputs=["first", "second"],
+    )
+    migrated_source = service.replace_draft(
+        scenario.id,
+        expected_revision=draft.revision,
+        definition_document=before,
+    )
+    assert migrated_source.revision == 2
+    result = migrate_current_v3_draft(
+        session,
+        target_scenario_id=scenario.id,
+        expected_revision=2,
+    )
+    assert result.changed is True
+    assert (result.revision_before, result.revision_after) == (2, 3)
+    migrated = session.get(ScenarioDraft, scenario.id)
+    assert migrated is not None
+    assert migrated.validation_status == "UNVALIDATED"
+    assert migrated.content_hash is None
+    assert migrated.definition_document["goal_resolution"] == {"quick_inputs": ["first", "second"]}
+    repeated = migrate_current_v3_draft(
+        session,
+        target_scenario_id=scenario.id,
+        expected_revision=3,
+    )
+    assert repeated.changed is False
+    assert repeated.revision_after == 3

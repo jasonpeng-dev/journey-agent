@@ -57,13 +57,13 @@ from app.api.schemas.phase_d import (
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.domain.scenario_v2 import (
-    ScenarioDefinitionV2,
     normalize_resource_source_hint_document,
 )
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.infrastructure.db.session import get_db
 from app.scenarios.authoring import ReferenceEdge, locator_for_path, reference_index
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
+from app.scenarios.documents import parse_scenario_document
 from app.scenarios.initialization import bootstrap_parity, initialization_projection
 from app.scenarios.validation import ScenarioValidationIssue
 from app.services.draft_sandbox import DraftSandboxService
@@ -243,12 +243,12 @@ def preview_initialization(
                 "SCENARIO_DRAFT_CONFLICT",
                 "The Scenario Draft revision changed before initialization preview",
             )
-        definition = ScenarioDefinitionV2.model_validate(request.definition_document)
+        definition = parse_scenario_document(request.definition_document)
         scenario = service.get_scenario(scenario_id)
         published = None
         if scenario.current_published_version_id is not None:
             version = service.get_version(scenario_id, scenario.current_published_version_id)
-            published = ScenarioDefinitionV2.model_validate(version.snapshot_document)
+            published = parse_scenario_document(version.snapshot_document)
         return {
             "revision": draft.revision,
             "projection": initialization_projection(definition, request.definition_document),
@@ -265,7 +265,7 @@ def preview_initialization(
         )
         if partial_document is not None:
             try:
-                partial_definition = ScenarioDefinitionV2.model_validate(partial_document)
+                partial_definition = parse_scenario_document(partial_document)
             except ValidationError:
                 pass
             else:
@@ -1169,9 +1169,11 @@ def list_examples() -> list[ScenarioExampleResponse]:
 
 @router.get("/scenario-definition-schema", response_model=dict[str, Any])
 def get_scenario_definition_schema() -> dict[str, Any]:
-    """Expose the closed v2 authoring vocabulary, never executable behavior."""
+    """Expose the closed current authoring vocabulary, never executable behavior."""
 
-    return ScenarioDefinitionV2.model_json_schema(mode="validation")
+    from app.domain.scenario_v3 import ScenarioDefinitionV3
+
+    return ScenarioDefinitionV3.model_json_schema(mode="validation")
 
 
 def _draft_write(
@@ -1279,7 +1281,7 @@ def _version_summary(version: ScenarioVersion) -> ScenarioVersionSummaryResponse
         id=version.id,
         scenario_id=version.scenario_id,
         version_number=version.version_number,
-        schema_version=2,
+        schema_version=version.schema_version,
         content_hash=version.content_hash,
         published_at=version.published_at,
     )

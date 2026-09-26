@@ -8,6 +8,7 @@ export type EditorLocator =
   | { owner: "root-collection"; section: EditorSection; collection: RootCollectionKey; identity: string; fieldPath: string | null }
   | { owner: "initialization-item"; section: "initialization"; domain: string; group: string; item: string; fieldPath: string | null }
   | { owner: "planning-instruction"; section: "planning-instructions"; index: number; fieldPath: string }
+  | { owner: "quick-input"; section: "goal-resolution"; index: number; fieldPath: string }
   | { owner: "browser"; section: "world"; contextKind: "scope" | "node" | "relation"; contextKey: string }
   | { owner: "workflow"; section: "validation"; issuePath: string | null };
 
@@ -152,16 +153,21 @@ export function editorLocatorFromValidation(locator: Locator, document: JsonObje
       }
     }
   }
+  if (locator.object_kind === "goal_resolution" && locator.field_path) {
+    const quickInputMatch = locator.field_path.match(/^quick_inputs\.(\d+)(?:\.(.*))?$/);
+    if (quickInputMatch) {
+      const index = Number(quickInputMatch[1]);
+      const quickInputs = record(document.goal_resolution)?.quick_inputs;
+      if (Number.isSafeInteger(index) && Array.isArray(quickInputs) && typeof quickInputs[index] === "string") {
+        return { owner: "quick-input", section: "goal-resolution", index, fieldPath: `quick_inputs.${index}${quickInputMatch[2] ? `.${quickInputMatch[2]}` : ""}` };
+      }
+    }
+  }
   if (locator.object_kind === "public_knowledge") {
     const resourceKey = locator.object_key;
     return resourceKey && objectByKindAndKey(document, "resource", resourceKey)
       ? { owner: "entity", section: "resources", kind: "resource", objectKey: resourceKey, fieldPath: "source_hint" }
       : { owner: "singleton", section: "resources", fieldPath: "source_hint" };
-  }
-  if (locator.object_kind === "planning" && locator.field_path?.startsWith("recovery_hints")) {
-    const root = sectionRoot(document, "planning-recovery");
-    const selection = root && typeof root === "object" && !Array.isArray(root) ? rootCollectionSelectionForPath(root as JsonObject, locator.field_path) : null;
-    if (selection) return { owner: "root-collection", section: "planning-recovery", collection: selection.collection, identity: selection.identity, fieldPath: locator.field_path };
   }
   const rootSection = rootSections[locator.object_kind];
   if (rootSection) {
@@ -200,6 +206,12 @@ export function editorLocatorHref(locator: EditorLocator, scenarioId: string): s
   const query = new URLSearchParams();
   if (locator.owner === "planning-instruction") {
     query.set("owner", "instruction");
+    query.set("item", String(locator.index));
+    query.set("focus_path", locator.fieldPath);
+    return `/scenarios/${scenarioId}/edit/${locator.section}?${query}`;
+  }
+  if (locator.owner === "quick-input") {
+    query.set("owner", "quick-input");
     query.set("item", String(locator.index));
     query.set("focus_path", locator.fieldPath);
     return `/scenarios/${scenarioId}/edit/${locator.section}?${query}`;

@@ -15,9 +15,9 @@ export function addObject(document: JsonObject, kind: EntityKind, identity: Json
 
 export function defaultArrayItem(field: string): unknown {
   if (field === "conditions") return { kind: "FACT_EQUALS", node: { kind: "EXPLICIT", node_key: "" }, fact_key: "", value: true };
-  if (field === "effects") return { kind: "EMIT_OUTCOME", outcome_code: "", retryable: false };
+  if (field === "effects") return { kind: "EMIT_OUTCOME", outcome_code: "" };
   // Identity-bearing arrays must go through their owner creation dialog.
-  if (["facts", "relations", "parameters", "expected_outcomes", "operation_bindings", "target_actor_roles", "dependencies", "value_labels", "doctrine", "autonomous_limits", "approval_required_values", "resource_pools", "region_resource_knowledge", "resource_initial_states", "recovery_hints", "resource_source_hints", "public_references"].includes(field)) return null;
+  if (["facts", "relations", "parameters", "expected_outcomes", "operation_bindings", "target_actor_roles", "dependencies", "value_labels", "doctrine", "autonomous_limits", "approval_required_values", "resource_pools", "region_resource_knowledge", "resource_initial_states", "resource_source_hints", "public_references", "recovery_hints"].includes(field)) return null;
   return "";
 }
 

@@ -19,6 +19,9 @@ class ScenarioVersionSnapshot:
     schema_version: int
     content_hash: str
     published_at: datetime
+    # Runtime always receives the normalized v2 semantic model.  The
+    # ``schema_version`` field records the immutable authored wire contract
+    # (v2 legacy or v3 current).
     definition: ScenarioDefinitionV2
     # The exact repository loader may verify both the current semantic hash
     # and a safe historical raw-payload hash. Manual/unit snapshots leave
@@ -26,8 +29,8 @@ class ScenarioVersionSnapshot:
     verified_content_hashes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.version_number < 1 or self.schema_version != 2:
-            raise ValueError("published Scenario versions must use schema v2")
+        if self.version_number < 1 or self.schema_version not in {2, 3}:
+            raise ValueError("published Scenario versions must use schema v2 or v3")
         if len(self.content_hash) != 64:
             raise ValueError("published Scenario content hash must be SHA-256")
         if self.verified_content_hashes and self.content_hash not in self.verified_content_hashes:

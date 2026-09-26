@@ -15,6 +15,7 @@ from app.domain.scenario_v2 import (
     ScenarioDefinitionV2,
     normalize_resource_source_hint_document,
 )
+from app.domain.scenario_v3 import ScenarioDefinitionV3
 from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
 from app.scenarios.authoring import (
     DraftAuthoringError,
@@ -29,7 +30,8 @@ from app.scenarios.authoring import (
     validate_generic_identity_transition,
 )
 from app.scenarios.completeness import CompletenessResult, evaluate_completeness
-from app.scenarios.serialization import canonical_document, scenario_content_hash
+from app.scenarios.documents import parse_scenario_document_versioned
+from app.scenarios.serialization import canonical_document_payload, scenario_content_hash
 from app.scenarios.validation import (
     ScenarioDefinitionValidator,
     ScenarioValidationIssue,
@@ -306,12 +308,18 @@ class ScenarioService:
             .order_by(ScenarioVersion.version_number.desc())
             .limit(1)
         )
-        canonical = canonical_document(draft.definition_document)
+        canonical_payload = canonical_document_payload(draft.definition_document)
+        canonical_authored = parse_scenario_document_versioned(canonical_payload)
+        canonical = (
+            canonical_authored.to_v2()
+            if isinstance(canonical_authored, ScenarioDefinitionV3)
+            else canonical_authored
+        )
         version = ScenarioVersion(
             scenario_id=scenario.id,
             version_number=(latest_number or 0) + 1,
-            schema_version=canonical.schema_version,
-            snapshot_document=canonical.model_dump(mode="json"),
+            schema_version=int(canonical_payload["schema_version"]),
+            snapshot_document=canonical_payload,
             content_hash=content_hash,
             engine_contract_key=canonical.engine_contract.key,
             engine_contract_version=canonical.engine_contract.version,
@@ -694,10 +702,10 @@ def _authoring_error_details(error: DraftAuthoringError) -> dict[str, Any]:
 
 
 def _blank_document(*, key: str, name: str) -> dict[str, Any]:
-    """Return an intentionally incomplete but Editor-shaped v2 Draft."""
+    """Return an intentionally incomplete but Editor-shaped current Draft."""
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "metadata": {"key": key, "name": name, "description": ""},
         "engine_contract": {"key": "declarative-rule-engine", "version": "1"},
         "initialization": {"start_node_key": "", "primary_actor_key": ""},
@@ -713,11 +721,8 @@ def _blank_document(*, key: str, name: str) -> dict[str, Any]:
         "interactions": [],
         "actions": [],
         "rules": [],
-        "goal_resolution": {
-            "allow_llm_fallback": True,
-            "clarification_prompt": "Please clarify the intended objective.",
-        },
-        "planning": {"instructions": [], "recovery_hints": []},
+        "goal_resolution": {"quick_inputs": []},
+        "planning": {"instructions": []},
     }
 
 

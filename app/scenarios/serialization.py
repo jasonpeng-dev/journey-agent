@@ -9,7 +9,8 @@ from copy import deepcopy
 from typing import Any
 
 from app.domain.scenario_v2 import LocalityContractV2, ScenarioDefinitionV2
-from app.scenarios.documents import parse_scenario_document
+from app.domain.scenario_v3 import ScenarioDefinitionV3
+from app.scenarios.documents import parse_scenario_document_versioned
 
 _OPTIONAL_ACTION_FIELDS_WITH_LEGACY_OMISSION = (
     "target_node_type_keys",
@@ -30,10 +31,10 @@ _OPTIONAL_INITIALIZATION_FIELDS_WITH_LEGACY_OMISSION = ("resource_initial_states
 _DEFAULT_LOCALITY_PAYLOAD = LocalityContractV2().model_dump(mode="json")
 
 
-def canonical_document(document: dict[str, Any]) -> ScenarioDefinitionV2:
-    """Validate and normalize ordering without changing Scenario semantics."""
+def canonical_document(document: dict[str, Any]) -> ScenarioDefinitionV2 | ScenarioDefinitionV3:
+    """Validate and normalize ordering while preserving the authored version."""
 
-    return ScenarioDefinitionV2.model_validate(canonical_document_payload(document))
+    return parse_scenario_document_versioned(canonical_document_payload(document))
 
 
 def canonical_document_payload(document: dict[str, Any]) -> dict[str, Any]:
@@ -47,7 +48,7 @@ def canonical_document_payload(document: dict[str, Any]) -> dict[str, Any]:
     hashes.
     """
 
-    return _canonical_v2_payload(parse_scenario_document(document), document)
+    return _canonical_v2_payload(parse_scenario_document_versioned(document), document)
 
 
 def legacy_resource_source_hint_payload(
@@ -78,7 +79,7 @@ def legacy_resource_source_hint_payload(
 
 
 def _canonical_v2_payload(
-    parsed: ScenarioDefinitionV2,
+    parsed: ScenarioDefinitionV2 | ScenarioDefinitionV3,
     source_document: Mapping[str, Any],
 ) -> dict[str, Any]:
     normalized = parsed.model_dump(mode="json")
@@ -237,7 +238,9 @@ def _canonical_v2_payload(
                 if isinstance(gate, dict):
                     gate.get("accepted_values", []).sort(key=_scalar_sort_key)
             state["dependencies"].sort(key=_derived_dependency_sort_key)
-    normalized["planning"]["recovery_hints"].sort(key=lambda item: item["failure_code"])
+    recovery_hints = normalized["planning"].get("recovery_hints")
+    if isinstance(recovery_hints, list):
+        recovery_hints.sort(key=lambda item: item["failure_code"])
     public_references = normalized.get("public_references")
     if isinstance(public_references, list):
         public_references.sort(
@@ -249,7 +252,10 @@ def _canonical_v2_payload(
         )
     # Validate without dumping the model again: another dump would reintroduce
     # fields intentionally omitted by legacy payloads.
-    ScenarioDefinitionV2.model_validate(normalized)
+    if normalized.get("schema_version") == 3:
+        ScenarioDefinitionV3.model_validate(normalized)
+    else:
+        ScenarioDefinitionV2.model_validate(normalized)
     return normalized
 
 

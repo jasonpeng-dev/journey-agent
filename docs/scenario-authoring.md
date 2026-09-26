@@ -18,14 +18,17 @@ create Blank / Example / Clone
 ```
 
 The Draft is an editable JSON document and may be incomplete while it is being authored. The
-strict `ScenarioDefinitionV2` model is constructed during validation, sandbox startup, and
-publication. A Scenario has exactly one Current Draft; saving a Draft increments its revision
-and uses optimistic concurrency. A stale write is rejected rather than silently overwriting
-another edit.
+current authored contract is `ScenarioDefinitionV3`; the runtime constructs the normalized
+`ScenarioDefinitionV2` semantic model during validation, sandbox startup, and publication.
+That normalization is in-memory and does not rewrite an old V2 snapshot. A Scenario has exactly
+one Current Draft; saving a Draft increments its revision and uses optimistic concurrency. A
+stale write is rejected rather than silently overwriting another edit.
 
 ## Definition vocabulary
 
-`ScenarioDefinitionV2` is a closed, generic data contract. The Editor exposes these groups:
+`ScenarioDefinitionV3` is the current closed, generic authoring contract. It reuses the V2
+world and runtime vocabulary while keeping failure ownership in the backend. The Editor exposes
+these groups:
 
 - **Metadata:** scenario key, display name, and description.
 - **World:** node types, nodes, node Facts, semantic Relations, Interactions, and global
@@ -38,7 +41,11 @@ another edit.
   Effects.
 - **Objectives:** completion `ObjectiveRequirementV2` values, public prerequisites, aliases,
   examples, and optional subsumption metadata.
-- **Planning:** Dynamic Goal/clarification metadata and recovery hints.
+- **Goal Resolution:** ordered Quick Targets (`goal_resolution.quick_inputs[]`) only. Provider
+  availability, fallback policy, clarification presentation, and the Dynamic Goal route are
+  platform-owned; they are not current Scenario authoring fields.
+- **Planning:** author planning instructions. Legacy V2 clarification and `recovery_hints`
+  remain readable for compatibility but are not part of current authoring.
 - **Initialization:** starting Node and primary Actor.
 
 Authors can define content and vocabulary, but cannot add executable code, edit the generic Rule
@@ -223,10 +230,13 @@ completion requirements, authored prerequisites, aliases, and planning
 metadata are compiled deterministically into the frozen
 `FormalGoalContractV1` when a Task is created. The contract is bound to the
 exact immutable ScenarioVersion; later Draft edits or publication do not alter
-an existing Task. A Version may set
-`goal_resolution.world_goal_state_catalog=true`; in that mode its authored
-Objective rows can remain for compatibility and preset text, but do not
-bypass the Goal contract.
+an existing Task. Legacy V2 Versions may set
+`goal_resolution.world_goal_state_catalog=true`; in that mode their authored
+Objective rows can remain for compatibility and preset text, but do not bypass
+the Goal contract. Current V3 authoring exposes only the ordered
+`goal_resolution.quick_inputs` collection. Provider fallback policy and the
+World Goal State route are platform-owned normalization details; they are not
+editable V3 fields.
 
 The runtime also accepts an `AD_HOC_DYNAMIC` Goal. The Dynamic Goal
 interpreter receives a Knowledge-safe public ontology and may return one or
@@ -264,11 +274,18 @@ frozen Goal or the authored Scenario.
 
 ## Editor behavior
 
-The browser Editor has Overview, World, Actors, Actions, Rules, Objectives, Planning,
-Initial State, and Validation sections. Objects have stable keys and display names. Display-name
-edits do not change references. Stable-key renames go through the authoring service and update
-the Draft references atomically. The reference index provides Used By navigation, and deletion
-is blocked when another object still references the target.
+The browser Editor has Overview, World, Actors, Actions, Rules, Derived States,
+Quick Targets, Planning Instructions, Initial State, and Validation sections. Objects have stable
+keys and display names. Display-name edits do not change references. Stable-key renames go through
+the authoring service and update the Draft references atomically. The reference index provides
+Used By navigation, and deletion is blocked when another object still references the target.
+
+Quick Targets and Planning Instructions use ordered positional collections. The editor shows a
+standard master/detail workspace: `快捷目标 N`/`规划指引 N` is a presentation ordinal, while the
+stored values remain `goal_resolution.quick_inputs[]` and `planning.instructions[]`. Adding an
+item appends an empty string to the Working Copy, selects it, and does not save automatically;
+deleting and reordering preserve the remaining logical values. There is no stable key or hidden
+identity for an ordered string.
 
 The World view starts with a simple node/relation graph. Facts and detailed interactions/rules
 are inspected when their owning object is selected rather than being rendered as a dense graph.

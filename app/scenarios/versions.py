@@ -8,10 +8,11 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.domain.scenario import ScenarioVersionSnapshot
+from app.domain.scenario_v3 import ScenarioDefinitionV3
 from app.infrastructure.db.models import ScenarioVersion
 from app.scenarios.documents import (
     SUPPORTED_SCENARIO_DOCUMENT_SCHEMA_VERSIONS,
-    parse_scenario_document,
+    parse_scenario_document_versioned,
 )
 from app.scenarios.serialization import (
     canonical_document_payload,
@@ -47,14 +48,19 @@ class ScenarioVersionRepository:
                 "The ScenarioVersion snapshot schema is not supported",
             )
         try:
-            document = parse_scenario_document(record.snapshot_document)
+            authored_document = parse_scenario_document_versioned(record.snapshot_document)
+            document = (
+                authored_document.to_v2()
+                if isinstance(authored_document, ScenarioDefinitionV3)
+                else authored_document
+            )
             canonical_payload = canonical_document_payload(record.snapshot_document)
         except (ValidationError, ValueError) as exc:
             raise ScenarioVersionError(
                 "SCENARIO_VERSION_SNAPSHOT_INVALID",
                 "The persisted ScenarioVersion snapshot is invalid",
             ) from exc
-        if document.schema_version != record.schema_version:
+        if authored_document.schema_version != record.schema_version:
             raise ScenarioVersionError(
                 "SCENARIO_VERSION_SCHEMA_MISMATCH",
                 "ScenarioVersion schema metadata does not match its snapshot",
@@ -76,7 +82,10 @@ class ScenarioVersionRepository:
         # optional empty Action fields existed. Accept that exact historical
         # payload hash only after the payload-shape equality check above; never
         # normalize or rewrite it.
-        semantic_hash = scenario_content_hash(record.snapshot_document)
+        # Runtime consumes the normalized semantic model.  For v3 the
+        # authored wire hash and this semantic hash are both verified; v2
+        # therefore retains the exact historical hash path.
+        semantic_hash = scenario_content_hash(document.model_dump(mode="json"))
         historical_payload_hash = canonical_payload_hash(canonical_payload)
         legacy_semantic_hash = (
             canonical_payload_hash(legacy_source_hint_payload)

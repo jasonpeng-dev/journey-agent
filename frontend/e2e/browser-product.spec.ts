@@ -159,7 +159,7 @@ test("Scenario Editor preserves an unsaved Node through authoring navigation", a
   await expect(page).toHaveURL(/\/edit\/configuration-check/);
   await page.getByRole("link", { name: "初始化", exact: true }).click();
   await expect(page).toHaveURL(/\/edit\/initialization/);
-  await page.getByRole("link", { name: "全局规划指引" }).click();
+  await page.getByRole("link", { name: "规划指引" }).click();
   await expect(page).toHaveURL(/\/edit\/planning-instructions/);
   await page.getByRole("link", { name: "世界实体" }).click();
   await page.getByText("E2E unsaved node", { exact: true }).first().click();
@@ -183,6 +183,52 @@ test("Scenario Editor preserves an unsaved Node through authoring navigation", a
   await dialog.getByRole("button", { name: "删除" }).click();
   await expect(page.locator(".object-list-item", { hasText: "E2E unsaved node" })).toHaveCount(0);
   await expect(page.getByText("有未保存修改")).toHaveCount(0);
+  expect(draftWrites).toBe(0);
+});
+
+test("Scenario Editor keeps Quick Targets ordered in the shared master-detail workspace", async ({ page }) => {
+  await wireApi(page);
+  const scenarios = await getJson<ScenarioSummary[]>(page, "/api/v1/scenarios");
+  const scenario = scenarios.find((candidate) => candidate.name === currentScenarioName);
+  expect(scenario).toBeTruthy();
+  let draftWrites = 0;
+  page.on("request", (request) => {
+    if (request.method() === "PUT" && /\/api\/v1\/scenarios\/[^/]+\/draft$/.test(request.url())) draftWrites += 1;
+  });
+
+  await page.goto(`/scenarios/${scenario!.id}/edit/goal-resolution`);
+  const workspace = page.locator("main.editor-shell");
+  await expect(page.getByRole("heading", { name: "快捷目标", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "快捷目标 1 E2E quick target one" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "快捷目标 2 E2E quick target two" })).toBeVisible();
+  await expect(page.getByText("从左侧选择一个对象", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "快捷目标 2 E2E quick target two" }).click();
+  await expect(page.getByRole("heading", { name: "快捷目标 2", exact: true })).toBeVisible();
+  await expect(page.getByLabel("目标文本", { exact: true })).toHaveValue("E2E quick target two");
+  await page.getByLabel("目标文本", { exact: true }).fill("E2E edited quick target");
+  await expect(page.getByText("有未保存修改")).toBeVisible();
+
+  await page.getByPlaceholder("快捷目标序号或正文").fill("edited quick target");
+  await expect(page.getByRole("button", { name: "快捷目标 2 E2E edited quick target" })).toBeVisible();
+  await page.getByPlaceholder("快捷目标序号或正文").fill("");
+  await page.getByRole("button", { name: "快捷目标 2 E2E edited quick target" }).click();
+
+  await page.getByRole("button", { name: "↑" }).click();
+  await expect(page.getByRole("heading", { name: "快捷目标 1", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "快捷目标 1 E2E edited quick target" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "快捷目标 2 E2E quick target one" })).toBeVisible();
+
+  await page.getByRole("button", { name: "＋ 快捷目标" }).click();
+  await expect(page.getByRole("heading", { name: "快捷目标 3", exact: true })).toBeVisible();
+  await expect(page.getByLabel("目标文本", { exact: true })).toBeFocused();
+  await page.getByLabel("目标文本", { exact: true }).fill("E2E temporary quick target");
+  await page.getByRole("button", { name: "删除" }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "删除「快捷目标 3」？" });
+  await deleteDialog.getByRole("button", { name: "删除", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "快捷目标 2", exact: true })).toBeVisible();
+  await expect(page.getByText("E2E temporary quick target", { exact: true })).toHaveCount(0);
+  await expect(workspace).toBeVisible();
   expect(draftWrites).toBe(0);
 });
 
