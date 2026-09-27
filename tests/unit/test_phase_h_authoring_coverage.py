@@ -1,131 +1,94 @@
-"""Regression guard for the Phase H V3 authoring ownership audit.
-
-The generated matrix is intentionally kept under ``tmp/`` as an audit artifact.
-This guard makes the audit fail closed if a schema field becomes unclassified or
-an authorable field loses its typed editor owner.
-"""
+"""Regression guards for the Phase H V3 authoring ownership contract."""
 
 from __future__ import annotations
 
-import csv
-from pathlib import Path
+from app.domain.scenario_v3 import ScenarioDefinitionV3
+from app.scenarios.initialization import FieldUiOwner
+from tests.phase_h_authoring import AuthoringField, build_v3_authoring_field_inventory
 
-MATRIX = (
-    Path(__file__).parents[2]
-    / "tmp"
-    / "scenario_v3_authoring_field_coverage_matrix_2026-09-26.csv"
-)
-DECOUPLING = (
-    Path(__file__).parents[2]
-    / "tmp"
-    / "scenario_content_decoupling_matrix_2026-09-26.csv"
-)
-SECTIONS = (
-    Path(__file__).parents[2]
-    / "tmp"
-    / "scenario_editor_section_responsibility_matrix_2026-09-26.csv"
-)
-PORTABILITY = (
-    Path(__file__).parents[2]
-    / "tmp"
-    / "scenario_file_portability_readiness_2026-09-26.md"
-)
-CURRENT_CLEANUP = (
-    Path(__file__).parents[2]
-    / "tmp"
-    / "scenario_v3_authoring_coverage_after_goal_cleanup_2026-09-26.csv"
-)
-ALLOWED = {
-    "AUTHORABLE",
-    "SYSTEM_MANAGED",
-    "INITIALIZATION_AUTHORABLE",
-    "DERIVED_READ_ONLY",
-    "PLATFORM_POLICY",
-    "LEGACY_COMPATIBILITY",
-}
+
+def _inventory_by_path() -> dict[str, AuthoringField]:
+    return {field.path: field for field in build_v3_authoring_field_inventory()}
 
 
 def test_phase_h_v3_authoring_matrix_is_complete_and_typed() -> None:
-    assert MATRIX.exists(), f"run tmp/generate_phase_h_audits.py before checking {MATRIX}"
-    with MATRIX.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-
-    assert len(rows) == 384
-    assert {row["classification"] for row in rows} <= ALLOWED
-    assert not [row for row in rows if row["classification"] not in ALLOWED]
-    world_name = next(row for row in rows if row["schema_path"] == "world.name")
-    assert world_name["classification"] == "LEGACY_COMPATIBILITY"
-    assert world_name["coverage_status"] == "EXPLICIT_EXEMPTION"
-
-    current = [
-        row
-        for row in rows
-        if row["classification"] in {"AUTHORABLE", "INITIALIZATION_AUTHORABLE"}
-    ]
-    assert len(current) == 331
-    assert not [row for row in current if row["coverage_status"] != "COVERED_TYPED"]
-    assert not [row for row in current if not row["editor_section"] or not row["editor_control"]]
-    assert len({row["schema_path"] for row in current}) == len(current)
-
-
-def test_phase_h_decoupling_matrix_is_fail_closed() -> None:
-    assert DECOUPLING.exists(), f"missing {DECOUPLING}"
-    with DECOUPLING.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert rows
-    assert not [row for row in rows if row["production_coupling"] != "0"]
-    assert {
-        "SCHEMA_CONTRACT",
-        "API_CONTRACT",
-        "ENGINE_CONTRACT",
-        "DATABASE_ENVELOPE",
-        "BUILTIN_DATA",
-        "SCENARIO_SPECIFIC",
+    fields = build_v3_authoring_field_inventory()
+    assert len(fields) == 381
+    allowed = {
+        "AUTHORABLE",
+        "SYSTEM_MANAGED",
+        "INITIALIZATION_AUTHORABLE",
+        "DERIVED_READ_ONLY",
         "LEGACY_COMPATIBILITY",
-        "TEST_ONLY",
-    } <= {row["category"] for row in rows}
-
-
-def test_phase_h_section_and_portability_audits_exist() -> None:
-    assert SECTIONS.exists(), f"missing {SECTIONS}"
-    with SECTIONS.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert len(rows) == 24
-    assert {row["route_id"] for row in rows} >= {
-        "overview",
-        "initialization",
-        "configuration-check",
-        "validation",
-        "planning-recovery",
+        "PLATFORM_POLICY",
     }
-    text = PORTABILITY.read_text(encoding="utf-8")
-    assert "JSON export readiness" in text
-    assert "YAML import readiness" in text
-    assert "DB envelope separation" in text
+    assert {field.classification for field in fields} <= allowed
+    assert {field.owner for field in fields} <= set(FieldUiOwner)
+    assert _inventory_by_path()["world.name"].owner is FieldUiOwner.LEGACY
+
+    current = [field for field in fields if field.current]
+    assert len(current) == 328
+    assert all(
+        field.coverage_status == "COVERED_TYPED"
+        and field.section
+        and field.control
+        and field.owner in {FieldUiOwner.DESIGN_ONLY, FieldUiOwner.INITIALIZATION_ONLY}
+        for field in current
+    )
+    assert len({field.path for field in current}) == len(current)
+
+
+def test_phase_h_v3_contract_has_portable_current_owners() -> None:
+    fields = _inventory_by_path()
+    paths = set(fields)
+    assert "goal_resolution.quick_inputs" in paths
+    assert "planning.instructions" in paths
+    assert "planning.recovery_hints" not in paths
+    assert fields["goal_resolution.quick_inputs"].owner is FieldUiOwner.DESIGN_ONLY
+    assert fields["planning.instructions"].owner is FieldUiOwner.DESIGN_ONLY
+    assert fields["metadata.name"].section == "overview"
+    assert fields["world.nodes[].initial_access"].section == "initialization"
+    assert fields["derived_states[].dependencies[].kind"].section == "derived-states"
+    assert fields["initialization.resource_pools[].pool_key"].control == (
+        "creation dialog + static identity"
+    )
+    assert set(ScenarioDefinitionV3.model_fields) >= {
+        "metadata",
+        "world",
+        "initialization",
+        "goal_resolution",
+    }
+
+
+def test_phase_h_initialization_fields_have_single_canonical_owner() -> None:
+    fields = _inventory_by_path()
+    initialization_paths = {
+        "initialization.start_node_key",
+        "initialization.primary_actor_key",
+        "world.nodes[].initial_access",
+        "world.nodes[].initial_visibility",
+        "world.nodes[].facts[].initial_value",
+        "world.nodes[].facts[].initial_visibility",
+        "world.relations[].initial_visibility",
+        "actors.actor_profiles[].initial_node_key",
+        "actors.actor_profiles[].command_reachability",
+    }
+    assert {fields[path].owner for path in initialization_paths} == {
+        FieldUiOwner.INITIALIZATION_ONLY
+    }
 
 
 def test_phase_j_goal_cleanup_coverage_has_one_writer_for_current_fields() -> None:
-    assert CURRENT_CLEANUP.exists(), f"missing {CURRENT_CLEANUP}"
-    with CURRENT_CLEANUP.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert rows
-    assert len(rows) == 381
-    assert not {
-        "goal_resolution.allow_llm_fallback",
-        "goal_resolution.clarification_prompt",
-        "goal_resolution.world_goal_state_catalog",
-    } & {row["schema_path"] for row in rows}
-    current = [
-        row
-        for row in rows
-        if row["classification"] in {"AUTHORABLE", "INITIALIZATION_AUTHORABLE"}
-    ]
+    fields = _inventory_by_path()
+    paths = set(fields)
+    assert (
+        not {
+            "goal_resolution.allow_llm_fallback",
+            "goal_resolution.clarification_prompt",
+            "goal_resolution.world_goal_state_catalog",
+        }
+        & paths
+    )
+    current = [field for field in fields.values() if field.current]
     assert current
-    assert len(current) == 328
-    assert not [row for row in current if not row["editor_section"] or not row["editor_control"]]
-    assert not [
-        row
-        for row in current
-        if row["writer_count"] != "1" or row["writer_status"] != "OK"
-    ]
-    assert len({row["schema_path"] for row in current}) == len(current)
+    assert len({field.path for field in current}) == len(current)

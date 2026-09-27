@@ -138,9 +138,7 @@ def preview_current_v3_migration(document: dict[str, Any]) -> CurrentV3Migration
     changed = _changed_paths(source, target)
     goal_resolution = target.get("goal_resolution")
     quick_inputs = (
-        goal_resolution.get("quick_inputs", ())
-        if isinstance(goal_resolution, dict)
-        else ()
+        goal_resolution.get("quick_inputs", ()) if isinstance(goal_resolution, dict) else ()
     )
     return CurrentV3MigrationPreview(
         source_schema_version=3,
@@ -166,9 +164,7 @@ def preview_v2_to_v3(document: dict[str, Any]) -> V2ToV3MigrationPreview:
     changed = _changed_paths(source, target)
     source_planning = source.get("planning")
     source_hints = (
-        source_planning.get("recovery_hints", [])
-        if isinstance(source_planning, dict)
-        else []
+        source_planning.get("recovery_hints", []) if isinstance(source_planning, dict) else []
     )
     converted_blocker_count = sum(
         1

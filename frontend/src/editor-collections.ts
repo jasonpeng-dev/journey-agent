@@ -3,7 +3,6 @@ import { moveItem, type MoveDirection } from "./editor-order";
 
 export type RootCollectionKey =
   | "recovery_hints"
-  | "resource_initial_states"
   | "resource_pools"
   | "region_resource_knowledge";
 
@@ -48,9 +47,8 @@ export type RootCollectionItem = RootCollectionSelection & {
 
 const definitions: Partial<Record<EditorSection, RootCollectionDefinition[]>> = {
   initialization: [
-    { key: "resource_initial_states", label: "资源初始状态", singularLabel: "资源初始状态" },
     { key: "resource_pools", label: "资源池", singularLabel: "资源池" },
-    { key: "region_resource_knowledge", label: "区域资源知识", singularLabel: "区域资源知识" },
+    { key: "region_resource_knowledge", label: "区域库存情报", singularLabel: "区域库存情报" },
   ],
 };
 
@@ -67,15 +65,6 @@ export function rootCollectionIdentity(collection: RootCollectionKey, value: Jso
   if (collection === "recovery_hints") {
     const failureCode = identityString(value.failure_code);
     return failureCode ? JSON.stringify([failureCode]) : null;
-  }
-  if (collection === "resource_initial_states") {
-    const resourceKey = identityString(value.resource_key);
-    const scopeNodeKey = value.scope_node_key === null || value.scope_node_key === undefined
-      ? null
-      : identityString(value.scope_node_key);
-    return resourceKey && (scopeNodeKey !== null || value.scope_node_key == null)
-      ? JSON.stringify([resourceKey, scopeNodeKey])
-      : null;
   }
   if (collection === "resource_pools") {
     const poolKey = identityString(value.pool_key);
@@ -174,14 +163,12 @@ function compact(value: unknown, fallback: string): string {
 
 function itemTitle(collection: RootCollectionKey, value: JsonObject, index: number): string {
   if (collection === "recovery_hints") return compact(value.failure_code, `未命名失败恢复策略 ${index + 1}`);
-  if (collection === "resource_initial_states") return compact(value.resource_key, `未命名资源初始状态 ${index + 1}`);
   if (collection === "resource_pools") return compact(value.pool_key, `未命名资源池 ${index + 1}`);
-  return compact(value.region_key, `未命名区域资源知识 ${index + 1}`);
+  return compact(value.region_key, `未命名区域库存情报 ${index + 1}`);
 }
 
 function itemSummary(collection: RootCollectionKey, value: JsonObject): string {
   if (collection === "recovery_hints") return compact(value.hint, "尚未填写提示");
-  if (collection === "resource_initial_states") return compact(value.scope_node_key, `初始值 ${String(value.value ?? 0)}`);
   if (collection === "resource_pools") return compact(value.region_key ?? value.facility_key, compact(value.resource_key, "待配置资源"));
   return compact(value.region_key, "待配置区域");
 }
@@ -189,11 +176,6 @@ function itemSummary(collection: RootCollectionKey, value: JsonObject): string {
 /** A concise semantic identity for presentation; canonical JSON identities stay URL-only. */
 export function rootCollectionIdentityLabel(collection: RootCollectionKey, value: JsonObject): string {
   if (collection === "recovery_hints") return `失败代码 · ${compact(value.failure_code, "待填写")}`;
-  if (collection === "resource_initial_states") {
-    const resource = compact(value.resource_key, "待填写");
-    const scope = value.scope_node_key == null ? "全局" : compact(value.scope_node_key, "待填写");
-    return `资源 · ${resource} / 作用域 · ${scope}`;
-  }
   if (collection === "resource_pools") return `资源池 · ${compact(value.pool_key, "待填写")}`;
   return `区域 · ${compact(value.region_key, "待填写")}`;
 }

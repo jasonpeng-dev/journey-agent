@@ -257,6 +257,13 @@ class InitializationPreviewRequest(DraftRevisionRequest):
     focus: InitializationPreviewFocus | None = None
 
 
+class SemanticDiffRequest(DraftRevisionRequest):
+    """Read-only semantic comparison for the current Working Copy."""
+
+    definition_document: dict[str, Any]
+    include_entries: bool = True
+
+
 class DraftPublishRequest(DraftRevisionRequest):
     expected_content_hash: str | None = Field(default=None, min_length=64, max_length=64)
 
@@ -385,6 +392,52 @@ class ObjectLocator(ApiModel):
     object_kind: str
     object_key: str | None = None
     field_path: str | None = None
+
+
+class SemanticDiffComparedVersion(ApiModel):
+    id: UUID
+    version_number: int = Field(ge=1)
+    schema_version: Literal[2, 3]
+
+
+class SemanticDiffEntryResponse(ApiModel):
+    scope: Literal["DESIGN", "INITIALIZATION"]
+    editor_section: str
+    editor_subsection: str
+    object_kind: str
+    object_key: str | None = None
+    object_display_name: str
+    change_kind: Literal["ADDED", "REMOVED", "MODIFIED", "REORDERED"]
+    locator: ObjectLocator
+    field_path: str | None = None
+    before: Any | None = None
+    after: Any | None = None
+
+
+class SemanticDiffSubsectionSummary(ApiModel):
+    subsection: str
+    count: int = Field(ge=0)
+
+
+class SemanticDiffSectionSummary(ApiModel):
+    section: str
+    count: int = Field(ge=0)
+    subsections: list[SemanticDiffSubsectionSummary] = Field(default_factory=list)
+
+
+class SemanticDiffResponse(ApiModel):
+    published: bool
+    compared_version: SemanticDiffComparedVersion | None = None
+    published_version_id: UUID | None = None
+    published_version_number: int | None = Field(default=None, ge=1)
+    published_schema_version: Literal[2, 3] | None = None
+    is_equal: bool | None = None
+    comparable: bool = True
+    total_changed_objects: int = Field(ge=0)
+    total_changed_items: int = Field(ge=0)
+    section_summaries: list[SemanticDiffSectionSummary] = Field(default_factory=list)
+    entries: list[SemanticDiffEntryResponse] = Field(default_factory=list)
+    error_message: str | None = None
 
 
 class ValidationIssueResponse(ApiModel):

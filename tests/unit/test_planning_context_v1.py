@@ -327,9 +327,7 @@ def test_validator_relevance_accepts_direct_progress_and_rejects_unrelated(
         unrelated_context,
         planner_input=planner_input,
     )
-    assert not any(
-        item.get("code") == "OBJECTIVE_IRRELEVANT" for item in unrelated_diagnostics
-    )
+    assert not any(item.get("code") == "OBJECTIVE_IRRELEVANT" for item in unrelated_diagnostics)
 
 
 def test_validator_reports_target_interaction_mismatch_to_provider(

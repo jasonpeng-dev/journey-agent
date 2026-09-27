@@ -70,10 +70,7 @@ class ScenarioVersionRepository:
             legacy_source_hint_payload is not None
             and record.snapshot_document == legacy_source_hint_payload
         )
-        if (
-            record.snapshot_document != canonical_payload
-            and not is_legacy_source_hint_snapshot
-        ):
+        if record.snapshot_document != canonical_payload and not is_legacy_source_hint_snapshot:
             raise ScenarioVersionError(
                 "SCENARIO_VERSION_SNAPSHOT_NOT_CANONICAL",
                 "The persisted ScenarioVersion snapshot is not canonical",

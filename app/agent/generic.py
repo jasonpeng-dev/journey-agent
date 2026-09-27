@@ -2290,9 +2290,9 @@ class GenericGoalResolver:
             )
             observation["ontology_hash"] = _dynamic_goal_payload_hash(ontology)
             provider = self.provider
-            observation["provider_calls"] = list(
-                provider_call_history_metadata(provider)
-            )[provider_history_start:]
+            observation["provider_calls"] = list(provider_call_history_metadata(provider))[
+                provider_history_start:
+            ]
             if "status" not in observation:
                 observation["status"] = {
                     "ACCEPTED": "RESOLVED",
@@ -3558,9 +3558,7 @@ class GenericAgentService:
             step.completed_at = datetime.now(UTC)
             task.status = AgentTaskStatus.ACTIVE
             operation_outcome = operation.outcome if isinstance(operation.outcome, dict) else {}
-            failure_payload = (
-                operation_outcome.get("failure")
-            )
+            failure_payload = operation_outcome.get("failure")
             if isinstance(failure_payload, dict) and failure_payload.get("code"):
                 failure_event = normalize_runtime_failure(
                     failure_payload,
@@ -7482,9 +7480,7 @@ class GenericAgentService:
         allow_epistemic: bool = False,
         matches_operation_goal: bool = False,
     ) -> list[dict[str, object]]:
-        action = next(
-            (item for item in definition.actions if item.key == action_key), None
-        )
+        action = next((item for item in definition.actions if item.key == action_key), None)
         actor = self.db.get(GameInstanceActor, (self.scope.game_instance_id, actor_key))
         if action is None or actor is None:
             raise GenericAgentError("GENERIC_PROVIDER_PLAN_INVALID", "Unknown Action or Actor")

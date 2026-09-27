@@ -133,10 +133,14 @@ def test_profile_save_does_not_change_draft_or_published_version(session: Sessio
     session.commit()
     draft = ScenarioService(session).get_draft(scenario.id)
     draft_revision = draft.revision
-    version = ScenarioService(session).publish_draft(
-        scenario.id,
-        expected_revision=draft_revision,
-    ).version
+    version = (
+        ScenarioService(session)
+        .publish_draft(
+            scenario.id,
+            expected_revision=draft_revision,
+        )
+        .version
+    )
     session.commit()
 
     before_version_id = scenario.current_published_version_id
@@ -151,11 +155,14 @@ def test_profile_save_does_not_change_draft_or_published_version(session: Sessio
     assert saved.revision == 2
     assert scenario.current_published_version_id == before_version_id
     assert session.get(ScenarioPresentationProfile, scenario.id).revision == 2
-    assert session.scalar(
-        select(func.count())
-        .select_from(ScenarioPresentationProfileRevision)
-        .where(ScenarioPresentationProfileRevision.scenario_id == scenario.id)
-    ) == 2
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ScenarioPresentationProfileRevision)
+            .where(ScenarioPresentationProfileRevision.scenario_id == scenario.id)
+        )
+        == 2
+    )
     assert session.get(type(version), version.id).content_hash == before_hash
 
 
@@ -175,8 +182,11 @@ def test_profile_delete_cascades_and_forbidden_payloads_fail(session: Session) -
     session.flush()
     session.expire_all()
     assert session.get(ScenarioPresentationProfile, scenario_id) is None
-    assert session.scalar(
-        select(func.count())
-        .select_from(ScenarioPresentationProfileRevision)
-        .where(ScenarioPresentationProfileRevision.scenario_id == scenario_id)
-    ) == 0
+    assert (
+        session.scalar(
+            select(func.count())
+            .select_from(ScenarioPresentationProfileRevision)
+            .where(ScenarioPresentationProfileRevision.scenario_id == scenario_id)
+        )
+        == 0
+    )

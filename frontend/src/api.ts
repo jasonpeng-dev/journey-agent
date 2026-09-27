@@ -1,4 +1,4 @@
-import type { CompletenessResult, DeveloperSnapshot, Draft, DraftSandboxResult, DraftTransformOperation, GameHistory, GameSummary, GoalSubmission, PlayerGameState, PresentationProfileHistoryResponse, PresentationProfileResponse, PresentationProfileDocument, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult, WorkingCopyReferenceAnalysis, WorkingCopyTransformResult } from "./types";
+import type { CompletenessResult, DeveloperSnapshot, Draft, DraftSandboxResult, DraftTransformOperation, GameHistory, GameSummary, GoalSubmission, PlayerGameState, PresentationProfileHistoryResponse, PresentationProfileResponse, PresentationProfileDocument, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, SemanticDiff, ValidationResult, WorkingCopyReferenceAnalysis, WorkingCopyTransformResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -67,6 +67,7 @@ export const api = {
   createScenario: (payload: Record<string, unknown>) => request<ScenarioSummary>("/api/v1/scenarios", { method: "POST", body: JSON.stringify(payload) }),
   validateDraft: (id: string, revision: number) => request<ValidationResult>(`/api/v1/scenarios/${id}/draft/validate`, { method: "POST", body: JSON.stringify({ expected_revision: revision }) }),
   initializationPreview: (id: string, revision: number, document: Record<string, unknown>, focus?: import("./types").InitializationPreviewFocus) => request<import("./types").InitializationPreview>(`/api/v1/scenarios/${id}/draft/initialization-preview`, { method: "POST", body: JSON.stringify({ expected_revision: revision, definition_document: document, ...(focus ? { focus } : {}) }) }),
+  semanticDiff: (id: string, revision: number, document: Record<string, unknown>, includeEntries = true) => request<SemanticDiff>(`/api/v1/scenarios/${id}/draft/semantic-diff`, { method: "POST", body: JSON.stringify({ expected_revision: revision, definition_document: document, include_entries: includeEntries }) }),
   testDraft: (id: string, revision: number, goal: string | null) => request<DraftSandboxResult>(`/api/v1/scenarios/${id}/draft/sandbox`, { method: "POST", body: JSON.stringify({ expected_revision: revision, goal: goal || null }) }),
   publishDraft: (id: string, revision: number, contentHash: string | null) => request<{ scenario: ScenarioSummary; version: ScenarioVersion }>(`/api/v1/scenarios/${id}/draft/publish`, { method: "POST", body: JSON.stringify({ expected_revision: revision, expected_content_hash: contentHash }) }),
   versions: (id: string) => request<ScenarioVersion[]>(`/api/v1/scenarios/${id}/versions`),

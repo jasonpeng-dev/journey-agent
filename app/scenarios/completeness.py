@@ -128,9 +128,7 @@ def _target_exists(document: dict[str, Any], edge: ReferenceEdge) -> bool:
             return any(
                 isinstance(node.get("facts"), list)
                 and any(
-                    isinstance(fact, dict)
-                    and fact.get("key") == fact_key
-                    for fact in node["facts"]
+                    isinstance(fact, dict) and fact.get("key") == fact_key for fact in node["facts"]
                 )
                 for node in nodes
             )
@@ -430,9 +428,7 @@ def evaluate_completeness(document: dict[str, Any]) -> CompletenessResult:
                 action="CONFIGURE",
             )
         missing_actions = [
-            key
-            for key in actor.get("allowed_action_keys", [])
-            if key not in action_keys
+            key for key in actor.get("allowed_action_keys", []) if key not in action_keys
         ]
         if missing_actions:
             _add(
@@ -442,8 +438,7 @@ def evaluate_completeness(document: dict[str, Any]) -> CompletenessResult:
                 level="INCOMPLETE_REQUIRED",
                 dependency_kind="SEMANTIC_REQUIRED",
                 message=(
-                    "存在无法解析的行动引用："
-                    f"{', '.join(str(item) for item in missing_actions)}。"
+                    f"存在无法解析的行动引用：{', '.join(str(item) for item in missing_actions)}。"
                 ),
                 path=f"actors.actor_profiles.{actor_key}.allowed_action_keys",
                 locator=_locator("actor", actor_key, "allowed_action_keys"),
@@ -468,8 +463,7 @@ def evaluate_completeness(document: dict[str, Any]) -> CompletenessResult:
         matching_rules = [
             rule
             for rule in rules
-            if _text(rule.get("action_key")) == action_key
-            and rule.get("phase") == "RESOLVE"
+            if _text(rule.get("action_key")) == action_key and rule.get("phase") == "RESOLVE"
         ]
         if not matching_rules:
             _add(

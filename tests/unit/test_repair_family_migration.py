@@ -97,9 +97,7 @@ def test_linjiang_power_source_contract_has_one_authored_predicate() -> None:
         for item in definition.rules
         if item.key == "repair_facility_electrical_southeast_emergency_power_station_resolution"
     )
-    assert [effect.fact_key for effect in repair_rule.effects if effect.fact_key] == [
-        "operational"
-    ]
+    assert [effect.fact_key for effect in repair_rule.effects if effect.fact_key] == ["operational"]
 
     supply_rule = next(
         item for item in definition.rules if item.key == "supply_power_source_unavailable"

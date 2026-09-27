@@ -51,6 +51,8 @@ from app.api.schemas.phase_d import (
     ScenarioSummaryResponse,
     ScenarioVersionDetailResponse,
     ScenarioVersionSummaryResponse,
+    SemanticDiffRequest,
+    SemanticDiffResponse,
     ValidationIssueResponse,
     ValidationSeverity,
 )
@@ -65,6 +67,7 @@ from app.scenarios.authoring import ReferenceEdge, locator_for_path, reference_i
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from app.scenarios.documents import parse_scenario_document
 from app.scenarios.initialization import bootstrap_parity, initialization_projection
+from app.scenarios.semantic_diff import semantic_diff
 from app.scenarios.validation import ScenarioValidationIssue
 from app.services.draft_sandbox import DraftSandboxService
 from app.services.presentation_profiles import (
@@ -274,7 +277,9 @@ def preview_initialization(
                     "revision": draft.revision,
                     "projection": _focus_initialization_projection(
                         projection, focus.object_kind, focus.object_key
-                    ) if focus is not None else projection,
+                    )
+                    if focus is not None
+                    else projection,
                     "parity": {
                         "published": False,
                         "initialization_changes": [],
@@ -298,6 +303,74 @@ def preview_initialization(
         ) from exc
     except ScenarioLifecycleError as exc:
         _raise_http(exc)
+
+
+@router.post(
+    "/scenarios/{scenario_id}/draft/semantic-diff",
+    response_model=SemanticDiffResponse,
+)
+def compare_draft_semantics(
+    scenario_id: UUID,
+    request: SemanticDiffRequest,
+    db: Session = Depends(get_db),
+) -> SemanticDiffResponse:
+    """Compare a read-only Working Copy with the explicit current Published version."""
+
+    service = ScenarioService(db)
+    draft = service.get_draft(scenario_id)
+    if draft.revision != request.expected_revision:
+        raise AppError(
+            "SCENARIO_DRAFT_CONFLICT",
+            "The Scenario Draft revision changed before semantic comparison",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    scenario = service.get_scenario(scenario_id)
+    if scenario.current_published_version_id is None:
+        return SemanticDiffResponse(
+            published=False,
+            compared_version=None,
+            published_version_id=None,
+            published_version_number=None,
+            published_schema_version=None,
+            is_equal=None,
+            comparable=False,
+            total_changed_objects=0,
+            total_changed_items=0,
+            section_summaries=[],
+            entries=[],
+        )
+    version = service.get_version(scenario_id, scenario.current_published_version_id)
+    try:
+        result = semantic_diff(
+            request.definition_document,
+            version.snapshot_document,
+            published_version_id=str(version.id),
+            published_version_number=version.version_number,
+            published_schema_version=version.schema_version,
+            include_entries=request.include_entries,
+        )
+    except ValidationError:
+        # An incomplete Working Copy is a valid authoring state.  It is not a
+        # semantic equality result and must not manufacture a baseline diff.
+        result = {
+            "published": True,
+            "compared_version": {
+                "id": str(version.id),
+                "version_number": version.version_number,
+                "schema_version": version.schema_version,
+            },
+            "published_version_id": str(version.id),
+            "published_version_number": version.version_number,
+            "published_schema_version": version.schema_version,
+            "is_equal": None,
+            "comparable": False,
+            "total_changed_objects": 0,
+            "total_changed_items": 0,
+            "section_summaries": [],
+            "entries": [],
+            "error_message": "当前工作副本尚未形成可比较的完整语义。",
+        }
+    return SemanticDiffResponse.model_validate(result)
 
 
 _INITIALIZATION_PREVIEW_COLLECTIONS: dict[tuple[str, ...], str] = {
@@ -427,9 +500,9 @@ def _initialization_reference_issue_target(
             "kind": kind,
             "identity": identity,
             "field_path": field_path,
-            "canonical_owner": "world-entities" if kind == "node" else (
-                "actors" if kind == "actor" else "actions"
-            ),
+            "canonical_owner": "world-entities"
+            if kind == "node"
+            else ("actors" if kind == "actor" else "actions"),
             "reference_owner": reference_owner,
         }
     return None
@@ -593,9 +666,7 @@ def _initialization_preview_issues(
                             fact_index = rest[1]
                             if isinstance(facts, list) and fact_index.isdigit():
                                 fact = (
-                                    facts[int(fact_index)]
-                                    if int(fact_index) < len(facts)
-                                    else None
+                                    facts[int(fact_index)] if int(fact_index) < len(facts) else None
                                 )
                                 if isinstance(fact, dict) and isinstance(fact.get("key"), str):
                                     identity_kind = "fact"
@@ -680,9 +751,7 @@ def _focus_initialization_projection(
                 matches = (
                     locator.get("object_kind") == focus_kind
                     and locator.get("object_key") == focus_key
-                ) or (
-                    focus_kind == "resource" and context.get("resource_key") == focus_key
-                )
+                ) or (focus_kind == "resource" and context.get("resource_key") == focus_key)
                 if matches:
                     items.append(item)
             if items:
@@ -705,30 +774,30 @@ def _focus_initialization_projection(
             return len(parts) > 2 and parts[0] == "pool" and parts[2] == focus_key
         return False
 
-    findings = [
-        finding
-        for finding in projection.get("findings", [])
-        if belongs_to_focus(finding)
-    ]
+    findings = [finding for finding in projection.get("findings", []) if belongs_to_focus(finding)]
     summary = {
         "nodes": sum(
             len(group["items"])
-            for domain in domains if domain["id"] == "nodes"
+            for domain in domains
+            if domain["id"] == "nodes"
             for group in domain["groups"]
         ),
         "actors": sum(
             len(group["items"])
-            for domain in domains if domain["id"] == "actors"
+            for domain in domains
+            if domain["id"] == "actors"
             for group in domain["groups"]
         ),
         "resource_pools": sum(
             len(group["items"])
-            for domain in domains if domain["id"] == "resources"
+            for domain in domains
+            if domain["id"] == "resources"
             for group in domain["groups"]
         ),
         "relations": sum(
             len(group["items"])
-            for domain in domains if domain["id"] == "relations"
+            for domain in domains
+            if domain["id"] == "relations"
             for group in domain["groups"]
         ),
         "derived_states": 0,
@@ -1242,9 +1311,7 @@ def _scenario_detail(db: Session, scenario: Scenario) -> ScenarioDetailResponse:
 
 def _draft_response(draft: ScenarioDraft) -> DraftResponse:
     try:
-        definition_document = normalize_resource_source_hint_document(
-            draft.definition_document
-        )
+        definition_document = normalize_resource_source_hint_document(draft.definition_document)
     except ValueError as exc:
         raise ScenarioLifecycleError(
             "SCENARIO_RESOURCE_SOURCE_HINT_NORMALIZATION_FAILED",

@@ -660,9 +660,7 @@ def normalize_resource_source_hint_document(document: object) -> object:
         if resource is None:
             raise ValueError(f"Legacy Resource source hint targets unknown Resource {resource_key}")
         legacy_value = {
-            key: deepcopy(value)
-            for key, value in legacy_hint.items()
-            if key != "resource_key"
+            key: deepcopy(value) for key, value in legacy_hint.items() if key != "resource_key"
         }
         if "source_hint" in resource:
             if not _source_hint_values_equivalent(resource.get("source_hint"), legacy_value):
@@ -1504,30 +1502,33 @@ class EffectV2(FrozenDefinitionModel):
             if self.failure_code is None or not self.message:
                 raise ValueError("EMIT_FAILURE requires failure_code/message")
         elif self.kind == EffectKind.BLOCK_ACTION:
-            if any(
-                value is not None
-                for value in (
-                    self.node,
-                    self.fact_key,
-                    self.value,
-                    self.access,
-                    self.resource_key,
-                    self.resource_scope,
-                    self.amount,
-                    self.outcome_code,
-                    self.failure_code,
-                    self.message,
-                    self.memory_key,
-                    self.memory_content,
-                    self.actor_key,
-                    self.relation_key,
-                    self.command_reachability,
-                    self.region_key,
-                    self.pool_key,
-                    self.visibility,
-                    self.availability,
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.node,
+                        self.fact_key,
+                        self.value,
+                        self.access,
+                        self.resource_key,
+                        self.resource_scope,
+                        self.amount,
+                        self.outcome_code,
+                        self.failure_code,
+                        self.message,
+                        self.memory_key,
+                        self.memory_content,
+                        self.actor_key,
+                        self.relation_key,
+                        self.command_reachability,
+                        self.region_key,
+                        self.pool_key,
+                        self.visibility,
+                        self.availability,
+                    )
                 )
-            ) or self.retryable:
+                or self.retryable
+            ):
                 raise ValueError("BLOCK_ACTION cannot carry failure metadata or mutations")
         elif self.kind == EffectKind.WRITE_MEMORY_EVENT and (
             self.memory_key is None or not self.memory_content
@@ -1582,7 +1583,8 @@ class RuleDefinitionV2(FrozenDefinitionModel):
         terminals = [
             effect
             for effect in self.effects
-            if effect.kind in {
+            if effect.kind
+            in {
                 EffectKind.EMIT_OUTCOME,
                 EffectKind.EMIT_FAILURE,
                 EffectKind.BLOCK_ACTION,
@@ -2055,9 +2057,7 @@ def _normalize_typed_value_labels(value: object, owner: str) -> object:
     if scalar_values:
         raise ValueError(f"{owner} allowed_values cannot mix scalar and typed entries")
 
-    payload["allowed_values"] = (
-        [entry["value"] for entry in typed_entries] if is_enum else []
-    )
+    payload["allowed_values"] = [entry["value"] for entry in typed_entries] if is_enum else []
     if not payload.get("value_labels"):
         payload["value_labels"] = typed_entries
     return payload
@@ -2230,8 +2230,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 )
                 if action.key not in target_actor.allowed_action_keys:
                     raise ValueError(
-                        f"Action {action.key} target contract Actor is not eligible "
-                        "for that Action"
+                        f"Action {action.key} target contract Actor is not eligible for that Action"
                     )
         if (
             action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
@@ -2302,12 +2301,8 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
         )
         if rule.applicable_target_keys:
             if rule_action is None:
-                raise ValueError(
-                    f"Rule {rule.key} applicable targets require an Action"
-                )
-            declared_contract_keys = {
-                item.target_key for item in rule_action.target_contracts
-            }
+                raise ValueError(f"Rule {rule.key} applicable targets require an Action")
+            declared_contract_keys = {item.target_key for item in rule_action.target_contracts}
             for target_key in rule.applicable_target_keys:
                 if declared_contract_keys and target_key not in declared_contract_keys:
                     raise ValueError(
@@ -2321,9 +2316,7 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                         f"Rule {rule.key} applicable target Node",
                     )
                     if rule_action.required_interaction_key not in target.interaction_keys:
-                        raise ValueError(
-                            f"Rule {rule.key} applicable target lacks its Interaction"
-                        )
+                        raise ValueError(f"Rule {rule.key} applicable target lacks its Interaction")
                     if (
                         rule_action.target_node_type_keys
                         and target.node_type_key not in rule_action.target_node_type_keys
@@ -2691,10 +2684,9 @@ def _validate_typed_values(
             raise ValueError(f"{label} does not match INTEGER")
         if value_type == FactValueType.BOOLEAN and type(value) is not bool:
             raise ValueError(f"{label} does not match BOOLEAN")
-        if (
-            value_type == FactValueType.ENUM
-            and _typed_value_identity(value) not in _typed_value_set(allowed_values)
-        ):
+        if value_type == FactValueType.ENUM and _typed_value_identity(
+            value
+        ) not in _typed_value_set(allowed_values):
             raise ValueError(f"{label} is outside the ENUM domain")
 
 

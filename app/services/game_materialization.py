@@ -166,15 +166,10 @@ class GameMaterializer:
             or {item.region_key for item in region_knowledge} != expected_regions
             or {item.relation_key for item in relation_knowledge} != expected_relations
             or {item.actor_key for item in actors} != expected_actor_keys
-            or (
-                expected_action_target_keys
-                and not supports_action_target_knowledge
-            )
+            or (expected_action_target_keys and not supports_action_target_knowledge)
             or (
                 supports_action_target_knowledge
-                and {
-                    (item.action_key, item.target_key) for item in action_target_knowledge
-                }
+                and {(item.action_key, item.target_key) for item in action_target_knowledge}
                 != expected_action_target_keys
             )
             or any(

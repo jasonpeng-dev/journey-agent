@@ -259,8 +259,7 @@ def test_current_and_legacy_source_hint_documents_normalize_to_same_model() -> N
     assert legacy == current
     assert "public_knowledge" not in legacy.model_dump(mode="json")
     assert (
-        legacy.model_dump(mode="json")["public_references"]
-        == current_document["public_references"]
+        legacy.model_dump(mode="json")["public_references"] == current_document["public_references"]
     )
     assert all(
         "resource_key" not in (item.source_hint.model_dump(mode="json") if item.source_hint else {})
@@ -271,9 +270,9 @@ def test_current_and_legacy_source_hint_documents_normalize_to_same_model() -> N
     dual_document["public_knowledge"] = deepcopy(legacy_document["public_knowledge"])
     assert ScenarioDefinitionV2.model_validate(dual_document) == current
 
-    dual_document["public_knowledge"]["resource_source_hints"][0][
-        "primary_region_key"
-    ] = "central_district"
+    dual_document["public_knowledge"]["resource_source_hints"][0]["primary_region_key"] = (
+        "central_district"
+    )
     with pytest.raises(ValidationError, match="conflict"):
         ScenarioDefinitionV2.model_validate(dual_document)
 

@@ -44,8 +44,8 @@ const entityCollections: Array<{ path: string[]; kind: EntityKind }> = [
 
 const initializationKindLabels: Record<string, string> = {
   resource_pool: "资源池",
-  region_resource_knowledge: "区域资源知识",
-  legacy_resource: "兼容资源",
+  region_resource_knowledge: "区域库存情报",
+  legacy_resource: "资源初始化",
 };
 
 const referenceOwners: Record<string, { kind: EntityKind; label: string }> = {

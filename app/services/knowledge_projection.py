@@ -97,9 +97,9 @@ class SharedKnowledgeProjection:
         self._visible_pools: tuple[KnownResourcePoolView, ...] | None = None
         self._target_knowledge_contracts_cache: tuple[dict[str, Any], ...] | None = None
         self._target_owned_resource_requirement_keys: set[tuple[str, str]] = set()
-        self._global_resource_requirements_cache: dict[
-            str, tuple[dict[str, Any], ...]
-        ] | None = None
+        self._global_resource_requirements_cache: dict[str, tuple[dict[str, Any], ...]] | None = (
+            None
+        )
         self._static_pool_requirements: dict[tuple[str, str | None, str], dict[str, Any]] = {}
         for pool in resource_pool_initial_states(definition):
             requirement = pool.availability_requirement
@@ -242,9 +242,7 @@ class SharedKnowledgeProjection:
         }
         role_names = {role.key: role.name for role in self.definition.actors.roles}
         target_contracts = (
-            self.target_knowledge_contracts()
-            if target_contracts is None
-            else target_contracts
+            self.target_knowledge_contracts() if target_contracts is None else target_contracts
         )
         global_resource_requirements = self.global_action_resource_requirements(
             target_contracts=target_contracts,
@@ -377,9 +375,8 @@ class SharedKnowledgeProjection:
                 for predicate in predicates
                 if isinstance(predicate.get("fact_key"), str)
             }
-            if (
-                len(current_values) != len(predicates)
-                or any(value is None for value in current_values.values())
+            if len(current_values) != len(predicates) or any(
+                value is None for value in current_values.values()
             ):
                 # An incomplete current source contract is UNKNOWN. Omit the
                 # entire group so Player cannot mistake it for not-ready or
@@ -433,9 +430,7 @@ class SharedKnowledgeProjection:
                 action,
                 known_resources=known_resources if isinstance(known_resources, dict) else None,
                 known_resource_knowledge=(
-                    known_resource_knowledge
-                    if isinstance(known_resource_knowledge, dict)
-                    else None
+                    known_resource_knowledge if isinstance(known_resource_knowledge, dict) else None
                 ),
             )
             remaining = tuple(
@@ -533,9 +528,7 @@ class SharedKnowledgeProjection:
                 and condition.node.kind == NodeSelectorKind.CURRENT_TARGET
                 and condition.kind in {ConditionKind.FACT_EQUALS, ConditionKind.FACT_IN}
             )
-            preflight_rules_by_action[rule.action_key].append(
-                (rule, leaves, selector_conditions)
-            )
+            preflight_rules_by_action[rule.action_key].append((rule, leaves, selector_conditions))
             if selector_conditions:
                 selector_rules_by_action[rule.action_key].append(
                     (rule, leaves, selector_conditions)
@@ -548,14 +541,11 @@ class SharedKnowledgeProjection:
                 action,
                 known_resources=known_resources if isinstance(known_resources, dict) else None,
                 known_resource_knowledge=(
-                    known_resource_knowledge
-                    if isinstance(known_resource_knowledge, dict)
-                    else None
+                    known_resource_knowledge if isinstance(known_resource_knowledge, dict) else None
                 ),
             )
             target_role_by_key = {
-                item.target_key: item.required_actor_role_key
-                for item in action.target_actor_roles
+                item.target_key: item.required_actor_role_key for item in action.target_actor_roles
             }
             if action.target_contracts:
                 declared_targets = {
@@ -602,8 +592,7 @@ class SharedKnowledgeProjection:
             # never evaluated twice.
             all_preflight_rules = preflight_rules_by_action.get(action.key, [])
             has_explicit_applicability = any(
-                rule.applicable_target_keys
-                for rule, _leaves, _selectors in all_preflight_rules
+                rule.applicable_target_keys for rule, _leaves, _selectors in all_preflight_rules
             )
             projection_rules: tuple[
                 tuple[
@@ -640,8 +629,7 @@ class SharedKnowledgeProjection:
                     (rule, leaves, selector_conditions)
                     for rule, leaves, selector_conditions in projection_rules
                     if (
-                        not rule.applicable_target_keys
-                        or target_key in rule.applicable_target_keys
+                        not rule.applicable_target_keys or target_key in rule.applicable_target_keys
                     )
                     if all(
                         self._target_selector_matches(
@@ -693,9 +681,7 @@ class SharedKnowledgeProjection:
                                 ),
                             )
                             if resource_requirement is not None:
-                                requirements = requirement.setdefault(
-                                    "resource_requirements", []
-                                )
+                                requirements = requirement.setdefault("resource_requirements", [])
                                 assert isinstance(requirements, list)
                                 if resource_requirement not in requirements:
                                     requirements.append(resource_requirement)
@@ -722,9 +708,7 @@ class SharedKnowledgeProjection:
                             target_key=target_key,
                         ):
                             continue
-                        resource_requirements = requirement.setdefault(
-                            "resource_requirements", []
-                        )
+                        resource_requirements = requirement.setdefault("resource_requirements", [])
                         assert isinstance(resource_requirements, list)
                         if resource_requirement not in resource_requirements:
                             resource_requirements.append(dict(resource_requirement))
@@ -832,8 +816,7 @@ class SharedKnowledgeProjection:
             relation.target_node_key
             for relation in self.definition.world.relations
             if (
-                relation.source_node_key == node_key
-                and relation.relation_type_key == relation_type
+                relation.source_node_key == node_key and relation.relation_type_key == relation_type
             )
         )
         return regions[0] if len(regions) == 1 else None
@@ -891,10 +874,7 @@ class SharedKnowledgeProjection:
         """
 
         source = self.target_knowledge_contracts() if target_contracts is None else target_contracts
-        known_facts = {
-            (row.node_key, row.fact_key)
-            for row in self.known_fact_rows()
-        }
+        known_facts = {(row.node_key, row.fact_key) for row in self.known_fact_rows()}
         result: list[dict[str, Any]] = []
         for item in source:
             projected = dict(item)
@@ -947,9 +927,7 @@ class SharedKnowledgeProjection:
         """
 
         contracts = (
-            self.target_knowledge_contracts()
-            if target_contracts is None
-            else target_contracts
+            self.target_knowledge_contracts() if target_contracts is None else target_contracts
         )
         action_rows = (
             self.known_action_requirements(target_contracts=contracts)
@@ -963,8 +941,7 @@ class SharedKnowledgeProjection:
         }
         known_nodes = {row.node_key for row in self.known_node_rows()}
         known_facts = {
-            (row.node_key, row.fact_key): row.truth_value
-            for row in self.known_fact_rows()
+            (row.node_key, row.fact_key): row.truth_value for row in self.known_fact_rows()
         }
         bindings: list[dict[str, Any]] = []
         for contract in sorted(
@@ -981,8 +958,8 @@ class SharedKnowledgeProjection:
             ):
                 continue
             outputs: list[dict[str, Any]] = []
-            binding_source_node_key, source_binding_key = (
-                self._producer_binding_source_identity(contract)
+            binding_source_node_key, source_binding_key = self._producer_binding_source_identity(
+                contract
             )
             for effect in contract.get("effects", []):
                 if not isinstance(effect, dict):
@@ -1011,9 +988,7 @@ class SharedKnowledgeProjection:
                     "fact_key": fact_key,
                     "desired_value": desired_value,
                     "status": (
-                        "SATISFIED"
-                        if known_facts[identity] == desired_value
-                        else "UNSATISFIED"
+                        "SATISFIED" if known_facts[identity] == desired_value else "UNSATISFIED"
                     ),
                 }
                 if output not in outputs:
@@ -1053,11 +1028,9 @@ class SharedKnowledgeProjection:
                             else None
                         )
                         if (
-                            isinstance(owner_target_key, str)
-                            and owner_target_key != target_key
+                            isinstance(owner_target_key, str) and owner_target_key != target_key
                         ) or (
-                            isinstance(scoped_target_key, str)
-                            and scoped_target_key != target_key
+                            isinstance(scoped_target_key, str) and scoped_target_key != target_key
                         ):
                             continue
                         owner_source_key = item.get("owner_source_key")
@@ -1119,13 +1092,11 @@ class SharedKnowledgeProjection:
                     # projection already exposed the same resource through a
                     # typed requirement (for example after resource survey).
                     if not any(
-                        item.get("resource_key") == resource_key
-                        for item in resource_requirements
+                        item.get("resource_key") == resource_key for item in resource_requirements
                     ):
                         continue
                     if any(
-                        item.get("resource_key") == resource_key
-                        and item.get("minimum") == amount
+                        item.get("resource_key") == resource_key and item.get("minimum") == amount
                         for item in resource_requirements
                     ):
                         continue
@@ -1280,8 +1251,7 @@ class SharedKnowledgeProjection:
             pools_by_resource[(pool.facility_key, pool.resource_key)].append(pool)
         for (target_key, resource_key), pools in sorted(pools_by_resource.items()):
             available = all(
-                pool.availability == ResourcePoolAvailability.AVAILABLE
-                for pool in pools
+                pool.availability == ResourcePoolAvailability.AVAILABLE for pool in pools
             )
             availability_requirements: list[dict[str, Any]] = []
             for pool in pools:
@@ -1323,13 +1293,15 @@ class SharedKnowledgeProjection:
                     "action_name": resource_names.get(resource_key, resource_key),
                     "target_key": target_key,
                     "producer_kind": "RESOURCE_AVAILABILITY",
-                    "outputs": [{
-                        "semantic_key": f"{target_key}.{resource_key}.availability",
-                        "target_key": target_key,
-                        "resource_key": resource_key,
-                        "desired_value": "AVAILABLE",
-                        "status": "SATISFIED" if available else "UNSATISFIED",
-                    }],
+                    "outputs": [
+                        {
+                            "semantic_key": f"{target_key}.{resource_key}.availability",
+                            "target_key": target_key,
+                            "resource_key": resource_key,
+                            "desired_value": "AVAILABLE",
+                            "status": "SATISFIED" if available else "UNSATISFIED",
+                        }
+                    ],
                     "requirements": availability_requirements,
                 }
             )
@@ -1360,8 +1332,7 @@ class SharedKnowledgeProjection:
                 continue
             leaves = self._condition_leaves(rule.condition)
             if any(
-                condition.node is not None
-                and condition.node.kind != NodeSelectorKind.EXPLICIT
+                condition.node is not None and condition.node.kind != NodeSelectorKind.EXPLICIT
                 for condition in leaves
             ):
                 # CURRENT_TARGET, ACTION_SOURCE, and RELATED predicates are
@@ -1783,9 +1754,7 @@ class SharedKnowledgeProjection:
         global_resources: dict[str, Any] = {}
         for (global_region_key, resource_key), pool_rows in grouped.items():
             if global_region_key is None:
-                summary = self._resource_summary(
-                    pool_rows, resource_definitions[resource_key].name
-                )
+                summary = self._resource_summary(pool_rows, resource_definitions[resource_key].name)
                 resource = resource_definitions[resource_key]
                 if resource.unit is not None:
                     summary["unit"] = resource.unit

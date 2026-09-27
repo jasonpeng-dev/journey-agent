@@ -126,9 +126,7 @@ class ScenarioPresentationProfileRevision(UUIDPrimaryKey, Base):
         ),
     )
 
-    scenario_id: Mapped[UUID] = mapped_column(
-        ForeignKey("scenarios.id", ondelete="CASCADE")
-    )
+    scenario_id: Mapped[UUID] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"))
     revision: Mapped[int] = mapped_column(Integer)
     profile_document: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

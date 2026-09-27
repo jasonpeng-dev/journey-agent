@@ -362,7 +362,8 @@ class PlayerProjectionService:
                                 for fact in node_definitions[item.node_key].facts
                                 if fact.key == item.fact_key
                             )
-                        ).presentation_role is not None
+                        ).presentation_role
+                        is not None
                         else None
                     ),
                     presentation_slot=self._fact_presentation_slot(
@@ -422,12 +423,11 @@ class PlayerProjectionService:
                         else None
                     ),
                     relation_type_description=(
-                        relation_type.description
-                        if relation_type is not None
-                        else None
+                        relation_type.description if relation_type is not None else None
                     ),
                     is_structural=(
-                        str(item["relation_type_key"]) in {
+                        str(item["relation_type_key"])
+                        in {
                             definition.metadata.locality.located_in_relation_type_key,
                             definition.metadata.locality.transport_endpoint_relation_type_key,
                         }

@@ -430,9 +430,7 @@ class RuntimeInitializationService:
 
     def _supports_action_target_knowledge_schema(self) -> bool:
         try:
-            inspect(self.db.connection()).get_columns(
-                "game_instance_action_target_knowledge"
-            )
+            inspect(self.db.connection()).get_columns("game_instance_action_target_knowledge")
         except Exception:
             return False
         return True
@@ -532,13 +530,10 @@ class RuntimeInitializationService:
             for contract in action.target_contracts
         }
         target_contracts_valid = (
-            not expected_target_contracts
-            and not self._supports_action_target_knowledge_schema()
+            not expected_target_contracts and not self._supports_action_target_knowledge_schema()
         ) or (
             self._supports_action_target_knowledge_schema()
-            and {
-                (row.action_key, row.target_key) for row in target_contract_knowledge_rows
-            }
+            and {(row.action_key, row.target_key) for row in target_contract_knowledge_rows}
             == expected_target_contracts
             and all(
                 getattr(row.visibility, "value", row.visibility)

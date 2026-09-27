@@ -898,10 +898,10 @@ function DerivedStateEditor({ entity, document, onChange, focusPath }: { entity:
   </>;
 }
 
-function InitializationEditor({ value }: { value: JsonObject; document: JsonObject; onChange: Change }) {
-  const legacyRowCount = arrayOf(value.resource_initial_states).length;
+function InitializationEditor(_props: { value: JsonObject; document: JsonObject; onChange: Change }) {
+  void _props;
   return <div className="typed-specialized-editor">
-    <p>{'\u521d\u59cb\u5316\u6761\u76ee\u5728\u5404\u81ea\u7684\u89c4\u8303\u5f52\u5c5e\u9875\u9762\u521b\u5efa\u548c\u7f16\u8f91\u3002\u517c\u5bb9\u65e7\u7248\u6761\u76ee\uff1a'}{legacyRowCount}{'\u3002'}</p>
+    <p>初始化条目在各自的规范归属页面创建和编辑。</p>
     <FieldActionRow><OwnerLink to="../initialization">前往初始化</OwnerLink></FieldActionRow>
   </div>;
 }
@@ -951,13 +951,7 @@ function PublicReferenceEditor({ entity, document, scenarioId }: { entity: Draft
   const ownerHref = scenarioId ? `/scenarios/${scenarioId}/edit/${referenceOwnerSection(domain)}` : `../${referenceOwnerSection(domain)}`;
   return <div className="typed-specialized-editor"><IdentityValue value={value.term} path={`${entity.kind}.${entity.key}.term`} label="Public term" /><IdentityValue value={value.ref_type} path={`${entity.kind}.${entity.key}.ref_type`} label="Reference type" /><IdentityValue value={value.ref_key} path={`${entity.kind}.${entity.key}.ref_key`} label="Reference key" /><FieldActionRow><OwnerLink className="field-owner-link" to={targetHref ?? ownerHref}>{targetHref ? "前往所选对象" : "前往目标对象"}</OwnerLink></FieldActionRow></div>;
 }
-function collectionRootPath(section: "initialization" | "planning" | "public-knowledge"): string {
-  return section === "public-knowledge" ? "public_knowledge" : section;
-}
-
-function CollectionDetailEditor({ section, selection, index, value, onRemove, onMove, moveCount }: { section: "initialization" | "planning" | "public-knowledge"; selection: RootCollectionSelection; index: number; value: JsonObject; document?: JsonObject; onRemove: () => void; onMove?: (direction: MoveDirection) => void; moveCount?: number }) {
-  const path = `${collectionRootPath(section)}.${selection.collection}.${index}`;
-  if (selection.collection === "resource_initial_states") return <article className="collection-detail-editor"><h4>旧版资源初始状态</h4><IdentityValue value={value.resource_key} path={`${path}.resource_key`} label="资源身份" /><IdentityValue value={value.scope_node_key ?? "global"} path={`${path}.scope_node_key`} label="范围身份" /><p>此兼容集合仅支持只读查看，当前数据请使用初始化正式所有者。</p><FieldActionRow><OwnerLink to="../initialization">前往初始化</OwnerLink></FieldActionRow></article>;
+function CollectionDetailEditor({ selection, index, onRemove, onMove, moveCount }: { section: "initialization" | "planning" | "public-knowledge"; selection: RootCollectionSelection; index: number; value: JsonObject; document?: JsonObject; onRemove: () => void; onMove?: (direction: MoveDirection) => void; moveCount?: number }) {
   return <article className="collection-detail-editor"><header className="collection-detail-heading"><div><p className="panel-kicker">{editorLabel("Collection item")}</p><h4>{rootCollectionLabel(selection.collection)}</h4></div><span className="collection-detail-actions"><ReorderControls index={index} count={moveCount ?? 1} onMove={onMove} /><button type="button" className="small danger" onClick={onRemove}>删除此项</button></span></header></article>;
 }
 

@@ -22,6 +22,7 @@ vi.mock("./api", () => ({
     draft: vi.fn(),
     scenario: vi.fn(),
     scenarioVersion: vi.fn(),
+    semanticDiff: vi.fn(),
     analyzeWorkingCopyReferences: vi.fn(),
     completeness: vi.fn(),
     initializationPreview: vi.fn(),
@@ -59,6 +60,7 @@ beforeEach(() => {
   vi.mocked(api.draft).mockResolvedValue(draft);
   vi.mocked(api.scenario).mockResolvedValue({ id: "scenario-1", key: "scenario-1", name: "Test Scenario", status: "DRAFT", draft_revision: 1, current_published_version_id: null, current_published_version_number: null, created_at: "2026-09-15T00:00:00Z", updated_at: "2026-09-15T00:00:00Z" });
   vi.mocked(api.scenarioVersion).mockReset();
+  vi.mocked(api.semanticDiff).mockReset();
   vi.mocked(api.analyzeWorkingCopyReferences).mockResolvedValue({ scenario_id: "scenario-1", base_revision: 1, source: "WORKING_COPY", references: [] });
   vi.mocked(api.completeness).mockResolvedValue({ scenario_id: "scenario-1", base_revision: 1, items: [], required_missing: 0, recommended_missing: 0, validation_issue_count: 0, reference_edge_count: 0 });
   vi.mocked(api.initializationPreview).mockResolvedValue({ revision: 1, projection: { domains: [], findings: [], summary: { nodes: 0, actors: 0, resource_pools: 0, relations: 0, derived_states: 0, warnings: 0 } }, parity: { published: false, initialization_changes: [], design_changes: [] } });
@@ -262,6 +264,7 @@ describe("EditorPage topology interaction contract", () => {
     vi.mocked(api.draft).mockResolvedValue(aheadDraft);
     vi.mocked(api.scenario).mockResolvedValue({ id: "scenario-1", key: "scenario-1", name: "Test Scenario", status: "PUBLISHED", draft_revision: 1, current_published_version_id: "version-7", current_published_version_number: 7, created_at: "2026-09-15T00:00:00Z", updated_at: "2026-09-15T00:00:00Z" });
     vi.mocked(api.scenarioVersion).mockResolvedValue({ id: "version-7", scenario_id: "scenario-1", version_number: 7, schema_version: 2, content_hash: "published-hash", published_at: "2026-09-15T00:00:00Z", definition_document: draft.definition_document });
+    vi.mocked(api.semanticDiff).mockResolvedValue({ published: true, compared_version: { id: "version-7", version_number: 7, schema_version: 2 }, published_version_id: "version-7", published_version_number: 7, published_schema_version: 2, is_equal: false, comparable: true, total_changed_objects: 1, total_changed_items: 1, section_summaries: [{ section: "世界模型", count: 1, subsections: [{ subsection: "场景信息", count: 1 }] }], entries: [] });
 
     renderEditor("/scenarios/scenario-1/edit/overview");
     const draftBadge = await screen.findByText("草稿 r1 · 已验证");

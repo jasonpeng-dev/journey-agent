@@ -284,8 +284,7 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     assert calls[-1]["proposal_stop_reason"] == "OBJECTIVE_COMPLETION"
     assert calls[-1]["validator_violations"] == []
     action_keys = {
-        item.action_key
-        for item in provider.plan_requests[0].planner_input.action_contracts
+        item.action_key for item in provider.plan_requests[0].planner_input.action_contracts
     }
     assert {"diagnose_patient", "treat_patient"} <= action_keys
 

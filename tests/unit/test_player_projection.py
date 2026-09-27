@@ -928,9 +928,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     }
     assert projected_roles == shared_roles
     assert ("utility_service_depot", "repair_facility") not in contracts
-    external_relief = contracts[
-        ("emergency_supply_warehouse", "receive_external_relief_supplies")
-    ]
+    external_relief = contracts[("emergency_supply_warehouse", "receive_external_relief_supplies")]
     assert external_relief.action_name == "接收外部救援物资"
     assert external_relief.effects == [
         {
@@ -947,8 +945,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
         "receive_external_relief_supplies:emergency_supply_warehouse"
     )
     assert [
-        item.model_dump(mode="json", exclude_none=True)
-        for item in external_binding.outputs
+        item.model_dump(mode="json", exclude_none=True) for item in external_binding.outputs
     ] == [
         {
             "semantic_key": "emergency_supply_warehouse.external_relief_supply_ready",
@@ -1000,8 +997,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     utility_binding = next(
         item
         for item in known_state.known_producer_bindings
-        if item.target_key == "utility_service_depot"
-        and item.action_key == "repair_facility"
+        if item.target_key == "utility_service_depot" and item.action_key == "repair_facility"
     )
     assert utility.cost == {
         "general_engineering_parts": 5,
@@ -1013,9 +1009,7 @@ def test_player_projection_exposes_known_target_contracts_without_hidden_targets
     )
     assert utility_binding.outputs[0].fact_key == "operational"
     assert utility_binding.outputs[0].status == "UNSATISFIED"
-    assert {
-        item.kind for item in utility_binding.requirements
-    } >= {"RESOURCE", "ROLE"}
+    assert {item.kind for item in utility_binding.requirements} >= {"RESOURCE", "ROLE"}
     repair_profile.visibility = Visibility.HIDDEN
     session.flush()
     hidden_state = projection.game_state(GameInstanceId(runtime.instance.id))
@@ -1067,12 +1061,10 @@ def test_player_projection_scopes_linjiang_repair_producer_to_exact_target(
         for item in binding.requirements
         if item.kind == "RESOURCE"
     ] == [("general_engineering_parts", 5)]
-    assert {
-        item.role_key for item in binding.requirements if item.kind == "ROLE"
-    } == {"industrial_repair_team"}
-    assert {
-        item.node_key for item in binding.requirements if item.kind == "FACT"
-    } <= {warehouse}
+    assert {item.role_key for item in binding.requirements if item.kind == "ROLE"} == {
+        "industrial_repair_team"
+    }
+    assert {item.node_key for item in binding.requirements if item.kind == "FACT"} <= {warehouse}
     assert not any(item.kind == "SOURCE" for item in binding.requirements)
 
 
@@ -1123,9 +1115,7 @@ def test_player_projection_groups_complete_known_source_requirements(session: Se
     supply_power = next(
         item for item in state.known_action_requirements if item.action_key == "supply_power"
     )
-    source_sets = {
-        item.source_node_key: item for item in supply_power.source_requirements
-    }
+    source_sets = {item.source_node_key: item for item in supply_power.source_requirements}
     assert source_sets
     example_source = next(iter(sorted(source_node_keys)))
     source_contract = source_sets[example_source]
@@ -1154,8 +1144,7 @@ def test_player_projection_groups_complete_known_source_requirements(session: Se
     target_binding = next(
         item
         for item in producer_state.known_producer_bindings
-        if item.action_key == "supply_power"
-        and item.target_key == "east_community_hospital"
+        if item.action_key == "supply_power" and item.target_key == "east_community_hospital"
     )
     assert not any(item.kind == "SOURCE" for item in target_binding.requirements)
     assert not any(item.kind == "FACT" for item in target_binding.requirements)
@@ -1283,11 +1272,9 @@ def test_producer_bindings_keep_synthetic_target_and_source_scopes_separate() ->
         "a_operator",
         "global_operator",
     }
-    assert {
-        item["node_key"]
-        for item in unit_a_requirements
-        if item["kind"] == "FACT"
-    } == {"unit_a"}
+    assert {item["node_key"] for item in unit_a_requirements if item["kind"] == "FACT"} == {
+        "unit_a"
+    }
 
     route_action = {
         "action_key": "route_coolant",

@@ -15,7 +15,6 @@ import type { JsonObject } from "./editor";
 
 const identityCases: Array<[RootCollectionKey, JsonObject, string]> = [
   ["recovery_hints", { failure_code: "BLOCKED" }, JSON.stringify(["BLOCKED"])],
-  ["resource_initial_states", { resource_key: "water", scope_node_key: "north" }, JSON.stringify(["water", "north"])],
   ["resource_pools", { pool_key: "north_water" }, JSON.stringify(["north_water"])],
   ["region_resource_knowledge", { region_key: "north" }, JSON.stringify(["north"])],
 ];
@@ -26,10 +25,6 @@ describe("root collection durable identity", () => {
   });
 
   it("presents semantic collection identities without exposing canonical JSON", () => {
-    expect(rootCollectionIdentityLabel("resource_initial_states", { resource_key: "water", scope_node_key: "north" }))
-      .toBe("资源 · water / 作用域 · north");
-    expect(rootCollectionIdentityLabel("resource_initial_states", { resource_key: "water", scope_node_key: null }))
-      .toBe("资源 · water / 作用域 · 全局");
     expect(rootCollectionIdentityLabel("resource_pools", { pool_key: "north_water" })).toBe("资源池 · north_water");
   });
 
@@ -79,9 +74,7 @@ describe("root collection durable identity", () => {
     const suffix = "second";
     const secondItem: JsonObject = collection === "recovery_hints"
       ? { failure_code: "SECOND", hint: "Second" }
-      : collection === "resource_initial_states"
-        ? { resource_key: "oil", scope_node_key: null, value: 0, reserved_value: 0 }
-        : collection === "resource_pools"
+      : collection === "resource_pools"
           ? { pool_key: `${firstItem.pool_key}_${suffix}`, resource_key: "oil" }
           : { region_key: "south", resource_inventory_visibility: "VISIBLE", resource_survey_completed: false };
     const first = appendRootCollectionItem({}, collection, firstItem);

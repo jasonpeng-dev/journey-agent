@@ -1803,10 +1803,7 @@ def build_dependency_closure(
         # transport candidates.  Preserve a canonical order at the public
         # PlannerInput boundary so identical state produces identical
         # replan payloads across processes (and therefore identical hashes).
-        tuple(
-            unknowns[key]
-            for key in sorted(unknowns)
-        ),
+        tuple(unknowns[key] for key in sorted(unknowns)),
         relevant_resource_source_hint_resources,
     )
     active_goal_dependencies = _active_goal_dependency_projections(

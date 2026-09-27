@@ -192,8 +192,7 @@ def test_locality_is_the_single_node_family_authority_for_builtin_and_generic_sc
 
     assert GENERIC_TEST.node_family_for_type("room") == NodeFamilyV2.GENERIC
     assert all(
-        family == NodeFamilyV2.GENERIC
-        for family in GENERIC_TEST.node_family_metadata().values()
+        family == NodeFamilyV2.GENERIC for family in GENERIC_TEST.node_family_metadata().values()
     )
 
 
@@ -205,8 +204,6 @@ def test_legacy_semantic_hash_is_stable_when_optional_metadata_is_omitted() -> N
     assert scenario_content_hash(canonical) == old_hash
     assert "relation_types" not in canonical["world"]
     assert all(
-        "value_labels" not in fact
-        for node in canonical["world"]["nodes"]
-        for fact in node["facts"]
+        "value_labels" not in fact for node in canonical["world"]["nodes"] for fact in node["facts"]
     )
     assert all("unit" not in resource for resource in canonical["world"]["resources"])

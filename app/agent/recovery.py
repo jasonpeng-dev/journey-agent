@@ -75,6 +75,7 @@ _PROVIDER_RETRYABLE_CODES = frozenset(
     }
 )
 
+
 # These are stable runtime terminal gates.  They are retained as a typed
 # compatibility fallback until every old producer supplies richer evidence.
 class GenericRecoveryPolicy:
@@ -302,9 +303,8 @@ def normalize_runtime_failure(
                 "action_key": existing.action_key or action_key,
                 "actor_key": existing.actor_key or actor_key,
                 "target_key": existing.target_key or target_key,
-                "knowledge_changes": existing.knowledge_changes or tuple(
-                    dict(item) for item in knowledge_changes
-                ),
+                "knowledge_changes": existing.knowledge_changes
+                or tuple(dict(item) for item in knowledge_changes),
             }
         )
     return normalize_legacy_failure(
@@ -326,8 +326,6 @@ def _json_value(value: object) -> JsonValue | None:
         return [item for item in items if item is not None]
     if isinstance(value, dict):
         return {
-            str(key): item
-            for key, raw in value.items()
-            if (item := _json_value(raw)) is not None
+            str(key): item for key, raw in value.items() if (item := _json_value(raw)) is not None
         }
     return str(value)

@@ -359,9 +359,11 @@ class GenericGameService:
                 GameInstanceActionTargetKnowledge,
                 (self.scope.game_instance_id, item.action_key, item.target_key),
             )
-            if target_row is not None and getattr(
-                target_row.visibility, "value", target_row.visibility
-            ) != Visibility.KNOWN.value:
+            if (
+                target_row is not None
+                and getattr(target_row.visibility, "value", target_row.visibility)
+                != Visibility.KNOWN.value
+            ):
                 newly_known_action_targets.add((item.action_key, item.target_key))
         # Region inventory knowledge is persisted in its own table, so it is
         # not represented by the ordinary Fact/Node/Relation visibility
@@ -460,11 +462,7 @@ class GenericGameService:
         for action_key, target_key in sorted(newly_known_action_targets):
             action = next((item for item in definition.actions if item.key == action_key), None)
             target_name = next(
-                (
-                    item.name
-                    for item in definition.world.nodes
-                    if item.key == target_key
-                ),
+                (item.name for item in definition.world.nodes if item.key == target_key),
                 next(
                     (
                         item.name
@@ -891,8 +889,7 @@ class GenericGameService:
                         for candidate_action in definition.actions
                         for contract in candidate_action.target_contracts
                         if candidate_action.target_kind == ActionTargetKind.NODE
-                        if contract.reveal_on_inspect
-                        and contract.target_key == target_node_key
+                        if contract.reveal_on_inspect and contract.target_key == target_node_key
                     ]
                 ),
             )
@@ -1579,16 +1576,10 @@ class GenericGameService:
                 self._supports_relation_knowledge_schema()
                 and {row.relation_key for row in relation_knowledge} != expected_relations
             )
-            or (
-                expected_target_contracts
-                and not self._supports_action_target_knowledge_schema()
-            )
+            or (expected_target_contracts and not self._supports_action_target_knowledge_schema())
             or (
                 self._supports_action_target_knowledge_schema()
-                and {
-                    (row.action_key, row.target_key)
-                    for row in target_contract_knowledge
-                }
+                and {(row.action_key, row.target_key) for row in target_contract_knowledge}
                 != expected_target_contracts
             )
             or any(
@@ -1741,10 +1732,7 @@ class GenericGameService:
         }
         for mutation in outcome.region_resource_visibility_updates:
             previous = projected_region_knowledge.get(mutation.region_key)
-            if (
-                previous is None
-                or previous.resource_inventory_visibility == mutation.visibility
-            ):
+            if previous is None or previous.resource_inventory_visibility == mutation.visibility:
                 continue
             region_changes.append(
                 PlayerKnowledgeChange(
@@ -1760,10 +1748,7 @@ class GenericGameService:
             )
         for survey_mutation in outcome.region_resource_survey_updates:
             previous = projected_region_knowledge.get(survey_mutation.region_key)
-            if (
-                previous is None
-                or previous.resource_survey_completed == survey_mutation.completed
-            ):
+            if previous is None or previous.resource_survey_completed == survey_mutation.completed:
                 continue
             region_changes.append(
                 PlayerKnowledgeChange(
@@ -2233,9 +2218,7 @@ class GenericGameService:
 
     def _supports_action_target_knowledge_schema(self) -> bool:
         try:
-            inspect(self.db.connection()).get_columns(
-                "game_instance_action_target_knowledge"
-            )
+            inspect(self.db.connection()).get_columns("game_instance_action_target_knowledge")
         except Exception:
             return False
         return True

@@ -63,7 +63,8 @@ def test_completeness_exposes_typed_nested_action_outcome_schema_issues() -> Non
     result = evaluate_completeness(document)
 
     issue = next(
-        issue for issue in result.validation_issues
+        issue
+        for issue in result.validation_issues
         if issue.path.endswith("expected_outcomes.0.name")
     )
     assert issue.code == "SCENARIO_DOCUMENT_SCHEMA_INVALID"
@@ -145,7 +146,4 @@ def test_reachable_retryable_resolve_failure_without_hint_is_recommended() -> No
         }
     ]
     covered = evaluate_completeness(document)
-    assert not any(
-        item.key == "recovery-hint:DIAGNOSIS_INCONCLUSIVE"
-        for item in covered.items
-    )
+    assert not any(item.key == "recovery-hint:DIAGNOSIS_INCONCLUSIVE" for item in covered.items)

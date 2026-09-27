@@ -67,9 +67,7 @@ def test_generic_draft_replace_rejects_action_derived_and_relation_identity_muta
     action = next(item for item in changed_action["actions"] if item["key"] == "treat_patient")
     action["key"] = "treat_patient_v2"
     with pytest.raises(ScenarioLifecycleError) as action_error:
-        service.replace_draft(
-            scenario.id, expected_revision=1, definition_document=changed_action
-        )
+        service.replace_draft(scenario.id, expected_revision=1, definition_document=changed_action)
     assert action_error.value.code == "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION"
 
     blank_action_key = deepcopy(original)
@@ -202,11 +200,14 @@ def test_generic_draft_replace_requires_complete_relation_identity_at_creation(
     assert blocked.value.code == "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION"
     persisted_after_change = service.get_draft(scenario.id)
     assert persisted_after_change.revision == created.revision
-    assert next(
-        item
-        for item in persisted_after_change.definition_document["world"]["relations"]
-        if item.get("key") == "new_relation"
-    )["target_node_key"] == "triage_room"
+    assert (
+        next(
+            item
+            for item in persisted_after_change.definition_document["world"]["relations"]
+            if item.get("key") == "new_relation"
+        )["target_node_key"]
+        == "triage_room"
+    )
 
 
 def test_publish_increments_versions_and_semantic_no_change_is_rejected(session: Session) -> None:

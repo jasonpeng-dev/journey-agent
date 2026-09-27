@@ -894,7 +894,7 @@ describe("typed ScenarioDefinition v2 authoring", () => {
   it("authors initialization availability requirements and root planning/goal/public sections", () => {
     const onInitializationChange = vi.fn();
     render(<TypedEditor section="initialization" value={{ resource_initial_states: [], resource_pools: [{ pool_key: "fuel_pool", resource_key: "fuel", quantity: 5 }], region_resource_knowledge: [] }} document={document} onChange={onInitializationChange} />);
-    expect(screen.getByText(/\u521d\u59cb\u5316\u6761\u76ee\u5728\u5404\u81ea\u7684\u89c4\u8303\u5f52\u5c5e\u9875\u9762\u521b\u5efa\u548c\u7f16\u8f91/)).toBeInTheDocument();
+    expect(screen.getByText("初始化条目在各自的规范归属页面创建和编辑。")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "前往初始化" })).toHaveAttribute("href", "../initialization");
     expect(screen.queryByRole("button", { name: /Add pool|Add initial state|Add region state/ })).not.toBeInTheDocument();
     expect(onInitializationChange).not.toHaveBeenCalled();

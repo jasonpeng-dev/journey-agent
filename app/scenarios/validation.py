@@ -91,8 +91,9 @@ def _readiness_issues(definition: ScenarioDefinitionV2) -> tuple[ScenarioValidat
             )
         )
     resolve_action_keys = {
-        rule.action_key for rule in definition.rules if rule.phase.value == "RESOLVE"
-        and rule.action_key is not None
+        rule.action_key
+        for rule in definition.rules
+        if rule.phase.value == "RESOLVE" and rule.action_key is not None
     }
     goal_facts: set[tuple[str, str]] = {
         (node.key, fact.key)

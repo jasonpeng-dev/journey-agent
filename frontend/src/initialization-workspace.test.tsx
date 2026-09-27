@@ -71,7 +71,6 @@ const resourcePreview: InitializationPreview = {
           label: "Region resource knowledge",
           items: [{ id: "region-knowledge:west_region", label: "Region resource knowledge · west_region", locator: { section: "initialization", object_kind: "region_resource_knowledge", object_key: "west_region", field_path: "initialization.region_resource_knowledge" }, field_ids: [], readonly: false, context: { region_key: "west_region" } }],
         },
-        { id: "compatibility-resources", label: "Compatibility sources", items: [] },
       ],
     }),
   },
@@ -235,18 +234,6 @@ describe("InitializationWorkspace", () => {
     await waitFor(() => expect(screen.queryByRole("heading", { name: "诊疗室" })).not.toBeInTheDocument());
     expect(screen.getByRole("heading", { name: "节点类型" })).toBeInTheDocument();
     expect(screen.getByText("请选择一个分类")).toBeInTheDocument();
-  });
-
-  it("keeps overview closed by default and preserves counts, warnings, and parity", () => {
-    renderWorkspace();
-    const trigger = screen.getByRole("button", { name: "初始化概览" });
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(trigger);
-    const overview = screen.getByRole("complementary", { name: "初始化概览" });
-    expect(within(overview).getByText("节点")).toBeInTheDocument();
-    expect(within(overview).getByText("警告")).toBeInTheDocument();
-    expect(within(overview).getByText("开局变化")).toBeInTheDocument();
-    expect(within(overview).getByText("设计变化")).toBeInTheDocument();
   });
 
   it("writes initialization edits directly to the canonical working document", () => {
@@ -524,13 +511,22 @@ describe("InitializationWorkspace", () => {
     expect(screen.queryByText("资源池 · west_general_stock")).not.toBeInTheDocument();
   });
 
+  it("shows only Resource Pool and Region Inventory Knowledge groups", () => {
+    renderWorkspace(vi.fn(), "/initialization?domain=resources", resourceDocument, resourcePreview);
+    const groups = screen.getByRole("region", { name: "分类" });
+    expect(within(groups).getByRole("button", { name: /资源池/ })).toBeInTheDocument();
+    expect(within(groups).getByRole("button", { name: /区域库存情报/ })).toBeInTheDocument();
+    expect(within(groups).queryByRole("button", { name: /兼容来源/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/兼容来源/)).not.toBeInTheDocument();
+  });
+
   it("falls back to the stable pool key and resolves Region Knowledge names without a prefix", () => {
     renderWorkspace(vi.fn(), "/initialization?domain=resources&group=resource-pools&item=pool%3Aunresolved_pool%3Amissing_resource%3Amissing_region", resourceDocument, resourcePreview);
     expect(screen.getByRole("heading", { name: "unresolved_pool" })).toBeInTheDocument();
     expect(screen.getByText("pool:unresolved_pool")).toBeInTheDocument();
     expect(screen.queryByText("资源池 · unresolved_pool")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /区域资源知识/ }));
+    fireEvent.click(screen.getByRole("button", { name: /区域库存情报/ }));
     fireEvent.click(screen.getByRole("button", { name: /西部物流区/ }));
     expect(screen.getByRole("heading", { name: "西部物流区" })).toBeInTheDocument();
     expect(screen.getAllByText("west_region").length).toBeGreaterThan(0);

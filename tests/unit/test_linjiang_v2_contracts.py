@@ -570,9 +570,7 @@ def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
     projection = SharedKnowledgeProjection(session, scope, definition)
     sparse = projection.planner_action_requirements()
     water = next(item for item in sparse if item["target_key"] == "water_treatment_plant")
-    assert not any(
-        item["action_key"] == "repair_facility" for item in water["requirements"]
-    )
+    assert not any(item["action_key"] == "repair_facility" for item in water["requirements"])
     assert all(
         "knowledge_status" not in json.dumps(item, ensure_ascii=False)
         for item in water["requirements"]
@@ -659,9 +657,7 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     )
     assert all(
         ("repair_facility", item["target_key"]) in shared_contract_keys
-        for item in repair_contract["executor_requirements"].get(
-            "target_role_requirements", []
-        )
+        for item in repair_contract["executor_requirements"].get("target_role_requirements", [])
     )
     assert "repair_facility" in communications["allowed_action_keys"]
     assert "north_heavy_equipment_stock" not in serialized
@@ -1141,8 +1137,7 @@ def test_dependency_closure_requeues_binding_specific_reachability_recovery(
     action_keys = {item.action_key for item in closure.planner_input.action_contracts}
     actor_keys = {item.actor_key for item in closure.planner_input.actors}
     binding_keys = {
-        (item.action_key, item.target_key)
-        for item in closure.planner_input.target_bindings
+        (item.action_key, item.target_key) for item in closure.planner_input.target_bindings
     }
     industrial = next(
         item
@@ -2958,9 +2953,7 @@ def test_explicit_terminal_effect_binds_only_to_the_same_eligible_target() -> No
         }
     ]
 
-    broadened_eligibility = action.model_copy(
-        update={"required_interaction_key": "repairable"}
-    )
+    broadened_eligibility = action.model_copy(update={"required_interaction_key": "repairable"})
     broadened_contracts = planner_target_contracts(
         definition,
         broadened_eligibility,
@@ -2979,17 +2972,18 @@ def test_explicit_terminal_effect_binds_only_to_the_same_eligible_target() -> No
 
     no_explicit_terminal = broadened_eligibility.model_copy(
         update={
-            "planning": broadened_eligibility.planning.model_copy(
-                update={"terminal_effects": ()}
-            )
+            "planning": broadened_eligibility.planning.model_copy(update={"terminal_effects": ()})
         }
     )
-    assert planner_target_contracts(
-        definition,
-        no_explicit_terminal,
-        known_node_keys=known_nodes,
-        known_facts=known_facts,
-    ) == {}
+    assert (
+        planner_target_contracts(
+            definition,
+            no_explicit_terminal,
+            known_node_keys=known_nodes,
+            known_facts=known_facts,
+        )
+        == {}
+    )
 
     hidden_fact_contracts = planner_target_contracts(
         definition,
@@ -3004,8 +2998,9 @@ def test_explicit_terminal_effect_binds_only_to_the_same_eligible_target() -> No
     )
     # A safe desired effect may identify its known target Fact, but never
     # substitutes or serializes that Fact's hidden current value.
-    assert hidden_fact_contracts["emergency_supply_warehouse"]["effects"] == (
-        contracts["emergency_supply_warehouse"]["effects"]
+    assert (
+        hidden_fact_contracts["emergency_supply_warehouse"]["effects"]
+        == (contracts["emergency_supply_warehouse"]["effects"])
     )
     assert "current_value" not in json.dumps(hidden_fact_contracts, ensure_ascii=False)
     hidden_target_contracts = planner_target_contracts(

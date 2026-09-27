@@ -13,6 +13,7 @@ from app.infrastructure.db.models import (
     GameInstanceResourceState,
     Player,
 )
+from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
 from app.scenarios.initialization import (
     BootstrapValueSource,
     FieldUiOwner,
@@ -118,6 +119,7 @@ def test_projection_has_stable_variable_depth_hierarchy_and_owner_locators() -> 
     assert patient["locator"]["section"] == "world-entities"
     assert patient["context"]["key"] == "patient_one"
     pools = domains["resources"]["groups"][0]["items"]
+    assert all(group["id"] != "compatibility-resources" for group in domains["resources"]["groups"])
     clinic_pool = next(
         item for item in pools if item["id"] == "pool:clinic_medicine:medicine:global"
     )
@@ -138,6 +140,26 @@ def test_initial_derived_preview_separates_truth_and_knowledge() -> None:
         "truth": "UNAVAILABLE",
         "knowledge": "UNAVAILABLE",
         "knowledge_status": "KNOWN",
+    }
+
+
+def test_linjiang_initial_derived_truth_and_knowledge_difference_is_semantic() -> None:
+    values = evaluate_initial_derived_states(LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
+
+    # East facts are all initially known.  At least one required fact is false,
+    # so both the authoritative result and the player-visible result are false.
+    assert values["east_emergency_power_network"] == {
+        "truth": "UNAVAILABLE",
+        "knowledge": "UNAVAILABLE",
+        "knowledge_status": "KNOWN",
+    }
+
+    # North facts are false in truth but hidden from the player.  The player
+    # cannot determine the derived result, so Knowledge remains UNKNOWN.
+    assert values["north_basic_engineering_support"] == {
+        "truth": "UNAVAILABLE",
+        "knowledge": None,
+        "knowledge_status": "UNKNOWN",
     }
 
 

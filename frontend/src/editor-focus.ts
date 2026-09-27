@@ -25,10 +25,6 @@ function rowIdentity(collection: string, row: RecordValue): string | null {
     return typeof row.target_key === "string" && typeof row.required_actor_role_key === "string"
       ? `${row.target_key}:${row.required_actor_role_key}` : null;
   }
-  if (collection === "resource_initial_states") {
-    return typeof row.resource_key === "string"
-      ? `${row.resource_key}:${typeof row.scope_node_key === "string" ? row.scope_node_key : "global"}` : null;
-  }
   if (collection === "relations") {
     if (typeof row.key === "string" && row.key) return row.key;
     if (typeof row.source_node_key === "string" && typeof row.relation_type_key === "string" && typeof row.target_node_key === "string") {

@@ -177,9 +177,7 @@ class PlayOrchestrator:
         metadata = dict(task.objective_resolution_metadata or {})
         metadata.update(
             {
-                "last_failure_event": failure_event.model_dump(
-                    mode="json", exclude_none=True
-                ),
+                "last_failure_event": failure_event.model_dump(mode="json", exclude_none=True),
                 "last_recovery_context": recovery_context.model_dump(
                     mode="json", exclude_none=True
                 ),

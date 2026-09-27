@@ -10,7 +10,7 @@ describe("IdentityCreationDialog required reference picker", () => {
   it("shows an explicit disabled prompt and creates only after selecting an existing target", () => {
     const onCreate = vi.fn();
     render(<MemoryRouter><IdentityCreationDialog
-      title="添加区域资源知识"
+      title="添加区域库存情报"
       fields={[{
         key: "region_key",
         label: "区域",
@@ -45,7 +45,7 @@ describe("IdentityCreationDialog required reference picker", () => {
     const onCreate = vi.fn();
     const onCancel = vi.fn();
     render(<MemoryRouter><IdentityCreationDialog
-      title="添加区域资源知识"
+      title="添加区域库存情报"
       fields={[{
         key: "region_key",
         label: "区域",

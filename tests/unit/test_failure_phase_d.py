@@ -89,8 +89,9 @@ def test_v3_goal_resolution_is_ordered_quick_inputs_and_runtime_policy_is_inject
     assert list(normalized.objectives) == list(GENERIC_TEST.objectives)
 
 
-def test_current_v3_goal_cleanup_is_deterministic_idempotent_and_preserves_non_goal_content(
-) -> None:
+def test_current_v3_goal_cleanup_is_deterministic_idempotent_and_preserves_non_goal_content() -> (
+    None
+):
     source = preview_v2_to_v3(GENERIC_TEST.model_dump(mode="json")).target_document
     source["goal_resolution"].update(
         allow_llm_fallback=False,
@@ -183,9 +184,7 @@ def test_v2_hash_and_legacy_failure_projection_remain_unchanged() -> None:
     legacy_hash = scenario_content_hash(source)
     assert scenario_content_hash(parsed.model_dump(mode="json")) == legacy_hash
     assert any(
-        effect.kind.value == "EMIT_FAILURE"
-        for rule in parsed.rules
-        for effect in rule.effects
+        effect.kind.value == "EMIT_FAILURE" for rule in parsed.rules for effect in rule.effects
     )
 
 

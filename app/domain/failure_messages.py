@@ -30,9 +30,7 @@ def format_failure_message(
 
     names = display_names or {}
     evidence = event.evidence
-    if event.kind == FailureKind.RESOURCE_INSUFFICIENT and isinstance(
-        evidence, ResourceEvidence
-    ):
+    if event.kind == FailureKind.RESOURCE_INSUFFICIENT and isinstance(evidence, ResourceEvidence):
         resource = _name(names, evidence.resource_key, "资源")
         required = _value(evidence.required)
         available = _value(evidence.available)

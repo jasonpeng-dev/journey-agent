@@ -110,9 +110,7 @@ def test_travel_blocked_preserves_reveal_and_actor_position(session: Session) ->
     assert failure.message == "The one-hop Transport is currently blocked"
     assert failure.retryable is True
     actor = session.get(GameInstanceActor, (runtime.instance.id, "logistics_team_alpha"))
-    passability = _linjiang_fact(
-        session, runtime.instance.id, "central_river_tunnel", "passable"
-    )
+    passability = _linjiang_fact(session, runtime.instance.id, "central_river_tunnel", "passable")
     assert actor is not None and actor.current_node_key == "central_district"
     assert passability.visibility == Visibility.KNOWN and passability.truth_value is False
     assert any(item.key == "central_river_tunnel.passable" for item in result.knowledge_changes)
@@ -391,9 +389,7 @@ def test_authored_resource_compare_preserves_preflight_replan_and_completion(
     session: Session,
 ) -> None:
     provider = _RecordingProvider(_accepted_proposal())
-    agent, runtime = cast(
-        tuple[Any, Any], _agent(session, preflight=True, provider=provider)
-    )
+    agent, runtime = cast(tuple[Any, Any], _agent(session, preflight=True, provider=provider))
     resource = session.get(GameInstanceResourceState, (runtime.instance.id, "medicine"))
     assert resource is not None
     resource.value = 0
@@ -438,8 +434,7 @@ def test_authored_resource_compare_preserves_preflight_replan_and_completion(
     planner_input = PlannerInput.model_validate(latest_cycle.planner_input)
     assert isinstance(planner_input.execution_context, dict)
     assert any(
-        "INSUFFICIENT_MEDICINE" in str(value)
-        for value in planner_input.execution_context.values()
+        "INSUFFICIENT_MEDICINE" in str(value) for value in planner_input.execution_context.values()
     )
     assert resource.value == 0
     stable = session.get(GameInstanceFactState, (runtime.instance.id, "patient_one", "stable"))

@@ -74,6 +74,57 @@ def test_blank_draft_is_editable_but_cannot_publish(client: TestClient) -> None:
     assert publish.json()["error"]["code"] == "SCENARIO_DRAFT_INVALID"
 
 
+def test_semantic_diff_compares_working_copy_to_explicit_published_version(
+    client: TestClient,
+) -> None:
+    created = _create_example(client, key="semantic_diff_api")
+    scenario_id = created["id"]
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    validated = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/validate",
+        json={"expected_revision": draft["revision"]},
+    )
+    assert validated.status_code == 200 and validated.json()["publish_ready"] is True
+    published = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/publish",
+        json={"expected_revision": draft["revision"]},
+    )
+    assert published.status_code == 200, published.text
+    published_number = published.json()["version"]["version_number"]
+
+    equal = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/semantic-diff",
+        json={
+            "expected_revision": draft["revision"],
+            "definition_document": draft["definition_document"],
+        },
+    )
+    assert equal.status_code == 200, equal.text
+    assert equal.json()["published"] is True
+    assert equal.json()["comparable"] is True
+    assert equal.json()["is_equal"] is True
+    assert equal.json()["published_version_number"] == published_number
+
+    working = deepcopy(draft["definition_document"])
+    working["planning"]["instructions"] = ["先确认当前区域状态"]
+    changed = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/semantic-diff",
+        json={
+            "expected_revision": draft["revision"],
+            "definition_document": working,
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    payload = changed.json()
+    assert payload["is_equal"] is False
+    assert payload["total_changed_items"] > 0
+    assert any(item["section"] == "目标与规划" for item in payload["section_summaries"])
+
+    persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert persisted["revision"] == draft["revision"]
+    assert persisted["definition_document"] == draft["definition_document"]
+
+
 def test_planning_instruction_save_reload_reaches_provider_payload(
     client: TestClient,
 ) -> None:
@@ -617,10 +668,14 @@ def test_working_copy_transform_and_reference_analysis_do_not_persist(client: Te
         },
     )
     assert deleted_nested.status_code == 200, deleted_nested.text
-    assert next(
-        item for item in deleted_nested.json()["definition_document"]["actions"]
-        if item["key"] == "repair_facility"
-    )["parameters"] == []
+    assert (
+        next(
+            item
+            for item in deleted_nested.json()["definition_document"]["actions"]
+            if item["key"] == "repair_facility"
+        )["parameters"]
+        == []
+    )
 
 
 def test_working_copy_completeness_is_readonly_and_tolerates_temporary_invalid_shape(
@@ -672,7 +727,8 @@ def test_working_copy_completeness_returns_nested_action_outcome_locator_without
 
     assert response.status_code == 200, response.text
     issue = next(
-        issue for issue in response.json()["validation_issues"]
+        issue
+        for issue in response.json()["validation_issues"]
         if issue["path"].endswith("expected_outcomes.0.name")
     )
     assert issue["type"] == "missing"
@@ -693,9 +749,7 @@ def test_invalid_initialization_preview_returns_json_safe_validation_details(
     scenario_id = created["id"]
     draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
     working = deepcopy(draft["definition_document"])
-    resource = next(
-        item for item in working["world"]["resources"] if item.get("source_hint")
-    )
+    resource = next(item for item in working["world"]["resources"] if item.get("source_hint"))
     resource["source_hint"] = {
         "primary_region_key": None,
         "candidate_region_keys": [],
@@ -875,6 +929,7 @@ def test_focused_initialization_preview_survives_an_unrelated_incomplete_node(
     persisted = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
     assert persisted["revision"] == draft["revision"]
     assert persisted["definition_document"] == draft["definition_document"]
+
 
 @pytest.mark.parametrize("example_key", ["linjiang_infrastructure_recovery_v2_0"])
 def test_generic_editor_round_trip_remains_engine_parseable(

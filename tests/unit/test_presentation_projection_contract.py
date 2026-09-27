@@ -27,9 +27,7 @@ def test_player_projection_exposes_resolved_profile_without_expanding_knowledge(
                 "schema_version": 1,
                 "template": "compact",
                 "world_entities": {"knowledge_level": "A"},
-                "family_overrides": [
-                    {"node_family": "FACILITY", "default_open": "FULL"}
-                ],
+                "family_overrides": [{"node_family": "FACILITY", "default_open": "FULL"}],
             },
         )
     )
@@ -40,13 +38,10 @@ def test_player_projection_exposes_resolved_profile_without_expanding_knowledge(
     assert state.presentation.revision == 7
     assert state.presentation.template == "compact"
     assert state.presentation.knowledge_level == "A"
-    facility = next(
-        node for node in state.visible_nodes if node.node_family == "FACILITY"
-    )
+    facility = next(node for node in state.visible_nodes if node.node_family == "FACILITY")
     assert facility.presentation is not None
     assert facility.presentation.default_open == "FULL"
     assert facility.presentation.knowledge_level == "A"
     assert all(
-        "truth" not in field and "hidden" not in field
-        for field in state.presentation.model_dump()
+        "truth" not in field and "hidden" not in field for field in state.presentation.model_dump()
     )

@@ -97,11 +97,7 @@ class ResolvedPresentation:
             else self.semantic_order
         )
         summary_slot = self.summary_slot
-        semantic_keys = tuple(
-            item
-            for item in (semantic_key, normalized_family.casefold())
-            if item
-        )
+        semantic_keys = tuple(item for item in (semantic_key, normalized_family.casefold()) if item)
         semantic_override = next(
             (
                 item
@@ -329,9 +325,7 @@ def resolve_presentation_profile(document: object | None) -> ResolvedPresentatio
             world.entity_detail if world and world.entity_detail else defaults.entity_detail
         ),
         knowledge_level=(
-            world.knowledge_level
-            if world and world.knowledge_level
-            else defaults.knowledge_level
+            world.knowledge_level if world and world.knowledge_level else defaults.knowledge_level
         ),
         semantic_order=(
             global_display.semantic_order
@@ -339,26 +333,18 @@ def resolve_presentation_profile(document: object | None) -> ResolvedPresentatio
             else defaults.semantic_order
         ),
         resource_order=(
-            world.resource_order
-            if world and world.resource_order
-            else defaults.resource_order
+            world.resource_order if world and world.resource_order else defaults.resource_order
         ),
         relation_order=(
-            world.relation_order
-            if world and world.relation_order
-            else defaults.relation_order
+            world.relation_order if world and world.relation_order else defaults.relation_order
         ),
         actor_fields=actor_fields,
         roadmap_detail=(
             goal.roadmap_detail if goal and goal.roadmap_detail else defaults.roadmap_detail
         ),
-        plan_default=(
-            goal.plan_default if goal and goal.plan_default else defaults.plan_default
-        ),
+        plan_default=(goal.plan_default if goal and goal.plan_default else defaults.plan_default),
         timeline_density=(
-            goal.timeline_density
-            if goal and goal.timeline_density
-            else defaults.timeline_density
+            goal.timeline_density if goal and goal.timeline_density else defaults.timeline_density
         ),
     )
 

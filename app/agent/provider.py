@@ -1185,9 +1185,7 @@ def goal_resolution_operation(timeout_seconds: float) -> Iterator[None]:
 
     if timeout_seconds <= 0:
         raise ValueError("Goal resolution timeout must be positive")
-    token = _goal_resolution_budget.set(
-        (perf_counter() + timeout_seconds, float(timeout_seconds))
-    )
+    token = _goal_resolution_budget.set((perf_counter() + timeout_seconds, float(timeout_seconds)))
     try:
         yield
     finally:
@@ -1221,9 +1219,7 @@ def plan_operation(timeout_seconds: float | None) -> Iterator[None]:
         return
     if timeout_seconds <= 0:
         raise ValueError("Plan total timeout must be positive")
-    token = _plan_operation_budget.set(
-        (perf_counter() + timeout_seconds, float(timeout_seconds))
-    )
+    token = _plan_operation_budget.set((perf_counter() + timeout_seconds, float(timeout_seconds)))
     try:
         yield
     finally:
@@ -1850,8 +1846,7 @@ def dynamic_goal_grounding_recovery_feedback(
         unknown_fields = sorted(
             str(field)
             for field in raw
-            if field
-            not in {"status", "candidate_refs", "intent", "clarification_prompt"}
+            if field not in {"status", "candidate_refs", "intent", "clarification_prompt"}
         )
         if unknown_fields:
             issue = "UNKNOWN_FIELD"
@@ -3401,7 +3396,7 @@ class OpenAICompatibleGenericProvider:
                     "candidate's complete authored name, description, and contract semantics. "
                     "If recovery_feedback reports ACTION_SEMANTIC_EVIDENCE_CONFLICT, re-check "
                     "the upstream Action and the returned candidate independently; do not use "
-                "target or slot compatibility as a substitute for the requested behavior."
+                    "target or slot compatibility as a substitute for the requested behavior."
                 )
         elif purpose == "dynamic_goal_operation":
             planning_prompt = (

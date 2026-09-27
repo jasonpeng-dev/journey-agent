@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from app.domain.enums import (
     ResourceInventoryVisibility,
@@ -671,22 +671,6 @@ def initialization_projection(
                 for item in region_items
             ],
         },
-        {
-            "id": "compatibility-resources",
-            "label": "Compatibility sources",
-            "items": [
-                entity(
-                    item.identity,
-                    item.label,
-                    item.locator,
-                    [item.identity],
-                    readonly=True,
-                    context=pool_context(item),
-                )
-                for item in pools
-                if item.source == BootstrapValueSource.LEGACY_FALLBACK
-            ],
-        },
     ]
 
     relation_groups = []
@@ -780,68 +764,33 @@ def bootstrap_parity(
     draft: ScenarioDefinitionV2,
     published: ScenarioDefinitionV2 | None,
 ) -> dict[str, object]:
-    """Return semantic Design/Initialization changes, never a raw JSON diff."""
+    """Return the compatibility parity shape from the semantic diff authority."""
 
     if published is None:
         return {"published": False, "initialization_changes": [], "design_changes": []}
 
-    def bootstrap_map(definition: ScenarioDefinitionV2) -> dict[str, object]:
-        return {item.identity: item.value for item in analyze_bootstrap(definition)}
+    # Keep this adapter for the existing Initialization projection contract.
+    # The comparison itself belongs to ``semantic_diff`` so the editor header,
+    # Validation/Publish, and future import previews cannot drift apart.
+    from app.scenarios.semantic_diff import SemanticDiffScope, semantic_diff
 
-    before_bootstrap = bootstrap_map(published)
-    after_bootstrap = bootstrap_map(draft)
-    initialization_changes = sorted(
-        key
-        for key in before_bootstrap.keys() | after_bootstrap.keys()
-        if before_bootstrap.get(key) != after_bootstrap.get(key)
+    result = semantic_diff(
+        draft.model_dump(mode="json"),
+        published.model_dump(mode="json"),
+        include_entries=True,
     )
-
-    def design_document(definition: ScenarioDefinitionV2) -> dict[str, object]:
-        document = definition.model_dump(mode="json", exclude_none=True)
-        document.pop("initialization", None)
-        world = document.get("world")
-        if isinstance(world, dict):
-            for node in world.get("nodes", []):
-                if not isinstance(node, dict):
-                    continue
-                node.pop("initial_access", None)
-                node.pop("initial_visibility", None)
-                for fact in node.get("facts", []):
-                    if isinstance(fact, dict):
-                        fact.pop("initial_value", None)
-                        fact.pop("initial_visibility", None)
-            for relation in world.get("relations", []):
-                if isinstance(relation, dict):
-                    relation.pop("initial_visibility", None)
-            for resource in world.get("resources", []):
-                if isinstance(resource, dict):
-                    resource.pop("initial_value", None)
-        actors = document.get("actors")
-        if isinstance(actors, dict):
-            for actor in actors.get("actor_profiles", []):
-                if isinstance(actor, dict):
-                    actor.pop("initial_node_key", None)
-                    actor.pop("command_reachability", None)
-        return document
-
-    before = design_document(published)
-    after = design_document(draft)
-    design_changes = []
-    for root in (
-        "metadata",
-        "world",
-        "actors",
-        "interactions",
-        "actions",
-        "rules",
-        "objectives",
-        "derived_states",
-        "goal_resolution",
-        "planning",
-        "public_references",
-    ):
-        if before.get(root) != after.get(root):
-            design_changes.append(root)
+    entries = cast(list[dict[str, object]], result.get("entries", []))
+    initialization_changes = sorted(
+        str(item.get("field_path") or item.get("object_key") or item.get("object_kind"))
+        for item in entries
+        if isinstance(item, dict) and item.get("scope") == SemanticDiffScope.INITIALIZATION.value
+    )
+    design_changes = sorted(
+        str(item.get("field_path") or "").split(".", 1)[0]
+        or str(item.get("editor_section") or item.get("object_kind"))
+        for item in entries
+        if isinstance(item, dict) and item.get("scope") == SemanticDiffScope.DESIGN.value
+    )
     return {
         "published": True,
         "initialization_changes": initialization_changes,

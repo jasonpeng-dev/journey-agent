@@ -53,7 +53,7 @@ describe("section structure registry", () => {
     expect(sectionStructure("initialization").owners).toEqual({
       rootPath: ["initialization"],
       entityKinds: [],
-      rootCollections: ["resource_initial_states", "resource_pools", "region_resource_knowledge"],
+      rootCollections: ["resource_pools", "region_resource_knowledge"],
     });
     expect(sectionStructure("resources").owners.entityKinds).toEqual(["resource"]);
     expect(sectionStructure("terminology-references").owners.entityKinds).toEqual(["public_reference"]);

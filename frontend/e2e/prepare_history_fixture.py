@@ -37,10 +37,10 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.infrastructure.db.session import SessionLocal
-from app.scenarios.versions import ScenarioVersionRepository
 from app.scenarios.target_applicability_migration import (
     migrate_target_applicability_document,
 )
+from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleService
 from app.services.generic_game import GenericGameService
@@ -195,8 +195,7 @@ def reveal_target_contract_fixture(game_id: str, target_key: str) -> dict[str, s
             raise RuntimeError("target applicability fixture ScenarioVersion is unavailable")
         scope = GameInstanceService(db).load(GameInstanceId(game.id))
         actor = db.scalar(
-            select(GameInstanceActor)
-            .where(
+            select(GameInstanceActor).where(
                 GameInstanceActor.game_instance_id == game.id,
                 GameInstanceActor.is_primary.is_(True),
             )

@@ -42,7 +42,7 @@ import { V2_ENUMS } from "../editor-registry";
 import { editorLocatorHref } from "../editor-locator";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
-import type { CompletenessItem, Draft, DraftSandboxResult, InitializationPreview, ScenarioVersionDetail, ValidationResult } from "../types";
+import type { CompletenessItem, Draft, DraftSandboxResult, ScenarioVersionDetail, SemanticDiff, ValidationResult } from "../types";
 import { diagnosticMessage, editorSectionTaxonomy, editorTaxonomyGroups, errorText, fieldLabel, kindLabels, sectionLabels, uiLabel } from "../ui";
 import { IdentityDisplay } from "../components/editor/FormPrimitives";
 import { useEditorFocusActivation } from "../editor-focus";
@@ -233,28 +233,14 @@ function authoringReferencesFromError(error: unknown, document: JsonObject, scen
   });
 }
 
-function documentDifferenceCount(left: unknown, right: unknown): number {
-  if (Object.is(left, right)) return 0;
-  if (Array.isArray(left) && Array.isArray(right)) {
-    const shared = Math.min(left.length, right.length);
-    return Math.abs(left.length - right.length) + Array.from({ length: shared }, (_, index) => documentDifferenceCount(left[index], right[index])).reduce((sum, value) => sum + value, 0);
-  }
-  if (left && right && typeof left === "object" && typeof right === "object" && !Array.isArray(left) && !Array.isArray(right)) {
-    const keys = new Set([...Object.keys(left as object), ...Object.keys(right as object)]);
-    return Array.from(keys).reduce((sum, key) => sum + documentDifferenceCount((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key]), 0);
-  }
-  return 1;
-}
-
 function validationStatusLabel(status: string): string {
   if (status === "FAILED") return "验证失败";
   if (status === "PASSED" || status === "VALID" || status === "VALIDATED") return "已验证";
   return "未验证";
 }
 
-function VersionStatusBadges({ draft, published, saveState }: { draft: Draft; published: ScenarioVersionDetail | null; saveState: SaveState }) {
-  const differenceCount = published ? documentDifferenceCount(draft.definition_document, published.definition_document) : null;
-  const draftAhead = differenceCount !== null && differenceCount > 0;
+function VersionStatusBadges({ draft, published, semanticDiff, saveState }: { draft: Draft; published: ScenarioVersionDetail | null; semanticDiff: SemanticDiff | null; saveState: SaveState }) {
+  const draftAhead = Boolean(semanticDiff?.published && semanticDiff.comparable && semanticDiff.is_equal === false);
   const draftConflict = saveState === "CONFLICT";
   const draftTitle = draftConflict ? "当前草稿与服务器版本发生冲突。" : draftAhead ? "当前草稿与最新已发布版本不同。" : "当前保存的草稿版本。";
   return <span className="version-badges" aria-label="版本状态">
@@ -518,6 +504,12 @@ export function EditorPage() {
     queryKey: ["initialization-preview", scenarioId, serverDraft?.revision, workingDocument, initializationPreviewFocus],
     queryFn: () => api.initializationPreview(scenarioId, serverDraft!.revision, workingDocument!, initializationPreviewFocus),
     enabled: Boolean(serverDraft && workingDocument && saveState !== "CONFLICT" && (section === "initialization" || section === "validation" || section === "configuration-check" || (["world-entities", "actors", "relations", "resources"].includes(section) && objectKey))),
+    retry: false,
+  });
+  const semanticDiffQuery = useQuery({
+    queryKey: ["semantic-diff", scenarioId, serverDraft?.revision, workingDocument, publishedVersionId],
+    queryFn: () => api.semanticDiff(scenarioId, serverDraft!.revision, workingDocument!),
+    enabled: Boolean(serverDraft && workingDocument && publishedVersionId && saveState !== "CONFLICT" && typeof api.semanticDiff === "function"),
     retry: false,
   });
   const local = useMemo(() => serverDraft && workingDocument ? { ...serverDraft, definition_document: workingDocument } : null, [serverDraft, workingDocument]);
@@ -813,10 +805,6 @@ export function EditorPage() {
     void preflightRootCollectionDelete(selection, subject);
   };
   const createCollectionItem = (collectionKey: RootCollectionKey) => {
-    if (collectionKey === "resource_initial_states") {
-      setMessage("\u8be5\u517c\u5bb9\u65e7\u7248\u96c6\u5408\u6682\u4e0d\u652f\u6301\u76f4\u63a5\u521b\u5efa\u3002");
-      return;
-    }
     setCreationRequest({ kind: "root_collection", collection: collectionKey });
   };
   const createPendingIdentity = (values: IdentityCreationValues): string | null => {
@@ -1222,7 +1210,7 @@ export function EditorPage() {
       <nav className="editor-section-nav" aria-label="编辑器导航">{editorTaxonomyGroups.map((group) => <div className="editor-nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => <Link className={item === section ? "active" : ""} key={item} to={`/scenarios/${scenarioId}/edit/${item}`}>{sectionLabels[item] ?? item}</Link>)}</div>)}</nav>
     </aside>
     <section className="editor-main">
-      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span>{serverDraft && <VersionStatusBadges draft={serverDraft} published={publishedVersionQuery.data ?? null} saveState={saveState} />}<button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={requestDiscard}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
+      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span>{serverDraft && <VersionStatusBadges draft={serverDraft} published={publishedVersionQuery.data ?? null} semanticDiff={semanticDiffQuery.data ?? null} saveState={saveState} />}<button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={requestDiscard}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
       {message && <div className="conflict-banner"><p>{message}</p>{saveState === "CONFLICT" && <button type="button" className="editor-button editor-button-secondary" onClick={() => void reloadServerDraft()}>重新加载服务器草稿</button>}</div>}
       {factDeleteDialog && <FactDeleteDialog state={factDeleteDialog} onClose={() => setFactDeleteDialog(null)} onConfirm={confirmFactDelete} />}
       {authoringDialog && <AuthoringOperationDialog state={authoringDialog} onClose={() => setAuthoringDialog(null)} onConfirm={confirmAuthoringOperation} />}
@@ -1268,7 +1256,7 @@ export function EditorPage() {
           {structure.workspace.renderer === "configuration-check" && completenessQuery.data && <div className="detail-content-shell"><CompletenessPanel result={completenessQuery.data} scenarioId={scenarioId} document={local.definition_document as JsonObject} initializationPreview={initializationPreviewQuery.data ?? null} initializationError={initializationPreviewQuery.error} currentValidation={saveState === "UNCHANGED" && validation?.revision === serverDraft?.revision ? validation : null} /></div>}
           {structure.workspace.renderer === "entity" && selected && <div className="detail-content-shell"><TypedEntityEditor entity={selected} document={local.definition_document} focusPath={editorFocusPath} initializationHref={`/scenarios/${scenarioId}/edit/initialization`} onDeleteFact={deleteFact} onDeleteNested={(request) => void removeNested(request)} scenarioId={scenarioId} onChange={updateSelectedEntity} references={refsQuery.data?.references ?? []} initializationPreview={initializationPreviewQuery.data ?? null} initializationPreviewLoading={initializationPreviewQuery.isPending} initializationPreviewError={initializationPreviewQuery.error} onRetryInitializationPreview={() => void initializationPreviewQuery.refetch()} /><ReferenceUsageSection references={refsQuery.data?.references ?? []} target={{ object_kind: selected.kind, object_key: selected.key, field_path: null }} document={local.definition_document} scenarioId={scenarioId} />{completenessQuery.data && <ContextualCompleteness result={completenessQuery.data} scenarioId={scenarioId} kind={selected.kind} objectKey={selected.key} onOwnerNavigate={createGuidedDependency} />}</div>}
           {["root", "root-collection", "hybrid"].includes(structure.workspace.renderer) && sectionValue !== null && <div className="detail-content-shell"><TypedEditor section={section} scenarioId={scenarioId} value={sectionValue} document={local.definition_document} focusPath={editorFocusPath} collectionSelection={collectionSelection} onDeleteNested={(request) => void removeNested(request)} onChange={(value) => editDocument(updateSectionRoot(local.definition_document, section, value))} onCollectionChange={(value) => { if (collectionSelection?.owner === "collection") updateCollectionItem(collectionSelection, value); }} onCollectionRemove={() => { if (collectionSelection?.owner === "collection") removeCollectionItem(collectionSelection); }} onCollectionRemoveSelection={removeCollectionItem} onCollectionMove={(direction) => { if (collectionSelection?.owner === "collection") moveCollectionItem(collectionSelection, direction); }} onInstructionChange={updatePlanningInstruction} onInstructionRemove={removePlanningInstruction} onInstructionMove={movePlanningInstruction} onQuickInputChange={updateQuickInput} onQuickInputRemove={removeQuickInput} onQuickInputMove={moveQuickInput} /></div>}
-          {structure.workspace.renderer === "workflow" && <div className="detail-content-shell"><ValidationPanel scenarioId={scenarioId} draft={serverDraft} published={publishedVersionQuery.data ?? null} validation={validation} initializationPreview={initializationPreviewQuery.data ?? null} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} /></div>}
+          {structure.workspace.renderer === "workflow" && <div className="detail-content-shell"><ValidationPanel scenarioId={scenarioId} draft={serverDraft} published={publishedVersionQuery.data ?? null} semanticDiff={semanticDiffQuery.data ?? null} validation={validation} sandboxGoal={sandboxGoal} sandbox={sandbox} setSandboxGoal={setSandboxGoal} onValidate={() => void validate()} onPublish={() => void publish()} onTest={() => void testDraft()} /></div>}
           {structure.workspace.renderer === "entity" && !selected && <div className="canvas-empty"><strong>{objects.length === 0 ? `暂无${sectionLabels[section] ?? "对象"}` : "从左侧选择一个对象"}</strong><p>{objects.length === 0 ? "使用左侧新增操作创建第一个项目。" : "选择或新建对象后，在这里编辑它的结构化字段。"}</p></div>}
         </div></section>
         {structure.capabilities.inspector && <aside className={`inspector inspector-new${inspectorOpen ? " is-open" : " is-collapsed"}`}><div className="inspector-heading"><div><p className="panel-kicker">详情</p><h3>{showWorldTopology ? "拓扑检查器" : "检查器"}</h3></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen(false)}>收起</button></div><div className="inspector-scroll">
@@ -1285,14 +1273,21 @@ export function EditorPage() {
   </main>;
 }
 
-function VersionDetailPanel({ draft, published, validation }: { draft: Draft; published: ScenarioVersionDetail | null; validation: ValidationResult | null }) {
-  const differenceCount = published ? documentDifferenceCount(draft.definition_document, published.definition_document) : null;
-  const aheadLabel = !published ? "暂无已发布版本" : differenceCount !== null && differenceCount > 0 ? "包含未发布修改" : "与最新已发布版本一致";
+function VersionDetailPanel({ draft, published, semanticDiff, validation }: { draft: Draft; published: ScenarioVersionDetail | null; semanticDiff: SemanticDiff | null; validation: ValidationResult | null }) {
+  const aheadLabel = !published ? "暂无已发布版本" : semanticDiff?.is_equal === true ? "与最新已发布版本一致" : semanticDiff?.is_equal === false ? "包含未发布修改" : "等待语义比较";
   return <section className="validation-section validation-version-detail"><h4>版本详情</h4><div className="version-detail-grid"><span>当前草稿 <strong>r{draft.revision}</strong></span><span>验证状态 <strong>{validationStatusLabel(draft.validation_status)}</strong></span><span>最新发布 <strong>{published ? `v${published.version_number}` : "暂无"}</strong></span><span>草稿状态 <strong>{aheadLabel}</strong></span><span>当前发布准备度 <strong>{validation?.publish_ready ? "可发布" : "需先通过验证"}</strong></span></div><p className="muted">保存只更新场景草稿；验证不会发布。发布会创建不可变场景版本。</p><p className="muted">新游戏必须明确选择已发布的场景版本；已有游戏继续固定使用创建时的场景版本。</p><details className="version-technical-details"><summary>技术详情</summary><dl><div><dt>基础已发布版本</dt><dd><code>{draft.base_scenario_version_id ?? "无"}</code></dd></div><div><dt>草稿内容哈希</dt><dd><code>{draft.content_hash ?? "无"}</code></dd></div>{published && <div><dt>当前发布内容哈希</dt><dd><code>{published.content_hash}</code></dd></div>}</dl></details></section>;
 }
 
-function ValidationPanel({ scenarioId, draft, published, validation, initializationPreview, sandboxGoal, sandbox, setSandboxGoal, onValidate, onPublish, onTest }: { scenarioId: string; draft: Draft | null; published: ScenarioVersionDetail | null; validation: ValidationResult | null; initializationPreview: InitializationPreview | null; sandboxGoal: string; sandbox: DraftSandboxResult | null; setSandboxGoal: (value: string) => void; onValidate: () => void; onPublish: () => void; onTest: () => void }) {
-  return <div className="validation-panel">{draft && <VersionDetailPanel draft={draft} published={published} validation={validation} />}<section className="validation-section validation-actions"><h4>草稿检查与发布</h4><p className="muted">先验证当前草稿；只有通过验证的已保存版本可以发布。</p><div className="button-row"><button onClick={onValidate}>验证当前草稿</button><button disabled={!validation?.publish_ready} onClick={onPublish}>发布不可变版本</button></div></section><section className="validation-section validation-bootstrap"><h4>开局准备度 · 当前草稿与已发布版本</h4>{initializationPreview ? <><p>初始化警告 {initializationPreview.projection.summary.warnings} 项</p><p>发布后开局变化 {initializationPreview.parity.initialization_changes.length} 项 · 设计变化 {initializationPreview.parity.design_changes.length} 组</p></> : <p className="muted">开局相关问题和可定位字段集中显示在配置检查中。</p>}<FieldActionRow><AuthoringActionButton intent="navigate" to="../initialization">前往初始化</AuthoringActionButton></FieldActionRow></section><section className="validation-section validation-readiness"><h4>运行准备度</h4>{validation ? validation.readiness.map((item) => <div className={`readiness ${item.passed ? "pass" : "fail"}`} key={item.level}>{item.passed ? "✓" : "×"} {uiLabel(item.level)}</div>) : <p className="muted">验证后将在这里显示各级运行准备度。</p>}</section><section className="validation-section validation-issues"><h4>发布门槛</h4>{!validation ? <p className="muted">尚未验证当前草稿。配置问题可先在配置检查中按来源处理。</p> : validation.publish_ready ? <p>当前已验证草稿达到发布门槛。</p> : <p>当前已验证草稿尚未达到发布门槛；具体问题及定位入口集中显示在配置检查中。</p>}<FieldActionRow><AuthoringActionButton intent="navigate" to={`/scenarios/${scenarioId}/edit/configuration-check`}>前往配置检查</AuthoringActionButton></FieldActionRow></section>
+function SemanticDiffPanel({ diff }: { diff: SemanticDiff | null }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!diff || !diff.published) return <section className="validation-section validation-semantic-diff"><h4>当前草稿与已发布版本相比</h4><p className="muted">暂无已发布版本，当前草稿没有可比较的基线。</p></section>;
+  if (!diff.comparable || diff.is_equal === null) return <section className="validation-section validation-semantic-diff"><h4>当前草稿与已发布版本相比</h4><p className="muted">当前工作副本尚未形成可比较的完整语义。</p></section>;
+  if (diff.is_equal) return <section className="validation-section validation-semantic-diff"><h4>当前草稿与已发布 v{diff.published_version_number} 相比</h4><p>当前草稿与已发布 v{diff.published_version_number} 一致</p></section>;
+  return <section className="validation-section validation-semantic-diff"><h4>当前草稿与已发布 v{diff.published_version_number} 相比</h4><div className="semantic-diff-summary">{diff.section_summaries.map((section) => <div key={section.section}><strong>{section.section}</strong><span>{section.count}</span></div>)}</div><button type="button" onClick={() => setExpanded((value) => !value)}>{expanded ? "收起变化" : "查看变化"}</button>{expanded && <div className="semantic-diff-details">{diff.section_summaries.map((section) => <section key={section.section}><h5>{section.section}</h5>{section.subsections.map((subsection) => <p key={subsection.subsection}>{subsection.subsection} <strong>{subsection.count}</strong></p>)}</section>)}</div>}</section>;
+}
+
+function ValidationPanel({ scenarioId, draft, published, semanticDiff, validation, sandboxGoal, sandbox, setSandboxGoal, onValidate, onPublish, onTest }: { scenarioId: string; draft: Draft | null; published: ScenarioVersionDetail | null; semanticDiff: SemanticDiff | null; validation: ValidationResult | null; sandboxGoal: string; sandbox: DraftSandboxResult | null; setSandboxGoal: (value: string) => void; onValidate: () => void; onPublish: () => void; onTest: () => void }) {
+  return <div className="validation-panel">{draft && <VersionDetailPanel draft={draft} published={published} semanticDiff={semanticDiff} validation={validation} />}<SemanticDiffPanel diff={semanticDiff} /><section className="validation-section validation-actions"><h4>草稿检查与发布</h4><p className="muted">先验证当前草稿；只有通过验证的已保存版本可以发布。</p><div className="button-row"><button onClick={onValidate}>验证当前草稿</button><button disabled={!validation?.publish_ready} onClick={onPublish}>发布不可变版本</button></div></section><section className="validation-section validation-readiness"><h4>运行准备度</h4>{validation ? validation.readiness.map((item) => <div className={`readiness ${item.passed ? "pass" : "fail"}`} key={item.level}>{item.passed ? "✓" : "×"} {uiLabel(item.level)}</div>) : <p className="muted">验证后将在这里显示各级运行准备度。</p>}</section><section className="validation-section validation-issues"><h4>发布门槛</h4>{!validation ? <p className="muted">尚未验证当前草稿。配置问题可先在配置检查中按来源处理。</p> : validation.publish_ready ? <p>当前已验证草稿达到发布门槛。</p> : <p>当前已验证草稿尚未达到发布门槛；具体问题及定位入口集中显示在配置检查中。</p>}<FieldActionRow><AuthoringActionButton intent="navigate" to={`/scenarios/${scenarioId}/edit/configuration-check`}>前往配置检查</AuthoringActionButton></FieldActionRow></section>
     <section className="sandbox-panel"><h4>预览/测试当前草稿</h4><p className="muted">在一次性隔离沙盒中运行，不会创建正式游戏。</p><label htmlFor="sandbox-goal">可选目标<input id="sandbox-goal" value={sandboxGoal} onChange={(event) => setSandboxGoal(event.target.value)} placeholder="输入精确版本中定义的目标别名" /></label><button onClick={onTest}>启动隔离测试</button>{sandbox && <div className={sandbox.sandbox_started ? "sandbox-result pass" : "sandbox-result fail"}><strong>{sandbox.sandbox_started ? "沙盒已启动" : "草稿无效，未启动沙盒"}</strong>{sandbox.goal_status && <p>目标状态：{uiLabel(sandbox.goal_status)}</p>}{sandbox.task && <p>任务状态：{uiLabel(sandbox.task.status)}</p>}{sandbox.issues.map((issue) => <p key={`${issue.code}:${issue.path}`}>{uiLabel(issue.severity)} · {diagnosticMessage(issue.code, issue.message)}</p>)}</div>}</section>
   </div>;
 }

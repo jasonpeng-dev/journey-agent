@@ -72,7 +72,7 @@ function itemHref(projected: ProjectedItem, scenarioId: string, factKey?: string
 
 function resourceRows(preview: InitializationPreview, entity: DraftObject, document: JsonObject, scenarioId: string): { rows: ReactNode[]; href: string } {
   const items = projectedItems(preview).filter(({ group, item }) =>
-    (group === "resource-pools" || group === "compatibility-resources") && item.context.resource_key === entity.key,
+    group === "resource-pools" && item.context.resource_key === entity.key,
   );
   const rows = items.flatMap(({ item }) => {
     const finding = item.field_ids.map((identity) => findFinding(preview, identity)).find((candidate): candidate is InitializationFinding => Boolean(candidate));
@@ -135,9 +135,6 @@ function fallbackInitializationHref(entity: DraftObject, document: JsonObject, s
     if (pool) {
       group = "resource-pools";
       item = `pool:${String(pool.pool_key)}:${entity.key}:${String(pool.region_key || "global")}`;
-    } else {
-      group = "compatibility-resources";
-      item = `pool:default:${entity.key}:global`;
     }
   }
   const query = new URLSearchParams({ domain, group, item });

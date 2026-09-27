@@ -611,14 +611,15 @@ def test_goal_operation_timeout_terminalizes_attempt_without_draft_or_task(
     assert attempt.rejection_code == "MODEL_PROVIDER_TIMEOUT"
     assert attempt.resolution_duration_ms > 0
     assert attempt.provider_metadata["error_category"] == "GOAL_RESOLUTION_DEADLINE"
-    assert session.scalar(
-        select(ResolvedGoalDraft).where(
-            ResolvedGoalDraft.game_instance_id == UUID(game_id)
+    assert (
+        session.scalar(
+            select(ResolvedGoalDraft).where(ResolvedGoalDraft.game_instance_id == UUID(game_id))
         )
-    ) is None
-    assert session.scalar(
-        select(AgentTask).where(AgentTask.game_instance_id == UUID(game_id))
-    ) is None
+        is None
+    )
+    assert (
+        session.scalar(select(AgentTask).where(AgentTask.game_instance_id == UUID(game_id))) is None
+    )
 
 
 def test_stale_goal_resolution_attempt_reconciliation_is_bounded(

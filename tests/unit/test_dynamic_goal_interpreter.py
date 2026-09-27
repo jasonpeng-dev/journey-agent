@@ -896,14 +896,10 @@ def test_exact_public_entity_uses_focused_ontology_without_legacy_recovery() -> 
     provider = _GroundingProvider(
         DynamicGoalEntityGrounding(
             candidate_refs=(
-                DynamicGoalCandidateReference(
-                    ref_type="NODE", key="west_freight_corridor"
-                ),
+                DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
             )
         ),
-        (
-            DynamicGoalInterpretation(requirements=(candidate,)),
-        ),
+        (DynamicGoalInterpretation(requirements=(candidate,)),),
     )
 
     resolution = GenericGoalResolver(provider=provider).resolve(
@@ -927,9 +923,7 @@ def test_exact_public_entity_uses_focused_ontology_without_legacy_recovery() -> 
     assert provider.requests[0].recovery_attempt == 0
     assert resolution.provider_observation is not None
     assert resolution.provider_observation["attempt_count"] == 1
-    assert resolution.provider_observation["grounding"]["source"] == (
-        "FROZEN_STATE_PUBLIC_CATALOG"
-    )
+    assert resolution.provider_observation["grounding"]["source"] == ("FROZEN_STATE_PUBLIC_CATALOG")
 
 
 def test_colloquial_public_entity_uses_one_bounded_grounding_call() -> None:
@@ -942,9 +936,7 @@ def test_colloquial_public_entity_uses_one_bounded_grounding_call() -> None:
     provider = _GroundingProvider(
         DynamicGoalEntityGrounding(
             candidate_refs=(
-                DynamicGoalCandidateReference(
-                    ref_type="NODE", key="west_freight_corridor"
-                ),
+                DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
             )
         ),
         (DynamicGoalInterpretation(requirements=(candidate,)),),
@@ -987,9 +979,7 @@ def test_public_topology_uniquely_grounds_relation_without_model_search() -> Non
     assert resolution.status == "RESOLVED"
     assert len(provider.requests) == 1
     assert provider.requests[0].grounded_entity_keys == ("central_river_tunnel",)
-    assert provider.requests[0].ontology["grounding"]["source"] == (
-        "FROZEN_STATE_PUBLIC_CATALOG"
-    )
+    assert provider.requests[0].ontology["grounding"]["source"] == ("FROZEN_STATE_PUBLIC_CATALOG")
 
 
 def test_ambiguous_public_topology_clarifies_without_arbitrary_pick() -> None:
@@ -1065,8 +1055,9 @@ def test_entity_grounding_unsupported_does_not_start_interpretation() -> None:
     assert resolution.objective_keys == ()
 
 
-def _obsolete_test_entity_grounding_retries_retryable_results_and_reuses_successful_grounding(
-) -> None:
+def _obsolete_test_entity_grounding_retries_retryable_results_and_reuses_successful_grounding() -> (
+    None
+):
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.FACT,
         node_key="west_freight_corridor",
@@ -1078,9 +1069,7 @@ def _obsolete_test_entity_grounding_retries_retryable_results_and_reuses_success
             GenericProviderError("MODEL_PROVIDER_RESPONSE_INVALID", "invalid"),
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
         ),
@@ -1113,9 +1102,7 @@ def test_entity_grounding_clarification_stops_without_retry() -> None:
             ),
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
         ),
@@ -1132,8 +1119,9 @@ def test_entity_grounding_clarification_stops_without_retry() -> None:
     assert provider.requests == []
 
 
-def _obsolete_test_two_by_two_retries_interpretation_without_regrounding_after_first_rejection(
-) -> None:
+def _obsolete_test_two_by_two_retries_interpretation_without_regrounding_after_first_rejection() -> (  # noqa: E501
+    None
+):
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.FACT,
         node_key="west_freight_corridor",
@@ -1174,8 +1162,9 @@ def _obsolete_test_two_by_two_retries_interpretation_without_regrounding_after_f
     assert [call["interpretation_attempt"] for call in calls[1:]] == [1, 2]
 
 
-def _obsolete_test_interpretation_schema_recovery_reuses_grounding_projection_and_feedback(
-) -> None:
+def _obsolete_test_interpretation_schema_recovery_reuses_grounding_projection_and_feedback() -> (
+    None
+):
     derived_key = "north_basic_engineering_support"
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.DERIVED_STATE,
@@ -1315,16 +1304,12 @@ def _obsolete_test_two_by_two_regrounds_after_two_interpretation_rejections() ->
         (
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="central_telecom_hub"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="central_telecom_hub"),
                 )
             ),
         ),
@@ -1376,14 +1361,10 @@ def _obsolete_test_invalid_grounding_reference_skips_interpretation_and_uses_sec
     provider = _SequenceDynamicProvider(
         (
             DynamicGoalEntityGrounding(
-                candidate_refs=(
-                    DynamicGoalCandidateReference(ref_type="NODE", key="not_public"),
-                )
+                candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key="not_public"),)
             ),
             DynamicGoalEntityGrounding(
-                candidate_refs=(
-                    DynamicGoalCandidateReference(ref_type="NODE", key="patient_one"),
-                )
+                candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key="patient_one"),)
             ),
         ),
         (DynamicGoalInterpretation(requirements=(candidate,)),),
@@ -1426,22 +1407,19 @@ def _obsolete_test_grounding_unsupported_is_bounded_to_two_rounds() -> None:
     assert resolution.provider_observation["grounding_round_count"] == 1
 
 
-def _obsolete_test_two_by_two_failure_does_not_issue_a_third_grounding_or_interpretation_call(
-) -> None:
+def _obsolete_test_two_by_two_failure_does_not_issue_a_third_grounding_or_interpretation_call() -> (
+    None
+):
     provider = _SequenceDynamicProvider(
         (
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
         ),
@@ -1505,9 +1483,7 @@ def _obsolete_test_interpretation_retries_twice_without_regrounding() -> None:
 def test_entity_grounding_cannot_invent_a_public_entity_key() -> None:
     provider = _GroundingProvider(
         DynamicGoalEntityGrounding(
-            candidate_refs=(
-                DynamicGoalCandidateReference(ref_type="NODE", key="invented_entity"),
-            )
+            candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key="invented_entity"),)
         ),
         (DynamicGoalInterpretation(status="UNSUPPORTED"),),
     )

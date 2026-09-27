@@ -262,9 +262,7 @@ def test_provider_goal_and_plan_are_structured_exact_version_and_validated(
     task = agent.create_task(runtime.session, "stabilize the patient")
 
     assert provider.plan_request is not None
-    assert provider.plan_request.planner_input.objective["objective_scope"] == [
-        "stabilize_patient"
-    ]
+    assert provider.plan_request.planner_input.objective["objective_scope"] == ["stabilize_patient"]
     assert "patient_one.stable" in provider.plan_request.planner_input.known_world.facts
     assert task.status == AgentTaskStatus.ACTIVE
     # Phase D permits only one non-terminal Task per GameInstance. Complete this

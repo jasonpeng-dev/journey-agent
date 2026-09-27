@@ -100,9 +100,7 @@ def action_planner_constraints(
         else target_role_requirements
     )
     if visible_target_roles:
-        executor["target_role_requirements"] = [
-            dict(item) for item in visible_target_roles
-        ]
+        executor["target_role_requirements"] = [dict(item) for item in visible_target_roles]
 
     target: dict[str, object] = {
         "kind": action.target_kind.value,
@@ -848,14 +846,11 @@ def planner_target_contracts(
             for fact_key in (effect.fact_key,)
         ]
     terminal_effect_refs = {
-        (reference.node_key, reference.fact_key)
-        for reference in action.planning.terminal_effects
+        (reference.node_key, reference.fact_key) for reference in action.planning.terminal_effects
     }
     for target_key in eligible_targets:
         target_terminal_effect_refs = {
-            fact_key
-            for node_key, fact_key in terminal_effect_refs
-            if node_key == target_key
+            fact_key for node_key, fact_key in terminal_effect_refs if node_key == target_key
         }
         if not target_terminal_effect_refs:
             continue

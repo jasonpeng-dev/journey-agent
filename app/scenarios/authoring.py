@@ -218,9 +218,7 @@ def _root_collection_item(
     return None
 
 
-def _nested_collection_values(
-    parent: dict[str, Any], collection_path: str
-) -> list[Any] | None:
+def _nested_collection_values(parent: dict[str, Any], collection_path: str) -> list[Any] | None:
     current: object = parent
     for part in collection_path.split("."):
         if not isinstance(current, dict):
@@ -553,8 +551,7 @@ def _related_selector_node_keys(
             if isinstance(fact, dict) and isinstance(fact.get("key"), str)
         }
         for node in nodes or ()
-        if isinstance(node, dict)
-        and isinstance((node_key := _object_key("node", node)), str)
+        if isinstance(node, dict) and isinstance((node_key := _object_key("node", node)), str)
     }
     return related_candidate_node_keys(
         anchor_node_keys=anchors,
@@ -598,8 +595,11 @@ def _fact_targets(
             for node_key in related_candidates
             if _node_has_fact(
                 next(
-                    (node for node in (_collection(document, "node") or [])
-                     if isinstance(node, dict) and _object_key("node", node) == node_key),
+                    (
+                        node
+                        for node in (_collection(document, "node") or [])
+                        if isinstance(node, dict) and _object_key("node", node) == node_key
+                    ),
                     {},
                 ),
                 fact_key,
@@ -640,9 +640,7 @@ def _fact_targets(
         if kind == "FACT_EQUALS" and "value" in container:
             expected = container.get("value")
             candidate_nodes = [
-                node
-                for node in candidate_nodes
-                if _fact_initial_value(node, fact_key) == expected
+                node for node in candidate_nodes if _fact_initial_value(node, fact_key) == expected
             ]
         elif kind == "FACT_IN" and isinstance(container.get("values"), list):
             expected_values = container["values"]
@@ -1002,10 +1000,7 @@ def validate_generic_identity_transition(
     next_records = _identity_manifest(next_document)
     added_keys = next_records.keys() - previous.keys()
 
-    if any(
-        next_records[key].signature == ("missing_identity",)
-        for key in added_keys
-    ):
+    if any(next_records[key].signature == ("missing_identity",) for key in added_keys):
         raise DraftAuthoringError(
             "SCENARIO_IDENTITY_MUTATION_REQUIRES_OPERATION",
             "New authored objects must receive their identity when they are created",
@@ -1057,10 +1052,7 @@ def validate_generic_identity_transition(
             if any(
                 edge.target.object_kind == target.object_kind
                 and edge.target.object_key == target.object_key
-                and (
-                    target.field_path is None
-                    or edge.target.field_path == target.field_path
-                )
+                and (target.field_path is None or edge.target.field_path == target.field_path)
                 for target in targets
             )
         )
@@ -1138,13 +1130,9 @@ def _rewrite_references(
                 for index, item in enumerate(child):
                     targets = _reference_targets(document, value, key, item, current_source)
                     target = _reference_target(document, value, key, item, current_source)
-                    if (
-                        any(
-                            _target_matches(candidate, object_kind, old_key)
-                            for candidate in targets
-                        )
-                        and _target_matches(target, object_kind, old_key)
-                    ):
+                    if any(
+                        _target_matches(candidate, object_kind, old_key) for candidate in targets
+                    ) and _target_matches(target, object_kind, old_key):
                         children = value[key]
                         assert isinstance(children, list)
                         children[index] = new_key
@@ -1162,10 +1150,9 @@ def _rewrite_references(
             else:
                 targets = _reference_targets(document, value, key, child, current_source)
                 target = _reference_target(document, value, key, child, current_source)
-                if (
-                    any(_target_matches(candidate, object_kind, old_key) for candidate in targets)
-                    and _target_matches(target, object_kind, old_key)
-                ):
+                if any(
+                    _target_matches(candidate, object_kind, old_key) for candidate in targets
+                ) and _target_matches(target, object_kind, old_key):
                     value[key] = new_key
                 else:
                     _rewrite_references(
@@ -1307,11 +1294,7 @@ def delete_fact(
         raise DraftAuthoringError("SCENARIO_FACT_NOT_FOUND", "The Node Fact does not exist")
     facts = node["facts"]
     assert isinstance(facts, list)
-    retained = [
-        item
-        for item in facts
-        if not isinstance(item, dict) or item.get("key") != fact_key
-    ]
+    retained = [item for item in facts if not isinstance(item, dict) or item.get("key") != fact_key]
     if len(retained) == len(facts):
         raise DraftAuthoringError("SCENARIO_FACT_NOT_FOUND", "The Node Fact does not exist")
     changed = deepcopy(document)
@@ -1345,17 +1328,22 @@ def delete_root_collection_item(
         edge
         for edge in _safe_reference_index(document)
         if (
-            (collection == "resource_pools"
-             and edge.target.object_kind == "initialization"
-             and edge.target.field_path == f"resource_pools.{identity}")
-            or (collection == "recovery_hints"
+            (
+                collection == "resource_pools"
+                and edge.target.object_kind == "initialization"
+                and edge.target.field_path == f"resource_pools.{identity}"
+            )
+            or (
+                collection == "recovery_hints"
                 and edge.target.object_kind == "planning"
-                and edge.target.field_path == f"recovery_hints.{identity}")
+                and edge.target.field_path == f"recovery_hints.{identity}"
+            )
         )
         and not (
             edge.source.object_kind
             == ("initialization" if collection == "resource_pools" else "planning")
-            and edge.source.field_path in {
+            and edge.source.field_path
+            in {
                 f"{collection}.{index}.{_ROOT_COLLECTIONS[collection][2]}"
                 for index in range(len(_root_collection(document, collection) or ()))
             }
@@ -1405,8 +1393,7 @@ def delete_nested_object(
     used_by = tuple(
         edge
         for edge in _safe_reference_index(document)
-        if edge.target.object_kind == nested_kind
-        and edge.target.object_key == locator.object_key
+        if edge.target.object_kind == nested_kind and edge.target.object_key == locator.object_key
     )
     if used_by:
         raise DraftAuthoringError(

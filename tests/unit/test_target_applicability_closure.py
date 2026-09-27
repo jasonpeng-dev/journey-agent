@@ -49,9 +49,7 @@ def test_linjiang_repair_profile_migration_is_deterministic_and_maps_central_tar
         for fact in node["facts"]
     )
     repair_action = next(
-        item
-        for item in report.document["actions"]
-        if item["key"] == "repair_facility"
+        item for item in report.document["actions"] if item["key"] == "repair_facility"
     )
     central = next(
         item
@@ -170,9 +168,7 @@ def test_rule_engine_filters_applicability_before_condition_selection() -> None:
 
 
 def test_target_contract_knowledge_reveals_only_after_generic_inspect(session) -> None:
-    migrated = migrate_target_applicability_document(
-        _linjiang_document(), apply_to_document=True
-    )
+    migrated = migrate_target_applicability_document(_linjiang_document(), apply_to_document=True)
     assert migrated.document is not None
     migrated.document["metadata"]["key"] = "target_contract_knowledge_test"
     migrated.document["metadata"]["name"] = "Target contract Knowledge test"
@@ -260,7 +256,5 @@ def test_target_contract_knowledge_reveals_only_after_generic_inspect(session) -
     session.flush()
     revealed = SharedKnowledgeProjection(session, scope, definition).target_knowledge_contracts()
     assert hidden_target in {
-        item["target_key"]
-        for item in revealed
-        if item["action_key"] == "repair_facility"
+        item["target_key"] for item in revealed if item["action_key"] == "repair_facility"
     }

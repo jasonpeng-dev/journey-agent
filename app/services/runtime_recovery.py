@@ -252,9 +252,7 @@ class RuntimeRecoveryService:
             or (expected_action_target_keys and not supports_action_target_knowledge)
             or (
                 supports_action_target_knowledge
-                and {
-                    (row.action_key, row.target_key) for row in action_target_knowledge_rows
-                }
+                and {(row.action_key, row.target_key) for row in action_target_knowledge_rows}
                 != expected_action_target_keys
             )
             or any(
@@ -279,9 +277,7 @@ class RuntimeRecoveryService:
 
     def _supports_action_target_knowledge_schema(self) -> bool:
         try:
-            inspect(self.db.connection()).get_columns(
-                "game_instance_action_target_knowledge"
-            )
+            inspect(self.db.connection()).get_columns("game_instance_action_target_knowledge")
         except Exception:
             return False
         return True

@@ -61,9 +61,7 @@ def check_scenario_version_execution_compatibility(
 def has_legacy_execution_tasks(db: Session, game_instance_id: UUID) -> bool:
     """Return whether an instance contains a Task without current contract data."""
 
-    tasks = db.scalars(
-        select(AgentTask).where(AgentTask.game_instance_id == game_instance_id)
-    )
+    tasks = db.scalars(select(AgentTask).where(AgentTask.game_instance_id == game_instance_id))
     for task in tasks:
         required_fields = (
             task.formal_goal_contract_schema_version,

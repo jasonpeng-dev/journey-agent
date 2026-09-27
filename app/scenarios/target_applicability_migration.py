@@ -155,9 +155,7 @@ def migrate_target_applicability_document(
             value for value in rule.get("applicable_target_keys", []) if isinstance(value, str)
         }
         if existing_targets and existing_targets != mapped_targets:
-            errors.append(
-                f"Rule {rule.get('key', '<unknown>')} has conflicting applicable targets"
-            )
+            errors.append(f"Rule {rule.get('key', '<unknown>')} has conflicting applicable targets")
             continue
         rule["applicable_target_keys"] = sorted(mapped_targets)
         action_keys_with_selectors.add(action_key)
@@ -195,11 +193,7 @@ def migrate_target_applicability_document(
             for item in raw_contracts
             if isinstance(item, dict) and isinstance(item.get("target_key"), str)
         }
-        contracts: list[dict[str, Any]] = [
-            item
-            for item in raw_contracts
-            if isinstance(item, dict)
-        ]
+        contracts: list[dict[str, Any]] = [item for item in raw_contracts if isinstance(item, dict)]
         for target_key in sorted(profile_nodes):
             visibility = visibility_by_node.get(target_key, "KNOWN")
             existing = existing_contracts.get(target_key)

@@ -183,8 +183,7 @@ class SemanticPresentationOverride(PresentationContract):
     @model_validator(mode="after")
     def validate_key(self) -> SemanticPresentationOverride:
         if not self.semantic_key or any(
-            char not in "abcdefghijklmnopqrstuvwxyz0123456789_.-"
-            for char in self.semantic_key
+            char not in "abcdefghijklmnopqrstuvwxyz0123456789_.-" for char in self.semantic_key
         ):
             raise ValueError("semantic_key must be a stable safe semantic identity")
         return self

@@ -165,9 +165,7 @@ def test_typed_evidence_families_round_trip_and_preserve_raw_details() -> None:
         action_key="travel",
         actor_key="team",
         target_key="region_b",
-        knowledge_changes=(
-            {"kind": "FACT_REVEALED", "key": "route_ab.passable", "value": False},
-        ),
+        knowledge_changes=({"kind": "FACT_REVEALED", "key": "route_ab.passable", "value": False},),
     )
 
     assert event.evidence == evidence

@@ -368,9 +368,7 @@ def normalize_legacy_failure(
     if resolved_evidence is None:
         resolved_evidence = _evidence_from_payload(code, payload, details)
     resolved_additional = tuple(
-        item
-        for raw in additional_evidence
-        if (item := _coerce_evidence(raw)) is not None
+        item for raw in additional_evidence if (item := _coerce_evidence(raw)) is not None
     )
     if resolved_evidence is not None:
         raw_metadata.setdefault("evidence_family", resolved_evidence.family)
@@ -393,10 +391,7 @@ def normalize_legacy_failure(
         target_key=target_key or _optional_text(payload.get("target_key")),
         knowledge_changes=tuple(
             _json_mapping(item)
-            for item in (
-                knowledge_changes
-                or _mapping_sequence(payload.get("knowledge_changes"))
-            )
+            for item in (knowledge_changes or _mapping_sequence(payload.get("knowledge_changes")))
         ),
         metadata=raw_metadata,
         producer=producer or _optional_text(payload.get("producer")) or type(failure).__name__,
@@ -560,17 +555,20 @@ def _is_internal_action_code(code: str) -> bool:
 def _is_internal_game_code(code: str) -> bool:
     """Identify GenericGame state/integrity failures outside gameplay policy."""
 
-    return code.startswith(
-        (
-            "RUNTIME_",
-            "RULE_",
-            "RESOURCE_REGION_KNOWLEDGE_",
-            "RELATION_KNOWLEDGE_",
-            "ACTION_TARGET_KNOWLEDGE_",
-            "GENERIC_RUNTIME_",
-            "GAME_",
+    return (
+        code.startswith(
+            (
+                "RUNTIME_",
+                "RULE_",
+                "RESOURCE_REGION_KNOWLEDGE_",
+                "RELATION_KNOWLEDGE_",
+                "ACTION_TARGET_KNOWLEDGE_",
+                "GENERIC_RUNTIME_",
+                "GAME_",
+            )
         )
-    ) or code == "GAME_INSTANCE_NOT_FOUND"
+        or code == "GAME_INSTANCE_NOT_FOUND"
+    )
 
 
 def _infer_phase(failure: object) -> FailurePhase:

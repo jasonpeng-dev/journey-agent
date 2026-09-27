@@ -43,9 +43,7 @@ class PlayerActionReportFormatter:
         self.resource_names = {item.key: item.name for item in definition.world.resources}
         self.node_names = {item.key: item.name for item in definition.world.nodes}
         self.fact_definitions = {
-            (node.key, fact.key): fact
-            for node in definition.world.nodes
-            for fact in node.facts
+            (node.key, fact.key): fact for node in definition.world.nodes for fact in node.facts
         }
         self.resource_pools = tuple(resource_pool_initial_states(definition))
 

@@ -57,9 +57,7 @@ def test_profile_precedence_is_product_then_global_then_family_then_semantic() -
                     "semantic_order": ["NAME", "FACTS"],
                 }
             ],
-            "semantic_overrides": [
-                {"semantic_key": "facility", "summary_slot": "BODY"}
-            ],
+            "semantic_overrides": [{"semantic_key": "facility", "summary_slot": "BODY"}],
         }
     )
 

@@ -1619,9 +1619,7 @@ def test_retryable_transport_failure_retries_once_and_records_each_network_call(
 
     provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(flaky))
 
-    result = provider.propose_plan(
-        _plan_request()
-    )
+    result = provider.propose_plan(_plan_request())
 
     assert result.steps[0].action_key == "inspect"
     assert calls == 2
@@ -1650,9 +1648,7 @@ def test_retryable_transport_failure_is_bounded_to_one_retry() -> None:
     provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(broken))
 
     with pytest.raises(GenericProviderError) as error:
-        provider.propose_plan(
-            _plan_request()
-        )
+        provider.propose_plan(_plan_request())
 
     assert error.value.code == "MODEL_PROVIDER_HTTP_ERROR"
     assert calls == 2
@@ -1676,9 +1672,7 @@ def test_completed_response_or_invalid_response_is_never_retried() -> None:
         _settings(), transport=httpx.MockTransport(status_error)
     )
     with pytest.raises(GenericProviderError) as status_failure:
-        provider.propose_plan(
-            _plan_request()
-        )
+        provider.propose_plan(_plan_request())
     assert status_failure.value.code == "MODEL_PROVIDER_HTTP_ERROR"
     assert status_calls == 1
 
@@ -1697,9 +1691,7 @@ def test_completed_response_or_invalid_response_is_never_retried() -> None:
         _settings(), transport=httpx.MockTransport(malformed)
     )
     with pytest.raises(GenericProviderError) as malformed_failure:
-        provider.propose_plan(
-            _plan_request()
-        )
+        provider.propose_plan(_plan_request())
     assert malformed_failure.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
     assert malformed_calls == 1
     metadata = provider.last_call_metadata
@@ -1725,9 +1717,7 @@ def test_transport_retry_obeys_one_logical_plan_timeout() -> None:
     )
 
     with pytest.raises(GenericProviderError) as error:
-        provider.propose_plan(
-            _plan_request()
-        )
+        provider.propose_plan(_plan_request())
 
     assert error.value.code == "MODEL_PROVIDER_TIMEOUT"
     assert calls == 2
@@ -1915,9 +1905,7 @@ def test_headers_received_but_slow_body_is_distinguished_from_no_response() -> N
     )
 
     with pytest.raises(GenericProviderError) as error:
-        provider.propose_plan(
-            _plan_request()
-        )
+        provider.propose_plan(_plan_request())
 
     assert error.value.code == "MODEL_PROVIDER_TIMEOUT"
     metadata = provider.last_call_metadata
@@ -1939,9 +1927,7 @@ def test_plan_timeout_without_response_keeps_response_phase_fields_null() -> Non
     )
 
     with pytest.raises(GenericProviderError):
-        provider.propose_plan(
-            _plan_request()
-        )
+        provider.propose_plan(_plan_request())
 
     metadata = provider.last_call_metadata
     assert metadata is not None
@@ -1966,9 +1952,7 @@ def test_partial_body_before_plan_timeout_preserves_received_bytes() -> None:
     )
 
     with pytest.raises(GenericProviderError):
-        provider.propose_plan(
-            _plan_request()
-        )
+        provider.propose_plan(_plan_request())
 
     assert first_chunk_sent.is_set()
     metadata = provider.last_call_metadata

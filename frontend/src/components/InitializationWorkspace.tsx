@@ -41,8 +41,7 @@ const subgroupHeadings: Record<string, string> = {
 const hierarchyGroupLabels: Record<string, string> = {
   entry: "开局入口",
   "resource-pools": "资源池",
-  "region-resource-knowledge": "区域资源知识",
-  "compatibility-resources": "兼容来源",
+  "region-resource-knowledge": "区域库存情报",
   "derived-states": "派生状态",
 };
 
@@ -515,8 +514,7 @@ function DetailContent({ item, preview, document, scenarioId, focusFactKey, onCh
     const pools = array(initialization.resource_pools);
     const index = pools.findIndex((pool) => pool.pool_key === poolKey);
     const pool = pools[index];
-    const finding = findingFor(preview, item.field_ids[0]);
-    if (!pool) return <div>{heading}<section className="initialization-detail-section"><h5>兼容来源 · 只读</h5><p>该运行时资源池由兼容旧版字段生成。</p><SourceBadge source="LEGACY_FALLBACK" /><pre className="initialization-legacy-resource-value" data-field-path={`world.resources.${String(item.context.resource_key ?? poolKey)}.initial_value`} tabIndex={-1}>{JSON.stringify(finding?.value ?? item.context, null, 2)}</pre></section></div>;
+    if (!pool) return null;
     return <ResourcePoolDetail document={document} pool={pool} poolKey={poolKey} heading={heading} onChange={(value) => onChange(replaceIn(document, "initialization", "resource_pools", index, value))} onDelete={onDeleteResourcePool} />;
   }
 
@@ -524,7 +522,7 @@ function DetailContent({ item, preview, document, scenarioId, focusFactKey, onCh
     const key = item.id.slice("region-knowledge:".length);
     const states = array(initialization.region_resource_knowledge);
     const index = states.findIndex((state) => state.region_key === key);
-    if (index < 0) return <div>{heading}<section className="initialization-detail-section"><h5>区域资源知识</h5><p>当前是推导出的默认值；工作副本中尚无对应配置行。</p><FieldActionRow><InitializationOwnerLink to={`/scenarios/${scenarioId}/edit/initialization?domain=resources&group=region-resource-knowledge`}>前往区域资源知识</InitializationOwnerLink></FieldActionRow></section></div>;
+    if (index < 0) return <div>{heading}<section className="initialization-detail-section"><h5>区域库存情报</h5><p>当前是推导出的默认值；工作副本中尚无对应配置行。</p><p className="typed-help">控制玩家与智能体是否掌握该区域库存，以及是否已完成资源调查；不会改变实际资源池数量。</p><FieldActionRow><InitializationOwnerLink to={`/scenarios/${scenarioId}/edit/initialization?domain=resources&group=region-resource-knowledge`}>前往区域库存情报</InitializationOwnerLink></FieldActionRow></section></div>;
     const state = states[index] ?? { region_key: key, resource_inventory_visibility: "VISIBLE", resource_survey_completed: true };
     const source = index >= 0 ? "EXPLICIT" : "DEFAULT";
     const update = (value: JsonObject) => {
@@ -534,7 +532,7 @@ function DetailContent({ item, preview, document, scenarioId, focusFactKey, onCh
       next.initialization = nextInitialization;
       onChange(next);
     };
-    return <div>{heading}<section className="initialization-detail-section"><h5>玩家初始知识</h5><SelectField label="库存可见性" value={state.resource_inventory_visibility} path={`initialization.region_resource_knowledge.${key}.resource_inventory_visibility`} choices={[{ key: "VISIBLE", name: "可见" }, { key: "HIDDEN", name: "隐藏" }]} enumType="visibility" source={Object.hasOwn(state, "resource_inventory_visibility") ? source : "DEFAULT"} defaultValue="VISIBLE" defaultLabel="可见" useDefault={!Object.hasOwn(state, "resource_inventory_visibility")} onChange={(value) => update(withOptionalOverride(state, "resource_inventory_visibility", value))} /><ScalarField label="调查已完成" value={state.resource_survey_completed} type="checkbox" source={Object.hasOwn(state, "resource_survey_completed") ? source : "DEFAULT"} defaultValue={true} defaultLabel="是" useDefault={!Object.hasOwn(state, "resource_survey_completed")} path={`initialization.region_resource_knowledge.${key}.resource_survey_completed`} onChange={(value) => update(withOptionalOverride(state, "resource_survey_completed", value))} />{index >= 0 && <FieldActionRow><InitializationOwnerLink to={`/scenarios/${scenarioId}/edit/world-entities/${encodeURIComponent(key)}`}>前往{displayItemLabel(item, document)}</InitializationOwnerLink></FieldActionRow>}{index >= 0 && <button type="button" className="editor-button editor-button-danger" onClick={() => onDeleteRootCollectionItem("region_resource_knowledge", key, displayItemLabel(item, document))}>删除区域资源知识</button>}</section></div>;
+    return <div>{heading}<section className="initialization-detail-section"><h5>初始库存情报</h5><p className="typed-help">控制玩家与智能体开局是否掌握该区域库存，以及是否已完成资源调查；不会改变实际资源池数量。</p><SelectField label="库存可见性" value={state.resource_inventory_visibility} path={`initialization.region_resource_knowledge.${key}.resource_inventory_visibility`} choices={[{ key: "VISIBLE", name: "可见" }, { key: "HIDDEN", name: "隐藏" }]} enumType="visibility" source={Object.hasOwn(state, "resource_inventory_visibility") ? source : "DEFAULT"} defaultValue="VISIBLE" defaultLabel="可见" useDefault={!Object.hasOwn(state, "resource_inventory_visibility")} onChange={(value) => update(withOptionalOverride(state, "resource_inventory_visibility", value))} /><ScalarField label="资源调查已完成" value={state.resource_survey_completed} type="checkbox" source={Object.hasOwn(state, "resource_survey_completed") ? source : "DEFAULT"} defaultValue={true} defaultLabel="是" useDefault={!Object.hasOwn(state, "resource_survey_completed")} path={`initialization.region_resource_knowledge.${key}.resource_survey_completed`} onChange={(value) => update(withOptionalOverride(state, "resource_survey_completed", value))} />{index >= 0 && <FieldActionRow><InitializationOwnerLink to={`/scenarios/${scenarioId}/edit/world-entities/${encodeURIComponent(key)}`}>前往{displayItemLabel(item, document)}</InitializationOwnerLink></FieldActionRow>}{index >= 0 && <button type="button" className="editor-button editor-button-danger" onClick={() => onDeleteRootCollectionItem("region_resource_knowledge", key, displayItemLabel(item, document))}>删除区域库存情报</button>}</section></div>;
   }
 
   if (item.id.startsWith("derived:")) {
@@ -567,9 +565,7 @@ function fallbackProjection(document: JsonObject): InitializationProjection {
   const roles = array(actors.roles);
   const relations = array(world.relations);
   const relationTypes = array(world.relation_types);
-  const resources = array(world.resources);
   const pools = array(initialization.resource_pools);
-  const legacyResourceStates = array(initialization.resource_initial_states);
   const regionStates = array(initialization.region_resource_knowledge);
   const makeItem = (id: string, label: string, section: string, kind: string | null, key: string | null, context: Record<string, unknown> = {}): InitializationProjectionItem => ({
     id, label, locator: { section, object_kind: kind, object_key: key, field_path: null }, field_ids: [], readonly: false, context,
@@ -617,24 +613,8 @@ function fallbackProjection(document: JsonObject): InitializationProjection {
   const regionItems = regionStates.flatMap((state) => {
     const key = stringValue(state.region_key);
     if (!key) return [];
-    return [{ group: "region-resource-knowledge", label: "区域资源知识", item: makeItem(`region-knowledge:${key}`, authoredReferenceName(document, "node", key) ?? key, "initialization", "region_resource_knowledge", key, { region_key: key }) }];
+    return [{ group: "region-resource-knowledge", label: "区域库存情报", item: makeItem(`region-knowledge:${key}`, authoredReferenceName(document, "node", key) ?? key, "initialization", "region_resource_knowledge", key, { region_key: key }) }];
   });
-  const compatibilityResourceItems = resources.flatMap((resource) => {
-    const resourceKey = stringValue(resource.key);
-    if (!resourceKey) return [];
-    const identity = `pool:default:${resourceKey}:global`;
-    return [{ group: "compatibility-resources", label: "兼容来源", item: { ...makeItem(identity, stringValue(resource.name) || resourceKey, "resources", "resource", resourceKey, { pool_key: "default", resource_key: resourceKey }), readonly: true, field_ids: [identity] } }];
-  });
-  const legacyResourceItems = legacyResourceStates.flatMap((state) => {
-    const resourceKey = stringValue(state.resource_key);
-    if (!resourceKey) return [];
-    const scopeKey = stringValue(state.scope_node_key) || "global";
-    if (scopeKey === "global" && compatibilityResourceItems.some((entry) => entry.item.id === `pool:default:${resourceKey}:global`)) return [];
-    const resourceName = authoredReferenceName(document, "resource", resourceKey) ?? resourceKey;
-    const identity = `pool:default:${resourceKey}:${scopeKey}`;
-    return [{ group: "compatibility-resources", label: "兼容来源", item: { ...makeItem(identity, resourceName, "resources", "resource", resourceKey, { pool_key: "default", resource_key: resourceKey, scope_node_key: state.scope_node_key, value: state.value, reserved_value: state.reserved_value }), readonly: true, field_ids: [identity] } }];
-  });
-  const compatibilityItems = [...compatibilityResourceItems, ...legacyResourceItems];
   const derivedItems = array(document.derived_states).flatMap((state) => {
     const key = stringValue(state.key);
     return key ? [{ group: "derived-states", label: "派生状态", item: { ...makeItem(`derived:${key}`, stringValue(state.name) || key, "derived-states", "derived_state", key, { key }), readonly: true } }] : [];
@@ -643,7 +623,7 @@ function fallbackProjection(document: JsonObject): InitializationProjection {
     { id: "basic", label: "开局入口", groups: [{ id: "entry", label: "开局入口", items: [makeItem("bootstrap-entry", "起始节点与主要参与者", "initialization", "initialization", null)] }] },
     { id: "nodes", label: "节点", groups: grouped(nodeItems) },
     { id: "actors", label: "参与者", groups: grouped(actorItems) },
-    { id: "resources", label: "资源", groups: grouped([...poolItems, ...regionItems, ...compatibilityItems]) },
+    { id: "resources", label: "资源", groups: grouped([...poolItems, ...regionItems]) },
     { id: "relations", label: "关系", groups: grouped(relationItems) },
     { id: "derived", label: "其他", groups: grouped(derivedItems) },
   ];
@@ -675,7 +655,6 @@ function previewWithRecoverableRows(preview: InitializationPreview | null, docum
 export function InitializationWorkspace({ document, preview, loading, error, scenarioId, onRetry, onChange, onDeleteResourcePool, onDeleteRootCollectionItem = () => undefined, onCreateResourcePool = () => undefined, onAddRegionResourceKnowledge = () => undefined }: Props) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
-  const [overviewOpen, setOverviewOpen] = useState(false);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const issueButtonRef = useRef<HTMLButtonElement>(null);
   const workspacePreview = useMemo(() => previewWithRecoverableRows(preview, document, error), [document, error, preview]);
@@ -715,16 +694,13 @@ export function InitializationWorkspace({ document, preview, loading, error, sce
   useEffect(() => setSearch(""), [domain?.id, group?.id]);
   const issueSource = preview ? preview.issues ?? [] : error;
   const presentations = initializationPreviewIssuePresentations(issueSource, workspaceEntity(item), document, scenarioId);
-  const summary = workspacePreview.projection.summary;
-  const differs = workspacePreview.parity.published && (workspacePreview.parity.initialization_changes.length > 0 || workspacePreview.parity.design_changes.length > 0);
   return <div className="initialization-workspace">
-     <header className="initialization-workspace-header"><div className="initialization-workspace-toolbar"><nav className="initialization-breadcrumb" aria-label="初始化层级"><button onClick={() => selectPath("")}>类别</button>{domain && <><span>/</span><button onClick={() => selectPath(domain.id)}>{domainLabels[domain.id] ?? domain.label}</button></>}{group && <><span>/</span><button onClick={() => selectPath(domain!.id, group.id)}>{displayGroupLabel(group)}</button></>}{item && <><span>/</span><strong>{displayItemLabel(item, document)}</strong></>}</nav><div className="initialization-status"><span>{summary.warnings > 0 ? `⚠ ${summary.warnings}` : "0 项警告"}</span>{differs && <span>当前草稿与最新发布版本不同</span>}{!preview && loading && <span role="status">正在读取开局配置</span>}{!preview && !loading && Boolean(error) && presentations.length === 0 && <span className="initialization-preview-unavailable" role="status">预览暂不可用{onRetry && <AuthoringActionButton intent="view" onPress={onRetry}>重新读取</AuthoringActionButton>}</span>}{presentations.length > 0 && <button ref={issueButtonRef} type="button" className="initialization-issue-trigger" aria-haspopup="dialog" aria-expanded={issuesOpen} aria-controls="initialization-issue-dialog" onClick={() => setIssuesOpen(true)}>查看问题（{presentations.length}）</button>}<button type="button" aria-expanded={overviewOpen} onClick={() => setOverviewOpen((open) => !open)}>初始化概览</button></div></div><p>配置当前版本的开局状态</p></header>
-    {overviewOpen && <aside className="initialization-overview" aria-label="初始化概览"><div className="initialization-overview-heading"><div><h4>初始化概览</h4><p>当前草稿的开局规模与发布差异</p></div><button type="button" className="editor-button editor-button-ghost" onClick={() => setOverviewOpen(false)}>关闭</button></div><div className="initialization-metrics"><span><strong>{summary.nodes}</strong>节点</span><span><strong>{summary.actors}</strong>参与者</span><span><strong>{summary.resource_pools}</strong>资源池</span><span><strong>{summary.relations}</strong>关系</span><span><strong>{summary.derived_states}</strong>派生状态</span></div><div className="initialization-overview-summary"><span>警告 <strong>{summary.warnings}</strong></span><span>开局变化 <strong>{workspacePreview.parity.initialization_changes.length}</strong></span><span>设计变化 <strong>{workspacePreview.parity.design_changes.length}</strong></span><span>{workspacePreview.parity.published ? "对比最新发布版本" : "尚无发布版本"}</span></div></aside>}
+     <header className="initialization-workspace-header"><div className="initialization-workspace-toolbar"><nav className="initialization-breadcrumb" aria-label="初始化层级"><button onClick={() => selectPath("")}>类别</button>{domain && <><span>/</span><button onClick={() => selectPath(domain.id)}>{domainLabels[domain.id] ?? domain.label}</button></>}{group && <><span>/</span><button onClick={() => selectPath(domain!.id, group.id)}>{displayGroupLabel(group)}</button></>}{item && <><span>/</span><strong>{displayItemLabel(item, document)}</strong></>}</nav><div className="initialization-status">{!preview && loading && <span role="status">正在读取开局配置</span>}{!preview && !loading && Boolean(error) && presentations.length === 0 && <span className="initialization-preview-unavailable" role="status">预览暂不可用{onRetry && <AuthoringActionButton intent="view" onPress={onRetry}>重新读取</AuthoringActionButton>}</span>}{presentations.length > 0 && <button ref={issueButtonRef} type="button" className="initialization-issue-trigger" aria-haspopup="dialog" aria-expanded={issuesOpen} aria-controls="initialization-issue-dialog" onClick={() => setIssuesOpen(true)}>查看问题（{presentations.length}）</button>}</div></div><p>配置当前版本的开局状态</p></header>
     {focusStatus === "stale" && <p className="editor-focus-notice" role="status">所定位的配置项已不存在，已带到当前初始化区域，请检查当前配置。</p>}
     <div className="initialization-panels" data-testid="initialization-four-panel-workspace">
        <section className={`initialization-panel initialization-column${!domain ? " mobile-active" : ""}`} aria-label="类别" onKeyDown={navigateColumn}><header><h4>类别</h4><span>选择领域</span></header><div className="initialization-panel-body">{domains.map((candidate) => <button aria-current={candidate.id === domain?.id ? "true" : undefined} className={candidate.id === domain?.id ? "selected" : ""} key={candidate.id} onClick={() => selectPath(candidate.id)}><span>{domainLabels[candidate.id] ?? candidate.label}</span><small>{candidate.groups.reduce((total, value) => total + value.items.length, 0)}</small></button>)}</div></section>
        <section className={`initialization-panel initialization-column${domain && !group ? " mobile-active" : ""}`} aria-label="分类" onKeyDown={navigateColumn}><header><h4>{domain ? subgroupHeadings[domain.id] ?? "分类" : "分类"}</h4><span>{domain ? domainLabels[domain.id] ?? domain.label : "等待选择"}</span></header><div className="initialization-panel-body">{domain ? domain.groups.map((candidate) => <button aria-current={candidate.id === group?.id ? "true" : undefined} className={candidate.id === group?.id ? "selected" : ""} key={candidate.id} onClick={() => selectPath(domain.id, candidate.id)}><span>{displayGroupLabel(candidate)}</span><small>{candidate.items.length}</small></button>) : <EmptyPanel>请选择一个类别</EmptyPanel>}</div></section>
-       <section className={`initialization-panel initialization-column initialization-items${group && !item ? " mobile-active" : ""}`} aria-label="对象" onKeyDown={navigateColumn}><header><h4>{group ? domain?.id === "derived" && group.id === "derived-states" ? "具体派生状态" : displayGroupLabel(group) : "对象"}</h4><span>{group ? "选择具体对象" : "等待选择"}</span>{group && <input aria-label="搜索当前项目" placeholder="名称或稳定键" value={search} onChange={(event) => setSearch(event.target.value)} />}{group?.id === "resource-pools" && <button type="button" className="initialization-add" onClick={onCreateResourcePool}>＋ 新增资源池</button>}{group?.id === "region-resource-knowledge" && <button type="button" className="initialization-add" onClick={onAddRegionResourceKnowledge}>＋ 新增区域资源知识</button>}</header><div className="initialization-panel-body">{group ? filteredItems.map((candidate) => <button aria-current={candidate.id === item?.id ? "true" : undefined} className={candidate.id === item?.id ? "selected" : ""} key={candidate.id} onClick={() => selectPath(domain!.id, group.id, candidate.id)}><span>{displayItemLabel(candidate, document)}</span><code>{displayItemIdentity(candidate)}</code></button>) : <EmptyPanel>请选择一个分类</EmptyPanel>}{group && filteredItems.length === 0 && <EmptyPanel>没有匹配的对象</EmptyPanel>}</div></section>
+       <section className={`initialization-panel initialization-column initialization-items${group && !item ? " mobile-active" : ""}`} aria-label="对象" onKeyDown={navigateColumn}><header><h4>{group ? domain?.id === "derived" && group.id === "derived-states" ? "具体派生状态" : displayGroupLabel(group) : "对象"}</h4><span>{group ? "选择具体对象" : "等待选择"}</span>{group && <input aria-label="搜索当前项目" placeholder="名称或稳定键" value={search} onChange={(event) => setSearch(event.target.value)} />}{group?.id === "resource-pools" && <button type="button" className="initialization-add" onClick={onCreateResourcePool}>＋ 新增资源池</button>}{group?.id === "region-resource-knowledge" && <button type="button" className="initialization-add" onClick={onAddRegionResourceKnowledge}>＋ 新增区域库存情报</button>}</header><div className="initialization-panel-body">{group ? filteredItems.map((candidate) => <button aria-current={candidate.id === item?.id ? "true" : undefined} className={candidate.id === item?.id ? "selected" : ""} key={candidate.id} onClick={() => selectPath(domain!.id, group.id, candidate.id)}><span>{displayItemLabel(candidate, document)}</span><code>{displayItemIdentity(candidate)}</code></button>) : <EmptyPanel>请选择一个分类</EmptyPanel>}{group && filteredItems.length === 0 && <EmptyPanel>没有匹配的对象</EmptyPanel>}</div></section>
       <section className={`initialization-panel initialization-detail${item ? " mobile-active" : ""}`} aria-label="初始化配置"><header><h4>初始化配置</h4><span>{item ? "编辑开局状态" : "等待选择"}</span></header><div className="initialization-panel-body" data-editor-focus-scope>{item ? <Detail item={item} preview={workspacePreview} document={document} scenarioId={scenarioId} focusFactKey={requestedFactKey || undefined} onChange={onChange} onDeleteResourcePool={onDeleteResourcePool} onDeleteRootCollectionItem={onDeleteRootCollectionItem} /> : <EmptyPanel>请选择一个对象以配置初始化状态</EmptyPanel>}</div></section>
     </div>
     {issuesOpen && <InitializationIssueDialog issues={presentations} onClose={() => { setIssuesOpen(false); window.requestAnimationFrame(() => issueButtonRef.current?.focus()); }} onNavigate={() => setIssuesOpen(false)} />}

@@ -167,6 +167,7 @@ class _RoutingProvider(_ContractProvider):
             ),
         )
 
+
 class _LLMAllRoutingProvider(_RoutingProvider):
     def __init__(
         self,
@@ -190,6 +191,7 @@ class _LLMAllRoutingProvider(_RoutingProvider):
     ) -> DynamicGoalEntityGrounding:
         self.grounding_requests.append(request)
         return self.grounding
+
 
 class _StateRoutingProvider(_RoutingProvider):
     def __init__(self, interpretation: DynamicGoalInterpretation) -> None:
@@ -1001,8 +1003,7 @@ def test_invalid_scalar_shape_gets_one_bounded_recovery() -> None:
     assert resolution.provider_observation is not None
     assert resolution.provider_observation["attempt"] == 1
     assert any(
-        item.get("stage") == "OPERATION_GROUNDING"
-        and item.get("result") == "RESOLVED"
+        item.get("stage") == "OPERATION_GROUNDING" and item.get("result") == "RESOLVED"
         for item in resolution.provider_observation["stages"]
     )
 
@@ -1289,9 +1290,7 @@ def test_semantic_routing_distinguishes_action_ambiguity_from_no_match() -> None
     assert ambiguous_resolution.source == "ACTION_AMBIGUOUS"
     assert ambiguous_resolution.candidate_keys == ("inspect", "survey_resources")
 
-    no_match = _RoutingProvider(
-        routing=_RoutingSpec(family="OPERATION", action_match="NO_MATCH")
-    )
+    no_match = _RoutingProvider(routing=_RoutingSpec(family="OPERATION", action_match="NO_MATCH"))
     no_match_resolution = GenericGoalResolver(provider=no_match).resolve(
         "执行场景没有的操作", LINJIANG_V2_TEST
     )

@@ -125,16 +125,10 @@ function initializationFieldLocator(locator: Locator, document: JsonObject): Edi
   }
 
   if (kind === "legacy_resource" || (kind === "resource" && path === "initial_value")) {
-    const [resourceKey, scopedKey] = key.split("::", 2);
+    const [resourceKey] = key.split("::", 2);
     const normalizedResourceKey = stableValue(resourceKey);
     if (!normalizedResourceKey) return null;
-    const states = rowsAt(document, "initialization", "resource_initial_states");
-    const state = kind === "legacy_resource"
-      ? states.find((item) => item.resource_key === normalizedResourceKey && (stableValue(item.scope_node_key) || "global") === (stableValue(scopedKey) || "global"))
-      : states.find((item) => item.resource_key === normalizedResourceKey);
-    const scopeKey = stableValue(scopedKey) || stableValue(state?.scope_node_key) || "global";
-    const fieldPath = `world.resources.${normalizedResourceKey}.initial_value`;
-    return initializationItem("resources", "compatibility-resources", `pool:default:${normalizedResourceKey}:${scopeKey}`, fieldPath);
+    return { owner: "entity", section: "resources", kind: "resource", objectKey: normalizedResourceKey, fieldPath: "initial_value" };
   }
 
   return null;

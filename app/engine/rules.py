@@ -364,10 +364,7 @@ class DeclarativeRuleEngine:
                 if action.target_kind.value == "ACTOR"
                 else context.target_node_key
             )
-            if (
-                rule.applicable_target_keys
-                and applicability_key not in rule.applicable_target_keys
-            ):
+            if rule.applicable_target_keys and applicability_key not in rule.applicable_target_keys:
                 continue
             if rule.condition is None:
                 matches.append(rule)
@@ -644,8 +641,10 @@ class DeclarativeRuleEngine:
         """Derive a canonical blocker from a v3 semantic Rule effect."""
 
         evidence = self._condition_evidence(rule.condition, state, context)
-        primary = evidence[0] if evidence else GenericEvidence(
-            details={"rule_key": rule.key, "condition": None}
+        primary = (
+            evidence[0]
+            if evidence
+            else GenericEvidence(details={"rule_key": rule.key, "condition": None})
         )
         if isinstance(primary, ResourceEvidence):
             kind = (
@@ -658,9 +657,7 @@ class DeclarativeRuleEngine:
         else:
             kind = FailureKind.PRECONDITION_UNMET
         phase = (
-            FailurePhase.PREFLIGHT
-            if rule.phase == RulePhase.PREFLIGHT
-            else FailurePhase.RESOLVE
+            FailurePhase.PREFLIGHT if rule.phase == RulePhase.PREFLIGHT else FailurePhase.RESOLVE
         )
         event = FailureEvent(
             domain=FailureDomain.ACTION_RUNTIME,
@@ -721,17 +718,19 @@ class DeclarativeRuleEngine:
         """
 
         evidence = self._condition_evidence(rule.condition, state, context)
-        primary = evidence[0] if evidence else GenericEvidence(
-            details={
-                "rule_key": rule.key,
-                "condition": None,
-            }
+        primary = (
+            evidence[0]
+            if evidence
+            else GenericEvidence(
+                details={
+                    "rule_key": rule.key,
+                    "condition": None,
+                }
+            )
         )
         additional = evidence[1:] if evidence else ()
         phase = (
-            FailurePhase.PREFLIGHT
-            if rule.phase == RulePhase.PREFLIGHT
-            else FailurePhase.RESOLVE
+            FailurePhase.PREFLIGHT if rule.phase == RulePhase.PREFLIGHT else FailurePhase.RESOLVE
         )
         return normalize_legacy_failure(
             failure,
@@ -793,7 +792,8 @@ class DeclarativeRuleEngine:
                 known = fact.visibility == Visibility.KNOWN
                 accepted_values = (
                     (condition.value,)
-                    if condition.kind in {
+                    if condition.kind
+                    in {
                         ConditionKind.FACT_EQUALS,
                         ConditionKind.FACT_NOT_EQUALS,
                         ConditionKind.FACT_COMPARE,
@@ -976,8 +976,7 @@ class DeclarativeRuleEngine:
                 for relation in self.definition.world.relations
             ),
             node_fact_keys={
-                node.key: {fact.key for fact in node.facts}
-                for node in self.definition.world.nodes
+                node.key: {fact.key for fact in node.facts} for node in self.definition.world.nodes
             },
             required_fact_key=required_fact_key,
         )
@@ -1156,9 +1155,7 @@ def merge_rule_outcomes(outcomes: tuple[GenericRuleOutcome, ...]) -> GenericRule
             item for outcome in outcomes for item in outcome.fact_visibility_updates
         ),
         action_target_knowledge_updates=tuple(
-            item
-            for outcome in outcomes
-            for item in outcome.action_target_knowledge_updates
+            item for outcome in outcomes for item in outcome.action_target_knowledge_updates
         ),
         node_visibility_updates=tuple(
             item for outcome in outcomes for item in outcome.node_visibility_updates
@@ -1182,27 +1179,19 @@ def merge_rule_outcomes(outcomes: tuple[GenericRuleOutcome, ...]) -> GenericRule
             None,
         ),
         actor_command_reachability_updates=tuple(
-            item
-            for outcome in outcomes
-            for item in outcome.actor_command_reachability_updates
+            item for outcome in outcomes for item in outcome.actor_command_reachability_updates
         ),
         region_resource_visibility_updates=tuple(
-            item
-            for outcome in outcomes
-            for item in outcome.region_resource_visibility_updates
+            item for outcome in outcomes for item in outcome.region_resource_visibility_updates
         ),
         region_resource_survey_updates=tuple(
             item for outcome in outcomes for item in outcome.region_resource_survey_updates
         ),
         resource_pool_visibility_updates=tuple(
-            item
-            for outcome in outcomes
-            for item in outcome.resource_pool_visibility_updates
+            item for outcome in outcomes for item in outcome.resource_pool_visibility_updates
         ),
         resource_pool_availability_updates=tuple(
-            item
-            for outcome in outcomes
-            for item in outcome.resource_pool_availability_updates
+            item for outcome in outcomes for item in outcome.resource_pool_availability_updates
         ),
         relation_visibility_updates=tuple(
             item for outcome in outcomes for item in outcome.relation_visibility_updates

@@ -26,9 +26,7 @@ def _document():  # type: ignore[no-untyped-def]
 def _related_fact_document(*, required_fact_selector: bool) -> dict[str, object]:
     document = _document()
     world = document["world"]
-    world["node_types"].append(
-        {"key": "probe_node_type", "name": "Probe node", "description": ""}
-    )
+    world["node_types"].append({"key": "probe_node_type", "name": "Probe node", "description": ""})
     world["relation_types"] = [
         {"key": "contains", "name": "Contains", "description": ""},
         {"key": "probe_link", "name": "Probe link", "description": ""},
@@ -238,9 +236,7 @@ def test_current_target_fact_is_limited_to_explicit_action_targets() -> None:
     other = deepcopy(patient)
     other["key"] = "other_node"
     document["world"]["nodes"].append(other)
-    document["actions"][0]["target_actor_roles"] = [
-        {"role": "TARGET", "target_key": "patient_one"}
-    ]
+    document["actions"][0]["target_actor_roles"] = [{"role": "TARGET", "target_key": "patient_one"}]
     document["actions"][0]["target_node_type_keys"] = []
     document["rules"][0]["condition"] = {
         "kind": "FACT_EQUALS",
@@ -333,8 +329,7 @@ def test_v2_reference_index_covers_nested_fact_pool_target_role_and_derived_refs
     )
     assert any(edge.target.object_kind == "node_type" for edge in edges)
     assert any(
-        edge.target.object_kind == "relation_type"
-        and edge.target.object_key == "located_in"
+        edge.target.object_kind == "relation_type" and edge.target.object_key == "located_in"
         for edge in edges
     )
     assert any(edge.target.object_kind == "derived_state" for edge in edges)
@@ -343,9 +338,7 @@ def test_v2_reference_index_covers_nested_fact_pool_target_role_and_derived_refs
 def test_target_contract_and_rule_applicability_are_reference_safe_for_rename_and_delete() -> None:
     document = _document()
     action = next(item for item in document["actions"] if item["key"] == "diagnose_patient")
-    action["target_contracts"] = [
-        {"target_key": "patient_one", "initial_visibility": "KNOWN"}
-    ]
+    action["target_contracts"] = [{"target_key": "patient_one", "initial_visibility": "KNOWN"}]
     rule = next(item for item in document["rules"] if item.get("action_key") == "diagnose_patient")
     rule["applicable_target_keys"] = ["patient_one"]
 
@@ -373,8 +366,7 @@ def test_target_contract_and_rule_applicability_are_reference_safe_for_rename_an
     renamed_action = next(item for item in renamed["actions"] if item["key"] == "diagnose_patient")
     assert renamed_action["target_contracts"][0]["target_key"] == "patient_primary"
     assert any(
-        item.get("applicable_target_keys") == ["patient_primary"]
-        for item in renamed["rules"]
+        item.get("applicable_target_keys") == ["patient_primary"] for item in renamed["rules"]
     )
 
     with pytest.raises(DraftAuthoringError) as referenced:
@@ -531,9 +523,7 @@ def test_root_pool_delete_ignores_its_own_identity_but_blocks_external_pool_refs
         }
     )
     with pytest.raises(DraftAuthoringError) as referenced:
-        delete_root_collection_item(
-            document, collection="resource_pools", identity="unused_pool"
-        )
+        delete_root_collection_item(document, collection="resource_pools", identity="unused_pool")
     assert referenced.value.code == "SCENARIO_ROOT_COLLECTION_ITEM_REFERENCED"
     assert referenced.value.references
 
@@ -556,8 +546,7 @@ def test_nested_action_parameter_delete_is_scoped_and_reference_safe() -> None:
         )
     assert referenced.value.code == "SCENARIO_NESTED_OBJECT_REFERENCED"
     assert any(
-        edge.target.object_kind == "action_parameter"
-        for edge in referenced.value.references
+        edge.target.object_kind == "action_parameter" for edge in referenced.value.references
     )
 
     document["rules"][0]["condition"] = None
@@ -785,8 +774,7 @@ def test_related_required_fact_references_candidate_fact_not_anchor_or_unrelated
     targets = {
         edge.target.object_key
         for edge in reference_index(document)
-        if edge.source.object_kind == "rule"
-        and edge.target.field_path == "facts.probe_shared_fact"
+        if edge.source.object_kind == "rule" and edge.target.field_path == "facts.probe_shared_fact"
     }
     assert targets == {"probe_neighbor"}
     with pytest.raises(DraftAuthoringError) as referenced:
@@ -796,15 +784,15 @@ def test_related_required_fact_references_candidate_fact_not_anchor_or_unrelated
     assert delete_fact(document, node_key="probe_unrelated", fact_key="probe_shared_fact")
 
 
-def test_ordinary_related_fact_uses_provable_topology_and_dynamic_selector_stays_conservative(
-) -> None:
+def test_ordinary_related_fact_uses_provable_topology_and_dynamic_selector_stays_conservative() -> (
+    None
+):
     document = _related_fact_document(required_fact_selector=False)
     ScenarioDefinitionV2.model_validate(document)
     targets = {
         edge.target.object_key
         for edge in reference_index(document)
-        if edge.source.object_kind == "rule"
-        and edge.target.field_path == "facts.probe_shared_fact"
+        if edge.source.object_kind == "rule" and edge.target.field_path == "facts.probe_shared_fact"
     }
     assert targets == {"probe_neighbor"}
     assert delete_fact(document, node_key="probe_unrelated", fact_key="probe_shared_fact")
@@ -817,8 +805,7 @@ def test_ordinary_related_fact_uses_provable_topology_and_dynamic_selector_stays
     dynamic_targets = {
         edge.target.object_key
         for edge in reference_index(dynamic)
-        if edge.source.object_kind == "rule"
-        and edge.target.field_path == "facts.probe_shared_fact"
+        if edge.source.object_kind == "rule" and edge.target.field_path == "facts.probe_shared_fact"
     }
     assert {"probe_anchor", "probe_neighbor", "probe_unrelated"}.issubset(dynamic_targets)
     with pytest.raises(DraftAuthoringError) as conservative:
@@ -850,9 +837,12 @@ def test_safe_action_rename_rewrites_every_exact_inbound_action_reference() -> N
         edge.target.object_kind == "action" and edge.target.object_key == "treat_patient_v2"
         for edge in after
     )
-    assert "treat_patient_v2" in next(
-        item for item in renamed["actors"]["actor_profiles"] if item["key"] == "doctor_lee"
-    )["allowed_action_keys"]
+    assert (
+        "treat_patient_v2"
+        in next(
+            item for item in renamed["actors"]["actor_profiles"] if item["key"] == "doctor_lee"
+        )["allowed_action_keys"]
+    )
     assert all(item.get("action_key") != "treat_patient" for item in renamed["rules"])
 
 

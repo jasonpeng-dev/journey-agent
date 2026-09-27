@@ -64,7 +64,7 @@ export type ValidationResult = {
 };
 
 export type ScenarioVersion = {
-  id: string; scenario_id: string; version_number: number; schema_version: 2;
+  id: string; scenario_id: string; version_number: number; schema_version: 2 | 3;
   content_hash: string; published_at: string; definition_document?: Record<string, unknown>;
 };
 
@@ -168,6 +168,38 @@ export type InitializationPreviewIssue = {
   msg?: string;
 };
 export type InitializationPreviewFocus = { object_kind: "node" | "actor" | "relation" | "resource"; object_key: string };
+export type SemanticDiffEntry = {
+  scope: "DESIGN" | "INITIALIZATION";
+  editor_section: string;
+  editor_subsection: string;
+  object_kind: string;
+  object_key: string | null;
+  object_display_name: string;
+  change_kind: "ADDED" | "REMOVED" | "MODIFIED" | "REORDERED";
+  locator: Locator;
+  field_path: string | null;
+  before?: unknown;
+  after?: unknown;
+};
+export type SemanticDiffSectionSummary = {
+  section: string;
+  count: number;
+  subsections: Array<{ subsection: string; count: number }>;
+};
+export type SemanticDiff = {
+  published: boolean;
+  compared_version: { id: string; version_number: number; schema_version: 2 | 3 } | null;
+  published_version_id: string | null;
+  published_version_number: number | null;
+  published_schema_version: 2 | 3 | null;
+  is_equal: boolean | null;
+  comparable: boolean;
+  total_changed_objects: number;
+  total_changed_items: number;
+  section_summaries: SemanticDiffSectionSummary[];
+  entries: SemanticDiffEntry[];
+  error_message?: string | null;
+};
 export type WorldPresentationOverrides = {
   entity_detail?: PresentationEntityDetail;
   knowledge_level?: PresentationKnowledgeLevel;
