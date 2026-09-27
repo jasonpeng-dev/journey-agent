@@ -1,14 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api";
+import { ScenarioArtifactImportDialog } from "../components/ScenarioArtifactImportDialog";
 import { uiLabel } from "../ui";
 
 export function ScenarioLibraryPage() {
   const scenarios = useQuery({ queryKey: ["scenarios"], queryFn: api.scenarios });
+  const navigate = useNavigate();
+  const [importOpen, setImportOpen] = useState(false);
   return (
     <main className="page">
-      <div className="page-heading"><div><p className="eyebrow">人工测试</p><h1>完整测试模板</h1><p className="muted">选择一个已发布模板，创建独立游戏后即可开始测试。</p></div><Link className="primary-button" to="/scenarios/new">新建场景</Link></div>
+      <div className="page-heading"><div><p className="eyebrow">人工测试</p><h1>完整测试模板</h1><p className="muted">选择一个已发布模板，创建独立游戏后即可开始测试。</p></div><div className="page-heading-actions"><button type="button" className="primary-button" onClick={() => setImportOpen(true)}>导入场景</button><Link className="primary-button" to="/scenarios/new">新建场景</Link></div></div>
       {scenarios.isLoading && <p>正在加载场景……</p>}
       {scenarios.error && <p className="error">无法加载场景。</p>}
       <div className="scenario-list" data-testid="scenario-library-list">
@@ -29,6 +33,13 @@ export function ScenarioLibraryPage() {
           </Link>
         ))}
       </div>
+      {importOpen && <ScenarioArtifactImportDialog
+        onCancel={() => setImportOpen(false)}
+        onImported={(result) => {
+          setImportOpen(false);
+          navigate(result.published_version ? `/scenarios/${result.scenario.id}` : `/scenarios/${result.scenario.id}/edit/overview`);
+        }}
+      />}
     </main>
   );
 }

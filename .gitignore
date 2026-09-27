@@ -53,6 +53,9 @@ logs/
 *.orig
 *.rej
 
+# Local Scenario portability exports
+scenarios/exports/
+
 # Editors and operating systems
 .vscode/
 .idea/

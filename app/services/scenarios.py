@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
+from pydantic import ValidationError
+from sqlalchemy import delete as sql_delete
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
@@ -16,7 +18,14 @@ from app.domain.scenario_v2 import (
     normalize_resource_source_hint_document,
 )
 from app.domain.scenario_v3 import ScenarioDefinitionV3
-from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
+from app.infrastructure.db.models import (
+    GameInstance,
+    Scenario,
+    ScenarioDraft,
+    ScenarioPresentationProfile,
+    ScenarioPresentationProfileRevision,
+    ScenarioVersion,
+)
 from app.scenarios.authoring import (
     DraftAuthoringError,
     ReferenceEdge,
@@ -31,6 +40,7 @@ from app.scenarios.authoring import (
 )
 from app.scenarios.completeness import CompletenessResult, evaluate_completeness
 from app.scenarios.documents import parse_scenario_document_versioned
+from app.scenarios.semantic_diff import semantic_diff
 from app.scenarios.serialization import canonical_document_payload, scenario_content_hash
 from app.scenarios.validation import (
     ScenarioDefinitionValidator,
@@ -52,6 +62,39 @@ class ScenarioLifecycleError(ValueError):
 class ScenarioPublishResult:
     status: Literal["PUBLISHED"]
     version: ScenarioVersion
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioRestorePreview:
+    scenario_id: UUID
+    version: ScenarioVersion
+    current_draft_revision: int
+    candidate_working_document: dict[str, Any]
+    semantic_diff: dict[str, Any]
+    unchanged: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioDependentGame:
+    game_id: UUID
+    identifier: str
+    status: str
+    scenario_version_id: UUID
+    scenario_version_number: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioDeletionImpact:
+    scenario: Scenario
+    draft_revision: int
+    published_version_count: int
+    dependent_games: tuple[ScenarioDependentGame, ...]
+
+    @property
+    def can_delete(self) -> bool:
+        return not self.dependent_games
 
 
 class ScenarioService:
@@ -101,6 +144,202 @@ class ScenarioService:
         assert version is not None
         return version
 
+    def preview_restore_version(
+        self,
+        scenario_id: UUID,
+        *,
+        version_id: UUID,
+        expected_revision: int,
+    ) -> ScenarioRestorePreview:
+        """Build a read-only historical-version candidate for browser restore.
+
+        The candidate is normalized through the versioned authored parser.  A
+        legacy v2 snapshot is migrated in memory to the current authored v3
+        document; no snapshot or Draft row is rewritten here.
+        """
+
+        scenario = self._scenario(scenario_id, lock=False)
+        self._require_mutable(scenario)
+        draft = self._draft(scenario_id, lock=False)
+        if draft.revision != expected_revision:
+            raise ScenarioLifecycleError(
+                "SCENARIO_DRAFT_CONFLICT",
+                "The Scenario Draft revision changed before restore preview",
+                details={"expected_revision": expected_revision, "actual_revision": draft.revision},
+            )
+        version = self.get_version(scenario_id, version_id)
+        try:
+            authored = parse_scenario_document_versioned(deepcopy(version.snapshot_document))
+            if isinstance(authored, ScenarioDefinitionV3):
+                candidate = canonical_document_payload(authored.model_dump(mode="json"))
+            else:
+                candidate = canonical_document_payload(
+                    ScenarioDefinitionV3.from_v2(authored).model_dump(mode="json")
+                )
+            _require_scenario_identity(candidate, scenario.key)
+        except (ValidationError, ValueError, ScenarioLifecycleError) as exc:
+            code = (
+                "SCENARIO_RESTORE_UNSUPPORTED"
+                if isinstance(exc, (ValidationError, ValueError))
+                else exc.code
+            )
+            message = (
+                "该历史版本无法安全转换为当前可编辑草稿格式。"
+                if code == "SCENARIO_RESTORE_UNSUPPORTED"
+                else str(exc)
+            )
+            raise ScenarioLifecycleError(
+                code, message, details={"version_id": str(version_id)}
+            ) from exc
+        try:
+            diff = semantic_diff(
+                draft.definition_document,
+                candidate,
+                published_version_id=str(version.id),
+                published_version_number=version.version_number,
+                published_schema_version=version.schema_version,
+                include_entries=True,
+            )
+        except (ValidationError, ValueError):
+            diff = {
+                "published": True,
+                "compared_version": {
+                    "id": str(version.id),
+                    "version_number": version.version_number,
+                    "schema_version": version.schema_version,
+                },
+                "published_version_id": str(version.id),
+                "published_version_number": version.version_number,
+                "published_schema_version": version.schema_version,
+                "is_equal": None,
+                "comparable": False,
+                "total_changed_objects": 0,
+                "total_changed_items": 0,
+                "section_summaries": [],
+                "entries": [],
+                "error_message": "当前草稿尚未形成可比较的完整语义。恢复候选仍可在编辑器中查看。",
+            }
+        return ScenarioRestorePreview(
+            scenario_id=scenario_id,
+            version=version,
+            current_draft_revision=draft.revision,
+            candidate_working_document=deepcopy(candidate),
+            semantic_diff=diff,
+            unchanged=diff.get("is_equal") is True,
+        )
+
+    def deletion_impact(self, scenario_id: UUID) -> ScenarioDeletionImpact:
+        """Read-only dependency census covering every published version."""
+
+        scenario = self._scenario(scenario_id, lock=False)
+        draft = self._draft(scenario_id, lock=False)
+        versions = tuple(
+            self.db.scalars(
+                select(ScenarioVersion)
+                .where(ScenarioVersion.scenario_id == scenario_id)
+                .order_by(ScenarioVersion.version_number.desc())
+            )
+        )
+        version_ids = [version.id for version in versions]
+        games: tuple[GameInstance, ...] = ()
+        if version_ids:
+            games = tuple(
+                self.db.scalars(
+                    select(GameInstance)
+                    .where(GameInstance.scenario_version_id.in_(version_ids))
+                    .order_by(GameInstance.created_at, GameInstance.id)
+                )
+            )
+        version_by_id = {version.id: version for version in versions}
+        dependent = tuple(
+            ScenarioDependentGame(
+                game_id=game.id,
+                identifier=f"游戏 {str(game.id)[:8]}",
+                status=getattr(game.status, "value", str(game.status)),
+                scenario_version_id=game.scenario_version_id,
+                scenario_version_number=version_by_id[game.scenario_version_id].version_number,
+                created_at=game.created_at,
+                updated_at=game.updated_at,
+            )
+            for game in games
+            if game.scenario_version_id in version_by_id
+        )
+        return ScenarioDeletionImpact(
+            scenario=scenario,
+            draft_revision=draft.revision,
+            published_version_count=len(versions),
+            dependent_games=dependent,
+        )
+
+    def delete_scenario(self, scenario_id: UUID) -> None:
+        """Atomically delete a Scenario and all Scenario-owned lifecycle rows."""
+
+        scenario = self._scenario(scenario_id, lock=True)
+        versions = tuple(
+            self.db.scalars(
+                select(ScenarioVersion)
+                .where(ScenarioVersion.scenario_id == scenario_id)
+                .with_for_update()
+            )
+        )
+        version_ids = [version.id for version in versions]
+        if version_ids:
+            games = tuple(
+                self.db.scalars(
+                    select(GameInstance)
+                    .where(GameInstance.scenario_version_id.in_(version_ids))
+                    .with_for_update()
+                )
+            )
+            if games:
+                dependent = [
+                    {
+                        "game_id": str(game.id),
+                        "identifier": f"游戏 {str(game.id)[:8]}",
+                        "status": getattr(game.status, "value", str(game.status)),
+                        "scenario_version_id": str(game.scenario_version_id),
+                        "scenario_version_number": next(
+                            version.version_number
+                            for version in versions
+                            if version.id == game.scenario_version_id
+                        ),
+                        "created_at": game.created_at.isoformat(),
+                        "updated_at": game.updated_at.isoformat(),
+                    }
+                    for game in games
+                ]
+                raise ScenarioLifecycleError(
+                    "SCENARIO_HAS_GAME_DEPENDENCIES",
+                    "该场景仍被游戏实例使用。请先手动删除这些游戏实例。",
+                    details={"dependent_games": dependent},
+                )
+        # Explicit deletes keep this service correct on databases where FK
+        # cascade behavior is disabled while preserving the same transaction.
+        self.db.execute(
+            sql_delete(ScenarioPresentationProfileRevision).where(
+                ScenarioPresentationProfileRevision.scenario_id == scenario_id
+            )
+        )
+        self.db.execute(
+            sql_delete(ScenarioPresentationProfile).where(
+                ScenarioPresentationProfile.scenario_id == scenario_id
+            )
+        )
+        self.db.execute(sql_delete(ScenarioDraft).where(ScenarioDraft.scenario_id == scenario_id))
+        # The Scenario row points at its current published version without an
+        # ON DELETE action. Clear that pointer before removing version rows so
+        # SQLite/PostgreSQL enforce the same referentially-safe delete order.
+        self.db.execute(
+            update(Scenario)
+            .where(Scenario.id == scenario_id)
+            .values(current_published_version_id=None)
+        )
+        self.db.execute(
+            sql_delete(ScenarioVersion).where(ScenarioVersion.scenario_id == scenario_id)
+        )
+        self.db.delete(scenario)
+        self.db.flush()
+
     def create_blank(self, *, key: str, name: str) -> Scenario:
         return self._create(
             key=key,
@@ -121,6 +360,37 @@ class ScenarioService:
         document["world"]["key"] = key
         document["world"]["name"] = name
         return self._create(key=key, name=name, definition_document=document)
+
+    def create_from_authored_document(
+        self,
+        *,
+        key: str,
+        name: str,
+        definition_document: dict[str, Any],
+    ) -> Scenario:
+        """Create a Scenario from an authored versioned document.
+
+        This lifecycle primitive deliberately preserves the authored schema
+        (including current v3 fields).  Runtime callers may still use
+        ``create_from_definition`` with the normalized v2 model, while
+        portability callers must not down-convert their document at the
+        persistence boundary.
+        """
+
+        try:
+            parse_scenario_document_versioned(definition_document)
+            canonical_document = canonical_document_payload(definition_document)
+        except (TypeError, ValueError) as exc:
+            raise ScenarioLifecycleError(
+                "SCENARIO_DRAFT_DOCUMENT_INVALID",
+                "The authored Scenario document is invalid",
+            ) from exc
+        _require_scenario_identity(canonical_document, key)
+        return self._create(
+            key=key,
+            name=name,
+            definition_document=canonical_document,
+        )
 
     def clone_version(self, *, key: str, name: str, version_id: UUID) -> Scenario:
         version = self.db.get(ScenarioVersion, version_id)
@@ -333,25 +603,6 @@ class ScenarioService:
         draft.base_scenario_version_id = version.id
         self.db.flush()
         return ScenarioPublishResult(status="PUBLISHED", version=version)
-
-    def restore_version(
-        self,
-        scenario_id: UUID,
-        *,
-        version_id: UUID,
-        expected_revision: int,
-    ) -> ScenarioDraft:
-        scenario = self._scenario(scenario_id, lock=False)
-        self._require_mutable(scenario)
-        version = self.get_version(scenario_id, version_id)
-        draft = self._replace_draft_document(
-            scenario_id,
-            expected_revision=expected_revision,
-            definition_document=version.snapshot_document,
-        )
-        draft.base_scenario_version_id = version.id
-        self.db.flush()
-        return draft
 
     def archive(self, scenario_id: UUID) -> Scenario:
         scenario = self._scenario(scenario_id, lock=True)

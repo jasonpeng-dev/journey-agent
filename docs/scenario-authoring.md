@@ -329,9 +329,11 @@ It creates a new immutable Version; publishing an unchanged semantic document is
 
 Version History supports reading a snapshot, restoring its content into the Current Draft, and
 starting a new Game from that exact Version. Restore changes only the Draft. The New Game flow
-accepts a `scenario_version_id`, never a Draft or a mutable Scenario pointer. Built-in examples
-are exposed by `GET /api/v1/scenario-examples` and are seeded through the normal scenario
-bootstrap. They are onboarding content, not a special runtime path.
+accepts a `scenario_version_id`, never a Draft or a mutable Scenario pointer. The tracked release
+artifact under `scenarios/examples/` is imported explicitly through the portability CLI or Web
+Import flow; database migrations and application startup do not seed Scenario content. The
+legacy `GET /api/v1/scenario-examples` creation templates remain an explicit authoring action,
+not a production bootstrap path.
 
 ## Authoring API map
 

@@ -76,6 +76,80 @@ export type ScenarioVersionDetail = ScenarioVersion & {
 
 export type ScenarioExample = { key: string; name: string; description: string; maturity: string };
 
+export type ScenarioArtifactMetadata = { key: string; name: string; description: string };
+export type ScenarioArtifactSummary = {
+  artifact_type: string;
+  artifact_version: number;
+  content_type: "draft" | "release";
+  schema_version: number;
+  scenario: ScenarioArtifactMetadata;
+  content_hash: string;
+};
+export type PortabilityValidationIssue = {
+  code: string;
+  path: string;
+  message: string;
+  severity: string;
+  type: string;
+};
+export type PortabilityValidation = {
+  structurally_valid: boolean;
+  publish_ready: boolean;
+  issue_count: number;
+  issues: PortabilityValidationIssue[];
+};
+export type NewScenarioArtifactPreview = {
+  artifact: ScenarioArtifactSummary;
+  candidate_target_key: string;
+  key_conflict: boolean;
+  validation: PortabilityValidation;
+  content_hash: string;
+  what_import_will_create: {
+    records: string[];
+    published_version_number: number | null;
+    game_created: boolean;
+  };
+};
+export type ScenarioArtifactImportResult = {
+  status: "IMPORTED";
+  artifact: Omit<ScenarioArtifactSummary, "scenario">;
+  scenario: Pick<ScenarioSummary, "id" | "key" | "name" | "status">;
+  draft: { revision: number; validation_status: string };
+  published_version: { id: string; version_number: number; schema_version: number; content_hash: string; published_at: string } | null;
+  game_created: false;
+};
+
+export type RestorePreview = {
+  scenario_id: string;
+  version: ScenarioVersion;
+  current_draft_revision: number;
+  candidate_working_document: Record<string, unknown>;
+  semantic_diff: SemanticDiff;
+  unchanged: boolean;
+  restore_supported: boolean;
+  restore_note?: string | null;
+};
+
+export type ScenarioDependentGame = {
+  game_id: string;
+  identifier: string;
+  status: string;
+  scenario_version_id: string;
+  scenario_version_number: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ScenarioDeletionImpact = {
+  scenario_id: string;
+  scenario_name: string;
+  scenario_key: string;
+  draft_revision: number;
+  published_version_count: number;
+  dependent_games: ScenarioDependentGame[];
+  can_delete: boolean;
+};
+
 export type PresentationTemplate = "compact" | "standard" | "detailed";
 export type PresentationDensity = "COMPACT" | "STANDARD" | "DETAILED";
 export type PresentationDefaultOpen = "COLLAPSED" | "COMPACT" | "FULL";

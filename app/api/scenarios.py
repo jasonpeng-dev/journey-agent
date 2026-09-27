@@ -25,7 +25,6 @@ from app.api.schemas.phase_d import (
     DraftRenameKeyRequest,
     DraftReplaceRequest,
     DraftResponse,
-    DraftRestoreRequest,
     DraftRevisionRequest,
     DraftSandboxRequest,
     DraftSandboxResponse,
@@ -42,8 +41,12 @@ from app.api.schemas.phase_d import (
     ReadinessLevel,
     ReferenceEdgeResponse,
     ReferenceIndexResponse,
+    RestorePreviewRequest,
+    RestorePreviewResponse,
     ScenarioCreateMode,
     ScenarioCreateRequest,
+    ScenarioDeletionImpactResponse,
+    ScenarioDependentGameResponse,
     ScenarioDetailResponse,
     ScenarioExampleResponse,
     ScenarioPublishResponse,
@@ -882,22 +885,6 @@ def publish_draft(
         _raise_http(exc, details=details)
 
 
-@router.post("/scenarios/{scenario_id}/draft/restore", response_model=DraftResponse)
-def restore_draft(
-    scenario_id: UUID,
-    request: DraftRestoreRequest,
-    db: Session = Depends(get_db),
-) -> DraftResponse:
-    return _draft_write(
-        db,
-        lambda service: service.restore_version(
-            scenario_id,
-            version_id=request.version_id,
-            expected_revision=request.expected_revision,
-        ),
-    )
-
-
 @router.get(
     "/scenarios/{scenario_id}/draft/references",
     response_model=ReferenceIndexResponse,
@@ -1221,6 +1208,92 @@ def get_version(
         )
     except ScenarioLifecycleError as exc:
         _raise_http(exc)
+
+
+@router.get(
+    "/scenarios/{scenario_id}/deletion-impact",
+    response_model=ScenarioDeletionImpactResponse,
+)
+def get_scenario_deletion_impact(
+    scenario_id: UUID,
+    db: Session = Depends(get_db),
+) -> ScenarioDeletionImpactResponse:
+    try:
+        impact = ScenarioService(db).deletion_impact(scenario_id)
+        return ScenarioDeletionImpactResponse(
+            scenario_id=scenario_id,
+            scenario_name=impact.scenario.name,
+            scenario_key=impact.scenario.key,
+            draft_revision=impact.draft_revision,
+            published_version_count=impact.published_version_count,
+            dependent_games=[
+                ScenarioDependentGameResponse(
+                    game_id=game.game_id,
+                    identifier=game.identifier,
+                    status=game.status,
+                    scenario_version_id=game.scenario_version_id,
+                    scenario_version_number=game.scenario_version_number,
+                    created_at=game.created_at,
+                    updated_at=game.updated_at,
+                )
+                for game in impact.dependent_games
+            ],
+            can_delete=impact.can_delete,
+        )
+    except ScenarioLifecycleError as exc:
+        _raise_http(exc)
+
+
+@router.delete("/scenarios/{scenario_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_scenario(scenario_id: UUID, db: Session = Depends(get_db)) -> None:
+    try:
+        ScenarioService(db).delete_scenario(scenario_id)
+        db.commit()
+    except ScenarioLifecycleError as exc:
+        db.rollback()
+        if exc.code == "SCENARIO_HAS_GAME_DEPENDENCIES":
+            raise AppError(
+                exc.code,
+                exc.message,
+                status_code=status.HTTP_409_CONFLICT,
+                details=exc.details,
+            ) from exc
+        _raise_http(exc, details=exc.details)
+
+
+@router.post(
+    "/scenarios/{scenario_id}/versions/{version_id}/restore-preview",
+    response_model=RestorePreviewResponse,
+)
+def preview_restore_version(
+    scenario_id: UUID,
+    version_id: UUID,
+    request: RestorePreviewRequest,
+    db: Session = Depends(get_db),
+) -> RestorePreviewResponse:
+    try:
+        preview = ScenarioService(db).preview_restore_version(
+            scenario_id,
+            version_id=version_id,
+            expected_revision=request.expected_persisted_revision,
+        )
+        return RestorePreviewResponse(
+            scenario_id=scenario_id,
+            version=_version_summary(preview.version),
+            current_draft_revision=preview.current_draft_revision,
+            candidate_working_document=preview.candidate_working_document,
+            semantic_diff=SemanticDiffResponse.model_validate(preview.semantic_diff),
+            unchanged=preview.unchanged,
+            restore_supported=True,
+        )
+    except ScenarioLifecycleError as exc:
+        if exc.code.endswith("_NOT_FOUND"):
+            code_status = status.HTTP_404_NOT_FOUND
+        elif exc.code in {"SCENARIO_RESTORE_UNSUPPORTED"}:
+            code_status = status.HTTP_422_UNPROCESSABLE_ENTITY
+        else:
+            code_status = status.HTTP_409_CONFLICT
+        raise AppError(exc.code, exc.message, status_code=code_status, details=exc.details) from exc
 
 
 @router.get("/scenario-examples", response_model=list[ScenarioExampleResponse])

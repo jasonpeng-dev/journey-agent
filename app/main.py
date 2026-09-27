@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.developer import router as developer_router
 from app.api.games import router as games_router
 from app.api.health import router as health_router
+from app.api.portability import router as portability_router
 from app.api.scenarios import router as scenarios_router
 from app.core.config import get_settings, resolved_database_target
 from app.core.errors import AppError
@@ -34,6 +35,7 @@ async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
 
 app = FastAPI(title=settings.app_name, version="0.2.0", lifespan=lifespan)
 app.include_router(health_router)
+app.include_router(portability_router)
 app.include_router(scenarios_router)
 app.include_router(games_router)
 app.include_router(developer_router)

@@ -128,6 +128,20 @@ Useful lifecycle commands:
 The named Compose volume preserves local Journey Agent data across normal
 stop/start and down/up. down -v removes only this Compose project's data.
 
+Fresh installs start with an empty Scenario and Game library. Database
+migrations are the only startup mutation; Docker does not seed or import
+Scenario content. The image contains the tracked release example at
+`scenarios/examples/linjiang_infrastructure_recovery.scenario.json`, which can
+be imported explicitly with the portability CLI:
+
+    docker compose exec api uv run journey scenario import \
+      /app/scenarios/examples/linjiang_infrastructure_recovery.scenario.json
+
+The same artifact can be imported from the Scenario Library through the Web
+Import action. Release import creates a new Scenario, Draft, and Published v1;
+it never creates a Game automatically. Create a Game explicitly from the
+selected Published Version.
+
 ## Manual local development
 
 Supported toolchain: Python 3.12, Node 22, and uv.
@@ -137,12 +151,19 @@ Backend, from the repository root:
     uv sync --python 3.12 --extra dev
     Copy-Item .env.example .env
     uv run alembic upgrade head
-    uv run python -m app.seed
     uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 Local development uses SQLite at ./journey_dev.db. Keep that database target
 in .env for backend, Editor, and Player UI. Do not point local commands at
 historical databases.
+
+After a fresh local migration, the Scenario Library is empty. Import an
+artifact explicitly when you need example content:
+
+    uv run journey scenario import scenarios/examples/linjiang_infrastructure_recovery.scenario.json
+
+The legacy `uv run python -m app.seed` command remains available only for
+legacy or test compatibility fixtures; it is not a production bootstrap path.
 
 Frontend, in a second terminal:
 

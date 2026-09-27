@@ -268,10 +268,6 @@ class DraftPublishRequest(DraftRevisionRequest):
     expected_content_hash: str | None = Field(default=None, min_length=64, max_length=64)
 
 
-class DraftRestoreRequest(DraftRevisionRequest):
-    version_id: UUID
-
-
 class DraftRenameKeyRequest(DraftRevisionRequest):
     object_kind: str = Field(min_length=1, max_length=80)
     old_key: str = Field(min_length=1, max_length=100)
@@ -481,6 +477,43 @@ class ScenarioVersionDetailResponse(ScenarioVersionSummaryResponse):
     definition_document: dict[str, Any]
 
 
+class RestorePreviewRequest(ApiModel):
+    """Read-only restore handoff guarded by the current persisted Draft revision."""
+
+    expected_persisted_revision: int = Field(ge=1)
+
+
+class RestorePreviewResponse(ApiModel):
+    scenario_id: UUID
+    version: ScenarioVersionSummaryResponse
+    current_draft_revision: int = Field(ge=1)
+    candidate_working_document: dict[str, Any]
+    semantic_diff: SemanticDiffResponse
+    unchanged: bool
+    restore_supported: bool = True
+    restore_note: str | None = None
+
+
+class ScenarioDependentGameResponse(ApiModel):
+    game_id: UUID
+    identifier: str
+    status: str
+    scenario_version_id: UUID
+    scenario_version_number: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScenarioDeletionImpactResponse(ApiModel):
+    scenario_id: UUID
+    scenario_name: str
+    scenario_key: str
+    draft_revision: int = Field(ge=1)
+    published_version_count: int = Field(ge=0)
+    dependent_games: list[ScenarioDependentGameResponse] = Field(default_factory=list)
+    can_delete: bool
+
+
 class ScenarioPublishResponse(ApiModel):
     scenario: ScenarioSummaryResponse
     version: ScenarioVersionSummaryResponse
@@ -568,6 +601,10 @@ class DraftCompletenessResponse(ApiModel):
 
 
 class NewGameRequest(ApiModel):
+    # The UI sends the selected Scenario identity as a binding guard.  Keep it
+    # optional for older API clients; the immutable ScenarioVersion remains the
+    # authoritative runtime pin when it is omitted.
+    scenario_id: UUID | None = None
     scenario_version_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=160)
 
@@ -1161,7 +1198,6 @@ __all__ = [
     "DraftRenameKeyRequest",
     "DraftReplaceRequest",
     "DraftResponse",
-    "DraftRestoreRequest",
     "DraftRevisionRequest",
     "DraftSandboxRequest",
     "DraftSandboxResponse",
@@ -1199,8 +1235,12 @@ __all__ = [
     "ReadinessLevel",
     "ReferenceEdgeResponse",
     "ReferenceIndexResponse",
+    "RestorePreviewRequest",
+    "RestorePreviewResponse",
     "ScenarioCreateMode",
     "ScenarioCreateRequest",
+    "ScenarioDeletionImpactResponse",
+    "ScenarioDependentGameResponse",
     "ScenarioDetailResponse",
     "ScenarioExampleResponse",
     "ScenarioPublishResponse",

@@ -57,6 +57,7 @@ const draft = {
 };
 
 beforeEach(() => {
+  vi.clearAllMocks();
   vi.mocked(api.draft).mockResolvedValue(draft);
   vi.mocked(api.scenario).mockResolvedValue({ id: "scenario-1", key: "scenario-1", name: "Test Scenario", status: "DRAFT", draft_revision: 1, current_published_version_id: null, current_published_version_number: null, created_at: "2026-09-15T00:00:00Z", updated_at: "2026-09-15T00:00:00Z" });
   vi.mocked(api.scenarioVersion).mockReset();
@@ -71,15 +72,104 @@ beforeEach(() => {
 });
 
 function LocationProbe() {
-  return <output data-testid="editor-location">{useLocation().pathname}</output>;
+  const location = useLocation();
+  return <><output data-testid="editor-location">{location.pathname}</output><output data-testid="editor-location-state">{location.state ? "present" : "clear"}</output></>;
 }
 
-function renderEditor(initialEntry = "/scenarios/scenario-1/edit/world") {
+function renderEditor(initialEntry: string | { pathname: string; state?: unknown } = "/scenarios/scenario-1/edit/world") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[initialEntry]}><Routes><Route path="/scenarios/:scenarioId/edit/:section" element={<EditorPage />} /><Route path="/scenarios/:scenarioId/edit/:section/:objectKey" element={<EditorPage />} /><Route path="/scenarios/:scenarioId" element={<div>Scenario Detail</div>} /></Routes><LocationProbe /></MemoryRouter></QueryClientProvider>);
 }
 
 describe("EditorPage topology interaction contract", () => {
+  it("consumes a restore navigation payload once and keeps later edits stable", async () => {
+    const candidate = structuredClone(draft.definition_document);
+    (candidate.metadata as Record<string, unknown>).name = "Restored Scenario";
+    const restorePreview = {
+      scenario_id: "scenario-1",
+      current_draft_revision: 1,
+      candidate_working_document: candidate,
+      unchanged: false,
+      restore_supported: true,
+      version: { id: "version-1", scenario_id: "scenario-1", version_number: 1, schema_version: 3, content_hash: "old-hash", published_at: "2026-09-15T00:00:00Z" },
+    };
+    renderEditor({ pathname: "/scenarios/scenario-1/edit/overview", state: { restorePreview } });
+
+    await screen.findByDisplayValue("Restored Scenario");
+    expect(screen.getByText("有未保存修改")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    const discardDialog = await screen.findByRole("dialog", { name: "放弃当前修改？" });
+    fireEvent.click(within(discardDialog).getByRole("button", { name: "放弃修改" }));
+    await waitFor(() => expect(screen.getByDisplayValue("Test Scenario")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("editor-location-state")).toHaveTextContent("clear"));
+    expect(screen.getByDisplayValue("Test Scenario")).toBeInTheDocument();
+
+    const persistedName = screen.getByDisplayValue("Test Scenario");
+    fireEvent.change(persistedName, { target: { value: "Edited After Restore" } });
+    expect(screen.getByDisplayValue("Edited After Restore")).toBeInTheDocument();
+    expect(screen.getByText("有未保存修改")).toBeInTheDocument();
+  });
+
+  it("does not dirty the working copy when the restore candidate is semantically equal", async () => {
+    const restorePreview = {
+      scenario_id: "scenario-1",
+      current_draft_revision: 1,
+      candidate_working_document: structuredClone(draft.definition_document),
+      unchanged: false,
+      restore_supported: true,
+      version: { id: "version-equal", scenario_id: "scenario-1", version_number: 1, schema_version: 3, content_hash: "same-hash", published_at: "2026-09-15T00:00:00Z" },
+    };
+    renderEditor({ pathname: "/scenarios/scenario-1/edit/overview", state: { restorePreview } });
+
+    await screen.findByDisplayValue("Test Scenario");
+    await waitFor(() => expect(screen.getByTestId("editor-location-state")).toHaveTextContent("clear"));
+    expect(screen.queryByText("有未保存修改")).not.toBeInTheDocument();
+    expect(screen.getByText("该历史版本与当前草稿内容一致。")).toBeInTheDocument();
+    expect(api.saveDraft).not.toHaveBeenCalled();
+  });
+
+  it("consumes a stale restore candidate without applying it", async () => {
+    const candidate = structuredClone(draft.definition_document);
+    (candidate.metadata as Record<string, unknown>).name = "Stale Scenario";
+    const restorePreview = {
+      scenario_id: "scenario-1",
+      current_draft_revision: 99,
+      candidate_working_document: candidate,
+      unchanged: false,
+      restore_supported: true,
+      version: { id: "version-stale", scenario_id: "scenario-1", version_number: 1, schema_version: 3, content_hash: "old-hash", published_at: "2026-09-15T00:00:00Z" },
+    };
+    renderEditor({ pathname: "/scenarios/scenario-1/edit/overview", state: { restorePreview } });
+
+    await screen.findByDisplayValue("Test Scenario");
+    await waitFor(() => expect(screen.getByTestId("editor-location-state")).toHaveTextContent("clear"));
+    expect(screen.queryByDisplayValue("Stale Scenario")).not.toBeInTheDocument();
+    expect(screen.getByText("当前草稿已在其他窗口更新，恢复候选已失效。请返回场景详情重新预览。")).toBeInTheDocument();
+    expect(screen.getAllByText("草稿冲突").length).toBeGreaterThan(0);
+  });
+
+  it("saves a restored candidate exactly once", async () => {
+    const candidate = structuredClone(draft.definition_document);
+    (candidate.metadata as Record<string, unknown>).name = "Saved Restore";
+    vi.mocked(api.saveDraft).mockResolvedValueOnce({ ...draft, revision: 2, definition_document: candidate });
+    const restorePreview = {
+      scenario_id: "scenario-1",
+      current_draft_revision: 1,
+      candidate_working_document: candidate,
+      unchanged: false,
+      restore_supported: true,
+      version: { id: "version-save", scenario_id: "scenario-1", version_number: 1, schema_version: 3, content_hash: "old-hash", published_at: "2026-09-15T00:00:00Z" },
+    };
+    renderEditor({ pathname: "/scenarios/scenario-1/edit/overview", state: { restorePreview } });
+
+    await screen.findByDisplayValue("Saved Restore");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(api.saveDraft).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("有未保存修改")).not.toBeInTheDocument();
+    expect(screen.getByText("未修改")).toBeInTheDocument();
+  });
+
   it("selects and focuses positional Planning instruction locators without claiming a stable identity", async () => {
     renderEditor("/scenarios/scenario-1/edit/planning-instructions?owner=instruction&item=1&focus_path=instructions.1");
 

@@ -1,8 +1,10 @@
+from copy import deepcopy
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, inspect, select
+from sqlalchemy import func, inspect, select, update
 from sqlalchemy.orm import Session
 
 from app.agent.generic import GenericAgentService
@@ -26,14 +28,176 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.scenarios.builtin import require_builtin_v2_version
+from app.scenarios.migration import preview_v2_to_v3
 from app.services.game_instances import GameInstanceService
 from app.services.game_lifecycle import GameLifecycleError
 from app.services.generic_game import GenericGameService
+from app.services.scenarios import ScenarioService
 from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _published_version_id(session: Session) -> str:
     return str(require_builtin_v2_version(session, GENERIC_TEST).id)
+
+
+def _v3_document(key: str, quick_inputs: list[str]) -> dict[str, Any]:
+    document = preview_v2_to_v3(GENERIC_TEST.model_dump(mode="json")).target_document
+    document["metadata"]["key"] = key
+    document["metadata"]["name"] = key.replace("_", " ").title()
+    document["world"]["key"] = key
+    document["world"]["name"] = document["metadata"]["name"]
+    document["goal_resolution"]["quick_inputs"] = quick_inputs
+    return document
+
+
+def _publish_v3(session: Session, key: str, quick_inputs: list[str]) -> tuple[Any, Any]:
+    service = ScenarioService(session)
+    scenario = service.create_from_authored_document(
+        key=key,
+        name=key.replace("_", " ").title(),
+        definition_document=_v3_document(key, quick_inputs),
+    )
+    session.flush()
+    draft = service.get_draft(scenario.id)
+    published = service.publish_draft(scenario.id, expected_revision=draft.revision)
+    session.commit()
+    return scenario, published.version
+
+
+def test_v3_published_version_creates_game_and_bootstrap_uses_exact_quick_inputs(
+    client: TestClient, session: Session
+) -> None:
+    scenario, version = _publish_v3(
+        session, "v3_game_creation_contract", ["Repair the relay", "Secure the depot"]
+    )
+
+    created = client.post(
+        "/api/v1/games",
+        json={
+            "scenario_id": str(scenario.id),
+            "scenario_version_id": str(version.id),
+            "idempotency_key": str(uuid4()),
+        },
+    )
+    assert created.status_code == 201, created.text
+    payload = created.json()
+    assert payload["scenario_id"] == str(scenario.id)
+    assert payload["scenario_version_id"] == str(version.id)
+    play = client.get(f"/api/v1/games/{payload['id']}/play")
+    assert play.status_code == 200, play.text
+    assert play.json()["scenario_metadata"]["quick_inputs"] == [
+        "Repair the relay",
+        "Secure the depot",
+    ]
+
+    # A Draft UUID is not a published immutable ScenarioVersion and cannot
+    # be used as a gameplay pin.
+    draft = ScenarioService(session).get_draft(scenario.id)
+    unpublished = client.post(
+        "/api/v1/games",
+        json={
+            "scenario_id": str(scenario.id),
+            "scenario_version_id": str(draft.scenario_id),
+            "idempotency_key": str(uuid4()),
+        },
+    )
+    assert unpublished.status_code == 404
+    assert unpublished.json()["error"]["code"] == "SCENARIO_VERSION_NOT_FOUND"
+
+
+def test_game_creation_rejects_version_from_selected_other_scenario(
+    client: TestClient, session: Session
+) -> None:
+    first, _ = _publish_v3(session, "v3_selected_scenario", ["first"])
+    other, other_version = _publish_v3(session, "v3_other_scenario", ["other"])
+
+    response = client.post(
+        "/api/v1/games",
+        json={
+            "scenario_id": str(first.id),
+            "scenario_version_id": str(other_version.id),
+            "idempotency_key": str(uuid4()),
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "SCENARIO_VERSION_SCENARIO_MISMATCH"
+    assert other.id != first.id
+
+
+def test_game_creation_returns_typed_error_for_corrupt_published_version(
+    client: TestClient, session: Session
+) -> None:
+    scenario, version = _publish_v3(session, "v3_corrupt_version_contract", ["goal"])
+    session.execute(
+        update(ScenarioVersion)
+        .where(ScenarioVersion.id == version.id)
+        .values(content_hash="0" * 64)
+        .execution_options(synchronize_session=False)
+    )
+    session.commit()
+    session.expire_all()
+
+    response = client.post(
+        "/api/v1/games",
+        json={
+            "scenario_id": str(scenario.id),
+            "scenario_version_id": str(version.id),
+            "idempotency_key": str(uuid4()),
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "SCENARIO_VERSION_HASH_MISMATCH"
+
+
+def test_historical_v3_game_keeps_pinned_quick_inputs_after_later_publish(
+    client: TestClient, session: Session
+) -> None:
+    scenario, first = _publish_v3(session, "v3_historical_quick_inputs", ["version one"])
+    service = ScenarioService(session)
+
+    draft = service.get_draft(scenario.id)
+    second_document = deepcopy(draft.definition_document)
+    second_document["goal_resolution"]["quick_inputs"] = ["version two"]
+    second_draft = service.replace_draft(
+        scenario.id,
+        expected_revision=draft.revision,
+        definition_document=second_document,
+    )
+    second = service.publish_draft(scenario.id, expected_revision=second_draft.revision).version
+    session.commit()
+
+    first_game = client.post(
+        "/api/v1/games",
+        json={
+            "scenario_id": str(scenario.id),
+            "scenario_version_id": str(first.id),
+            "idempotency_key": str(uuid4()),
+        },
+    ).json()
+    second_game = client.post(
+        "/api/v1/games",
+        json={
+            "scenario_id": str(scenario.id),
+            "scenario_version_id": str(second.id),
+            "idempotency_key": str(uuid4()),
+        },
+    ).json()
+
+    third_draft = service.get_draft(scenario.id)
+    third_document = deepcopy(third_draft.definition_document)
+    third_document["goal_resolution"]["quick_inputs"] = ["version three"]
+    third_draft = service.replace_draft(
+        scenario.id,
+        expected_revision=third_draft.revision,
+        definition_document=third_document,
+    )
+    service.publish_draft(scenario.id, expected_revision=third_draft.revision)
+    session.commit()
+
+    first_state = client.get(f"/api/v1/games/{first_game['id']}/play")
+    second_state = client.get(f"/api/v1/games/{second_game['id']}/play")
+    assert first_state.json()["scenario_metadata"]["quick_inputs"] == ["version one"]
+    assert second_state.json()["scenario_metadata"]["quick_inputs"] == ["version two"]
 
 
 def test_games_bind_exact_version_and_instances_are_isolated(

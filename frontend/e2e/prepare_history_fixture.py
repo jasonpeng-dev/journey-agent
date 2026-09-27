@@ -37,6 +37,7 @@ from app.infrastructure.db.models import (
     WorldOperation,
 )
 from app.infrastructure.db.session import SessionLocal
+from app.scenarios.migration import preview_v2_to_v3
 from app.scenarios.target_applicability_migration import (
     migrate_target_applicability_document,
 )
@@ -51,6 +52,10 @@ SCENARIO_KEY = "generic_authoring_e2e"
 SCENARIO_NAME = "Generic Authoring Scenario"
 TARGET_SCENARIO_KEY = "target_applicability_e2e"
 TARGET_SCENARIO_NAME = "Target Applicability E2E Scenario"
+PORTABILITY_SCENARIO_KEY = "scenario_portability_e2e"
+PORTABILITY_SCENARIO_NAME = "Scenario Portability E2E"
+EMPTY_QUICK_INPUT_SCENARIO_KEY = "scenario_portability_empty_quick_inputs_e2e"
+EMPTY_QUICK_INPUT_SCENARIO_NAME = "Scenario Portability Empty Quick Inputs E2E"
 
 
 def generic_authoring_definition() -> ScenarioDefinitionV2:
@@ -102,6 +107,107 @@ def ensure_generic_scenario(db):  # type: ignore[no-untyped-def]
     version = db.get(ScenarioVersion, scenario.current_published_version_id)
     if version is None:
         raise RuntimeError("generic E2E ScenarioVersion is unavailable")
+    return scenario, version
+
+
+def portability_v3_document() -> dict[str, object]:
+    """Build a current-schema document only for the isolated portability E2E."""
+
+    document = preview_v2_to_v3(GENERIC_TEST.model_dump(mode="json")).target_document
+    document["metadata"]["key"] = PORTABILITY_SCENARIO_KEY
+    document["metadata"]["name"] = PORTABILITY_SCENARIO_NAME
+    document["world"]["key"] = PORTABILITY_SCENARIO_KEY
+    document["world"]["name"] = PORTABILITY_SCENARIO_NAME
+    document["planning"]["instructions"] = [
+        "Portability browser fixture instruction",
+    ]
+    document["goal_resolution"]["quick_inputs"] = [
+        "Portability browser fixture goal v1",
+    ]
+    return document
+
+
+def ensure_portability_scenario(db):  # type: ignore[no-untyped-def]
+    """Create a published v3 source for browser-only portability coverage."""
+
+    scenario = db.scalar(select(Scenario).where(Scenario.key == PORTABILITY_SCENARIO_KEY))
+    service = ScenarioService(db)
+    if scenario is None:
+        document = portability_v3_document()
+        scenario = service.create_from_authored_document(
+            key=PORTABILITY_SCENARIO_KEY,
+            name=PORTABILITY_SCENARIO_NAME,
+            definition_document=document,
+        )
+        db.flush()
+    if scenario.current_published_version_id is None:
+        draft = db.get(ScenarioDraft, scenario.id)
+        if draft is None:
+            raise RuntimeError("portability E2E Scenario Draft was not created")
+        service.publish_draft(scenario.id, expected_revision=draft.revision)
+        db.commit()
+    versions = tuple(
+        db.scalars(
+            select(ScenarioVersion)
+            .where(ScenarioVersion.scenario_id == scenario.id)
+            .order_by(ScenarioVersion.version_number)
+        )
+    )
+    if len(versions) == 1:
+        draft = db.get(ScenarioDraft, scenario.id)
+        if draft is None:
+            raise RuntimeError("portability E2E Scenario Draft is unavailable")
+        changed = deepcopy(draft.definition_document)
+        instructions = list(changed.get("planning", {}).get("instructions", []))
+        instructions.append("Portability browser fixture historical change")
+        changed.setdefault("planning", {})["instructions"] = instructions
+        changed["goal_resolution"]["quick_inputs"] = [
+            "Portability browser fixture goal v2",
+        ]
+        service.replace_draft(
+            scenario.id,
+            expected_revision=draft.revision,
+            definition_document=changed,
+        )
+        updated = db.get(ScenarioDraft, scenario.id)
+        if updated is None:
+            raise RuntimeError("portability E2E Scenario Draft update failed")
+        service.publish_draft(scenario.id, expected_revision=updated.revision)
+        db.commit()
+    version = db.get(ScenarioVersion, scenario.current_published_version_id)
+    if version is None:
+        raise RuntimeError("portability E2E ScenarioVersion is unavailable")
+    return scenario, version
+
+
+def ensure_empty_quick_input_scenario(db):  # type: ignore[no-untyped-def]
+    """Create a V3 Published scenario whose authoritative quick-input list is empty."""
+
+    scenario = db.scalar(
+        select(Scenario).where(Scenario.key == EMPTY_QUICK_INPUT_SCENARIO_KEY)
+    )
+    if scenario is None:
+        document = portability_v3_document()
+        document["metadata"]["key"] = EMPTY_QUICK_INPUT_SCENARIO_KEY
+        document["metadata"]["name"] = EMPTY_QUICK_INPUT_SCENARIO_NAME
+        document["world"]["key"] = EMPTY_QUICK_INPUT_SCENARIO_KEY
+        document["world"]["name"] = EMPTY_QUICK_INPUT_SCENARIO_NAME
+        document["goal_resolution"]["quick_inputs"] = []
+        service = ScenarioService(db)
+        scenario = service.create_from_authored_document(
+            key=EMPTY_QUICK_INPUT_SCENARIO_KEY,
+            name=EMPTY_QUICK_INPUT_SCENARIO_NAME,
+            definition_document=document,
+        )
+        db.flush()
+        draft = db.get(ScenarioDraft, scenario.id)
+        if draft is None:
+            raise RuntimeError("empty quick-input Scenario Draft was not created")
+        service.publish_draft(scenario.id, expected_revision=draft.revision)
+        db.commit()
+    version = db.get(ScenarioVersion, scenario.current_published_version_id)
+    if version is None:
+        raise RuntimeError("empty quick-input ScenarioVersion is unavailable")
     return scenario, version
 
 
@@ -419,6 +525,23 @@ def main() -> None:
         finally:
             db.close()
         return
+    if len(sys.argv) == 2 and sys.argv[1] == "portability":
+        db = SessionLocal()
+        try:
+            scenario, version = ensure_portability_scenario(db)
+            ensure_empty_quick_input_scenario(db)
+            print(
+                json.dumps(
+                    {
+                        "scenarioId": str(scenario.id),
+                        "key": scenario.key,
+                        "versionId": str(version.id),
+                    }
+                )
+            )
+        finally:
+            db.close()
+        return
     if len(sys.argv) == 2 and sys.argv[1] in {"presentation", "fork"}:
         print(json.dumps(create_fixture(sys.argv[1])))
         return
@@ -432,7 +555,7 @@ def main() -> None:
         print(json.dumps(append_post_fork_task(sys.argv[2])))
         return
     raise ValueError(
-        "usage: prepare_history_fixture.py scenario|presentation|fork|target | "
+        "usage: prepare_history_fixture.py scenario|portability|presentation|fork|target | "
         "target-reveal GAME_ID TARGET_KEY | append GAME_ID"
     )
 

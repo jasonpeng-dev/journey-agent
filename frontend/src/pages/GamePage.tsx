@@ -2167,12 +2167,27 @@ export function GoalComposer({
             {resolving ? "解析中…" : "解析目标"}
           </button>
         </div>
-        <div className="goal-quick-inputs" aria-label="快捷输入">
-          {!presetsLoaded && <span className="muted">正在加载快捷输入……</span>}
-          {presetsLoaded && quickInputs.map((input) => (
-            <button type="button" className="small" key={input} disabled={resolving} onClick={() => onGoalChange(input)}>{input}</button>
-          ))}
-        </div>
+        {!presetsLoaded && (
+          <div className="goal-quick-inputs" aria-label="快捷输入">
+            <span className="muted">正在加载快捷输入……</span>
+          </div>
+        )}
+        {presetsLoaded && quickInputs.length > 0 && (
+          <select
+            id="goal-preset-select"
+            aria-label="选择快捷目标"
+            value=""
+            onChange={(event) => {
+              if (event.target.value) onGoalChange(event.target.value);
+            }}
+            disabled={resolving}
+          >
+            <option value="">选择快捷目标……</option>
+            {quickInputs.map((input) => (
+              <option key={input} value={input}>{input}</option>
+            ))}
+          </select>
+        )}
         {readyDraft && (
           <div className="goal-confirmation-feedback" data-testid="goal-confirmation-feedback" role="status">
             <span>{readyDraft.presentation_text}</span>

@@ -204,7 +204,19 @@ async function main() {
   let cleanupError = null;
   try {
     await runChecked("database migration", python, ["-m", "alembic", "upgrade", "head"], repositoryRoot, env);
-    await runChecked("database seed", python, ["-m", "app.seed"], repositoryRoot, env);
+    await runChecked(
+      "official release artifact import",
+      python,
+      [
+        "-m",
+        "app.cli",
+        "scenario",
+        "import",
+        path.join(repositoryRoot, "scenarios", "examples", "linjiang_infrastructure_recovery.scenario.json"),
+      ],
+      repositoryRoot,
+      env,
+    );
     await runChecked(
       "platform player preparation",
       python,
@@ -219,6 +231,13 @@ async function main() {
       "generic authoring scenario preparation",
       python,
       [path.join(frontendRoot, "e2e", "prepare_history_fixture.py"), "scenario"],
+      repositoryRoot,
+      env,
+    );
+    await runChecked(
+      "portability v3 scenario preparation",
+      python,
+      [path.join(frontendRoot, "e2e", "prepare_history_fixture.py"), "portability"],
       repositoryRoot,
       env,
     );

@@ -7,9 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.provider import PlannerInput, PlanRequest
-from app.infrastructure.db.models import Scenario, ScenarioDraft, ScenarioVersion
+from app.infrastructure.db.models import (
+    GameInstance,
+    Player,
+    Scenario,
+    ScenarioDraft,
+    ScenarioVersion,
+)
 from app.scenarios.documents import parse_scenario_document_versioned
 from app.scenarios.serialization import legacy_resource_source_hint_payload
+from app.services.scenarios import ScenarioService
+from tests.scenario_fixtures import GENERIC_TEST
 
 
 def _create_example(client: TestClient, *, key: str = "clinic_one") -> dict[str, object]:
@@ -289,13 +297,24 @@ def test_publish_versions_restore_clone_and_archive_are_isolated(
     versions = client.get(f"/api/v1/scenarios/{scenario_id}/versions")
     assert [item["version_number"] for item in versions.json()] == [2, 1]
 
-    restored = client.post(
-        f"/api/v1/scenarios/{scenario_id}/draft/restore",
-        json={"expected_revision": 2, "version_id": version_one["id"]},
+    restore_preview = client.post(
+        f"/api/v1/scenarios/{scenario_id}/versions/{version_one['id']}/restore-preview",
+        json={"expected_persisted_revision": 2},
+    )
+    assert restore_preview.status_code == 200
+    assert restore_preview.json()["current_draft_revision"] == 2
+    assert restore_preview.json()["candidate_working_document"]["metadata"]["name"] == "Clinic One"
+    unchanged_draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    assert unchanged_draft["revision"] == 2
+    restored = client.put(
+        f"/api/v1/scenarios/{scenario_id}/draft",
+        json={
+            "expected_revision": 2,
+            "definition_document": restore_preview.json()["candidate_working_document"],
+        },
     )
     assert restored.status_code == 200
     assert restored.json()["revision"] == 3
-    assert restored.json()["base_scenario_version_id"] == version_one["id"]
     assert restored.json()["definition_document"]["metadata"]["name"] == "Clinic One"
 
     clone = client.post(
@@ -329,6 +348,103 @@ def test_publish_versions_restore_clone_and_archive_are_isolated(
         session.scalar(select(ScenarioVersion).where(ScenarioVersion.id == UUID(version_one["id"])))
         is not None
     )
+
+
+def test_scenario_deletion_impact_and_zero_game_delete_remove_owned_rows(
+    client: TestClient,
+    session: Session,
+) -> None:
+    created = _create_example(client, key="delete_without_games")
+    scenario_id = UUID(str(created["id"]))
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    published = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/publish",
+        json={"expected_revision": draft["revision"]},
+    )
+    assert published.status_code == 200, published.text
+    version_id = UUID(str(published.json()["version"]["id"]))
+
+    impact = client.get(f"/api/v1/scenarios/{scenario_id}/deletion-impact")
+    assert impact.status_code == 200, impact.text
+    assert impact.json()["can_delete"] is True
+    assert impact.json()["published_version_count"] == 1
+    assert impact.json()["dependent_games"] == []
+
+    deleted = client.delete(f"/api/v1/scenarios/{scenario_id}")
+    assert deleted.status_code == 204, deleted.text
+    assert client.get(f"/api/v1/scenarios/{scenario_id}").status_code == 404
+    assert session.get(Scenario, scenario_id) is None
+    assert session.get(ScenarioDraft, scenario_id) is None
+    assert session.get(ScenarioVersion, version_id) is None
+
+
+def test_scenario_delete_blocks_all_historical_version_game_dependencies(
+    client: TestClient,
+    session: Session,
+) -> None:
+    created = _create_example(client, key="delete_with_game")
+    scenario_id = UUID(str(created["id"]))
+    draft = client.get(f"/api/v1/scenarios/{scenario_id}/draft").json()
+    published = client.post(
+        f"/api/v1/scenarios/{scenario_id}/draft/publish",
+        json={"expected_revision": draft["revision"]},
+    )
+    assert published.status_code == 200, published.text
+    version_id = UUID(str(published.json()["version"]["id"]))
+    player = Player(name="Delete dependency player")
+    session.add(player)
+    session.flush()
+    game = GameInstance(
+        player_id=player.id,
+        scenario_version_id=version_id,
+        creation_key="delete-dependency-game",
+    )
+    session.add(game)
+    session.flush()
+    session.commit()
+
+    impact = client.get(f"/api/v1/scenarios/{scenario_id}/deletion-impact")
+    assert impact.status_code == 200, impact.text
+    assert impact.json()["can_delete"] is False
+    assert [item["game_id"] for item in impact.json()["dependent_games"]] == [str(game.id)]
+
+    blocked = client.delete(f"/api/v1/scenarios/{scenario_id}")
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["code"] == "SCENARIO_HAS_GAME_DEPENDENCIES"
+    assert [item["game_id"] for item in blocked.json()["error"]["details"]["dependent_games"]] == [
+        str(game.id)
+    ]
+    assert session.get(Scenario, scenario_id) is not None
+    assert session.get(GameInstance, game.id) is not None
+
+
+def test_legacy_v2_restore_preview_remains_independent_from_export_policy(
+    client: TestClient,
+    session: Session,
+) -> None:
+    service = ScenarioService(session)
+    scenario = service.create_from_definition(
+        key="legacy_restore_preview",
+        name="Legacy Restore Preview",
+        definition=GENERIC_TEST,
+    )
+    session.flush()
+    draft = service.get_draft(scenario.id)
+    published = service.publish_draft(scenario.id, expected_revision=draft.revision)
+    session.commit()
+
+    export = client.get(f"/api/v1/scenarios/{scenario.id}/versions/{published.version.id}/artifact")
+    assert export.status_code == 422
+    assert export.json()["error"]["code"] == "UNSUPPORTED_SCENARIO_SCHEMA_VERSION"
+
+    preview = client.post(
+        f"/api/v1/scenarios/{scenario.id}/versions/{published.version.id}/restore-preview",
+        json={"expected_persisted_revision": 1},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["version"]["schema_version"] == 2
+    assert preview.json()["candidate_working_document"]["schema_version"] == 3
+    assert client.get(f"/api/v1/scenarios/{scenario.id}/draft").json()["revision"] == 1
 
 
 def test_scenario_library_detail_identity_and_not_found_contract(

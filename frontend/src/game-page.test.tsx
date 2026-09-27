@@ -1220,10 +1220,10 @@ describe("Formal Play player projections", () => {
       />,
     );
 
-    const quickInput = screen.getByRole("button", { name: "恢复东部应急供电网络" });
+    const quickInput = screen.getByRole("combobox", { name: "选择快捷目标" });
     expect(quickInput).toBeVisible();
     expect(screen.getByLabelText("目标内容")).toBeVisible();
-    fireEvent.click(quickInput);
+    fireEvent.change(quickInput, { target: { value: "恢复东部应急供电网络" } });
     expect(onGoalChange).toHaveBeenLastCalledWith("恢复东部应急供电网络");
     expect(screen.getByLabelText("目标内容")).toHaveValue("恢复东部应急供电网络");
     fireEvent.change(screen.getByLabelText("目标内容"), {
@@ -1232,6 +1232,25 @@ describe("Formal Play player projections", () => {
     expect(onGoalChange).toHaveBeenLastCalledWith("优先恢复东部应急供电网络");
     fireEvent.click(screen.getByRole("button", { name: "解析目标" }));
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the quick input selector when the pinned version has none", () => {
+    render(
+      <GoalComposer
+        goal=""
+        pendingGoal={null}
+        resolving={false}
+        startedAt={null}
+        busy={false}
+        presetsLoaded
+        quickInputs={[]}
+        onGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("combobox", { name: "选择快捷目标" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("目标内容")).toBeVisible();
   });
 
   it("keeps the composer and its timer visible while Goal Resolution runs", () => {

@@ -257,7 +257,7 @@ def test_exact_version_loader_fails_closed_for_corrupt_metadata(
             scenario_version_id=version.id,
             idempotency_key=f"corrupt-version-{code}",
         )
-    assert blocked.value.code == "LEGACY_SCENARIO_VERSION_READ_ONLY"
+    assert blocked.value.code == code
 
 
 def test_noncanonical_snapshot_and_published_mutation_are_rejected(session: Session) -> None:

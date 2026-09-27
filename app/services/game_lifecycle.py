@@ -68,16 +68,30 @@ class GameLifecycleService:
             self.db.flush()
         return player
 
-    def create(self, *, scenario_version_id: UUID, idempotency_key: str) -> InitializedRuntime:
+    def create(
+        self,
+        *,
+        scenario_version_id: UUID,
+        idempotency_key: str,
+        scenario_id: UUID | None = None,
+    ) -> InitializedRuntime:
         version = self.db.get(ScenarioVersion, scenario_version_id)
         if version is None:
             raise GameLifecycleError(
                 "SCENARIO_VERSION_NOT_FOUND", "The published ScenarioVersion does not exist"
             )
+        if scenario_id is not None and version.scenario_id != scenario_id:
+            raise GameLifecycleError(
+                "SCENARIO_VERSION_SCENARIO_MISMATCH",
+                "The selected ScenarioVersion does not belong to the selected Scenario",
+            )
         compatibility = check_scenario_version_execution_compatibility(self.db, version.id)
         if not compatibility.compatible:
+            reason_code = compatibility.reason_code
             raise GameLifecycleError(
-                "LEGACY_SCENARIO_VERSION_READ_ONLY",
+                reason_code
+                if reason_code and reason_code != "SCENARIO_VERSION_NOT_CURRENT_PLAYABLE"
+                else "LEGACY_SCENARIO_VERSION_READ_ONLY",
                 compatibility.reason or "This ScenarioVersion is read-only for gameplay",
             )
         scenario = self.db.get(Scenario, version.scenario_id)

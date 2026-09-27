@@ -84,6 +84,9 @@ describe("Scenario Library and Detail presentation", () => {
     const list = await screen.findByTestId("scenario-library-list");
     expect(list).toHaveClass("scenario-list");
     expect(screen.getAllByTestId(/scenario-row-/)).toHaveLength(2);
+    const createScenarioButton = screen.getByRole("link", { name: "新建场景" });
+    expect(createScenarioButton).toHaveAttribute("href", "/scenarios/new");
+    expect(screen.getByRole("button").className).toBe(createScenarioButton.className);
     expect(screen.getByRole("link", { name: "新建场景" })).toHaveAttribute("href", "/scenarios/new");
     expect(screen.getByText(scenario.name)).toBeVisible();
     expect(screen.getByText("已发布版本 14")).toBeVisible();
@@ -150,6 +153,7 @@ describe("Scenario Library and Detail presentation", () => {
     await screen.findByText(scenario.name);
     expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveAttribute("href", "/scenarios/scenario-1/edit/overview");
     expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveClass("primary-button");
+    expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveClass("editor-button", "editor-button-primary");
     expect(screen.getByTestId("presentation-settings-link")).toHaveAttribute("href", "/scenarios/scenario-1/presentation");
     expect(screen.getByTestId("presentation-settings-link")).toHaveClass("primary-button");
     expect(screen.queryByText("适用于此场景的所有版本和游戏实例")).not.toBeInTheDocument();
@@ -160,8 +164,12 @@ describe("Scenario Library and Detail presentation", () => {
     expect(screen.getByRole("link", { name: "编辑当前草稿" })).toHaveClass("action-button-centered");
     expect(screen.getByTestId("presentation-settings-link")).toHaveClass("action-button-centered");
     expect(screen.getByRole("link", { name: "返回场景库" })).toHaveClass("action-button-centered");
+    expect(screen.getByRole("link", { name: "返回场景库" })).toHaveClass("editor-button", "editor-button-secondary");
     expect(screen.getByText("版本历史")).toBeVisible();
     expect(screen.getByText("版本 14")).toBeVisible();
+    const versionCard = screen.getByRole("article");
+    expect(within(versionCard).getByRole("button", { name: "恢复到当前草稿" })).toHaveClass("editor-button", "editor-button-primary");
+    expect(within(versionCard).getByRole("button", { name: "不支持当前格式导出" })).toHaveClass("editor-button", "editor-button-secondary");
 
     screen.getByRole("link", { name: "返回场景库" }).click();
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/scenarios"));

@@ -42,7 +42,7 @@ import { V2_ENUMS } from "../editor-registry";
 import { editorLocatorHref } from "../editor-locator";
 import { cloneWorkingDocument, deriveWorkingCopySaveState, workingCopyIsDirty, workingDocumentsEqual, type WorkingCopySaveState } from "../editor-working-copy";
 import { buildEntityNeighborhood, buildScopeOverview, buildScopeTopology, findScopeForNode, nodeByTopologyKey, relationByTopologyKey } from "../topology-projection";
-import type { CompletenessItem, Draft, DraftSandboxResult, ScenarioVersionDetail, SemanticDiff, ValidationResult } from "../types";
+import type { CompletenessItem, Draft, DraftSandboxResult, RestorePreview, ScenarioVersionDetail, SemanticDiff, ValidationResult } from "../types";
 import { diagnosticMessage, editorSectionTaxonomy, editorTaxonomyGroups, errorText, fieldLabel, kindLabels, sectionLabels, uiLabel } from "../ui";
 import { IdentityDisplay } from "../components/editor/FormPrimitives";
 import { useEditorFocusActivation } from "../editor-focus";
@@ -386,6 +386,7 @@ export function EditorPage() {
   const [discardRequest, setDiscardRequest] = useState<string | null>(null);
   const [renameRequest, setRenameRequest] = useState<{ subject: string; currentKey: string } | null>(null);
   const [creationRequest, setCreationRequest] = useState<CreationRequest | null>(null);
+  const [exportGuardOpen, setExportGuardOpen] = useState(false);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [sandboxGoal, setSandboxGoal] = useState("");
   const [sandbox, setSandbox] = useState<DraftSandboxResult | null>(null);
@@ -421,6 +422,7 @@ export function EditorPage() {
   const [topologyFocusNodeKey, setTopologyFocusNodeKey] = useState<string | null>(null);
   const serverDraftRef = useRef<Draft | null>(null);
   const workingDocumentRef = useRef<Record<string, unknown> | null>(null);
+  const restorePreviewConsumedRef = useRef<string | null>(null);
 
   const hydrateDraft = (draft: Draft) => {
     const document = cloneWorkingDocument(draft.definition_document);
@@ -545,7 +547,6 @@ export function EditorPage() {
   useEffect(() => {
     if (topologyModeActive && topologySelection) setInspectorOpen(true);
   }, [topologyModeActive, topologySelection]);
-
   const objects = useMemo(() => {
     if (!local) return [];
     return structure.master.source === "topology" ? nodeSemanticView(local.definition_document, worldView) : sectionObjects(local.definition_document, section);
@@ -628,8 +629,6 @@ export function EditorPage() {
   const topologyPortal = topologySelection?.kind === "portal" ? buildScopeTopology(topologyDocument, topologySelection.scopeKey).portals.find((portal) => portal.key === topologySelection.key) ?? null : null;
   const topologyNeighborhood = topologyNode ? buildEntityNeighborhood(topologyDocument, topologyNode.key) : null;
 
-  if (!local) return <main className="page"><p>正在加载草稿…</p></main>;
-
   const editDocument = (document: JsonObject) => {
     const normalized = normalizeCurrentAuthoringDocument(document);
     const next = cloneWorkingDocument(normalized.document);
@@ -641,6 +640,39 @@ export function EditorPage() {
     setFactDeleteDialog(null);
     if (normalized.stripped) setMessage("当前版本不再编辑失败代码、失败消息、重试策略或失败恢复提示；已转换为阻止行动。");
   };
+  useEffect(() => {
+    const state = location.state as { restorePreview?: unknown } | null;
+    if (!state?.restorePreview || !serverDraft || !workingDocument) return;
+    const preview = state.restorePreview as Partial<RestorePreview>;
+    const candidate = preview.candidate_working_document;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return;
+    const token = JSON.stringify([
+      preview.version && typeof preview.version === "object" ? preview.version.id : null,
+      preview.current_draft_revision,
+      candidate,
+    ]);
+    if (restorePreviewConsumedRef.current === token) return;
+    // Mark the navigation payload as consumed before changing the working copy.
+    // The router's replace is asynchronous; without this guard the dependency
+    // update caused by editDocument can run this effect again while the old
+    // restore payload is still present in location.state.
+    restorePreviewConsumedRef.current = token;
+    navigateRouter(`${location.pathname}${location.search}`, { replace: true, state: null });
+    if (serverDraft.revision !== preview.current_draft_revision) {
+      setMessage("当前草稿已在其他窗口更新，恢复候选已失效。请返回场景详情重新预览。");
+      setSaveState("CONFLICT");
+      return;
+    }
+    if (preview.unchanged || workingDocumentsEqual(serverDraft.definition_document, candidate as Record<string, unknown>)) {
+      setMessage("该历史版本与当前草稿内容一致。");
+      setSaveState("UNCHANGED");
+      return;
+    }
+    editDocument(candidate as JsonObject);
+    setMessage(`已载入版本 v${preview.version?.version_number ?? ""} 到当前工作副本，请手动保存。`);
+  }, [location.pathname, location.search, location.state, navigateRouter, serverDraft, workingDocument]);
+
+  if (!local) return <main className="page"><p>正在加载草稿…</p></main>;
   const saveWorkingCopy = () => {
     const draft = serverDraftRef.current;
     const document = workingDocumentRef.current;
@@ -650,6 +682,22 @@ export function EditorPage() {
       return;
     }
     save.mutate({ revision: draft.revision, document: cloneWorkingDocument(document) });
+  };
+  const triggerDraftDownload = () => {
+    const anchor = window.document.createElement("a");
+    anchor.href = `/api/v1/scenarios/${scenarioId}/draft/artifact`;
+    anchor.download = "";
+    anchor.rel = "noopener";
+    window.document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  };
+  const requestDraftExport = () => {
+    if (hasUnsavedChanges) {
+      setExportGuardOpen(true);
+      return;
+    }
+    triggerDraftDownload();
   };
   const discardWorkingCopy = (): boolean => {
     const draft = serverDraftRef.current;
@@ -1210,11 +1258,12 @@ export function EditorPage() {
       <nav className="editor-section-nav" aria-label="编辑器导航">{editorTaxonomyGroups.map((group) => <div className="editor-nav-group" key={group.label}><p>{group.label}</p>{group.items.map((item) => <Link className={item === section ? "active" : ""} key={item} to={`/scenarios/${scenarioId}/edit/${item}`}>{sectionLabels[item] ?? item}</Link>)}</div>)}</nav>
     </aside>
     <section className="editor-main">
-      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span>{serverDraft && <VersionStatusBadges draft={serverDraft} published={publishedVersionQuery.data ?? null} semanticDiff={semanticDiffQuery.data ?? null} saveState={saveState} />}<button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={requestDiscard}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
+      <header className="editor-toolbar"><div className="editor-toolbar-context"><div className="editor-breadcrumb" data-testid="editor-taxonomy-heading"><span>{taxonomy.category}</span><span aria-hidden="true">/</span><strong>{taxonomy.label}</strong></div></div><div className="editor-heading-actions"><span className={`save-state ${saveState.toLowerCase()}`}><i aria-hidden="true" />{saveLabels[saveState]}</span>{serverDraft && <VersionStatusBadges draft={serverDraft} published={publishedVersionQuery.data ?? null} semanticDiff={semanticDiffQuery.data ?? null} saveState={saveState} />}<button type="button" className="editor-button editor-button-secondary" onClick={requestDraftExport}>导出当前草稿</button><button type="button" className="editor-button editor-button-primary" disabled={!hasUnsavedChanges || save.isPending} onClick={saveWorkingCopy}>保存</button><button type="button" className="editor-button editor-button-secondary" disabled={!hasUnsavedChanges || save.isPending} onClick={requestDiscard}>放弃修改</button><button type="button" className="editor-button editor-button-danger editor-return-detail" onClick={() => guardedNavigate(`/scenarios/${scenarioId}`)}>返回场景详情</button>{structure.capabilities.inspector && <button type="button" className="editor-button editor-button-ghost" onClick={() => setInspectorOpen((current) => !current)}>{inspectorOpen ? "隐藏检查器" : "显示检查器"}</button>}</div></header>
       {message && <div className="conflict-banner"><p>{message}</p>{saveState === "CONFLICT" && <button type="button" className="editor-button editor-button-secondary" onClick={() => void reloadServerDraft()}>重新加载服务器草稿</button>}</div>}
       {factDeleteDialog && <FactDeleteDialog state={factDeleteDialog} onClose={() => setFactDeleteDialog(null)} onConfirm={confirmFactDelete} />}
       {authoringDialog && <AuthoringOperationDialog state={authoringDialog} onClose={() => setAuthoringDialog(null)} onConfirm={confirmAuthoringOperation} />}
       {discardRequest !== null && <EditorConfirmDialog title="放弃当前修改？" message="当前工作副本有未保存修改，放弃后将恢复到已保存草稿。" confirmLabel="放弃修改" onCancel={() => setDiscardRequest(null)} onConfirm={confirmDiscardRequest} />}
+      {exportGuardOpen && <EditorConfirmDialog title="当前有未保存修改" message="当前有未保存修改。请先保存后再导出草稿；导出只包含已保存的 Draft。" confirmLabel="关闭提示" onCancel={() => setExportGuardOpen(false)} onConfirm={() => setExportGuardOpen(false)} />}
       {renameRequest && <EditorRenameDialog subject={renameRequest.subject} initialValue={renameRequest.currentKey} onCancel={() => setRenameRequest(null)} onConfirm={(value) => void rename(value)} />}
       {creationRequest && <IdentityCreationDialog key={`${creationRequest.kind}:${creationRequest.kind === "entity" ? creationRequest.entityKind : creationRequest.collection}`} title={creationTitle} fields={creationFields} onCancel={() => setCreationRequest(null)} onCreate={createPendingIdentity} />}
       <div className={`editor-columns${structure.master.visible ? "" : " master-hidden"}${inspectorOpen ? "" : " inspector-collapsed"}`}>

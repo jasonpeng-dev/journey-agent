@@ -132,7 +132,6 @@ Backend 命令从 repository root 执行：
 uv sync --python 3.12 --extra dev
 Copy-Item .env.example .env
 uv run alembic upgrade head
-uv run python -m app.seed
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ~~~
 
@@ -220,3 +219,23 @@ implementation authority。
 
 Setup 和 run instructions 保持在本 README；architecture、planning、authoring
 和 GameInstance lifecycle 的详细语义分别由上述 current docs 负责。
+
+## Scenario portability fresh-install contract
+
+Fresh install starts with empty Scenario and Game libraries. Startup only runs database migrations; Docker never seeds or imports Scenario content. The image contains the tracked release artifact at `scenarios/examples/linjiang_infrastructure_recovery.scenario.json`.
+
+Explicit CLI import:
+
+~~~text
+docker compose exec api uv run journey scenario import /app/scenarios/examples/linjiang_infrastructure_recovery.scenario.json
+~~~
+
+The same artifact is available through the Scenario Library Web Import action. Release import creates Scenario + Draft + Published v1 and creates no Game. Create a Game explicitly from the selected Published Version.
+
+For local development, import the artifact explicitly after migrations:
+
+~~~text
+uv run journey scenario import scenarios/examples/linjiang_infrastructure_recovery.scenario.json
+~~~
+
+The legacy `uv run python -m app.seed` command remains only for legacy and test compatibility fixtures; it is not the production bootstrap path.

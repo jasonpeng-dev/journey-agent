@@ -11,7 +11,7 @@ export function NewGamePage() {
   const [scenarioId, setScenarioId] = useState(searchParams.get("scenarioId") ?? "");
   const [versionId, setVersionId] = useState(searchParams.get("versionId") ?? "");
   const versions = useQuery({ queryKey: ["versions", scenarioId], queryFn: () => api.versions(scenarioId), enabled: Boolean(scenarioId) });
-  const create = useMutation({ mutationFn: () => api.createGame(versionId, crypto.randomUUID()), onSuccess: (game) => navigate(`/games/${game.id}`) });
+  const create = useMutation({ mutationFn: () => api.createGame(versionId, crypto.randomUUID(), scenarioId), onSuccess: (game) => navigate(`/games/${game.id}`) });
   return <main className="page"><p className="eyebrow">精确版本运行时</p><h1>新游戏</h1>
     <div className="form-card">
       <label>场景<select value={scenarioId} onChange={(event) => { setScenarioId(event.target.value); setVersionId(""); }}><option value="">请选择场景……</option>{scenarios.data?.filter((item) => item.status === "PUBLISHED").map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
