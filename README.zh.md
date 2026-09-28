@@ -1,144 +1,116 @@
 # Journey Agent
 
-[English](README.md) · [中文](README.zh.md)
+[English](README.md) ｜ 中文说明
 
-Journey Agent 是一个通用、数据驱动的 Scenario runtime，包含 LLM
-Planner、确定性 Validator、明确的 Truth/Knowledge 分离，以及可审计的
-Formal PLAY 执行。运行时由发布后的 ScenarioVersion 驱动：不可变的
-Version 提供世界内容和声明式语义，可复用的源代码负责 Goal resolution、
-planning、validation、Action execution、persistence 和浏览器产品。
+Journey Agent 是一个通用、数据驱动的场景运行时，提供 Web 场景编辑器、
+自然语言目标、LLM 规划、确定性校验与执行、明确的 Truth/Knowledge
+分离，以及可审计的 Formal PLAY。
 
-它不同于普通 chatbot：Agent 在有版本约束的世界中行动，并经过确定性验证和
-执行；它也不同于 scripted game：结果来自 Scenario 的声明式 contract 和不断
-变化的公开世界状态，而不是固定的对话树。
+Scenario 内容是数据。可复用的运行时代码解释 Scenario，而不是把特定场景的
+玩法硬编码进程序。
 
-## 包含内容
+## 项目能力
 
-* Web-based Scenario authoring：作者通过 Web Editor 设计 world、actors/roles、
-  actions、rules、resources、goal semantics 和 initial state，并经过 validation
-  发布 immutable ScenarioVersions。
-* Versioned gameplay：每个 Game 精确绑定一个发布后的 ScenarioVersion，保证
-  世界内容、规则和运行历史基于确定版本。
-* Natural-language Custom Goals：玩家可以自由输入自然语言 Goal；作者可提供
-  optional preset/suggested Goals 作为 onboarding/example，意图不完整或有歧义时
-  系统会请求 clarification。
-* Agent planning and deterministic execution：Agent 根据当前公开世界状态自主规划
-  HOW，系统确定性验证 proposal，通过后由 Runtime 执行 Action。
-* Truth/Knowledge separation and replanning：Truth 与 Player/Agent 可见 Knowledge
-  分离；执行可能揭示新 Knowledge，并在需要时驱动 REPLAN。
-* Auditable game lifecycle：支持 Formal PLAY、执行历史、Archive、Checkpoint、
-  Fork 和可审计 runtime 记录。
+- 在 Web 场景编辑器中编写并校验 Scenario 内容。
+- 发布不可变的 ScenarioVersion，并让 Game 精确绑定某个 Version。
+- 让玩家用自然语言描述想要达成的目标。
+- 解析 Goal、规划实现方式、逐步校验并执行。
+- 将真实世界状态与玩家当前知道的内容分开记录。
+- 当新 Knowledge 改变可用信息时重新规划。
 
-## 如何游玩
+主要产品入口包括场景库、编辑器和 Games。
 
-1. 在 Web Editor 中设计 Scenario：World、Actors、Actions、Rules、Resources、
-   goal semantics 和初始状态。
-2. 验证 Draft，并发布不可变的 ScenarioVersion。
-3. 从某一个精确的已发布 Version 创建 Game。
-4. 选择作者提供的 suggested Goal，或输入自然语言 Custom Goal。运行时会解析
-   你想达成的结果；如果意图不完整或有歧义，会先请求 clarification。
-5. Agent 根据当前已知世界规划，玩家逐步查看并确认 Action。
-6. Runtime 执行 Action，改变世界并可能揭示新的 Knowledge；当可用信息改变时，
-   Agent 可以重新规划。
-7. 当 Goal 的确定性世界条件满足后，目标完成。
-
-Scenario 作者可以提供 optional preset/suggested Goal，作为帮助玩家开始的
-onboarding/example surface，但它们不是固定任务集合；玩家仍然可以直接输入自然语言
-Custom Goal。详见 [Custom Goals and Task Compilation](docs/custom-goals.md)，了解产品
-contract 和 WHAT/HOW 边界。
-
-## 架构概览
+## 工作方式
 
 ~~~text
-ScenarioVersion
-  -> GameInstance
-       -> Natural-language Goal
-            -> Goal Resolution
-                 -> Frozen Goal Contract
-                      -> Planning
-                           -> Validation
-                                -> Execution
-                                     -> Truth / Knowledge update
-                                          -> Replan or Completion
+Scenario
+  -> Draft / Publish
+  -> immutable ScenarioVersion
+  -> Game
+  -> 自然语言 Goal
+  -> Agent Planning
+  -> 确定性校验
+  -> Runtime
+  -> Truth / Knowledge
+  -> Replan or Complete
 ~~~
 
-Formal PLAY 协调每个 planning cycle，只把通过验证的 Action 呈现给玩家。
-被拒绝的 proposal 只保留在内部，不会改变世界，也不会成为 Player 可见的 plan。
+作者编辑 Scenario 数据并发布不可变 Version。每个 Game 都精确绑定一个已发布
+Version。玩家表达要完成的 WHAT，Planner 选择 HOW，校验器和运行时共同保证
+执行遵守 Scenario contract。
 
-详见 [docs/custom-goals.md](docs/custom-goals.md)，了解玩家 Goal 如何变成任务以及
-WHAT/HOW 的职责边界；详见 [docs/architecture.md](docs/architecture.md) 了解 high-level runtime
-boundaries，[docs/agent-planning-v2.md](docs/agent-planning-v2.md) 了解详细
-planning contract，[docs/scenario-authoring.md](docs/scenario-authoring.md)
-了解 Scenario publishing，以及 [docs/game-lifecycle.md](docs/game-lifecycle.md)
-了解详细的 GameInstance lifecycle。
+Scenario 可以导入和导出为可移植的 .scenario.json artifact。导入会创建新的
+Scenario identity，不会覆盖已有 Scenario。
 
-## Provider 配置
+## 快速启动
 
-Mock mode 是安全默认值，不会发起网络模型请求。
-默认本地开发和 Docker 启动都不需要 API key。
-
-~~~text
-MODEL_PROVIDER=mock
-~~~
-
-如需使用真实 OpenAI-compatible Provider，请只在本地 `.env` 中配置。
-Journey Agent 支持 OpenAI-compatible endpoint，包括 OpenAI 以及 DeepSeek
-等兼容服务。
-
-完整配置项和示例请参见 [`.env.example`](.env.example)。
-
-Goal 理解和 planning 使用分离的 Provider 配置 profile；运行时不会把 provider
-payload 或内部诊断暴露给玩家。详细的 semantic/planning 边界和 retry 行为请见
-[docs/architecture.md](docs/architecture.md) 与
-[docs/agent-planning-v2.md](docs/agent-planning-v2.md)。
-
-不要提交 API key。
-
-## Docker 快速启动
-
-从干净 checkout 开始：
+从干净的 checkout 开始：
 
 ~~~text
 git clone https://github.com/jasonpeng-dev/journey-agent.git
 cd journey-agent
-Copy-Item .env.example .env
 docker compose up --build -d
 ~~~
 
-macOS/Linux 使用 cp .env.example .env。打开
-[http://localhost:8000](http://localhost:8000)
-Mock mode 不需要 API key。
+默认 Mock mode 不需要 .env。打开：
 
-常用 lifecycle 命令：
+http://localhost:8000
+
+全新的 Docker 安装会自动运行 migrations。Scenario 和 Game 库初始为空；
+启动过程不会自动 seed 或 import Scenario 内容。
+
+常用命令：
 
 ~~~text
 docker compose logs -f
-docker compose stop
-docker compose start
 docker compose down
-docker compose down -v
 ~~~
 
-命名的 Compose volume 会在普通 stop/start 和 down/up 之间保留本地
-Journey Agent 数据；down -v 只删除本 Compose project 的数据。
+## 使用 OpenAI
+
+默认 profile 是 Mock，不需要 .env，不需要 API key，也不会发起模型网络请求。
+
+启用 OpenAI：
+
+1. 在仓库根目录创建未跟踪的 .env。
+2. 只从 [.env.example](.env.example) 复制 OPENAI 区块。
+3. 在 .env 中填写 MODEL_API_KEY。
+4. 按平常方式启动 backend 或 Docker Compose。
+
+公开示例使用 GPT-5.6 Luna 处理 Goal 语义工作，使用 GPT-5.6 Terra 进行规划。
+用户可以在 .env 中修改配置的模型名称。
+
+## 官方示例
+
+仓库中跟踪的官方 artifact：
+
+~~~text
+scenarios/examples/linjiang_infrastructure_recovery.scenario.json
+~~~
+
+使用 CLI 显式导入：
+
+~~~text
+docker compose exec api uv run journey scenario import /app/scenarios/examples/linjiang_infrastructure_recovery.scenario.json
+~~~
+
+同一个 artifact 也可以从 Web 场景库导入。
 
 ## 本地开发
 
-支持的工具链是 Python 3.12、Node 22 和 uv。
+支持的工具链：Python 3.12、Node 22 和 uv。
 
-Backend 命令从 repository root 执行：
+在仓库根目录启动 backend：
 
 ~~~text
 uv sync --python 3.12 --extra dev
-Copy-Item .env.example .env
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ~~~
 
-本地开发使用 ./journey_dev.db 中的 SQLite。请在 .env 中让 backend、
-Editor 和 Player UI 使用同一个数据库目标，不要把本地命令指向历史数据库。
+没有 .env 时，内置默认值使用 Mock 和 ./journey_dev.db。
 
-Frontend 在第二个 terminal 中运行：
+在第二个终端启动 frontend：
 
 ~~~text
 cd frontend
@@ -146,36 +118,19 @@ npm ci
 npm run dev -- --host 127.0.0.1 --port 4173
 ~~~
 
-打开 [http://127.0.0.1:4173](http://127.0.0.1:4173)
-Vite 会把 API request proxy 到 backend。
-
-浏览器 lifecycle surface 保持精简：active game 可以从 detail 或 list card
-Archive，archived game 可以从任一位置 Fork。Fork request 使用一个
-creation key 提供 retry-safe idempotency，成功后导航到新的 target。
-
-## 主要 HTTP surfaces
-
-| Area | Routes |
-| --- | --- |
-| Health | /health, /ready |
-| Scenario Library | /scenarios and /api/v1/scenarios |
-| Editor | /scenarios/:id/edit/:section |
-| Games | /games and /api/v1/games |
-| Developer | /api/v1/developer/games/:id/snapshot and history |
+打开 http://127.0.0.1:4173。Vite 会把 API 请求代理到 backend。
 
 ## 验证
 
 Backend：
 
 ~~~text
-uv run pytest --cov=app --cov-report=term-missing
+uv run pytest
 uv run ruff check .
-uv run ruff format --check app tests frontend/e2e/prepare_history_fixture.py
 uv run mypy app
-uv run alembic upgrade head
 ~~~
 
-Frontend，从 frontend 目录运行：
+在 frontend 目录运行：
 
 ~~~text
 npm run lint
@@ -185,57 +140,18 @@ npm run build
 npm run e2e
 ~~~
 
-Real Provider calls 不属于 CI。Provider tests 使用 deterministic fakes 或
-mocked HTTP responses；real-model runs 只作为有边界的手动 evaluation。
-Browser E2E 包含三个 deterministic smoke：Basic Product、PLAY Presentation
-和 Checkpoint/Fork；这些测试使用 mock Provider，不调用真实 Provider。
-
-## 仓库结构
-
-| Path | Responsibility |
-| --- | --- |
-| app/domain | ScenarioDefinitionV2、world/runtime values 和 domain contracts |
-| app/agent | Goal resolution、planning、provider、validation 和 Agent loop |
-| app/services | Scenario/Game lifecycle、Formal PLAY、actions、projections |
-| app/scenarios | V2 parsing、validation、persistence、built-in definitions |
-| app/api | FastAPI adapters 和 Player/Developer DTOs |
-| frontend/src | React/Vite browser product 和 Editor |
-| tests | Unit、contract、integration、lifecycle、provider 和 E2E support |
-| migrations | Alembic schema history |
-| docs | 当前 custom-goals、architecture、planning、authoring、lifecycle 和 archive |
+CI 和 provider 测试使用确定性的 mock 或 mocked HTTP response，不需要真实的
+OpenAI 调用。
 
 ## 文档
 
-当前权威文档：
+- [架构](docs/architecture.md) —— 系统边界和整体拓扑。
+- [Scenario authoring](docs/scenario-authoring.md) —— 编辑器、Draft、Version、
+  portability、校验和删除规则。
+- [Custom Goals](docs/custom-goals.md) —— Goal 语义、WHAT/HOW 和必需 Goal slot。
+- [Agent planning](docs/agent-planning-v2.md) —— 规划、校验、REPAIR、REPLAN
+  和 provider policy。
+- [Game lifecycle](docs/game-lifecycle.md) —— Version 绑定、Archive、Checkpoint、
+  Fork 和历史。
 
-* [docs/custom-goals.md](docs/custom-goals.md)：自然语言 Goal 如何变成可执行任务、何时需要澄清，以及玩家 WHAT 与 Planner HOW 如何分工。
-* [docs/architecture.md](docs/architecture.md)：ScenarioVersion、GameInstance、Goal、Planning、Validation、Runtime、Truth/Knowledge 和 Formal PLAY 如何组合。
-* [docs/agent-planning-v2.md](docs/agent-planning-v2.md)：Agent 如何获得受限的公开上下文、组合支援 Action、验证规划，并在新 Knowledge 出现后重新规划。
-* [docs/scenario-authoring.md](docs/scenario-authoring.md)：作者可以在 Web Editor 中声明什么，以及 Draft → Validate → Publish 如何工作。
-* [docs/game-lifecycle.md](docs/game-lifecycle.md)：Game 如何绑定一个精确 Version，以及 Archive、Checkpoint、Fork 和 history 如何工作。
-
-[docs/archive](docs/archive/) 仅保存 historical material，不是 current
-implementation authority。
-
-Setup 和 run instructions 保持在本 README；architecture、planning、authoring
-和 GameInstance lifecycle 的详细语义分别由上述 current docs 负责。
-
-## Scenario portability fresh-install contract
-
-Fresh install starts with empty Scenario and Game libraries. Startup only runs database migrations; Docker never seeds or imports Scenario content. The image contains the tracked release artifact at `scenarios/examples/linjiang_infrastructure_recovery.scenario.json`.
-
-Explicit CLI import:
-
-~~~text
-docker compose exec api uv run journey scenario import /app/scenarios/examples/linjiang_infrastructure_recovery.scenario.json
-~~~
-
-The same artifact is available through the Scenario Library Web Import action. Release import creates Scenario + Draft + Published v1 and creates no Game. Create a Game explicitly from the selected Published Version.
-
-For local development, import the artifact explicitly after migrations:
-
-~~~text
-uv run journey scenario import scenarios/examples/linjiang_infrastructure_recovery.scenario.json
-~~~
-
-The legacy `uv run python -m app.seed` command remains only for legacy and test compatibility fixtures; it is not the production bootstrap path.
+docs/archive/ 仅包含历史材料，不是当前实现的权威来源。

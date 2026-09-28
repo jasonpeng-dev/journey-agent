@@ -2,7 +2,7 @@
 
 from sqlalchemy.orm import Session
 
-from app.agent.provider import build_generic_provider
+from app.agent.provider import build_provider
 from app.core.config import Settings
 from app.domain.runtime_scope import GameInstanceId
 from app.services.play import PlayOrchestrator
@@ -13,7 +13,7 @@ def configured_play_orchestrator(
     game_instance_id: GameInstanceId,
     settings: Settings,
 ) -> PlayOrchestrator:
-    provider = build_generic_provider(settings)
+    provider = build_provider(settings)
     return PlayOrchestrator(
         db,
         game_instance_id,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from pathlib import Path
 from threading import Event
 from time import sleep
 from typing import Literal
@@ -25,10 +26,11 @@ from app.agent.provider import (
     DynamicGoalOperationGroundingRequest,
     DynamicGoalScalarMentionSlot,
     GenericProviderError,
-    OpenAICompatibleGenericProvider,
+    OpenAIProvider,
     PlannerInput,
     PlanRequest,
     _normalize_dynamic_goal_operation_grounding,
+    build_provider,
     dynamic_goal_recovery_feedback,
     goal_provider_request_snapshot,
     goal_provider_response_snapshot,
@@ -43,7 +45,7 @@ def _settings(*, plan_timeout: float = 1.0, observability: str = "NORMAL") -> Se
         _env_file=None,
         app_env="test",
         database_url="sqlite+pysqlite:///:memory:",
-        model_provider="openai_compatible",
+        model_provider="openai",
         model_name="fake-model",
         model_api_key=SecretStr("not-a-real-key"),
         plan_timeout_seconds=plan_timeout,
@@ -67,7 +69,7 @@ def test_family_routing_request_excludes_action_and_state_catalogs() -> None:
             },
         )
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(observability="DEBUG"), transport=httpx.MockTransport(complete)
     )
     result = provider.decide_dynamic_goal_family(
@@ -125,7 +127,7 @@ def test_action_routing_request_is_operation_only_and_excludes_state_candidates(
             },
         )
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(observability="DEBUG"), transport=httpx.MockTransport(complete)
     )
     result = provider.route_dynamic_goal_action(
@@ -246,7 +248,7 @@ def test_action_routing_rejects_missing_or_malformed_typed_no_match_reason(
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(complete))
 
     with pytest.raises(GenericProviderError) as captured:
         provider.route_dynamic_goal_action(
@@ -293,7 +295,7 @@ def test_action_routing_accepts_valid_typed_no_match_and_ambiguous_boundary() ->
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(complete))
     request = DynamicGoalActionRoutingRequest(
         goal="repair the facility",
         action_catalog=(
@@ -310,7 +312,7 @@ def test_action_routing_accepts_valid_typed_no_match_and_ambiguous_boundary() ->
 
 
 def test_operation_prompt_commits_unique_topology_target_without_guessing() -> None:
-    provider = OpenAICompatibleGenericProvider(_settings())
+    provider = OpenAIProvider(_settings())
 
     body, _ = provider._build_request_body("dynamic_goal_operation", {})
     prompt = body["messages"][0]["content"]
@@ -405,7 +407,7 @@ def _operation_transport(payload: dict[str, object]) -> httpx.MockTransport:
 def test_operation_reference_key_with_redundant_name_is_safely_normalized() -> None:
     payload = _operation_payload()
     payload["intent"]["target"]["value"] = "Region A"  # type: ignore[index]
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(),
         transport=_operation_transport(payload),
     )
@@ -420,7 +422,7 @@ def test_operation_reference_key_with_redundant_name_is_safely_normalized() -> N
 def test_operation_reference_key_with_conflicting_identity_is_rejected() -> None:
     payload = _operation_payload()
     payload["intent"]["target"]["value"] = "Region B"  # type: ignore[index]
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(),
         transport=_operation_transport(payload),
     )
@@ -437,7 +439,7 @@ def test_operation_slot_contract_metadata_is_safely_removed() -> None:
     target.update(  # type: ignore[union-attr]
         {"name": "Target", "node_type_keys": ["region"], "description": "metadata"}
     )
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(),
         transport=_operation_transport(payload),
     )
@@ -500,7 +502,7 @@ def test_operation_typed_recovery_rejects_changed_frozen_action() -> None:
             "fix_only": ["intent.actor"],
         },
     )
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(),
         transport=_operation_transport(payload),
     )
@@ -516,7 +518,7 @@ def test_operation_typed_recovery_rejects_changed_frozen_action() -> None:
 def test_operation_invalid_top_level_status_gets_typed_recovery_feedback() -> None:
     payload = _operation_payload()
     payload["status"] = "UNRESOLVED"
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(),
         transport=_operation_transport(payload),
     )
@@ -591,9 +593,7 @@ class _DelayedBody(httpx.SyncByteStream):
 
 
 def test_fast_response_records_headers_first_byte_and_bytes() -> None:
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(_plan_response)
-    )
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(_plan_response))
 
     result = provider.propose_plan(_plan_request())
 
@@ -642,7 +642,7 @@ def test_dynamic_goal_payloads_use_separate_public_grounding_and_interpretation_
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(complete))
     grounding = provider.ground_dynamic_goal_entities(
         DynamicGoalEntityGroundingRequest(
             goal="repair the public road",
@@ -847,7 +847,7 @@ def test_dynamic_goal_recovery_feedback_contains_the_legal_derived_shape() -> No
         recovery_attempt=1,
         recovery_feedback=feedback,
     )
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(), transport=httpx.MockTransport(lambda request: _plan_response(request))
     )
     body, _ = provider._build_request_body("dynamic_goal", request.model_dump(mode="json"))
@@ -887,7 +887,7 @@ def test_dynamic_goal_prompt_explains_action_defined_derived_bindings() -> None:
         goal="move 30 cargo from source to destination",
         ontology=ontology,
     )
-    provider = OpenAICompatibleGenericProvider(_settings())
+    provider = OpenAIProvider(_settings())
 
     body, _size = provider._build_request_body("dynamic_goal", request.model_dump(mode="json"))
     payload = json.loads(body["messages"][1]["content"])
@@ -959,7 +959,7 @@ def test_dynamic_grounding_prompt_exposes_typed_roles_and_advisory_refs() -> Non
         },
         deterministic_candidate_refs=deterministic_refs,
     )
-    provider = OpenAICompatibleGenericProvider(_settings())
+    provider = OpenAIProvider(_settings())
 
     body, _size = provider._build_request_body(
         "dynamic_goal_grounding",
@@ -1002,7 +1002,7 @@ def test_dynamic_goal_prompt_exposes_explicit_slot_provenance() -> None:
         public_catalog={"references": []},
         intent=intent,
     )
-    provider = OpenAICompatibleGenericProvider(_settings())
+    provider = OpenAIProvider(_settings())
 
     body, _size = provider._build_request_body(
         "dynamic_goal_grounding",
@@ -1085,7 +1085,7 @@ def test_dynamic_goal_grounding_reference_and_scalar_slot_modes_are_closed() -> 
 
 
 def test_dynamic_goal_grounding_request_uses_json_object_with_explicit_scalar_contract() -> None:
-    provider = OpenAICompatibleGenericProvider(_settings())
+    provider = OpenAIProvider(_settings())
     body, _size = provider._build_request_body("dynamic_goal_grounding", {})
     prompt = body["messages"][0]["content"]
 
@@ -1146,7 +1146,7 @@ def test_dynamic_grounding_wire_normalization_strips_only_provider_owned_fields(
             },
         )
 
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(complete))
     result = provider.ground_dynamic_goal_entities(
         DynamicGoalEntityGroundingRequest(
             goal="move 30 to central hospital",
@@ -1180,7 +1180,7 @@ def test_dynamic_grounding_wire_unknown_extra_still_fails_closed() -> None:
             },
         )
 
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(complete))
     with pytest.raises(GenericProviderError) as caught:
         provider.ground_dynamic_goal_entities(
             DynamicGoalEntityGroundingRequest(
@@ -1196,7 +1196,7 @@ def test_dynamic_grounding_wire_unknown_extra_still_fails_closed() -> None:
 
 
 def test_dynamic_grounding_prompt_does_not_publish_provenance_wire_fields() -> None:
-    provider = OpenAICompatibleGenericProvider(_settings())
+    provider = OpenAIProvider(_settings())
     body, _size = provider._build_request_body("dynamic_goal_grounding", {})
     prompt = body["messages"][0]["content"]
     assert '"candidate_refs":[{"ref_type"' in prompt
@@ -1281,7 +1281,7 @@ def test_dynamic_goal_prompt_locks_stage_one_explicit_operation() -> None:
             parameter_constraints={"resource_key": "cargo", "amount": 30},
         ),
     )
-    provider = OpenAICompatibleGenericProvider(_settings())
+    provider = OpenAIProvider(_settings())
 
     body, _size = provider._build_request_body("dynamic_goal", request.model_dump(mode="json"))
     payload = json.loads(body["messages"][1]["content"])
@@ -1334,7 +1334,7 @@ def test_dynamic_goal_calls_keep_independent_metadata_history() -> None:
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(complete))
     provider.ground_dynamic_goal_entities(
         DynamicGoalEntityGroundingRequest(
             goal="repair the public road",
@@ -1401,7 +1401,7 @@ def test_debug_goal_calls_keep_safe_input_and_output_snapshots() -> None:
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(observability="DEBUG"),
         transport=httpx.MockTransport(complete),
     )
@@ -1481,13 +1481,11 @@ def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoni
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings().model_copy(
             update={
-                "model_name": "planning-model",
-                "semantic_model": "semantic-model",
-                "model_thinking_mode": "enabled",
-                "model_reasoning_effort": "high",
+                "model_name": "gpt-5.6-terra",
+                "semantic_model": "gpt-5.6-luna",
                 "model_max_output_tokens": 8192,
             }
         ),
@@ -1518,29 +1516,26 @@ def test_dynamic_goal_calls_use_fast_semantic_profile_and_planning_keeps_reasoni
         )
     )
 
-    assert [body["thinking"] for body in captured] == [
-        {"type": "disabled"},
-        {"type": "disabled"},
-        {"type": "enabled"},
-    ]
+    assert all("thinking" not in body for body in captured)
     assert [body["model"] for body in captured] == [
-        "semantic-model",
-        "semantic-model",
-        "planning-model",
+        "gpt-5.6-luna",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
     ]
-    assert [body["reasoning_effort"] for body in captured] == ["low", "low", "high"]
-    assert [body.get("max_tokens") for body in captured] == [2048, 2048, 8192]
+    assert [body["reasoning_effort"] for body in captured] == ["none", "none", "medium"]
+    assert [body.get("max_completion_tokens") for body in captured] == [2048, 2048, 8192]
     history = provider.call_metadata_history
     assert [item.profile for item in history] == [
         "FAST_SEMANTIC",
         "FAST_SEMANTIC",
-        "PLANNING_REASONING",
+        "PLANNING",
     ]
-    assert [item.thinking_mode for item in history] == ["disabled", "disabled", "enabled"]
+    assert [item.thinking_mode for item in history] == ["disabled", "disabled", "disabled"]
+    assert [item.reasoning_effort for item in history] == ["none", "none", "medium"]
     assert [item.model for item in history] == [
-        "semantic-model",
-        "semantic-model",
-        "planning-model",
+        "gpt-5.6-luna",
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
     ]
     assert [item.configured_output_token_limit for item in history] == [2048, 2048, 8192]
 
@@ -1566,11 +1561,9 @@ def test_dynamic_interpretation_schema_failure_records_safe_type_diagnostics() -
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings().model_copy(
             update={
-                "model_thinking_mode": "enabled",
-                "model_reasoning_effort": "high",
                 "goal_resolution_observability": "DEBUG",
             }
         ),
@@ -1617,7 +1610,7 @@ def test_retryable_transport_failure_retries_once_and_records_each_network_call(
             raise httpx.RemoteProtocolError("peer closed the connection", request=request)
         return _plan_response(request)
 
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(flaky))
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(flaky))
 
     result = provider.propose_plan(_plan_request())
 
@@ -1645,7 +1638,7 @@ def test_retryable_transport_failure_is_bounded_to_one_retry() -> None:
         calls += 1
         raise httpx.ReadError("connection reset", request=request)
 
-    provider = OpenAICompatibleGenericProvider(_settings(), transport=httpx.MockTransport(broken))
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(broken))
 
     with pytest.raises(GenericProviderError) as error:
         provider.propose_plan(_plan_request())
@@ -1668,9 +1661,7 @@ def test_completed_response_or_invalid_response_is_never_retried() -> None:
         status_calls += 1
         return httpx.Response(503, request=request)
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(status_error)
-    )
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(status_error))
     with pytest.raises(GenericProviderError) as status_failure:
         provider.propose_plan(_plan_request())
     assert status_failure.value.code == "MODEL_PROVIDER_HTTP_ERROR"
@@ -1687,9 +1678,7 @@ def test_completed_response_or_invalid_response_is_never_retried() -> None:
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(malformed)
-    )
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(malformed))
     with pytest.raises(GenericProviderError) as malformed_failure:
         provider.propose_plan(_plan_request())
     assert malformed_failure.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
@@ -1711,7 +1700,7 @@ def test_transport_retry_obeys_one_logical_plan_timeout() -> None:
         sleep(0.15)
         return _plan_response(request)
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(plan_timeout=0.02),
         transport=httpx.MockTransport(slow_second_attempt),
     )
@@ -1741,7 +1730,7 @@ def test_goal_resolution_calls_share_one_operation_deadline() -> None:
             sleep(0.15)
         return _plan_response(request)
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(plan_timeout=300),
         transport=httpx.MockTransport(slow_second_call),
     )
@@ -1770,12 +1759,10 @@ def test_plan_provider_uses_finite_invocation_and_unlimited_http_settings(
         captured.update(json.loads(request.content))
         return _plan_response(request)
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings().model_copy(
             update={
-                "model_name": "deepseek-v4-flash",
-                "model_thinking_mode": "enabled",
-                "model_reasoning_effort": "low",
+                "model_name": "planning-model",
                 "plan_timeout_seconds": 300,
                 "plan_total_timeout_seconds": None,
                 "model_max_output_tokens": None,
@@ -1791,15 +1778,14 @@ def test_plan_provider_uses_finite_invocation_and_unlimited_http_settings(
         )
     )
 
-    assert captured["model"] == "deepseek-v4-flash"
-    assert captured["thinking"] == {"type": "enabled"}
-    assert captured["reasoning_effort"] == "low"
-    assert "max_tokens" not in captured
+    assert captured["model"] == "planning-model"
+    assert "thinking" not in captured
+    assert captured["reasoning_effort"] == "medium"
     assert "max_completion_tokens" not in captured
     metadata = provider.last_call_metadata
     assert metadata is not None
-    assert metadata.thinking_mode == "enabled"
-    assert metadata.reasoning_effort == "low"
+    assert metadata.thinking_mode == "disabled"
+    assert metadata.reasoning_effort == "medium"
     assert metadata.configured_output_token_limit is None
     assert metadata.http_timeout_seconds is None
     assert metadata.plan_timeout_seconds == 300
@@ -1810,8 +1796,6 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for key in (
-        "MODEL_THINKING_MODE",
-        "MODEL_REASONING_EFFORT",
         "PLAN_TIMEOUT_SECONDS",
         "PLAN_TOTAL_TIMEOUT_SECONDS",
         "MODEL_MAX_OUTPUT_TOKENS",
@@ -1822,14 +1806,102 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
 
     settings = Settings(_env_file=None)
 
-    assert settings.model_thinking_mode == "disabled"
-    assert settings.model_reasoning_effort == "low"
+    assert "model_thinking_mode" not in Settings.model_fields
+    assert "model_reasoning_effort" not in Settings.model_fields
+    assert settings.model_provider == "mock"
+    assert settings.database_url == "sqlite+pysqlite:///./journey_dev.db"
     assert settings.semantic_model is None
     assert settings.goal_resolution_observability == "NORMAL"
     assert settings.plan_timeout_seconds == 300
     assert settings.plan_total_timeout_seconds is None
     assert settings.goal_resolution_timeout_seconds == 20
     assert settings.model_max_output_tokens == 8192
+
+
+def test_provider_contract_is_mock_or_openai_and_factory_has_no_mock_network() -> None:
+    mock_settings = Settings(_env_file=None, model_provider="mock")
+    assert build_provider(mock_settings) is None
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, model_provider="openai_compatible")  # type: ignore[arg-type]
+
+    with pytest.raises(GenericProviderError) as missing_key:
+        build_provider(
+            Settings(
+                _env_file=None,
+                model_provider="openai",
+                model_api_key=None,
+            )
+        )
+    assert missing_key.value.code == "MODEL_PROVIDER_CONFIGURATION_INVALID"
+
+    provider = build_provider(
+        Settings(
+            _env_file=None,
+            model_provider="openai",
+            model_api_key=SecretStr("not-a-real-key"),
+        )
+    )
+    assert isinstance(provider, OpenAIProvider)
+
+
+def test_compose_forwards_current_provider_runtime_contract() -> None:
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+    for name in (
+        "MODEL_PROVIDER",
+        "MODEL_BASE_URL",
+        "MODEL_NAME",
+        "MODEL_API_KEY",
+        "SEMANTIC_MODEL",
+        "MODEL_MAX_OUTPUT_TOKENS",
+        "MODEL_MAX_REPAIR_ATTEMPTS_PER_CYCLE",
+        "GOAL_RESOLUTION_TIMEOUT_SECONDS",
+        "PLAN_TIMEOUT_SECONDS",
+        "PLAN_TOTAL_TIMEOUT_SECONDS",
+        "GOAL_RESOLUTION_OBSERVABILITY",
+        "DEVELOPER_API_TOKEN",
+    ):
+        assert f"{name}: ${{{name}:-" in compose
+    for removed in (
+        "MODEL_THINKING_MODE",
+        "MODEL_REASONING_EFFORT",
+        "AGENT_MAX_ROUNDS",
+        "AGENT_MAX_TOOL_CALLS",
+        "PLANNER_MAX_STEPS",
+        "PLANNER_MAX_WAIT_STEPS",
+        "PLANNER_MAX_REPLANS",
+        "PLANNER_MAX_GENERATION_ATTEMPTS",
+    ):
+        assert f"{removed}:" not in compose
+
+
+@pytest.mark.parametrize(
+    "purpose",
+    [
+        "dynamic_goal_grounding",
+        "dynamic_goal",
+        "dynamic_goal_operation",
+        "dynamic_goal_family_routing",
+        "dynamic_goal_action_routing",
+        "initial_plan",
+        "repair",
+        "replan",
+    ],
+)
+def test_openai_request_shape_uses_supported_fixed_profile_fields_for_all_purposes(
+    purpose: str,
+) -> None:
+    provider = OpenAIProvider(_settings())
+    body, request_size = provider._build_request_body(purpose, {"request": "test"})
+
+    assert request_size > 0
+    assert body["model"] == "fake-model"
+    assert body["response_format"] == {"type": "json_object"}
+    assert "thinking" not in body
+    expected_reasoning_effort = "none" if purpose.startswith("dynamic_goal") else "medium"
+    assert body["reasoning_effort"] == expected_reasoning_effort
+    expected_limit = 2048 if purpose.startswith("dynamic_goal") else 8192
+    assert body["max_completion_tokens"] == expected_limit
 
 
 def test_provider_settings_parse_independent_semantic_model(
@@ -1893,7 +1965,7 @@ def test_provider_deadline_settings_reject_non_positive_values(
 
 
 def test_headers_received_but_slow_body_is_distinguished_from_no_response() -> None:
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(plan_timeout=0.02),
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -1922,7 +1994,7 @@ def test_plan_timeout_without_response_keeps_response_phase_fields_null() -> Non
         sleep(0.15)
         return _plan_response(request)
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(plan_timeout=0.02), transport=httpx.MockTransport(no_response)
     )
 
@@ -1940,7 +2012,7 @@ def test_plan_timeout_without_response_keeps_response_phase_fields_null() -> Non
 
 def test_partial_body_before_plan_timeout_preserves_received_bytes() -> None:
     first_chunk_sent = Event()
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         _settings(plan_timeout=0.02),
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -1964,9 +2036,7 @@ def test_partial_body_before_plan_timeout_preserves_received_bytes() -> None:
 
 
 def test_phase_telemetry_does_not_change_plan_parsing() -> None:
-    provider = OpenAICompatibleGenericProvider(
-        _settings(), transport=httpx.MockTransport(_plan_response)
-    )
+    provider = OpenAIProvider(_settings(), transport=httpx.MockTransport(_plan_response))
 
     proposal = provider.propose_plan(
         PlanRequest(

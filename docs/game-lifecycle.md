@@ -9,6 +9,22 @@ are defined in [Custom Goals and Task Compilation](custom-goals.md); this
 document owns the GameInstance and Formal PLAY lifecycle after a Goal is
 accepted.
 
+The game entry point is an exact immutable Version binding:
+
+```text
+new or existing Scenario
+  -> choose one published ScenarioVersion
+  -> create GameInstance with that scenario_version_id
+```
+
+A Draft, a browser Working Copy, or an unqualified Scenario identity cannot
+create a GameInstance. The selected Version remains fixed for the lifetime of
+the instance. A portable artifact is imported through the Scenario authoring
+flow first; a Release artifact creates a new Scenario with an editable Draft
+and Published Version 1, and a Game is created only after the author or player
+explicitly selects that published Version. Import never migrates existing
+Games, runtime state, or Scenario history.
+
 ## 1. Identity and exact ScenarioVersion binding
 
 A GameInstance is an independent runtime identity owned by a Player. It binds
@@ -232,6 +248,7 @@ attempts to acquire its root.
 
 The Player API exposes:
 
+* POST /api/v1/games (create from an exact scenario_version_id)
 * POST /api/v1/games/{game_instance_id}/archive
 * POST /api/v1/games/{game_instance_id}/checkpoint
 * POST /api/v1/games/{game_instance_id}/fork

@@ -23,7 +23,7 @@ from app.agent.provider import (
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     GenericProviderError,
-    OpenAICompatibleGenericProvider,
+    OpenAIProvider,
     ProviderCallMetadata,
 )
 from app.core.config import Settings
@@ -241,9 +241,7 @@ def test_unresolved_goal_attempt_survives_api_rollback(
 ) -> None:
     response = DynamicGoalInterpretation(status=status, clarification_prompt=prompt)  # type: ignore[arg-type]
     provider = _ResolutionProvider(response)
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     game_id, version_id = _new_game(client, session)
 
     goal = "invent warp travel" if status == "UNSUPPORTED" else "make the patient better"
@@ -304,9 +302,7 @@ def test_resolved_dynamic_attempt_records_safe_provider_diagnostics(
         accepted_values=(True,),
     )
     provider = _ResolutionProvider(DynamicGoalInterpretation(requirements=(candidate,)))
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     game_id, version_id = _new_game(client, session)
 
     submitted = client.post(
@@ -354,9 +350,7 @@ def test_resolution_attempt_persists_each_provider_call_in_order(
             clarification_prompt="Please clarify the desired state",
         )
     )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     game_id, _version_id = _new_game(client, session)
 
     submitted = client.post(
@@ -427,9 +421,7 @@ def test_state_vnext_observation_keeps_outer_routing_call(
             clarification_prompt="Please clarify the desired state",
         )
     )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     game_id, _version_id = _new_game(client, session)
 
     submitted = client.post(
@@ -466,9 +458,7 @@ def test_debug_resolution_attempt_persists_bounded_call_snapshots(
             DynamicGoalCandidateReference(ref_type="RESOURCE", key="general_engineering_parts"),
         ),
     )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     game_id, _version_id = _new_game(client, session, LINJIANG_V2_TEST)
 
     submitted = client.post(
@@ -506,9 +496,7 @@ def test_rejected_dynamic_value_type_persists_safe_type_diagnostics(
         accepted_values=("yes",),
     )
     provider = _ResolutionProvider(DynamicGoalInterpretation(requirements=(candidate,)))
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     game_id, _version_id = _new_game(client, session)
 
     submitted = client.post(
@@ -534,9 +522,7 @@ def test_provider_error_attempt_persists_goal_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _ErrorResolutionProvider(DynamicGoalInterpretation(status="UNSUPPORTED"))
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     game_id, _version_id = _new_game(client, session)
     goal = "make the patient recover"
 
@@ -574,8 +560,8 @@ def test_goal_operation_timeout_terminalizes_attempt_without_draft_or_task(
         _env_file=None,
         app_env="test",
         database_url="sqlite+pysqlite:///:memory:",
-        model_provider="openai_compatible",
-        model_base_url="https://api.deepseek.com",
+        model_provider="openai",
+        model_base_url="https://api.openai.com/v1",
         model_name="test-model",
         model_api_key=SecretStr("not-a-real-key"),
         plan_timeout_seconds=300,
@@ -591,7 +577,7 @@ def test_goal_operation_timeout_terminalizes_attempt_without_draft_or_task(
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         settings,
         transport=httpx.MockTransport(slow_response),
     )
@@ -696,9 +682,7 @@ def test_goal_resolution_attempt_history_is_not_copied_to_fork(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _ResolutionProvider(DynamicGoalInterpretation(status="UNSUPPORTED"))
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     game_id, _version_id = _new_game(client, session)
     submitted = client.post(
         f"/api/v1/games/{game_id}/goals",

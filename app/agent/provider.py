@@ -1266,7 +1266,12 @@ def ensure_goal_resolution_budget() -> None:
 
 @dataclass(frozen=True, slots=True)
 class _ProviderProfile:
-    """Purpose-specific request settings for one logical provider call."""
+    """Purpose-specific settings for one logical OpenAI call.
+
+    ``thinking_mode`` remains internal, secret-safe metadata for observability.
+    ``reasoning_effort`` is a fixed profile policy and is sent through the
+    supported OpenAI Chat Completions request field; it is not user-configurable.
+    """
 
     name: str
     model_name: str
@@ -2768,7 +2773,7 @@ class _TelemetryResponseStream(httpx.SyncByteStream):
         self._stream.close()
 
 
-class OpenAICompatibleGenericProvider:
+class OpenAIProvider:
     def __init__(
         self,
         settings: Settings,
@@ -2788,27 +2793,25 @@ class OpenAICompatibleGenericProvider:
         self._plan_timeout = settings.plan_timeout_seconds
         self._plan_total_timeout = settings.plan_total_timeout_seconds
         self._max_output_tokens = settings.model_max_output_tokens
-        self._thinking_mode = settings.model_thinking_mode
-        self._reasoning_effort = settings.model_reasoning_effort
         self._default_profile = _ProviderProfile(
             name="DEFAULT",
             model_name=self._model_name,
-            thinking_mode=self._thinking_mode,
-            reasoning_effort=self._reasoning_effort,
+            thinking_mode="disabled",
+            reasoning_effort="medium",
             output_token_limit=None,
         )
         self._planning_profile = _ProviderProfile(
-            name="PLANNING_REASONING",
+            name="PLANNING",
             model_name=self._model_name,
-            thinking_mode=self._thinking_mode,
-            reasoning_effort=self._reasoning_effort,
+            thinking_mode="disabled",
+            reasoning_effort="medium",
             output_token_limit=self._max_output_tokens,
         )
         self._fast_semantic_profile = _ProviderProfile(
             name="FAST_SEMANTIC",
             model_name=self._semantic_model_name,
             thinking_mode="disabled",
-            reasoning_effort="low",
+            reasoning_effort="none",
             output_token_limit=_FAST_SEMANTIC_OUTPUT_TOKEN_LIMIT,
         )
         self._purpose_profiles: dict[str, _ProviderProfile] = {
@@ -2828,15 +2831,15 @@ class OpenAICompatibleGenericProvider:
 
     @property
     def provider_name(self) -> str:
-        return "openai_compatible"
+        return "openai"
 
     @property
     def thinking_mode(self) -> str:
-        return self._thinking_mode
+        return self._default_profile.thinking_mode
 
     @property
     def reasoning_effort(self) -> str:
-        return self._reasoning_effort
+        return self._default_profile.reasoning_effort
 
     @property
     def configured_output_token_limit(self) -> int | None:
@@ -3832,7 +3835,6 @@ class OpenAICompatibleGenericProvider:
             )
         request_body: dict[str, object] = {
             "model": profile.model_name,
-            "thinking": {"type": profile.thinking_mode},
             "reasoning_effort": profile.reasoning_effort,
             "response_format": {"type": "json_object"},
             "messages": [
@@ -3852,7 +3854,7 @@ class OpenAICompatibleGenericProvider:
             ],
         }
         if profile.output_token_limit is not None:
-            request_body["max_tokens"] = profile.output_token_limit
+            request_body["max_completion_tokens"] = profile.output_token_limit
         request_size_bytes = len(
             json.dumps(request_body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         )
@@ -4281,10 +4283,15 @@ class OpenAICompatibleGenericProvider:
         self._record_call_metadata(metadata)
 
 
-def build_generic_provider(settings: Settings) -> GenericModelProvider | None:
+def build_provider(settings: Settings) -> GenericModelProvider | None:
     if settings.model_provider == "mock":
         return None
-    return OpenAICompatibleGenericProvider(settings)
+    if settings.model_provider == "openai":
+        return OpenAIProvider(settings)
+    raise GenericProviderError(
+        "MODEL_PROVIDER_CONFIGURATION_INVALID",
+        f"Unsupported MODEL_PROVIDER: {settings.model_provider}",
+    )
 
 
 def provider_call_metadata(provider: GenericModelProvider) -> dict[str, object]:
@@ -4408,7 +4415,7 @@ def _log_provider_failure(
 def _provider_request_id(response: httpx.Response | None) -> str | None:
     if response is None:
         return None
-    for header_name in ("x-request-id", "x-deepseek-request-id", "request-id"):
+    for header_name in ("x-request-id", "request-id"):
         value = response.headers.get(header_name)
         if value:
             return _safe_text(value, limit=160)
@@ -4508,7 +4515,7 @@ __all__ = [
     "GoalDependencyProjection",
     "GoalMatchSemantics",
     "GoalRoleProvenance",
-    "OpenAICompatibleGenericProvider",
+    "OpenAIProvider",
     "OperationContractSlot",
     "OperationGoalProjection",
     "OperationIntentDraft",
@@ -4527,7 +4534,7 @@ __all__ = [
     "PlanningContext",
     "ProviderCallMetadata",
     "ProviderTotalTimeout",
-    "build_generic_provider",
+    "build_provider",
     "dynamic_goal_grounding_recovery_feedback",
     "dynamic_goal_recovery_feedback",
     "ensure_goal_resolution_budget",

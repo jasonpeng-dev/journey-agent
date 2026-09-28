@@ -183,9 +183,7 @@ def ensure_portability_scenario(db):  # type: ignore[no-untyped-def]
 def ensure_empty_quick_input_scenario(db):  # type: ignore[no-untyped-def]
     """Create a V3 Published scenario whose authoritative quick-input list is empty."""
 
-    scenario = db.scalar(
-        select(Scenario).where(Scenario.key == EMPTY_QUICK_INPUT_SCENARIO_KEY)
-    )
+    scenario = db.scalar(select(Scenario).where(Scenario.key == EMPTY_QUICK_INPUT_SCENARIO_KEY))
     if scenario is None:
         document = portability_v3_document()
         document["metadata"]["key"] = EMPTY_QUICK_INPUT_SCENARIO_KEY

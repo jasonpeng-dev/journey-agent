@@ -60,8 +60,12 @@ predefined Tasks.
 
 Preset Goal text in the browser is only suggested text that fills the normal
 editable Goal input. It is not an Objective selector, does not submit a
-separate identity, and does not create an `ObjectiveDefinitionV2`. Dynamic
-submission also does not edit the Draft or create a new ScenarioVersion.
+separate identity, and does not create an Objective definition or Task. The
+current ScenarioDefinitionV3 authoring contract calls these onboarding values
+`goal_resolution.quick_inputs[]`; they remain ordered display text and do not
+become authored Objective identity. Dynamic submission also does not edit the
+Draft or create a new ScenarioVersion. The authoring-side Quick Target contract
+is documented in [Scenario authoring](scenario-authoring.md).
 
 `PARAMETERIZED` is reserved in the domain vocabulary but has no implemented V1
 resolver or template source. V1 also has no Goal AST, `OR`, generic `NOT`,
