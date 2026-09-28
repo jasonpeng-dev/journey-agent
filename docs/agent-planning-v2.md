@@ -6,6 +6,12 @@ It describes the generic production path implemented by the repository.
 Scenario data supplies content; it does not add
 scenario-specific control flow.
 
+The title refers to the canonical PlannerInput V2 and normalized runtime
+semantic model. It does not mean that current authored Scenario documents are
+V2: ScenarioDefinitionV3 is the current authored and portable contract, and
+the document parser projects V3 to the V2 runtime model in memory where the
+existing planning services require it.
+
 The product-facing Goal and task-compilation contract is maintained in
 [Custom Goals and Task Compilation](custom-goals.md); this document defines
 the detailed planning and validation boundary after resolution.
@@ -45,9 +51,17 @@ or example takes the `PREDEFINED` path. An unmatched Goal never falls back to
 selecting the nearest authored Objective.
 
 The runtime is generic because the same source code interprets every
-published ScenarioVersion through the declarative ScenarioDefinitionV2 and
-declarative-rule-engine contracts. A ScenarioVersion changes data and public
-semantics, not the generic planner or runtime implementation.
+published ScenarioVersion through the current authored contract and the
+declarative-rule-engine contracts. A V3 ScenarioDefinition is normalized to
+the V2 semantic model in memory for the planning/runtime paths that still use
+that model; the authored document and portable artifact remain V3. A
+ScenarioVersion changes data and public semantics, not the generic planner or
+runtime implementation.
+
+The source of the Version does not change this contract. A Version published
+normally or created as Published v1 by an explicit Release artifact import
+enters the same exact-Version planning path. Artifact import allocates a new
+Scenario identity; it does not migrate a prior Game, Task, or planning history.
 
 Formal PLAY uses one synchronous HTTP request for an INITIAL_PLAN or REPLAN.
 The backend may perform the configured repair attempts inside that request.
@@ -229,20 +243,25 @@ expanding the Formal Goal contract.
 
 ### 3.3 Provider profiles
 
-Provider request settings are selected by purpose through two independent
-profiles:
+The supported model provider values are `mock` and `openai`. Request settings
+are selected by purpose through two independent logical profiles:
 
 * `FAST_SEMANTIC` handles `DYNAMIC_GOAL_GROUNDING` and
   `DYNAMIC_GOAL_INTERPRETATION`. Its model comes from `SEMANTIC_MODEL`, with
-  fallback to `MODEL_NAME`; thinking is forcibly disabled and its fast output
-  budget is fixed by code.
-* `PLANNING_REASONING` handles `INITIAL`, `REPAIR`, and `REPLAN`. Its model,
-  thinking, reasoning effort, and output token budget come from `MODEL_NAME`,
-  `MODEL_THINKING_MODE`, `MODEL_REASONING_EFFORT`, and
+  fallback to `MODEL_NAME`; its lightweight policy and 2048 output-token
+  budget are fixed by code.
+* `PLANNING` handles `INITIAL`, `REPAIR`, and `REPLAN`. Its model comes from
+  `MODEL_NAME` and its optional output limit comes from
   `MODEL_MAX_OUTPUT_TOKENS`.
 
-Planning configuration does not flow into semantic calls. The two profiles
-may use different models without changing Goal resolution or Planner logic.
+The OpenAI request builder sends only supported Chat Completions request
+fields. Its fixed profile policy sends `reasoning_effort=none` for
+`FAST_SEMANTIC` and `reasoning_effort=medium` for `PLANNING`; these values are
+not user-facing environment settings. Other logical profile metadata is kept
+for safe provider audit and is not serialized as provider-specific request
+configuration. Planning configuration does not flow into semantic calls. The
+two profiles may use different models without changing Goal resolution or
+Planner logic.
 
 ### 3.4 Goal Required and explicit player constraints
 
@@ -812,7 +831,9 @@ implementation.
 | Formal PLAY orchestration | app/services/play.py |
 | Player-safe response projection | app/services/player_projection.py |
 | Player pacing checkpoint | app/services/player_pacing.py |
-| ScenarioDefinitionV2 | app/domain/scenario_v2.py |
+| Authored ScenarioDefinitionV3 | app/domain/scenario_v3.py |
+| Versioned document parsing | app/scenarios/documents.py |
+| V2 validation/runtime projection | app/scenarios/validation.py, app/domain/scenario_v2.py |
 
 Documentation authority:
 

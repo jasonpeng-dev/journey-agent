@@ -1,5 +1,6 @@
 import { defaultArrayItem } from "../templates";
-import { fieldLabel, uiLabel } from "../ui";
+import { fieldLabel, platformEnumLabel, type PlatformEnumDomain } from "../ui";
+import { BooleanControl } from "./editor/FormPrimitives";
 
 const enums: Record<string, string[]> = {
   initial_access: ["LOCKED", "AVAILABLE"], access: ["LOCKED", "AVAILABLE"],
@@ -14,18 +15,27 @@ const enums: Record<string, string[]> = {
   operator: ["EQ", "NE", "LT", "LTE", "GT", "GTE"], source: ["LITERAL", "PARAMETER"], direction: ["SOURCE", "TARGET"], relation_direction: ["SOURCE", "TARGET"],
 };
 
+const enumDomains: Record<string, PlatformEnumDomain> = {
+  initial_access: "node_access", access: "node_access", initial_visibility: "node_knowledge", visibility: "node_knowledge",
+  capabilities: "capability", allowed_actor_capabilities: "capability", execution_mode: "execution_mode",
+  phase: "rule_phase", behavior: "action_behavior", locality: "locality", resource_scope_kind: "resource_scope",
+  value_type: "value_type", operator: "comparison", source: "value_source", direction: "relation_direction",
+  relation_direction: "relation_direction",
+};
+
 type Props = { value: unknown; onChange: (value: unknown) => void; field?: string; depth?: number; resourceScope?: boolean };
 
 export function StructuredEditor({ value, onChange, field = "value", depth = 0, resourceScope = false }: Props) {
   if (Array.isArray(value)) {
+    if (defaultArrayItem(field) === null) return <div className="structured-array">{value.map((item, index) => <div className="array-item" key={index}><StructuredEditor field={field} value={item} depth={depth + 1} onChange={(next) => onChange(value.map((old, oldIndex) => oldIndex === index ? next : old))} /><button className="small danger" onClick={() => onChange(value.filter((_, oldIndex) => oldIndex !== index))}>{'\u79fb\u9664'}</button></div>)}</div>;
     return <div className="structured-array">{value.map((item, index) => <div className="array-item" key={index}><StructuredEditor field={field} value={item} depth={depth + 1} onChange={(next) => onChange(value.map((old, oldIndex) => oldIndex === index ? next : old))} /><button className="small danger" onClick={() => onChange(value.filter((_, oldIndex) => oldIndex !== index))}>移除</button></div>)}<button className="small" onClick={() => onChange([...value, defaultArrayItem(field)])}>＋ 添加</button></div>;
   }
   if (value && typeof value === "object") {
     return <div className={`structured-object depth-${Math.min(depth, 3)}`}>{Object.entries(value as Record<string, unknown>).map(([key, child]) => <label className="structured-field" key={key}><span title={key}>{fieldLabel(key)}</span><StructuredEditor field={resourceScope && key === "kind" ? "resource_scope_kind" : key} resourceScope={key === "resource_scope"} value={child} depth={depth + 1} onChange={(next) => onChange({ ...(value as Record<string, unknown>), [key]: next })} /></label>)}</div>;
   }
   const choices = enums[field];
-  if (choices && typeof value === "string") return <select value={value} onChange={(event) => onChange(event.target.value)}>{choices.map((item) => <option key={item} value={item}>{uiLabel(item)}</option>)}</select>;
-  if (typeof value === "boolean") return <input type="checkbox" checked={value} onChange={(event) => onChange(event.target.checked)} />;
+  if (choices && typeof value === "string") return <select value={value} onChange={(event) => onChange(event.target.value)}>{choices.map((item) => <option key={item} value={item}>{platformEnumLabel(enumDomains[field], item)}</option>)}</select>;
+  if (typeof value === "boolean") return <BooleanControl value={value} onChange={onChange} path={field} label={fieldLabel(field)} />;
   if (typeof value === "number") return <input type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} />;
   if (value === null) return <button className="small" onClick={() => onChange("")}>设置值</button>;
   return <input value={String(value ?? "")} onChange={(event) => onChange(event.target.value)} />;

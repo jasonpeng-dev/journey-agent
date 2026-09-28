@@ -121,9 +121,7 @@ def test_canonical_task4_has_one_derived_capability_requirement() -> None:
     assert "activate_emergency_water_transfer" not in action_keys
     assert "water_transfer_target" not in interaction_keys
     assert all(
-        item.action_key in action_keys
-        for item in definition.rules
-        if item.action_key is not None
+        item.action_key in action_keys for item in definition.rules if item.action_key is not None
     )
     assert all(item.required_interaction_key in interaction_keys for item in definition.actions)
 

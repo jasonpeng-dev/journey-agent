@@ -39,15 +39,13 @@ class Settings(BaseSettings):
     app_name: str = "Journey Agent Backend"
     app_env: Literal["development", "test", "production"] = "development"
     database_url: str = "sqlite+pysqlite:///./journey_dev.db"
-    model_provider: Literal["mock", "openai_compatible"] = "mock"
+    model_provider: Literal["mock", "openai"] = "mock"
     model_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4.1-mini"
     semantic_model: str | None = None
     goal_resolution_observability: Literal["NORMAL", "DEBUG"] = "NORMAL"
     model_api_key: SecretStr | None = None
     developer_api_token: SecretStr | None = None
-    model_thinking_mode: Literal["disabled", "enabled"] = "disabled"
-    model_reasoning_effort: Literal["low", "medium", "high"] = "low"
     # One independent Plan / Replan / Repair Provider invocation is bounded at
     # 300 seconds. HTTPX's phase timeout is deliberately disabled; the
     # invocation deadline below is the meaningful runtime safety boundary.
@@ -60,12 +58,6 @@ class Settings(BaseSettings):
     goal_resolution_timeout_seconds: float = Field(default=20, gt=0, le=120)
     model_max_output_tokens: int | None = Field(default=8192, ge=256, le=32768)
     model_max_repair_attempts_per_cycle: int = 2
-    agent_max_rounds: int = Field(default=5, ge=1, le=10)
-    agent_max_tool_calls: int = Field(default=8, ge=1, le=20)
-    planner_max_steps: int = Field(default=10, ge=1, le=12)
-    planner_max_wait_steps: int = Field(default=4, ge=0, le=6)
-    planner_max_replans: int = Field(default=2, ge=0, le=5)
-    planner_max_generation_attempts: int = Field(default=2, ge=1, le=3)
 
     @field_validator("plan_total_timeout_seconds", mode="before")
     @classmethod

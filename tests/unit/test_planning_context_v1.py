@@ -9,7 +9,7 @@ from app.agent.dependency_closure import _scope_actor_actions_to_contracts
 from app.agent.generic import GenericAgentService, _validate_plan_segment_contract
 from app.agent.planning_context import PlanningContextBuilder
 from app.agent.provider import (
-    OpenAICompatibleGenericProvider,
+    OpenAIProvider,
     PlannerActionContract,
     PlannerActorState,
     PlannerInput,
@@ -327,9 +327,7 @@ def test_validator_relevance_accepts_direct_progress_and_rejects_unrelated(
         unrelated_context,
         planner_input=planner_input,
     )
-    assert not any(
-        item.get("code") == "OBJECTIVE_IRRELEVANT" for item in unrelated_diagnostics
-    )
+    assert not any(item.get("code") == "OBJECTIVE_IRRELEVANT" for item in unrelated_diagnostics)
 
 
 def test_validator_reports_target_interaction_mismatch_to_provider(
@@ -386,7 +384,7 @@ def test_validator_reports_target_interaction_mismatch_to_provider(
     assert all(item.get("code") != "OBJECTIVE_IRRELEVANT" for item in diagnostics)
 
 
-def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> None:
+def test_openai_provider_sends_context_not_candidate_catalog() -> None:
     captured: dict[str, object] = {}
     response_content = json.dumps(
         {
@@ -431,12 +429,12 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         Settings(
             _env_file=None,
             app_env="test",
             database_url="sqlite+pysqlite:///:memory:",
-            model_provider="openai_compatible",
+            model_provider="openai",
             model_name="fake-model",
             model_api_key=SecretStr("not-a-real-key"),
         ),
@@ -564,14 +562,14 @@ def test_openai_compatible_provider_sends_context_not_candidate_catalog() -> Non
     ):
         assert forbidden_term not in system_prompt
         assert forbidden_term not in repair_prompt
-    assert captured["json"]["thinking"] == {"type": "disabled"}  # type: ignore[index]
-    assert captured["json"]["reasoning_effort"] == "low"  # type: ignore[index]
-    assert captured["json"]["max_tokens"] == 8192  # type: ignore[index]
+    assert "thinking" not in captured["json"]  # type: ignore[operator]
+    assert captured["json"]["reasoning_effort"] == "medium"  # type: ignore[index]
+    assert captured["json"]["max_completion_tokens"] == 8192  # type: ignore[index]
     assert provider.last_call_metadata is not None
     assert provider.last_call_metadata.model == "fake-model"
     assert provider.last_call_metadata.call_type == "INITIAL_PLAN"
     assert provider.last_call_metadata.thinking_mode == "disabled"
-    assert provider.last_call_metadata.reasoning_effort == "low"
+    assert provider.last_call_metadata.reasoning_effort == "medium"
     assert provider.last_call_metadata.configured_output_token_limit == 8192
     assert provider.last_call_metadata.context_bytes is not None
     assert provider.last_call_metadata.request_size_bytes is not None

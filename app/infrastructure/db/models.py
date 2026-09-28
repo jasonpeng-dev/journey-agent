@@ -101,6 +101,43 @@ class ScenarioVersion(UUIDPrimaryKey, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ScenarioPresentationProfile(TimestampMixin, Base):
+    """Mutable Scenario-scoped presentation policy, independent of Versions."""
+
+    __tablename__ = "scenario_presentation_profiles"
+
+    scenario_id: Mapped[UUID] = mapped_column(
+        ForeignKey("scenarios.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    profile_document: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class ScenarioPresentationProfileRevision(UUIDPrimaryKey, Base):
+    """Immutable saved PresentationProfile history."""
+
+    __tablename__ = "scenario_presentation_profile_revisions"
+    __table_args__ = (
+        UniqueConstraint("scenario_id", "revision"),
+        Index(
+            "ix_scenario_presentation_profile_revisions_scenario_revision",
+            "scenario_id",
+            "revision",
+        ),
+    )
+
+    scenario_id: Mapped[UUID] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"))
+    revision: Mapped[int] = mapped_column(Integer)
+    profile_document: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+@event.listens_for(ScenarioPresentationProfileRevision, "before_update")
+@event.listens_for(ScenarioPresentationProfileRevision, "before_delete")
+def _reject_presentation_profile_revision_mutation(*_args: object) -> None:
+    raise RuntimeError("PresentationProfile revision rows are immutable")
+
+
 class ScenarioVersionImmutableError(RuntimeError):
     """Raised when ORM code attempts to mutate a published ScenarioVersion."""
 
@@ -475,6 +512,25 @@ class GameInstanceRelationKnowledge(TimestampMixin, Base):
         Enum(RelationVisibility, native_enum=False),
         default=RelationVisibility.VISIBLE,
         server_default=RelationVisibility.VISIBLE.value,
+        nullable=False,
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GameInstanceActionTargetKnowledge(TimestampMixin, Base):
+    """Instance-owned Knowledge for one exact Action/target contract."""
+
+    __tablename__ = "game_instance_action_target_knowledge"
+
+    game_instance_id: Mapped[UUID] = mapped_column(
+        ForeignKey("game_instances.id", ondelete="CASCADE"), primary_key=True
+    )
+    action_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    target_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    visibility: Mapped[Visibility] = mapped_column(
+        Enum(Visibility, native_enum=False),
+        default=Visibility.KNOWN,
+        server_default=Visibility.KNOWN.value,
         nullable=False,
     )
     version: Mapped[int] = mapped_column(Integer, default=1)

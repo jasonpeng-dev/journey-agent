@@ -2,7 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import {
   appendFixtureTask,
-  currentScenarioName,
   fixtureGame,
   getJson,
   wireApi,
@@ -19,9 +18,9 @@ test("Checkpoint / Fork Smoke", async ({ page }) => {
   expect(source.scenario_version_number).toBeGreaterThan(0);
 
   await page.goto(`/games/${fixture.gameId}`);
-  await expect(page.getByText(currentScenarioName, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(fixture.scenarioName, { exact: true }).first()).toBeVisible();
   await expect(page.locator(".plan-history-card")).toBeVisible();
-  await expect(page.locator(".timeline-entry").filter({ hasText: "检查状态" })).toBeVisible();
+  await expect(page.locator(".timeline-entry").filter({ hasText: fixture.actionName }).first()).toBeVisible();
 
   await page.getByRole("button", { name: "存档", exact: true }).click();
   await expect(page.getByText(/已创建存档/)).toBeVisible();
@@ -53,6 +52,6 @@ test("Checkpoint / Fork Smoke", async ({ page }) => {
   await page.locator(".task-tabs button").first().click();
   await expect(page.locator(".plan-history-card")).toBeVisible();
   await expect(page.locator(".plan-history-steps li.completed")).toBeVisible();
-  await expect(page.locator(".timeline-entry").filter({ hasText: "检查状态" })).toBeVisible();
+  await expect(page.locator(".timeline-entry").filter({ hasText: fixture.actionName }).first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "已知世界", exact: true })).toBeVisible();
 });

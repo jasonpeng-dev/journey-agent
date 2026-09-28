@@ -1,364 +1,225 @@
 # Journey Agent Architecture
 
 This document is the canonical high-level architecture for Journey Agent.
-Detailed planning and validation semantics live in
-[Agent Planning V2](agent-planning-v2.md). Scenario authoring semantics live
-in [Scenario authoring](scenario-authoring.md). Historical design and
-migration notes live under [docs/archive](archive/) and are not current
-implementation authority.
-GameInstance lifecycle details live in [GameInstance lifecycle](game-lifecycle.md).
-The player-facing natural-language Goal and task-compilation contract is in
-[Custom Goals and Task Compilation](custom-goals.md).
+Detailed authoring and portability semantics live in
+[Scenario authoring](scenario-authoring.md). The player Goal contract lives in
+[Custom Goals and Task Compilation](custom-goals.md). The detailed planning
+boundary lives in [Agent Planning V2](agent-planning-v2.md), and GameInstance
+history lives in [GameInstance lifecycle](game-lifecycle.md). Material under
+docs/archive/ is historical and is not current implementation authority.
 
-## 1. Product and system goal
+## 1. Product boundary
 
-Journey Agent is a generic, data-driven scenario runtime with:
+Journey Agent is a generic, data-driven Scenario runtime with:
 
-* natural-language goal resolution;
-* an LLM Planner;
-* deterministic validation;
-* an explicit Truth/Knowledge boundary;
+* a Web Scenario Editor and explicit Draft lifecycle;
+* portable Scenario artifact import/export;
+* natural-language Goal resolution;
+* an LLM Planner and deterministic Validator;
 * declarative Action and Rule execution;
-* auditable Formal PLAY;
-* Knowledge-aware replanning.
+* an explicit Truth/Knowledge boundary; and
+* auditable Formal PLAY and Game history.
 
-Scenario content is supplied by an immutable published ScenarioVersion.
-The runtime interprets that content through generic source code. A Scenario
-must not require a scenario-key branch in Planner, Validator, Runtime, or
-persistence code.
+Scenario data supplies content and contracts. Generic source code interprets
+that data; a Scenario key must not select a custom Planner, Validator, Runtime,
+or persistence branch.
 
-From the product perspective, a player enters a Goal, receives clarification
-when the requested WHAT is incomplete, reviews the Agent's proposed HOW one
-Action at a time, and sees the world/Knowledge update after execution. The
-Goal contract is frozen before planning; supporting work and replanning remain
-data-driven runtime behavior. The detailed player contract is maintained in
-[Custom Goals and Task Compilation](custom-goals.md), rather than duplicated
-here.
+The current authored document contract is ScenarioDefinitionV3. Runtime paths
+that still consume the normalized ScenarioDefinitionV2 semantic model receive
+an in-memory projection from V3. This compatibility boundary is intentional:
+V3 owns current authoring and portable serialization, while V2 remains the
+semantic/runtime and historical compatibility vocabulary where the code still
+requires it.
 
-## 2. Runtime identity hierarchy
+## 2. Authoring authorities
 
-The durable identity hierarchy is:
+The authoring side has separate authorities:
 
-    Player
-      -> GameInstance
-           -> exact published ScenarioVersion
-                -> AgentTask
-                     -> frozen FormalGoalContractV1
-                          -> ObjectiveScope compatibility projection (predefined only)
-                     -> AgentPlan / AgentStep
-                          -> WorldOperation
+~~~text
+external .scenario.json artifact
+  -> read-only preview
+  -> explicit import
+  -> new Scenario lifecycle identity
+       -> one persisted Current Draft
+       -> browser Working Copy
+            --manual Save-->
+       -> Current Draft revision
+            --Validate-->
+       -> readiness and diagnostics
+            --Publish-->
+       -> immutable Published ScenarioVersion
+~~~
 
-A Scenario has one mutable Current Draft and immutable published Versions.
-Creating a GameInstance binds it to one exact Version and content hash. Editing
-or publishing a later Version never changes an existing GameInstance.
+A Scenario is a series identity with exactly one Current Draft and zero or more
+immutable Published Versions. The browser Working Copy is a client-side view of
+the Draft being edited; it is not a second persisted authority. Typing,
+structured Editor transforms, reference analysis, completeness guidance, and
+initialization previews can operate on the Working Copy without saving it.
 
-The FormalGoalContractV1 is frozen when a Goal becomes an AgentTask. It is
-bound to the exact ScenarioVersion and is not expanded by REPAIR or REPLAN.
-An authored PREDEFINED Goal may also retain an ObjectiveScope as a compatibility
-and planning projection. An AD_HOC_DYNAMIC Goal has no authored ObjectiveScope;
-its legacy non-null scope-hash column is only an integrity fingerprint.
+Manual Save is the only normal path that persists a Working Copy as the Current
+Draft. The write includes the expected Draft revision and fails closed on a
+stale revision. Validate is diagnostic; Publish validates again and creates the
+next immutable Version. Publishing does not mutate an existing GameInstance.
 
-## 3. Scenario authoring boundary
+### 2.1 Portable artifact boundary
 
-A ScenarioDefinitionV2 contains declarative:
+A portable artifact contains the canonical authored ScenarioDefinitionV3 and
+portable metadata/hash. It does not carry database lifecycle IDs, Draft
+revision, Published Version number/history, Game ID, timestamps, or validation
+cache state.
 
-* metadata;
-* world Nodes, Facts, Relations, Interactions, and Resources;
-* Roles and Actors;
-* Actions and parameters;
-* preflight and resolution Rules;
-* Objectives and completion requirements;
-* goal-resolution and planning metadata;
-* initialization.
+Import always creates a new Scenario series. The target key defaults to the
+artifact key and can be explicitly changed. A key conflict is reported; import
+does not merge, overwrite, or invent an automatic suffix.
 
-Authors provide stable machine keys, public names, descriptions, structured
-contracts, and data. They do not add executable gameplay code, a custom
-interpreter, a model-specific provider, or a scenario-specific runtime branch.
+* A Draft artifact creates Scenario plus editable Current Draft. It creates no
+  Published Version and no Game.
+* A Release artifact creates Scenario plus editable Current Draft and
+  Published Version v1. Source history/version numbering is not copied, and no
+  Game is created.
+* Preview is read-only. The Web adapter reads the selected browser file and
+  sends its JSON to the backend; the CLI reads a local file. Neither adapter
+  changes the database during preview.
 
-### 3.1 Formal Goal V1
+The exact artifact envelope, schema/version checks, target-key rules, and
+unsupported legacy behavior are owned by Scenario authoring, not by the
+planning or Game lifecycle documents.
 
-The runtime has one frozen Goal authority: `FormalGoalContractV1`. Product
-sources are `PREDEFINED` (the compatibility path for catalog-disabled and old
-immutable Versions) and `AD_HOC_DYNAMIC` (the World Goal State path, compiled
-from catalog semantics or a provider candidate set validated against the
-public ontology). `PARAMETERIZED` is reserved in the domain enum
-but has no V1 resolver or template implementation.
+## 3. Runtime identity hierarchy
 
-The contract contains a flat, canonically ordered tuple of typed completion
-requirements. The tuple is an implicit `AND`; V1 has no Goal AST, `OR`, generic
-`NOT`, dynamic selector, quantifier, Actor Goal, WorkingGoal, or Milestone
-entity. The supported requirement kinds are the shared `FACT` and
-`RESOURCE_AT_LEAST` contracts, plus an authored `DERIVED_STATE` capability
-target. Derived State dependencies remain Scenario-authored semantics; they
-are evaluated by the backend rather than supplied by a provider. The backend
-assigns stable requirement identity and computes the contract hash; a provider
-cannot supply either identity or completion semantics.
+The durable runtime hierarchy is:
 
-Before the contract is frozen, a Version with
-`goal_resolution.world_goal_state_catalog=true` matches only its public World
-Goal State catalog. Exact Fact/Derived metadata can resolve deterministically;
-other text enters the Dynamic path. A catalog-disabled or older immutable
-Version may use an explicit authored Objective key, canonical name, alias, or
-example as `PREDEFINED`. No path falls back to a nearest Objective. The
-Dynamic path first performs deterministic public entity or unique
-public-topology grounding. If that cannot uniquely identify a public entity,
-bounded Entity Grounding may return only validated public candidate keys,
-clarification, or unsupported. The backend then builds a focused public
-ontology for Goal Interpretation and validates the resulting typed candidate
-against the exact Version.
+~~~text
+Player
+  -> GameInstance
+       -> exact Published ScenarioVersion
+            -> AgentTask
+                 -> frozen FormalGoalContract
+                      -> Dependency Closure / PlannerInput
+                           -> AgentPlan / AgentStep
+                                -> WorldOperation
+~~~
 
-The AD_HOC_DYNAMIC interpreter receives only that focused public Scenario
-ontology and currently public entity, Fact, Region, Resource, and
-goal-addressable Derived State identities. It cannot see hidden Truth, authored
-Objective metadata, Actions, prerequisites, knowledge gates, hidden Derived
-State dependencies, or hidden completion requirements. It can therefore
-express only public `FACT`, `RESOURCE_AT_LEAST`, and `DERIVED_STATE`
-requirements; a Derived State candidate carries only its public state key and
-typed target value. Dynamic compilation does not create a Scenario
-ObjectiveDefinition or modify the immutable ScenarioVersion.
+Creating a Game requires an exact immutable Published ScenarioVersion. A mutable
+Draft, a Scenario pointer without a Version, or a later publication cannot
+rebind an existing Game. A Version imported from a Release artifact is just
+another Published Version at runtime; its source artifact history is not a
+runtime identity.
 
-The canonical contract is embedded in AgentTask with its schema version, source
-kind, exact ScenarioVersion proof, compiler version, canonical JSON, and hash.
-PlanningCycle stores the contract hash alongside its canonical PlannerInput.
-Legacy predefined Tasks are read through a deterministic compile-on-read
-compatibility path; no lazy write-back is required.
+The Formal Goal contract is frozen when a Goal becomes an AgentTask. REPAIR and
+REPLAN may change the public planning projection, but cannot broaden or replace
+that contract.
 
-### 3.2 World Goal State vocabulary
+## 4. Goal, planning, validation, and Runtime
 
-The typed World Goal State vocabulary is deliberately small:
+The normal runtime path is:
 
-* `FACT` addresses one authoritative Fact on one entity;
-* `RESOURCE_AT_LEAST` addresses a typed quantity threshold in one Region; and
-* `DERIVED_STATE` addresses an authored computed capability whose independent
-  semantic identity is worth exposing as a World Goal.
+~~~text
+Goal text
+  -> Goal resolution and clarification
+  -> frozen FormalGoalContract bound to one ScenarioVersion
+  -> Dependency Closure
+  -> canonical PlannerInput
+  -> Planner proposal
+  -> deterministic Validator and bounded REPAIR
+  -> accepted AgentPlan
+  -> Runtime execution
+  -> Truth mutation and Knowledge projection
+  -> remaining-plan validation
+  -> REPLAN or deterministic completion
+~~~
 
-`DERIVED_STATE` is not a default wrapper around a single Fact. A single real
-world condition remains a `FACT`; a capability with multiple authored
-dependencies may be a `DERIVED_STATE`. Authors choose the smallest semantic
-kind that losslessly describes the intended completion condition.
+Goal Resolution decides the player's WHAT. The Planner decides HOW from the
+bounded public input. Dependency Closure collects relevant public contracts; it
+does not choose an Actor, source, route, order, or recovery plan. The Validator
+checks a submitted segment and projected sequential state. Runtime is the only
+layer that mutates world Truth and settles WorldOperations.
 
-`FactDefinitionV2.goal_addressable` is false by default and is independent of
-Fact Truth and current Knowledge. Public `goal_aliases`, `goal_examples`, and
-typed `goal_target_values` describe addressable semantic metadata only. Thus a
-Known entity plus an addressable Fact schema can be a valid Goal while its
-current value remains UNKNOWN; internal/control/discovery Facts remain outside
-the catalog.
+The detailed Objective/Goal source compatibility, Provider profiles, Closure,
+PlannerInput, REPAIR, REPLAN, and stop reasons are maintained in
+Agent Planning V2. They are not duplicated here.
 
-Derived values are computed on read from the immutable ScenarioVersion and
-current Runtime Truth or public Knowledge. They are not runtime rows, do not
-add a runtime revision, and cannot be directly set by an Action or Rule.
+## 5. Truth and Knowledge
 
-### 3.3 Provider profiles
+Truth is authoritative mutable instance state used by Rules and deterministic
+completion evaluation. Knowledge is the public projection available to the
+Planner, Validator, and Player.
 
-Provider configuration is routed by logical purpose rather than by Goal or
-Planner business code:
+~~~text
+UNKNOWN != false
+UNKNOWN != zero
+UNKNOWN != unavailable
+UNKNOWN != blocked
+~~~
 
-| Profile | Purposes | Configuration boundary |
-| --- | --- | --- |
-| `FAST_SEMANTIC` | Dynamic Goal Entity Grounding and Goal Interpretation | `SEMANTIC_MODEL` (falling back to `MODEL_NAME`); `thinking=disabled` and the fast output budget are fixed by code |
-| `PLANNING_REASONING` | `INITIAL`, `REPAIR`, `REPLAN` | `MODEL_NAME`, `MODEL_THINKING_MODE`, `MODEL_REASONING_EFFORT`, and `MODEL_MAX_OUTPUT_TOKENS` |
+Hidden Truth never enters PlannerInput or player responses. A legal survey,
+inspection, communication, or authored public effect may reveal Knowledge;
+inference alone does not. A Derived State is computed on read from the exact
+ScenarioVersion and either complete Truth or public Knowledge. It is not a
+persisted runtime row and cannot be directly set by an Action or Rule.
 
-Planning settings do not change the semantic profile. Semantic and planning
-calls may use different models without changing Goal Resolver or Planner
-logic. Dynamic provider-format or transient failures are bounded;
-`NEEDS_CLARIFICATION` is returned rather than retried into an arbitrary
-resolution.
+The completion evaluator may retain separate Truth and Knowledge results. A
+hidden Truth value is not presented as player-visible completion while the
+corresponding requirement remains Knowledge UNKNOWN.
 
-## 4. Agent runtime overview
+## 6. GameInstance and persistence boundary
 
-The request path is:
+A GameInstance owns instance-scoped Truth, Knowledge, formal history, runtime
+revision, and pacing state. Archive, Checkpoint, and Fork operate on that
+identity while preserving exact ScenarioVersion binding. The complete stable
+gate, locking, materialization, provenance, idempotency, and inherited-history
+contract is in [GameInstance lifecycle](game-lifecycle.md).
 
-    Goal text
-      -> Goal Resolution and clarification when needed
-      -> frozen FormalGoalContractV1 bound to one ScenarioVersion
-      -> Dependency Closure and PlannerInput V2
-      -> Planner proposal
-      -> deterministic Validation and bounded REPAIR
-      -> accepted AgentPlan
-      -> Runtime execution
-      -> Truth and public Knowledge update
-      -> remaining-plan validation and Player acknowledgement
-      -> REPLAN or deterministic completion
+Scenario deletion belongs to the authoring boundary. A deletion-impact check
+looks across all Published Versions and blocks deletion while any GameInstance
+depends on one of them. A successful deletion removes the Scenario-owned
+Draft, Versions, and presentation rows atomically; it never silently deletes a
+Game. See [Scenario authoring](scenario-authoring.md).
 
-Goal Resolution may use public catalog semantics, authored compatibility
-semantics, or bounded semantic grounding according to the ScenarioVersion
-contract. It validates the resolved Goal against that exact Version before
-planning. Grounding identifies public entities; interpretation identifies the
-supported requested outcome; neither stage plans Actions.
+## 7. API and repository boundaries
 
-The application composes the configured provider once and injects it into
-the generic resolver and Agent service. API routes and React components are
-adapters; they do not duplicate Rule evaluation, objective completion,
-authority, or Version semantics.
-
-## 5. Truth and Knowledge boundary
-
-Truth is the authoritative mutable instance state used by Rule evaluation
-and Formal Goal verification. Knowledge is the public projection used by
-Planner, Validator, and normal Player responses. Requirement Knowledge (for
-example, whether a gated authored requirement has been revealed) is a public
-Knowledge state, not a change to the frozen Formal Goal contract.
-
-Authoritative Truth satisfaction and player-visible completion are separate
-answers. If a Dynamic Goal requirement remains Knowledge `UNKNOWN`, a hidden
-Truth value satisfying it cannot by itself publish `SUCCEEDED` to the Player;
-the completion visibility path must first have a legal public Knowledge
-projection.
-
-Hidden Truth is never serialized into PlannerInput. UNKNOWN is not false,
-zero, unavailable, or blocked. Runtime may reveal new public Knowledge through
-survey, inspect, public Action effects, or an explicit deterministic failure.
-Inference alone does not reveal hidden state.
-
-Derived State is computed, not directly mutated: the evaluator derives an
-authoritative value from the full Runtime Truth and a separate player/Agent
-value from the shared public Knowledge projection. No Derived State row or
-provider assertion becomes a new source of Truth. A public Derived State may
-therefore remain Knowledge `UNKNOWN` while its authored schema is a legal Goal
-target.
-
-An authored Knowledge-producing Action may reveal previously gated
-dependencies. Newly public dependencies can change the Closure and Planner
-projection and trigger REPLAN without changing the frozen Formal Goal contract.
-Checkpoint and Fork copy Base Runtime and Knowledge state; Derived values are
-recomputed in each instance.
-
-Player projections expose known Nodes/Facts/Relations/Resources, accepted
-formal Plan History, safe action results, and pacing state. Developer
-projections are separate and credential-gated. Provider payloads, Rule ASTs,
-credentials, and raw model reasoning are not player data.
-
-## 6. Planning / validation / execution ownership
-
-PlannerInput construction and Dependency Closure select bounded public
-relevance. The LLM chooses Action, Actor, Target, Resource source,
-parameters, route, and ordering.
-
-The Validator is deterministic authority over a submitted PlanSegment. It
-checks bindings, parameters, locality, command reachability, public
-preconditions, resources, target contracts, objective relevance, stop
-semantics, and sequential projected state. It only rejects Known
-deterministic contradictions.
-
-Runtime is the only layer that mutates Truth and settles WorldOperations.
-Knowledge projection and objective verification consume the resulting state.
-No layer inserts a missing prerequisite or computes a recovery route for the
-Planner.
-
-Goal planning relevance is another projection boundary. Closure and
-PlannerInput expose only the currently public obligations and their public
-producers. Revealing a requirement or Action relevance changes the public
-planning projection, never the frozen Formal Goal contract.
-
-Scenario-authored Action and target contracts provide the generic roles,
-resources, locality, interactions, prerequisites, and deterministic effects
-that Closure and PlannerInput project. Target-specific contracts remain data,
-not Scenario-specific Python; authored identities may stay visible to planning
-while hidden current Truth stays `UNKNOWN`.
-
-See Agent Planning V2 for the detailed contract and invariants.
-
-## 7. Formal PLAY lifecycle
-
-Formal PLAY uses a single synchronous HTTP request for each initial planning
-or replan action:
-
-    user starts planning
-      -> INITIAL_PLAN or REPLAN
-      -> internal Provider / Validator / REPAIR loop
-      -> one final response
-      -> accepted formal Plan History or terminal error
-
-After an accepted Plan, the player acknowledges and executes each Action.
-The UI then shows an action briefing/debrief and the next pacing phase. A
-Runtime failure, a Knowledge change that invalidates the remaining plan, or a
-naturally exhausted INFORMATION_BOUNDARY segment can require player
-acknowledgement followed by REPLAN. A completed Objective enters COMPLETED and
-does not replan.
-
-Rejected Provider proposals are internal audit records. They are not
-player-facing plans and do not create AgentStep or WorldOperation rows.
-
-## 8. Persistence and audit
-
-The main lifecycle entities are:
-
-| Entity | Role |
+| Surface | Responsibility |
 | --- | --- |
-| PlanningCycle | One INITIAL or REPLAN cycle with frozen canonical input |
-| PlanningAttempt | One Provider attempt, proposal, violations, and telemetry |
-| AgentPlan | Validator-passing executable formal plan |
-| AgentStep | Ordered executable Action step |
-| WorldOperation | Runtime operation and public outcome |
-| PlayerExecutionCheckpoint | Player pacing state, not gameplay authority |
-
-### GameInstance lifecycle
-
-GameInstance lifecycle has a stable archive boundary:
-
-    ACTIVE A --Archive--> ARCHIVED A
-          |
-          +-- Checkpoint --> ARCHIVED B --Fork--> ACTIVE C
-
-Ordinary Archive finalizes the same GameInstance as an immutable ARCHIVED
-runtime source. Checkpoint creates an independent archived snapshot while its
-ACTIVE source remains unchanged. Fork starts a new independent ACTIVE
-GameInstance from an ARCHIVED source with the same exact ScenarioVersion,
-materialized runtime state, and inherited formal history.
-
-The complete contract for stable gates, runtime materialization, provenance,
-idempotency, locking, and inherited-history presentation is in
-[GameInstance lifecycle](game-lifecycle.md).
-
-Provider audit metadata is secret-safe and may include model settings,
-timestamps, latency, token usage, request size, finish reason, parsed
-proposal, and Validator diagnostics. Raw chain-of-thought and API keys are
-not persisted.
-
-Formal Goal JSON, its canonical hash, exact-Version proof, source kind, and
-compiler version are copied with the stable AgentTask history during
-Checkpoint and Fork materialization. Hidden requirement Knowledge remains in
-the copied GameInstance-scoped public Knowledge state; it is not duplicated
-inside the contract. These lifecycle operations do not create a separate Goal
-lifecycle.
-
-All runtime rows are scoped by GameInstance and exact ScenarioVersion
-ownership. The detailed lifecycle implementation contract, including
-idempotency and transaction boundaries, belongs to
-[GameInstance lifecycle](game-lifecycle.md).
-
-## 9. API and repository boundaries
-
-| Surface | Purpose |
-| --- | --- |
-| /api/v1/scenarios | Draft, validation, publication, references, and sandbox |
-| /api/v1/games | Player-safe GameInstance, archive/Fork lifecycle, and Formal PLAY |
-| /api/v1/developer/games | Credential-gated Truth/internal snapshots |
+| /api/v1/scenarios | Scenario series, Draft, validation, sandbox, references, Version history, deletion, and authoring transforms |
+| /api/v1/scenarios/artifacts/* | Portable artifact preview and new-Scenario import |
+| /api/v1/scenarios/{id}/draft/artifact | Persisted Current Draft export |
+| /api/v1/scenarios/{id}/latest/artifact | Current Published Version export |
+| /api/v1/scenarios/{id}/versions/{version_id}/artifact | Exact Published Version export |
+| /api/v1/games | Game creation from an exact Published Version and Formal PLAY lifecycle |
+| /api/v1/developer/games | Credential-gated Truth and internal snapshots |
 | /health and /ready | Process and database readiness |
 
-Repository map:
+Repository responsibilities:
 
 | Path | Responsibility |
 | --- | --- |
-| app/domain | ScenarioDefinitionV2, ObjectiveScope, world/runtime values |
-| app/agent | Goal resolution, PlannerInput, provider, validation, Agent loop |
-| app/services | Scenario/Game lifecycle, Formal PLAY, actions, projections |
-| app/scenarios | V2 parsing, validation, persistence, built-in definitions |
-| app/api | FastAPI adapters and Player/Developer DTOs |
-| frontend/src | React/Vite Scenario Library, Editor, and Formal PLAY |
-| tests | Unit, contract, integration, lifecycle, provider, and E2E support |
-| migrations | Alembic schema history |
-| docs | Current architecture, planning, authoring, and historical notes |
+| app/domain | V3 authored contract, V2 normalized semantic/runtime vocabulary, and domain contracts |
+| app/agent | Goal resolution, Formal Goal, Closure, PlannerInput, Provider, Validator, and Agent loop |
+| app/services | Scenario/Draft/Version and portability services, Game lifecycle, PLAY, actions, and projections |
+| app/scenarios | Versioned document parsing, validation, serialization, semantic diff, and portability codec |
+| app/api | HTTP adapters and DTOs |
+| app/cli.py | Local artifact validate/import/export adapter |
+| frontend/src | Scenario Library, Editor, artifact UX, and Formal PLAY |
+| migrations | Database schema history |
+| tests | Unit, contract, integration, portability, lifecycle, and browser coverage |
 
-## 10. Canonical documents
+Fresh installation follows the same boundary: migrations run, the application
+starts with empty Scenario and Game libraries, and the tracked official example
+is imported explicitly through Web or CLI. Startup seed is not the production
+authority.
 
-* [Custom Goals and Task Compilation](custom-goals.md): natural-language
-  Goal resolution, clarification, explicit constraints, task compilation,
-  supporting dependencies, and the WHAT/HOW boundary.
-* [Agent Planning V2](agent-planning-v2.md): detailed Planner, Validator,
-  Runtime, Knowledge, REPAIR, REPLAN, and continuity contract.
-* [Scenario authoring](scenario-authoring.md): Draft, Editor, validation,
-  sandbox, publication, and Version lifecycle.
-* [GameInstance lifecycle](game-lifecycle.md): Archive, Checkpoint, Fork,
-  runtime materialization, and formal history inheritance.
-* [Archive](archive/): historical design and migration notes only.
+## 8. Canonical documents
+
+* [Scenario authoring](scenario-authoring.md) owns Editor Working Copy,
+  Current Draft, validation/readiness, safe reference editing, Version history,
+  restore preview, artifact portability, and Scenario deletion.
+* [Custom Goals and Task Compilation](custom-goals.md) owns the player Goal,
+  Goal Required slots, and WHAT/HOW contract.
+* [Agent Planning V2](agent-planning-v2.md) owns Closure, PlannerInput,
+  Provider profiles, Validator, REPAIR, REPLAN, and planning continuity.
+* [GameInstance lifecycle](game-lifecycle.md) owns Game binding, Archive,
+  Checkpoint, Fork, runtime materialization, and formal history.
+* This document owns only the high-level topology and authority boundaries.
+
+Historical implementation notes remain under docs/archive/ and should not be
+used to infer the current product path.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -66,6 +66,7 @@ from app.engine.rules import (
 from app.infrastructure.db.models import (
     GameInstanceActor,
     GameInstanceFactState,
+    GameInstanceNodeState,
     GameInstanceRegionResourceKnowledge,
     GameInstanceRelationKnowledge,
     GameInstanceResourceState,
@@ -217,7 +218,9 @@ def test_builtin_action_authoring_change_publishes_without_mutating_predecessor(
 
 
 def _linjiang_v4_runtime(session: Session, key: str):  # type: ignore[no-untyped-def]
-    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
+    # These tests intentionally exercise the historical PREDEFINED Objective
+    # runtime against an exact legacy snapshot.
+    version = require_builtin_v2_version(session, LINJIANG_V2_TEST)
     player = Player(name=key)
     session.add(player)
     session.flush()
@@ -567,9 +570,7 @@ def test_planner_sparse_requirements_do_not_reveal_hidden_target_fact(
     projection = SharedKnowledgeProjection(session, scope, definition)
     sparse = projection.planner_action_requirements()
     water = next(item for item in sparse if item["target_key"] == "water_treatment_plant")
-    assert not any(
-        item["action_key"] == "repair_facility" for item in water["requirements"]
-    )
+    assert not any(item["action_key"] == "repair_facility" for item in water["requirements"])
     assert all(
         "knowledge_status" not in json.dumps(item, ensure_ascii=False)
         for item in water["requirements"]
@@ -656,9 +657,7 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     )
     assert all(
         ("repair_facility", item["target_key"]) in shared_contract_keys
-        for item in repair_contract["executor_requirements"].get(
-            "target_role_requirements", []
-        )
+        for item in repair_contract["executor_requirements"].get("target_role_requirements", [])
     )
     assert "repair_facility" in communications["allowed_action_keys"]
     assert "north_heavy_equipment_stock" not in serialized
@@ -704,6 +703,9 @@ def test_linjiang_v2_0_provider_input_is_canonical_v2_and_knowledge_safe(
     dependencies = payload["known_world"]["unknown_dependencies"]
     assert all(item.get("dependency_id") for item in dependencies)
     assert len({item["dependency_id"] for item in dependencies}) == len(dependencies)
+    assert [item["dependency_id"] for item in dependencies] == sorted(
+        item["dependency_id"] for item in dependencies
+    )
     resource_dependencies = {
         item["resource_key"]: item
         for item in dependencies
@@ -1135,8 +1137,7 @@ def test_dependency_closure_requeues_binding_specific_reachability_recovery(
     action_keys = {item.action_key for item in closure.planner_input.action_contracts}
     actor_keys = {item.actor_key for item in closure.planner_input.actors}
     binding_keys = {
-        (item.action_key, item.target_key)
-        for item in closure.planner_input.target_bindings
+        (item.action_key, item.target_key) for item in closure.planner_input.target_bindings
     }
     industrial = next(
         item
@@ -2922,6 +2923,173 @@ def test_linjiang_v2_hidden_target_contracts_never_emit_current_truth() -> None:
     assert all(
         "current_value" not in json.dumps(contract, ensure_ascii=False)
         for contract in contracts.values()
+    )
+
+
+def test_explicit_terminal_effect_binds_only_to_the_same_eligible_target() -> None:
+    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
+    action = next(
+        item for item in definition.actions if item.key == "receive_external_relief_supplies"
+    )
+    known_nodes = {node.key for node in definition.world.nodes}
+    known_facts = {
+        (node.key, fact.key): fact.initial_value
+        for node in definition.world.nodes
+        for fact in node.facts
+    }
+
+    contracts = planner_target_contracts(
+        definition,
+        action,
+        known_node_keys=known_nodes,
+        known_facts=known_facts,
+    )
+    assert contracts["emergency_supply_warehouse"]["effects"] == [
+        {
+            "type": "FACT_MUTATION",
+            "target": "target_key",
+            "fact_key": "external_relief_supply_ready",
+            "value": True,
+        }
+    ]
+
+    broadened_eligibility = action.model_copy(update={"required_interaction_key": "repairable"})
+    broadened_contracts = planner_target_contracts(
+        definition,
+        broadened_eligibility,
+        known_node_keys=known_nodes,
+        known_facts=known_facts,
+    )
+    effect_targets = {
+        target_key
+        for target_key, contract in broadened_contracts.items()
+        if any(
+            effect.get("fact_key") == "external_relief_supply_ready"
+            for effect in cast(list[dict[str, object]], contract.get("effects", []))
+        )
+    }
+    assert effect_targets == {"emergency_supply_warehouse"}
+
+    no_explicit_terminal = broadened_eligibility.model_copy(
+        update={
+            "planning": broadened_eligibility.planning.model_copy(update={"terminal_effects": ()})
+        }
+    )
+    assert (
+        planner_target_contracts(
+            definition,
+            no_explicit_terminal,
+            known_node_keys=known_nodes,
+            known_facts=known_facts,
+        )
+        == {}
+    )
+
+    hidden_fact_contracts = planner_target_contracts(
+        definition,
+        action,
+        known_node_keys=known_nodes,
+        known_facts={
+            identity: value
+            for identity, value in known_facts.items()
+            if identity != ("emergency_supply_warehouse", "external_relief_supply_ready")
+        },
+        include_authored_hidden_target_effects=True,
+    )
+    # A safe desired effect may identify its known target Fact, but never
+    # substitutes or serializes that Fact's hidden current value.
+    assert (
+        hidden_fact_contracts["emergency_supply_warehouse"]["effects"]
+        == (contracts["emergency_supply_warehouse"]["effects"])
+    )
+    assert "current_value" not in json.dumps(hidden_fact_contracts, ensure_ascii=False)
+    hidden_target_contracts = planner_target_contracts(
+        definition,
+        action,
+        known_node_keys=known_nodes - {"emergency_supply_warehouse"},
+        known_facts=known_facts,
+        include_authored_hidden_target_effects=True,
+    )
+    assert "emergency_supply_warehouse" not in hidden_target_contracts
+
+
+def test_external_relief_target_binding_is_shared_by_planner_and_closure(
+    session: Session,
+) -> None:
+    definition = LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0
+    runtime, scope = _v2_0_runtime(
+        session,
+        "linjiang-external-relief-shared-target-binding",
+        definition=definition,
+    )
+    warehouse = session.get(
+        GameInstanceNodeState,
+        (runtime.instance.id, "emergency_supply_warehouse"),
+    )
+    readiness = session.get(
+        GameInstanceFactState,
+        (runtime.instance.id, "emergency_supply_warehouse", "external_relief_supply_ready"),
+    )
+    assert warehouse is not None
+    assert readiness is not None
+    warehouse.visibility = Visibility.KNOWN
+    readiness.visibility = Visibility.KNOWN
+    session.flush()
+
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "接收外部救援物资",
+        resolved_goal=GenericGoalResolution(
+            status="RESOLVED",
+            source=FormalGoalSourceKind.AD_HOC_DYNAMIC.value,
+            dynamic_requirements=(
+                AdHocGoalRequirementCandidateV1(
+                    kind=ObjectiveRequirementKind.FACT,
+                    node_key="emergency_supply_warehouse",
+                    fact_key="external_relief_supply_ready",
+                    accepted_values=(True,),
+                ),
+            ),
+        ),
+        initialize_plan=False,
+    )
+    definition = agent._definition()
+    projection = SharedKnowledgeProjection(session, scope, definition)
+    shared_contract = next(
+        item
+        for item in projection.target_knowledge_contracts()
+        if item.get("action_key") == "receive_external_relief_supplies"
+        and item.get("target_key") == "emergency_supply_warehouse"
+    )
+    shared_effects = shared_contract["effects"]
+    planner_requirement = next(
+        requirement
+        for target in projection.planner_action_requirements()
+        if target["target_key"] == "emergency_supply_warehouse"
+        for requirement in target["requirements"]
+        if requirement["action_key"] == "receive_external_relief_supplies"
+    )
+    assert planner_requirement["effects"] == shared_effects
+
+    closure = PlanningContextBuilder(session, scope).build_v2_closure(
+        definition,
+        agent._objectives(task, definition),
+        task=task,
+        replan_reason=None,
+    )
+    binding = next(
+        item
+        for item in closure.planner_input.target_bindings
+        if item.action_key == "receive_external_relief_supplies"
+        and item.target_key == "emergency_supply_warehouse"
+    )
+    assert list(binding.deterministic_effects) == shared_effects
+    assert any(
+        effect.get("fact_key") == "external_relief_supply_ready"
+        and effect.get("value") is True
+        and effect.get("target") == "target_key"
+        for effect in binding.deterministic_effects
     )
 
 

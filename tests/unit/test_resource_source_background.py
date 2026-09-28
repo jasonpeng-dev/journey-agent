@@ -1,4 +1,5 @@
 from copy import deepcopy
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,8 +25,16 @@ from app.infrastructure.db.models import (
     GameInstanceRegionResourceKnowledge,
     GameInstanceResourceState,
     Player,
+    ScenarioVersion,
 )
+from app.scenarios.authoring import DraftAuthoringError, delete_object, reference_index, rename_key
 from app.scenarios.persistence import ScenarioDefinitionRepository
+from app.scenarios.serialization import (
+    canonical_document_payload,
+    canonical_payload_hash,
+    legacy_resource_source_hint_payload,
+)
+from app.scenarios.versions import ScenarioVersionRepository
 from app.services.game_instances import GameInstanceService
 from app.services.generic_game import GenericGameService
 from app.services.knowledge_projection import SharedKnowledgeProjection
@@ -208,7 +217,9 @@ def _linjiang_runtime(session: Session, key: str) -> tuple[Any, Any]:
 
 def test_linjiang_resource_source_hints_are_authored_and_quantity_free() -> None:
     hints = {
-        item.resource_key: item for item in LINJIANG_V2_TEST.public_knowledge.resource_source_hints
+        item.key: item.source_hint
+        for item in LINJIANG_V2_TEST.world.resources
+        if item.source_hint is not None
     }
     assert len(hints) == 7
     assert hints["general_engineering_parts"].primary_region_key == "north_industrial_district"
@@ -219,14 +230,81 @@ def test_linjiang_resource_source_hints_are_authored_and_quantity_free() -> None
     assert hints["emergency_fuel"].primary_region_key == "south_waterfront_district"
     assert hints["emergency_fuel"].candidate_region_keys == ("north_industrial_district",)
 
-    public_knowledge = LINJIANG_V2_TEST.model_dump(mode="json")["public_knowledge"]
+    document = LINJIANG_V2_TEST.model_dump(mode="json")
+    resources = document["world"]["resources"]
     assert all(
-        set(item) <= {"resource_key", "primary_region_key", "candidate_region_keys"}
-        for item in public_knowledge["resource_source_hints"]
+        "resource_key" not in item["source_hint"]
+        and set(item["source_hint"]) <= {"primary_region_key", "candidate_region_keys"}
+        for item in resources
+        if "source_hint" in item
+    )
+    assert "public_knowledge" not in document
+    assert "source_hint" not in resources[0] or "quantity" not in resources[0]["source_hint"]
+
+
+def _legacy_linjiang_document() -> dict[str, Any]:
+    current = LINJIANG_V2_TEST.model_dump(mode="json")
+    legacy = legacy_resource_source_hint_payload(current)
+    assert legacy is not None
+    return legacy
+
+
+def test_current_and_legacy_source_hint_documents_normalize_to_same_model() -> None:
+    current_document = LINJIANG_V2_TEST.model_dump(mode="json")
+    legacy_document = _legacy_linjiang_document()
+    current = ScenarioDefinitionV2.model_validate(current_document)
+    legacy = ScenarioDefinitionV2.model_validate(legacy_document)
+
+    assert current == LINJIANG_V2_TEST
+    assert legacy == current
+    assert "public_knowledge" not in legacy.model_dump(mode="json")
+    assert (
+        legacy.model_dump(mode="json")["public_references"] == current_document["public_references"]
     )
     assert all(
-        forbidden not in public_knowledge
-        for forbidden in ("quantity", "pool_key", "availability", "facility_key")
+        "resource_key" not in (item.source_hint.model_dump(mode="json") if item.source_hint else {})
+        for item in legacy.world.resources
+    )
+
+    dual_document = deepcopy(current_document)
+    dual_document["public_knowledge"] = deepcopy(legacy_document["public_knowledge"])
+    assert ScenarioDefinitionV2.model_validate(dual_document) == current
+
+    dual_document["public_knowledge"]["resource_source_hints"][0]["primary_region_key"] = (
+        "central_district"
+    )
+    with pytest.raises(ValidationError, match="conflict"):
+        ScenarioDefinitionV2.model_validate(dual_document)
+
+
+def test_immutable_legacy_snapshot_loads_without_rewriting_its_wire_shape(
+    session: Session,
+) -> None:
+    scenario = ScenarioDefinitionRepository(session).persist_initial_draft(LINJIANG_V2_TEST)
+    canonical = canonical_document_payload(LINJIANG_V2_TEST.model_dump(mode="json"))
+    legacy = legacy_resource_source_hint_payload(canonical)
+    assert legacy is not None
+    version = ScenarioVersion(
+        scenario_id=scenario.id,
+        version_number=1,
+        schema_version=2,
+        snapshot_document=deepcopy(legacy),
+        content_hash=canonical_payload_hash(legacy),
+        engine_contract_key=LINJIANG_V2_TEST.engine_contract.key,
+        engine_contract_version=LINJIANG_V2_TEST.engine_contract.version,
+        published_at=datetime.now(UTC),
+    )
+    session.add(version)
+    session.flush()
+
+    loaded = ScenarioVersionRepository(session).load(version.id)
+
+    assert loaded.definition == ScenarioDefinitionV2.model_validate(legacy)
+    assert version.snapshot_document == legacy
+    assert "public_knowledge" in version.snapshot_document
+    assert all(
+        "source_hint" not in resource
+        for resource in version.snapshot_document["world"]["resources"]
     )
 
 
@@ -248,7 +326,7 @@ def test_linjiang_resource_source_hints_are_authored_and_quantity_free() -> None
     ),
 )
 def test_resource_source_hint_references_and_duplicates_fail_closed(mutate: Any) -> None:
-    document = deepcopy(LINJIANG_V2_TEST.model_dump(mode="json"))
+    document = _legacy_linjiang_document()
     mutate(document)
     with pytest.raises(ValidationError):
         ScenarioDefinitionV2.model_validate(document)
@@ -258,6 +336,91 @@ def test_scenarios_without_resource_source_background_remain_compatible() -> Non
     document = deepcopy(GENERIC_TEST.model_dump(mode="json"))
     assert "public_knowledge" not in document
     assert ScenarioDefinitionV2.model_validate(document) == GENERIC_TEST
+
+
+def test_resource_region_references_are_owned_by_resource_and_block_region_delete() -> None:
+    document = LINJIANG_V2_TEST.model_dump(mode="json")
+    edges = reference_index(document)
+    source_edges = [
+        edge
+        for edge in edges
+        if edge.source.object_kind == "resource"
+        and (edge.source.field_path or "").startswith("source_hint.")
+    ]
+    assert source_edges
+    assert all(edge.target.object_kind == "node" for edge in source_edges)
+    assert not any(
+        edge.source.object_kind == "document"
+        and edge.source.field_path == "public_knowledge.resource_source_hints"
+        for edge in edges
+    )
+    assert not any(edge.target.object_kind == "resource" for edge in source_edges)
+
+    primary_edge = next(
+        edge for edge in source_edges if edge.source.field_path == "source_hint.primary_region_key"
+    )
+    assert primary_edge.source.object_key is not None
+    assert primary_edge.target.object_key is not None
+    with pytest.raises(DraftAuthoringError) as caught:
+        delete_object(document, object_kind="node", object_key=primary_edge.target.object_key)
+    assert caught.value.code == "SCENARIO_OBJECT_REFERENCED"
+    assert any(
+        edge.source.object_kind == "resource"
+        and edge.source.object_key == primary_edge.source.object_key
+        and edge.source.field_path == "source_hint.primary_region_key"
+        for edge in caught.value.references
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_path", "new_key"),
+    (
+        ("source_hint.primary_region_key", "renamed_primary_region"),
+        ("source_hint.candidate_region_keys", "renamed_candidate_region"),
+    ),
+)
+def test_safe_region_rename_rewrites_resource_source_hint_references(
+    field_path: str,
+    new_key: str,
+) -> None:
+    document = LINJIANG_V2_TEST.model_dump(mode="json")
+    edge = next(
+        edge
+        for edge in reference_index(document)
+        if edge.source.object_kind == "resource" and edge.source.field_path == field_path
+    )
+    old_key = edge.target.object_key
+    assert old_key is not None
+
+    renamed = rename_key(
+        document,
+        object_kind="node",
+        old_key=old_key,
+        new_key=new_key,
+    )
+
+    resource = next(
+        item for item in renamed["world"]["resources"] if item["key"] == edge.source.object_key
+    )
+    hint = resource["source_hint"]
+    if field_path.endswith("candidate_region_keys"):
+        assert old_key not in hint["candidate_region_keys"]
+        assert new_key in hint["candidate_region_keys"]
+    else:
+        assert hint["primary_region_key"] == new_key
+
+    rewritten_edge = next(
+        edge
+        for edge in reference_index(renamed)
+        if edge.source.object_kind == "resource"
+        and edge.source.object_key == resource["key"]
+        and edge.source.field_path == field_path
+        and edge.target.object_key == new_key
+    )
+    assert rewritten_edge.target.object_kind == "node"
+    with pytest.raises(DraftAuthoringError) as caught:
+        delete_object(renamed, object_kind="node", object_key=new_key)
+    assert caught.value.code == "SCENARIO_OBJECT_REFERENCED"
 
 
 def test_sufficient_known_inventory_suppresses_source_hints() -> None:
@@ -364,6 +527,69 @@ def test_source_hints_do_not_restrict_the_generic_region_catalog() -> None:
     assert result.planner_input.known_world.resource_source_hints[0].candidate_region_keys == (
         "candidate_region",
         "other_region",
+    )
+
+
+def test_legacy_and_current_forms_have_equivalent_goal_context_planner_and_closure(
+    session: Session,
+) -> None:
+    runtime, scope = _linjiang_runtime(session, "resource-source-canonical-equivalence")
+    agent = GenericAgentService(session, scope)
+    task = agent.create_task(
+        runtime.session,
+        "establish sustained emergency generation",
+        resolved_goal=predefined_goal_resolution("establish_sustained_emergency_generation"),
+        initialize_plan=False,
+    )
+    current_definition = ScenarioDefinitionV2.model_validate(
+        LINJIANG_V2_TEST.model_dump(mode="json")
+    )
+    legacy_definition = ScenarioDefinitionV2.model_validate(_legacy_linjiang_document())
+    assert legacy_definition == current_definition
+
+    current_projection = SharedKnowledgeProjection(session, scope, current_definition)
+    legacy_projection = SharedKnowledgeProjection(session, scope, legacy_definition)
+    assert (
+        legacy_projection.public_resource_source_hints()
+        == current_projection.public_resource_source_hints()
+    )
+
+    builder = PlanningContextBuilder(session, scope)
+    current_objectives = agent._objectives(task, current_definition)
+    legacy_objectives = agent._objectives(task, legacy_definition)
+    assert legacy_objectives == current_objectives
+    current_context = builder.build(
+        current_definition,
+        current_objectives,
+        task=task,
+        replan_reason=None,
+    )
+    legacy_context = builder.build(
+        legacy_definition,
+        legacy_objectives,
+        task=task,
+        replan_reason=None,
+    )
+    assert legacy_context.goal == current_context.goal
+    assert legacy_context.current_knowledge == current_context.current_knowledge
+
+    current_closure = builder.build_v2_closure(
+        current_definition,
+        current_objectives,
+        task=task,
+        replan_reason=None,
+    )
+    legacy_closure = builder.build_v2_closure(
+        legacy_definition,
+        legacy_objectives,
+        task=task,
+        replan_reason=None,
+    )
+    assert legacy_closure.planner_input == current_closure.planner_input
+    assert legacy_closure.relevance_reason == current_closure.relevance_reason
+    assert (
+        legacy_closure.planner_input.known_world.resource_source_hints
+        == current_closure.planner_input.known_world.resource_source_hints
     )
 
 

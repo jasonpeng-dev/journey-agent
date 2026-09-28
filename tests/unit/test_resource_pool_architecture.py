@@ -1000,13 +1000,11 @@ def test_player_projection_keeps_facility_stock_out_of_usable_regional_total(
     assert associated[0]["facility_name"] == "市政工程维修基地"
     assert associated[0]["quantity"] == 100
     assert associated[0]["availability"] == "UNAVAILABLE"
-    assert associated[0]["availability_requirement"] == {
-        "node_key": "utility_service_depot",
-        "fact_key": "operational",
-        "value": True,
-    }
-    assert associated[0]["availability_requirement_status"] == "KNOWN"
-    assert "known_value" not in associated[0]["availability_requirement"]
+    assert associated[0]["availability_requirement"] == {"status": "UNKNOWN"}
+    assert associated[0]["availability_requirement_status"] == "UNKNOWN"
+    assert "node_key" not in associated[0]["availability_requirement"]
+    assert "fact_key" not in associated[0]["availability_requirement"]
+    assert "value" not in associated[0]["availability_requirement"]
 
     for pool_key in ("north_service_depot_stock",):
         pool = session.get(
@@ -1309,32 +1307,22 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
     known_pool = next(
         item for item in projection.visible_resource_pools() if item.pool_key == "north_hidden_pool"
     )
-    assert known_pool.availability_requirement == {
-        "node_key": "north_power_substation",
-        "fact_key": "operational",
-        "value": True,
-    }
-    assert known_pool.availability_requirement_status == "KNOWN"
-    assert "known_value" not in known_pool.availability_requirement
+    assert known_pool.availability_requirement == {"status": "UNKNOWN"}
+    assert known_pool.availability_requirement_status == "UNKNOWN"
+    assert "node_key" not in known_pool.availability_requirement
+    assert "fact_key" not in known_pool.availability_requirement
+    assert "value" not in known_pool.availability_requirement
     summary = projection.resource_intelligence()["regions"]["north_industrial_district"][
         "resources"
     ]["electrical_repair_parts"]
     pool_summary = summary["pools"][0]
-    assert pool_summary["availability_requirement"] == {
-        "node_key": "north_power_substation",
-        "fact_key": "operational",
-        "value": True,
-    }
-    assert pool_summary["availability_requirement_status"] == "KNOWN"
+    assert pool_summary["availability_requirement"] == {"status": "UNKNOWN"}
+    assert pool_summary["availability_requirement_status"] == "UNKNOWN"
     planner_pool = projection.planner_resources()["resources"]["electrical_repair_parts"][
         "regions"
     ]["north_industrial_district"]["pools"][0]
-    assert planner_pool["availability_requirement"] == {
-        "node_key": "north_power_substation",
-        "fact_key": "operational",
-        "value": True,
-    }
-    assert planner_pool["availability_requirement_status"] == "KNOWN"
+    assert planner_pool["availability_requirement"] == {"status": "UNKNOWN"}
+    assert planner_pool["availability_requirement_status"] == "UNKNOWN"
     player_pool = (
         PlayerProjectionService(session)
         .game_state(GameInstanceId(runtime.instance.id))
@@ -1342,13 +1330,20 @@ def test_unknown_unlock_requirement_is_explicitly_safe_in_player_and_planner_pro
             "electrical_repair_parts"
         ]["pools"][0]
     )
-    assert player_pool["availability_requirement"] == {
-        "node_key": "north_power_substation",
-        "fact_key": "operational",
-        "value": True,
-    }
-    assert player_pool["availability_requirement_status"] == "KNOWN"
-    assert "known_value" not in player_pool["availability_requirement"]
+    assert player_pool["availability_requirement"] == {"status": "UNKNOWN"}
+    assert player_pool["availability_requirement_status"] == "UNKNOWN"
+    assert "node_key" not in player_pool["availability_requirement"]
+    assert "fact_key" not in player_pool["availability_requirement"]
+    assert "value" not in player_pool["availability_requirement"]
+    player_payload = (
+        PlayerProjectionService(session)
+        .game_state(GameInstanceId(runtime.instance.id))
+        .model_dump(mode="json")
+    )
+    player_requirement = player_payload["resource_intelligence"]["regions"][
+        "north_industrial_district"
+    ]["resources"]["electrical_repair_parts"]["pools"][0]["availability_requirement"]
+    assert player_requirement == {"status": "UNKNOWN"}
     task = GenericAgentService(session, scope).create_task(
         runtime.session,
         "restore central communications",

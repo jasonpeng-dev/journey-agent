@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import delete as sql_delete
-from sqlalchemy import func, select, update
+from sqlalchemy import func, inspect, select, update
 from sqlalchemy.orm import Session
 
 from app.domain.enums import (
@@ -23,6 +24,7 @@ from app.infrastructure.db.models import (
     ConversationMessage,
     ConversationSession,
     GameInstance,
+    GameInstanceActionTargetKnowledge,
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceMemoryEvent,
@@ -66,16 +68,30 @@ class GameLifecycleService:
             self.db.flush()
         return player
 
-    def create(self, *, scenario_version_id: UUID, idempotency_key: str) -> InitializedRuntime:
+    def create(
+        self,
+        *,
+        scenario_version_id: UUID,
+        idempotency_key: str,
+        scenario_id: UUID | None = None,
+    ) -> InitializedRuntime:
         version = self.db.get(ScenarioVersion, scenario_version_id)
         if version is None:
             raise GameLifecycleError(
                 "SCENARIO_VERSION_NOT_FOUND", "The published ScenarioVersion does not exist"
             )
+        if scenario_id is not None and version.scenario_id != scenario_id:
+            raise GameLifecycleError(
+                "SCENARIO_VERSION_SCENARIO_MISMATCH",
+                "The selected ScenarioVersion does not belong to the selected Scenario",
+            )
         compatibility = check_scenario_version_execution_compatibility(self.db, version.id)
         if not compatibility.compatible:
+            reason_code = compatibility.reason_code
             raise GameLifecycleError(
-                "LEGACY_SCENARIO_VERSION_READ_ONLY",
+                reason_code
+                if reason_code and reason_code != "SCENARIO_VERSION_NOT_CURRENT_PLAYABLE"
+                else "LEGACY_SCENARIO_VERSION_READ_ONLY",
                 compatibility.reason or "This ScenarioVersion is read-only for gameplay",
             )
         scenario = self.db.get(Scenario, version.scenario_id)
@@ -180,7 +196,7 @@ class GameLifecycleService:
             self.db.execute(
                 sql_delete(ConversationSession).where(ConversationSession.id.in_(session_ids))
             )
-        for model in (
+        models: tuple[type[Any], ...] = (
             GameInstanceMemoryEvent,
             GameInstanceActor,
             GameInstanceResourceState,
@@ -188,7 +204,10 @@ class GameLifecycleService:
             GameInstanceRelationKnowledge,
             GameInstanceFactState,
             GameInstanceNodeState,
-        ):
+        )
+        if inspect(self.db.connection()).has_table("game_instance_action_target_knowledge"):
+            models = (*models, GameInstanceActionTargetKnowledge)
+        for model in models:
             self.db.execute(sql_delete(model).where(model.game_instance_id == deleted_id))
         self.db.execute(
             update(GameInstance)

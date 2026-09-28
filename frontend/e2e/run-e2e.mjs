@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -25,6 +26,21 @@ let terminationPromise;
 
 function delay(milliseconds) {
   return new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds));
+}
+
+async function findFreePort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : null;
+  await new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
+  if (!port) throw new Error("Unable to allocate a free local port for E2E");
+  return port;
 }
 
 function spawnCommand(label, command, args, cwd, env) {
@@ -166,23 +182,41 @@ async function main() {
   const e2eRoot = await mkdtemp(path.join(os.tmpdir(), "journey-agent-e2e-"));
   const databasePath = path.join(e2eRoot, "journey_e2e.db");
   const databaseUrl = `sqlite+pysqlite:///${databasePath.replaceAll("\\", "/")}`;
+  const backendPort = Number(process.env.E2E_BACKEND_PORT ?? await findFreePort());
+  const frontendPort = Number(process.env.E2E_FRONTEND_PORT ?? await findFreePort());
+  const backendOrigin = `http://127.0.0.1:${backendPort}`;
+  const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
   const env = {
     ...process.env,
     DATABASE_URL: databaseUrl,
     DEVELOPER_API_TOKEN: process.env.DEVELOPER_API_TOKEN ?? "ci-developer",
-    E2E_API_ORIGIN: "http://127.0.0.1:8000",
+    E2E_API_ORIGIN: backendOrigin,
+    E2E_FRONTEND_ORIGIN: frontendOrigin,
     E2E_ARTIFACT_DIR: path.join(e2eRoot, "playwright-output"),
     E2E_DB_DIR: e2eRoot,
     E2E_FIXTURE_DB: databasePath,
     E2E_MANAGED_SERVERS: "1",
     E2E_PYTHON: python,
     MODEL_PROVIDER: "mock",
+    VITE_CACHE_DIR: path.join(e2eRoot, "vite-cache"),
   };
   let exitCode = 1;
   let cleanupError = null;
   try {
     await runChecked("database migration", python, ["-m", "alembic", "upgrade", "head"], repositoryRoot, env);
-    await runChecked("database seed", python, ["-m", "app.seed"], repositoryRoot, env);
+    await runChecked(
+      "official release artifact import",
+      python,
+      [
+        "-m",
+        "app.cli",
+        "scenario",
+        "import",
+        path.join(repositoryRoot, "scenarios", "examples", "linjiang_infrastructure_recovery.scenario.json"),
+      ],
+      repositoryRoot,
+      env,
+    );
     await runChecked(
       "platform player preparation",
       python,
@@ -193,24 +227,38 @@ async function main() {
       repositoryRoot,
       env,
     );
+    await runChecked(
+      "generic authoring scenario preparation",
+      python,
+      [path.join(frontendRoot, "e2e", "prepare_history_fixture.py"), "scenario"],
+      repositoryRoot,
+      env,
+    );
+    await runChecked(
+      "portability v3 scenario preparation",
+      python,
+      [path.join(frontendRoot, "e2e", "prepare_history_fixture.py"), "portability"],
+      repositoryRoot,
+      env,
+    );
 
     const backend = spawnCommand(
       "backend",
       python,
-      ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+      ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(backendPort)],
       repositoryRoot,
       env,
     );
-    await waitForHttp("backend", "http://127.0.0.1:8000/ready", backend.child);
+    await waitForHttp("backend", `${backendOrigin}/ready`, backend.child);
 
     const frontend = spawnCommand(
       "frontend",
       process.execPath,
-      [viteEntry, "--configLoader", "runner", "--host", "127.0.0.1", "--port", "4173"],
+      [viteEntry, "--configLoader", "runner", "--host", "127.0.0.1", "--port", String(frontendPort)],
       frontendRoot,
       env,
     );
-    await waitForHttp("frontend", "http://127.0.0.1:4173/", frontend.child);
+    await waitForHttp("frontend", `${frontendOrigin}/`, frontend.child);
 
     const playwrightArgs = process.argv.slice(2);
     if (!playwrightArgs.some((argument) => argument === "--workers" || argument.startsWith("--workers="))) {

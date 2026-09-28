@@ -74,6 +74,7 @@ def list_games(
 def create_game(request: NewGameRequest, db: Session = Depends(get_db)) -> GameSummaryResponse:
     try:
         runtime = GameLifecycleService(db).create(
+            scenario_id=request.scenario_id,
             scenario_version_id=request.scenario_version_id,
             idempotency_key=request.idempotency_key,
         )

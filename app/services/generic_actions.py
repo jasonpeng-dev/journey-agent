@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.agent.authority import actor_binding_matches, evaluate_authority
 from app.domain.action_invocation import canonical_action_invocation
 from app.domain.enums import AuthorityOutcome, DecisionStatus, WorldOperationStatus
+from app.domain.failures import FailureEvent, normalize_legacy_failure
 from app.domain.runtime_scope import RuntimeScope
 from app.domain.scenario_v2 import (
     ActionDefinitionV2,
@@ -40,11 +41,19 @@ class GenericActionError(ValueError):
         message: str,
         *,
         retryable: bool = False,
+        failure_event: FailureEvent | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
+        self._failure_event = failure_event
+
+    @property
+    def failure_event(self) -> FailureEvent:
+        """Typed view of the Action boundary error with legacy fields intact."""
+
+        return self._failure_event or normalize_legacy_failure(self)
 
 
 class GenericApprovalRequired(GenericActionError):
@@ -166,14 +175,24 @@ class GenericActionService:
                 approval_granted=approval_granted,
             )
         except GenericGameError as exc:
-            raise GenericActionError(exc.code, exc.message, retryable=exc.retryable) from exc
+            raise GenericActionError(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                failure_event=exc.failure_event,
+            ) from exc
         except RuleEngineError as exc:
-            raise GenericActionError(exc.code, exc.message) from exc
+            raise GenericActionError(
+                exc.code,
+                exc.message,
+                failure_event=exc.failure_event,
+            ) from exc
         if preflight is not None and preflight.failure is not None:
             raise GenericActionError(
                 preflight.failure.code,
                 preflight.failure.message,
                 retryable=preflight.failure.retryable,
+                failure_event=preflight.failure_event,
             )
         operation = WorldOperation(
             player_id=self.scope.player_id,
@@ -206,9 +225,19 @@ class GenericActionService:
                 approval_granted=approval_granted,
             )
         except GenericGameError as exc:
-            applied = self._runtime_failure(exc.code, exc.message, retryable=exc.retryable)
+            applied = self._runtime_failure(
+                exc.code,
+                exc.message,
+                retryable=exc.retryable,
+                failure_event=exc.failure_event,
+            )
         except RuleEngineError as exc:
-            applied = self._runtime_failure(exc.code, exc.message, retryable=False)
+            applied = self._runtime_failure(
+                exc.code,
+                exc.message,
+                retryable=False,
+                failure_event=exc.failure_event,
+            )
         self._complete(operation, applied, resolution_key=idempotency_key)
         return ActionExecutionResult(operation, applied, False)
 
@@ -246,7 +275,12 @@ class GenericActionService:
         try:
             action = self._action(operation.action_key)
         except GenericActionError as exc:
-            applied = self._runtime_failure(exc.code, exc.message, retryable=False)
+            applied = self._runtime_failure(
+                exc.code,
+                exc.message,
+                retryable=False,
+                failure_event=exc.failure_event,
+            )
         else:
             try:
                 operation.parameters = normalize_action_parameters(
@@ -267,9 +301,19 @@ class GenericActionService:
                         approval_granted=True,
                     )
                 except GenericGameError as exc:
-                    applied = self._runtime_failure(exc.code, exc.message, retryable=exc.retryable)
+                    applied = self._runtime_failure(
+                        exc.code,
+                        exc.message,
+                        retryable=exc.retryable,
+                        failure_event=exc.failure_event,
+                    )
                 except RuleEngineError as exc:
-                    applied = self._runtime_failure(exc.code, exc.message, retryable=False)
+                    applied = self._runtime_failure(
+                        exc.code,
+                        exc.message,
+                        retryable=False,
+                        failure_event=exc.failure_event,
+                    )
         self._complete(operation, applied, resolution_key=resolution_key)
         return ActionExecutionResult(operation, applied, False)
 
@@ -386,6 +430,7 @@ class GenericActionService:
         message: str,
         *,
         retryable: bool,
+        failure_event: FailureEvent | None = None,
     ) -> AppliedRuleResult:
         instance = self.db.get(GameInstance, self.scope.game_instance_id)
         runtime_revision = instance.runtime_revision if instance is not None else 0
@@ -393,6 +438,12 @@ class GenericActionService:
             outcome=GenericRuleOutcome(
                 selected_rule_key="APPLICATION_RUNTIME_ERROR",
                 failure=RuleFailure(code=code, message=message, retryable=retryable),
+                failure_event=(
+                    failure_event
+                    or normalize_legacy_failure(
+                        RuleFailure(code=code, message=message, retryable=retryable)
+                    )
+                ),
             ),
             runtime_revision=runtime_revision,
         )

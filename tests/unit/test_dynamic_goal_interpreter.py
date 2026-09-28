@@ -41,14 +41,12 @@ from app.domain.formal_goal import (
     AdHocGoalCandidateSetV2,
     FormalGoalError,
     FormalGoalSourceKind,
-    compile_predefined_formal_goal,
 )
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import ObjectiveRequirementKind, RelationDefinitionV2
 from app.domain.world import Visibility
 from app.infrastructure.db.models import GameInstanceFactState, GameInstanceResourceState, Player
 from app.scenarios.builtin import LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0, require_builtin_v2_version
-from app.scenarios.versions import ScenarioVersionRepository
 from app.services.formal_goal import load_formal_goal_for_task
 from app.services.game_instances import GameInstanceService
 from app.services.play import PlayOrchestrator
@@ -898,14 +896,10 @@ def test_exact_public_entity_uses_focused_ontology_without_legacy_recovery() -> 
     provider = _GroundingProvider(
         DynamicGoalEntityGrounding(
             candidate_refs=(
-                DynamicGoalCandidateReference(
-                    ref_type="NODE", key="west_freight_corridor"
-                ),
+                DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
             )
         ),
-        (
-            DynamicGoalInterpretation(requirements=(candidate,)),
-        ),
+        (DynamicGoalInterpretation(requirements=(candidate,)),),
     )
 
     resolution = GenericGoalResolver(provider=provider).resolve(
@@ -929,9 +923,7 @@ def test_exact_public_entity_uses_focused_ontology_without_legacy_recovery() -> 
     assert provider.requests[0].recovery_attempt == 0
     assert resolution.provider_observation is not None
     assert resolution.provider_observation["attempt_count"] == 1
-    assert resolution.provider_observation["grounding"]["source"] == (
-        "FROZEN_STATE_PUBLIC_CATALOG"
-    )
+    assert resolution.provider_observation["grounding"]["source"] == ("FROZEN_STATE_PUBLIC_CATALOG")
 
 
 def test_colloquial_public_entity_uses_one_bounded_grounding_call() -> None:
@@ -944,9 +936,7 @@ def test_colloquial_public_entity_uses_one_bounded_grounding_call() -> None:
     provider = _GroundingProvider(
         DynamicGoalEntityGrounding(
             candidate_refs=(
-                DynamicGoalCandidateReference(
-                    ref_type="NODE", key="west_freight_corridor"
-                ),
+                DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
             )
         ),
         (DynamicGoalInterpretation(requirements=(candidate,)),),
@@ -989,9 +979,7 @@ def test_public_topology_uniquely_grounds_relation_without_model_search() -> Non
     assert resolution.status == "RESOLVED"
     assert len(provider.requests) == 1
     assert provider.requests[0].grounded_entity_keys == ("central_river_tunnel",)
-    assert provider.requests[0].ontology["grounding"]["source"] == (
-        "FROZEN_STATE_PUBLIC_CATALOG"
-    )
+    assert provider.requests[0].ontology["grounding"]["source"] == ("FROZEN_STATE_PUBLIC_CATALOG")
 
 
 def test_ambiguous_public_topology_clarifies_without_arbitrary_pick() -> None:
@@ -1067,8 +1055,9 @@ def test_entity_grounding_unsupported_does_not_start_interpretation() -> None:
     assert resolution.objective_keys == ()
 
 
-def _obsolete_test_entity_grounding_retries_retryable_results_and_reuses_successful_grounding(
-) -> None:
+def _obsolete_test_entity_grounding_retries_retryable_results_and_reuses_successful_grounding() -> (
+    None
+):
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.FACT,
         node_key="west_freight_corridor",
@@ -1080,9 +1069,7 @@ def _obsolete_test_entity_grounding_retries_retryable_results_and_reuses_success
             GenericProviderError("MODEL_PROVIDER_RESPONSE_INVALID", "invalid"),
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
         ),
@@ -1115,9 +1102,7 @@ def test_entity_grounding_clarification_stops_without_retry() -> None:
             ),
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
         ),
@@ -1134,8 +1119,9 @@ def test_entity_grounding_clarification_stops_without_retry() -> None:
     assert provider.requests == []
 
 
-def _obsolete_test_two_by_two_retries_interpretation_without_regrounding_after_first_rejection(
-) -> None:
+def _obsolete_test_two_by_two_retries_interpretation_without_regrounding_after_first_rejection() -> (  # noqa: E501
+    None
+):
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.FACT,
         node_key="west_freight_corridor",
@@ -1176,8 +1162,9 @@ def _obsolete_test_two_by_two_retries_interpretation_without_regrounding_after_f
     assert [call["interpretation_attempt"] for call in calls[1:]] == [1, 2]
 
 
-def _obsolete_test_interpretation_schema_recovery_reuses_grounding_projection_and_feedback(
-) -> None:
+def _obsolete_test_interpretation_schema_recovery_reuses_grounding_projection_and_feedback() -> (
+    None
+):
     derived_key = "north_basic_engineering_support"
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.DERIVED_STATE,
@@ -1317,16 +1304,12 @@ def _obsolete_test_two_by_two_regrounds_after_two_interpretation_rejections() ->
         (
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="central_telecom_hub"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="central_telecom_hub"),
                 )
             ),
         ),
@@ -1378,14 +1361,10 @@ def _obsolete_test_invalid_grounding_reference_skips_interpretation_and_uses_sec
     provider = _SequenceDynamicProvider(
         (
             DynamicGoalEntityGrounding(
-                candidate_refs=(
-                    DynamicGoalCandidateReference(ref_type="NODE", key="not_public"),
-                )
+                candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key="not_public"),)
             ),
             DynamicGoalEntityGrounding(
-                candidate_refs=(
-                    DynamicGoalCandidateReference(ref_type="NODE", key="patient_one"),
-                )
+                candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key="patient_one"),)
             ),
         ),
         (DynamicGoalInterpretation(requirements=(candidate,)),),
@@ -1428,22 +1407,19 @@ def _obsolete_test_grounding_unsupported_is_bounded_to_two_rounds() -> None:
     assert resolution.provider_observation["grounding_round_count"] == 1
 
 
-def _obsolete_test_two_by_two_failure_does_not_issue_a_third_grounding_or_interpretation_call(
-) -> None:
+def _obsolete_test_two_by_two_failure_does_not_issue_a_third_grounding_or_interpretation_call() -> (
+    None
+):
     provider = _SequenceDynamicProvider(
         (
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
             DynamicGoalEntityGrounding(
                 candidate_refs=(
-                    DynamicGoalCandidateReference(
-                        ref_type="NODE", key="west_freight_corridor"
-                    ),
+                    DynamicGoalCandidateReference(ref_type="NODE", key="west_freight_corridor"),
                 )
             ),
         ),
@@ -1507,9 +1483,7 @@ def _obsolete_test_interpretation_retries_twice_without_regrounding() -> None:
 def test_entity_grounding_cannot_invent_a_public_entity_key() -> None:
     provider = _GroundingProvider(
         DynamicGoalEntityGrounding(
-            candidate_refs=(
-                DynamicGoalCandidateReference(ref_type="NODE", key="invented_entity"),
-            )
+            candidate_refs=(DynamicGoalCandidateReference(ref_type="NODE", key="invented_entity"),)
         ),
         (DynamicGoalInterpretation(status="UNSUPPORTED"),),
     )
@@ -1526,10 +1500,10 @@ def test_entity_grounding_cannot_invent_a_public_entity_key() -> None:
 
 
 def test_canonical_task5_goal_routes_to_public_derived_capability() -> None:
-    objective = next(
+    state = next(
         item
-        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives
-        if item.key == "establish_citywide_sustained_emergency_support"
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.derived_states
+        if item.key == "citywide_sustained_emergency_support"
     )
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.DERIVED_STATE,
@@ -1539,7 +1513,7 @@ def test_canonical_task5_goal_routes_to_public_derived_capability() -> None:
     provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(candidate,)))
 
     resolution = GenericGoalResolver(provider=provider).resolve(
-        objective.name,
+        state.name,
         LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0,
     )
 
@@ -1556,13 +1530,11 @@ def test_canonical_task5_goal_routes_to_public_derived_capability() -> None:
     assert len(provider.requests) == 1
 
 
-def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
-    session,
-) -> None:
-    objective = next(
+def test_canonical_task6_goal_and_alias_keep_hidden_semantics() -> None:
+    state = next(
         item
-        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.objectives
-        if item.key == "establish_sustained_emergency_generation"
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.derived_states
+        if item.key == "southeast_sustained_emergency_generation"
     )
     candidate = AdHocGoalRequirementCandidateV1(
         kind=ObjectiveRequirementKind.DERIVED_STATE,
@@ -1572,7 +1544,7 @@ def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
     provider = _DynamicProvider(DynamicGoalInterpretation(requirements=(candidate,)))
     resolver = GenericGoalResolver(provider=provider)
 
-    for goal in (objective.name, *objective.goal_aliases):
+    for goal in (state.name, *state.goal_aliases):
         resolution = resolver.resolve(goal, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
         assert resolution.status == "RESOLVED"
         assert resolution.source == FormalGoalSourceKind.AD_HOC_DYNAMIC.value
@@ -1583,20 +1555,9 @@ def test_canonical_task6_goal_and_alias_keep_hidden_semantics(
             "southeast_sustained_emergency_generation"
         )
 
-    version = require_builtin_v2_version(session, LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0)
-    assert version is not None
-    contract = compile_predefined_formal_goal(
-        ScenarioVersionRepository(session).load(version.id),
-        (objective,),
-    )
-    assert contract.source_kind == FormalGoalSourceKind.PREDEFINED
-    requirement = contract.completion_requirements[0].requirement
-    assert requirement.kind == ObjectiveRequirementKind.DERIVED_STATE
-    assert requirement.derived_key == "southeast_sustained_emergency_generation"
-    derived = ScenarioVersionRepository(session).load(version.id).definition
     assert any(
         item.knowledge_gate is not None
-        for item in derived.derived_state_definitions[
+        for item in LINJIANG_INFRASTRUCTURE_RECOVERY_V2_0.derived_state_definitions[
             "southeast_sustained_emergency_generation"
         ].dependencies
     )

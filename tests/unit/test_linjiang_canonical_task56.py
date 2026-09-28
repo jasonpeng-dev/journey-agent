@@ -1109,8 +1109,7 @@ def test_task6_state_discovery_is_generic_and_sticky_for_an_alternative_action(
     session.flush()
     projection = SharedKnowledgeProjection(session, scope, alternative_definition)
     known_gate = {
-        (row.node_key, row.fact_key): row.truth_value
-        for row in projection.known_fact_rows()
+        (row.node_key, row.fact_key): row.truth_value for row in projection.known_fact_rows()
     }
     assert known_gate[("southeast_fuel_emergency_power_plant", "sustained_requirements_discovered")]
 
@@ -1144,17 +1143,11 @@ def test_task6_generate_power_requires_operational_power_and_startup_fuel() -> N
         if item.action_key == "generate_power" and item.phase.value == "RESOLVE"
     )
     resolution_effect_facts = {
-        effect.fact_key
-        for effect in resolution.effects
-        if effect.kind == EffectKind.SET_FACT
+        effect.fact_key for effect in resolution.effects if effect.kind == EffectKind.SET_FACT
     }
     assert "generating" in resolution_effect_facts
     assert "sustained_requirements_discovered" not in resolution_effect_facts
-    state_discovery_rules = [
-        item
-        for item in definition.rules
-        if item.trigger.value == "STATE"
-    ]
+    state_discovery_rules = [item for item in definition.rules if item.trigger.value == "STATE"]
     assert len(state_discovery_rules) == 1
     assert state_discovery_rules[0].action_key is None
     assert any(

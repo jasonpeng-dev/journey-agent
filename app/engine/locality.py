@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from app.domain.failures import FailureEvent, normalize_legacy_failure
 from app.domain.scenario_v2 import (
     ActionBehavior,
     ActionDefinitionV2,
@@ -27,12 +28,20 @@ class LocalityEngineError(ValueError):
         *,
         retryable: bool = False,
         details: dict[str, object] | None = None,
+        failure_event: FailureEvent | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
         self.details = dict(details or {})
+        self._failure_event = failure_event
+
+    @property
+    def failure_event(self) -> FailureEvent:
+        """Expose a typed runtime event while retaining the legacy exception."""
+
+        return self._failure_event or normalize_legacy_failure(self)
 
 
 def locality_enabled(definition: ScenarioDefinitionV2) -> bool:

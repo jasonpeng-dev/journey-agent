@@ -1,4 +1,4 @@
-import type { DeveloperSnapshot, Draft, DraftSandboxResult, GameHistory, GameSummary, GoalSubmission, PlayerGameState, ReferenceIndex, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, ValidationResult } from "./types";
+import type { CompletenessResult, DeveloperSnapshot, Draft, DraftSandboxResult, DraftTransformOperation, GameHistory, GameSummary, GoalSubmission, NewScenarioArtifactPreview, PlayerGameState, PresentationProfileHistoryResponse, PresentationProfileResponse, PresentationProfileDocument, ReferenceIndex, RestorePreview, ScenarioArtifactImportResult, ScenarioDeletionImpact, ScenarioExample, ScenarioSummary, ScenarioVersion, ScenarioVersionDetail, SemanticDiff, ValidationResult, WorkingCopyReferenceAnalysis, WorkingCopyTransformResult } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -33,16 +33,59 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   scenarios: () => request<ScenarioSummary[]>("/api/v1/scenarios"),
   scenario: (id: string) => request<ScenarioSummary>(`/api/v1/scenarios/${id}`),
+  presentation: (id: string) => request<PresentationProfileResponse>(`/api/v1/scenarios/${id}/presentation`),
+  presentationRevision: (id: string) => request<import("./types").PresentationProfileRevisionCheck>(`/api/v1/scenarios/${id}/presentation/revision`),
+  presentationHistory: (id: string) => request<PresentationProfileHistoryResponse>(`/api/v1/scenarios/${id}/presentation/revisions`),
+  savePresentation: (id: string, revision: number, profile: PresentationProfileDocument) =>
+    request<PresentationProfileResponse>(`/api/v1/scenarios/${id}/presentation`, {
+      method: "PUT",
+      body: JSON.stringify({ expected_revision: revision, profile }),
+    }),
+  restorePresentation: (id: string, revision: number, targetRevision: number) =>
+    request<PresentationProfileResponse>(`/api/v1/scenarios/${id}/presentation/restore`, {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision, revision: targetRevision }),
+    }),
   draft: (id: string) => request<Draft>(`/api/v1/scenarios/${id}/draft`),
   references: (id: string) => request<ReferenceIndex>(`/api/v1/scenarios/${id}/draft/references`),
+  analyzeWorkingCopyReferences: (id: string, revision: number, document: Record<string, unknown>) =>
+    request<WorkingCopyReferenceAnalysis>(`/api/v1/scenarios/${id}/draft/reference-analysis`, {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision, definition_document: document }),
+    }),
+  completeness: (id: string, revision: number, document: Record<string, unknown>) =>
+    request<CompletenessResult>(`/api/v1/scenarios/${id}/draft/completeness`, {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision, definition_document: document }),
+    }),
+  transformWorkingCopy: (id: string, revision: number, document: Record<string, unknown>, operation: DraftTransformOperation) =>
+    request<WorkingCopyTransformResult>(`/api/v1/scenarios/${id}/draft/transform`, {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision, definition_document: document, operation }),
+    }),
   examples: () => request<ScenarioExample[]>("/api/v1/scenario-examples"),
   createScenario: (payload: Record<string, unknown>) => request<ScenarioSummary>("/api/v1/scenarios", { method: "POST", body: JSON.stringify(payload) }),
   validateDraft: (id: string, revision: number) => request<ValidationResult>(`/api/v1/scenarios/${id}/draft/validate`, { method: "POST", body: JSON.stringify({ expected_revision: revision }) }),
+  initializationPreview: (id: string, revision: number, document: Record<string, unknown>, focus?: import("./types").InitializationPreviewFocus) => request<import("./types").InitializationPreview>(`/api/v1/scenarios/${id}/draft/initialization-preview`, { method: "POST", body: JSON.stringify({ expected_revision: revision, definition_document: document, ...(focus ? { focus } : {}) }) }),
+  semanticDiff: (id: string, revision: number, document: Record<string, unknown>, includeEntries = true) => request<SemanticDiff>(`/api/v1/scenarios/${id}/draft/semantic-diff`, { method: "POST", body: JSON.stringify({ expected_revision: revision, definition_document: document, include_entries: includeEntries }) }),
   testDraft: (id: string, revision: number, goal: string | null) => request<DraftSandboxResult>(`/api/v1/scenarios/${id}/draft/sandbox`, { method: "POST", body: JSON.stringify({ expected_revision: revision, goal: goal || null }) }),
   publishDraft: (id: string, revision: number, contentHash: string | null) => request<{ scenario: ScenarioSummary; version: ScenarioVersion }>(`/api/v1/scenarios/${id}/draft/publish`, { method: "POST", body: JSON.stringify({ expected_revision: revision, expected_content_hash: contentHash }) }),
   versions: (id: string) => request<ScenarioVersion[]>(`/api/v1/scenarios/${id}/versions`),
   scenarioVersion: (scenarioId: string, versionId: string) => request<ScenarioVersionDetail>(`/api/v1/scenarios/${scenarioId}/versions/${versionId}`),
-  restoreVersion: (id: string, revision: number, versionId: string) => request<Draft>(`/api/v1/scenarios/${id}/draft/restore`, { method: "POST", body: JSON.stringify({ expected_revision: revision, version_id: versionId }) }),
+  previewNewArtifact: (artifact: Record<string, unknown>, targetScenarioKey?: string) => request<NewScenarioArtifactPreview>("/api/v1/scenarios/artifacts/preview", {
+    method: "POST",
+    body: JSON.stringify({ artifact, ...(targetScenarioKey ? { target_scenario_key: targetScenarioKey } : {}) }),
+  }),
+  importNewArtifact: (artifact: Record<string, unknown>, targetScenarioKey?: string) => request<ScenarioArtifactImportResult>("/api/v1/scenarios/artifacts/import", {
+    method: "POST",
+    body: JSON.stringify({ artifact, ...(targetScenarioKey ? { target_scenario_key: targetScenarioKey } : {}) }),
+  }),
+  restorePreview: (id: string, versionId: string, expectedRevision: number) => request<RestorePreview>(`/api/v1/scenarios/${id}/versions/${versionId}/restore-preview`, {
+    method: "POST",
+    body: JSON.stringify({ expected_persisted_revision: expectedRevision }),
+  }),
+  deletionImpact: (id: string) => request<ScenarioDeletionImpact>(`/api/v1/scenarios/${id}/deletion-impact`),
+  deleteScenario: (id: string) => request<void>(`/api/v1/scenarios/${id}`, { method: "DELETE" }),
   saveDraft: (id: string, revision: number, document: Record<string, unknown>) =>
     request<Draft>(`/api/v1/scenarios/${id}/draft`, {
       method: "PUT",
@@ -70,8 +113,8 @@ export const api = {
   games: (archived = false) => request<GameSummary[]>(`/api/v1/games?status=${archived ? "archived" : "active"}`),
   game: (id: string) => request<GameSummary>(`/api/v1/games/${id}`),
   gameHistory: (id: string) => request<GameHistory>(`/api/v1/games/${id}/history`),
-  createGame: (versionId: string, idempotencyKey: string) => request<GameSummary>("/api/v1/games", {
-    method: "POST", body: JSON.stringify({ scenario_version_id: versionId, idempotency_key: idempotencyKey }),
+  createGame: (versionId: string, idempotencyKey: string, scenarioId?: string) => request<GameSummary>("/api/v1/games", {
+    method: "POST", body: JSON.stringify({ scenario_id: scenarioId, scenario_version_id: versionId, idempotency_key: idempotencyKey }),
   }),
   archiveGame: (id: string, expectedRuntimeRevision: number) => request<GameSummary>(`/api/v1/games/${id}/archive`, {
     method: "POST",

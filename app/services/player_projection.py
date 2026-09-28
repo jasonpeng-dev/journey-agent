@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agent.recovery import failure_event_from_json
 from app.api.schemas.phase_d import (
     GameSummaryResponse,
     MissionRoadmapResponse,
@@ -20,6 +21,7 @@ from app.api.schemas.phase_d import (
     PublicActionLocationResponse,
     PublicActionRequirementResponse,
     PublicActorResponse,
+    PublicEntityPresentationResponse,
     PublicExecutionPhase,
     PublicFactResponse,
     PublicGameStatus,
@@ -37,11 +39,14 @@ from app.api.schemas.phase_d import (
     PublicPlanningCycleResponse,
     PublicPlanResponse,
     PublicPlanStepResponse,
+    PublicPresentationResponse,
+    PublicProducerBindingResponse,
     PublicRelationResponse,
     PublicResolvedGoalDraftResponse,
     PublicResourceResponse,
     PublicResourceUsageKind,
     PublicResourceUsageResponse,
+    PublicScenarioMetadataResponse,
     PublicStepStatus,
     PublicTargetActionContractResponse,
     PublicTaskResponse,
@@ -60,6 +65,7 @@ from app.domain.enums import (
     StepExecutionType,
     WorldOperationStatus,
 )
+from app.domain.failures import FailureKind
 from app.domain.formal_goal import FormalGoalContract
 from app.domain.runtime_scope import GameInstanceId
 from app.domain.scenario_v2 import (
@@ -82,6 +88,7 @@ from app.infrastructure.db.models import (
     PlayerExecutionCheckpoint,
     ResolvedGoalDraft,
     Scenario,
+    ScenarioPresentationProfile,
     ScenarioVersion,
     WorldOperation,
 )
@@ -99,6 +106,7 @@ from app.services.knowledge_projection import SharedKnowledgeProjection
 from app.services.mission_roadmap import MissionRoadmap, MissionRoadmapProjector
 from app.services.player_action_report import format_player_knowledge_changes
 from app.services.player_pacing import PlayerExecutionPhase
+from app.services.presentation_resolver import resolved_presentation_for_scenario
 from app.services.spatial_projection import SpatialDisplayProjector, SpatialNodeProjection
 
 
@@ -111,6 +119,7 @@ class _PlayerResourceRow:
     facility_key: str | None
     availability: str
     availability_requirement: dict[str, Any] | None
+    availability_requirement_status: str | None
     scope_node_key: str | None
 
 
@@ -126,8 +135,16 @@ class PlayerProjectionService:
     ) -> PlayerGameStateResponse:
         scope = GameInstanceService(self.db).load(game_instance_id)
         game = GameLifecycleService(self.db).get(game_instance_id)
+        scenario_version = self.db.get(ScenarioVersion, scope.scenario_version_id)
+        assert scenario_version is not None
         definition = ScenarioVersionRepository(self.db).load(scope.scenario_version_id).definition
         assert isinstance(definition, ScenarioDefinitionV2)
+        stored_profile = self.db.get(ScenarioPresentationProfile, scenario_version.scenario_id)
+        presentation = resolved_presentation_for_scenario(
+            definition,
+            stored_profile.profile_document if stored_profile is not None else None,
+        )
+        presentation_revision = stored_profile.revision if stored_profile is not None else 1
         node_definitions = {item.key: item for item in definition.world.nodes}
         resource_definitions = {item.key: item for item in definition.world.resources}
         role_definitions = {item.key: item for item in definition.actors.roles}
@@ -144,6 +161,10 @@ class PlayerProjectionService:
         target_knowledge_contracts = knowledge_projection.target_knowledge_contracts()
         known_action_requirements = knowledge_projection.known_action_requirements(
             target_contracts=target_knowledge_contracts,
+        )
+        known_producer_bindings = knowledge_projection.known_producer_bindings(
+            target_contracts=target_knowledge_contracts,
+            action_requirements=known_action_requirements,
         )
         known_target_action_contracts = knowledge_projection.known_target_action_contracts(
             target_contracts=target_knowledge_contracts,
@@ -223,8 +244,26 @@ class PlayerProjectionService:
             if task is not None
             else None
         )
+        public_task = (
+            self.task(
+                task,
+                definition,
+                known_facts={
+                    (item.node_key, item.fact_key): item.truth_value for item in known_facts
+                },
+                known_resources=knowledge_projection.planner_resources()["resources"],
+            )
+            if task is not None
+            else None
+        )
         return PlayerGameStateResponse(
             game=self._game_summary(game, active_task),
+            scenario_metadata=PublicScenarioMetadataResponse(
+                quick_inputs=list(definition.goal_resolution.quick_inputs),
+            ),
+            presentation=PublicPresentationResponse(
+                **presentation.public_document(revision=presentation_revision)
+            ),
             visible_nodes=[
                 PublicNodeResponse(
                     key=item.node_key,
@@ -234,6 +273,12 @@ class PlayerProjectionService:
                         node_projections[item.node_key].node_type_key
                         if node_projections[item.node_key] is not None
                         else None
+                    ),
+                    node_family=definition.node_family_for_node(item.node_key).value,
+                    presentation=self._entity_presentation(
+                        presentation,
+                        definition.node_family_for_node(item.node_key).value,
+                        item.node_key,
                     ),
                     region_key=(
                         node_projections[item.node_key].region_key
@@ -284,6 +329,48 @@ class PlayerProjectionService:
                         if node_projections[item.node_key] is not None
                         else None
                     ),
+                    node_family=definition.node_family_for_node(item.node_key).value,
+                    value_label=presentation.fact_value_label(
+                        next(
+                            fact
+                            for fact in node_definitions[item.node_key].facts
+                            if fact.key == item.fact_key
+                        ),
+                        item.truth_value,
+                    ),
+                    summary_value_label=presentation.fact_summary_value_label(
+                        next(
+                            fact
+                            for fact in node_definitions[item.node_key].facts
+                            if fact.key == item.fact_key
+                        ),
+                        item.truth_value,
+                    ),
+                    detail_value_label=presentation.fact_detail_value_label(
+                        next(
+                            fact
+                            for fact in node_definitions[item.node_key].facts
+                            if fact.key == item.fact_key
+                        ),
+                        item.truth_value,
+                    ),
+                    presentation_role=(
+                        fact_definition.presentation_role.value
+                        if (
+                            fact_definition := next(
+                                fact
+                                for fact in node_definitions[item.node_key].facts
+                                if fact.key == item.fact_key
+                            )
+                        ).presentation_role
+                        is not None
+                        else None
+                    ),
+                    presentation_slot=self._fact_presentation_slot(
+                        definition,
+                        item.node_key,
+                        item.fact_key,
+                    ),
                     region_key=(
                         node_projections[item.node_key].region_key
                         if node_projections[item.node_key] is not None
@@ -325,6 +412,26 @@ class PlayerProjectionService:
                         if str(item["target_node_key"]) in node_definitions
                         else None
                     ),
+                    relation_type_name=(
+                        relation_type.name
+                        if (
+                            relation_type := definition.world.relation_type(
+                                str(item["relation_type_key"])
+                            )
+                        )
+                        is not None
+                        else None
+                    ),
+                    relation_type_description=(
+                        relation_type.description if relation_type is not None else None
+                    ),
+                    is_structural=(
+                        str(item["relation_type_key"])
+                        in {
+                            definition.metadata.locality.located_in_relation_type_key,
+                            definition.metadata.locality.transport_endpoint_relation_type_key,
+                        }
+                    ),
                 )
                 for item in known_relations
             ],
@@ -333,6 +440,9 @@ class PlayerProjectionService:
             ],
             known_target_action_contracts=[
                 PublicTargetActionContractResponse(**item) for item in known_target_action_contracts
+            ],
+            known_producer_bindings=[
+                PublicProducerBindingResponse(**item) for item in known_producer_bindings
             ],
             resources=[
                 PublicResourceResponse(
@@ -347,16 +457,14 @@ class PlayerProjectionService:
                         if hasattr(item.availability, "value")
                         else item.availability
                     ),
-                    availability_requirement=knowledge_projection.known_requirement(
-                        item.availability_requirement
-                    ),
-                    availability_requirement_status=knowledge_projection.requirement_status(
-                        item.availability_requirement
-                    ),
+                    availability_requirement=item.availability_requirement,
+                    availability_requirement_status=item.availability_requirement_status,
                     scope_node_key=item.scope_node_key,
                     scope_node_name=spatial.resource_scope(item.scope_node_key).scope_node_name,
                     scope_region_key=spatial.resource_scope(item.scope_node_key).scope_region_key,
                     scope_region_name=spatial.resource_scope(item.scope_node_key).scope_region_name,
+                    unit=resource_definitions[item.resource_key].unit,
+                    display_unit=resource_definitions[item.resource_key].display_unit,
                 )
                 for item in public_resources
             ],
@@ -367,6 +475,8 @@ class PlayerProjectionService:
                     name=item.name,
                     role_name=role_definitions[item.role_key].name,
                     current_node_name=node_definitions[item.current_node_key].name,
+                    status=self._actor_activity(public_task, item.name)[0],
+                    task_name=self._actor_activity(public_task, item.name)[1],
                     command_reachability=(
                         "DISCONNECTED" if item.command_reachability == "DISCONNECTED" else "ONLINE"
                     ),
@@ -374,18 +484,7 @@ class PlayerProjectionService:
                 for item in actors
                 if item.current_node_key in visible_node_keys
             ],
-            current_task=(
-                self.task(
-                    task,
-                    definition,
-                    known_facts={
-                        (item.node_key, item.fact_key): item.truth_value for item in known_facts
-                    },
-                    known_resources=knowledge_projection.planner_resources()["resources"],
-                )
-                if task is not None
-                else None
-            ),
+            current_task=public_task,
             current_goal_draft=(
                 PublicResolvedGoalDraftResponse(
                     draft_id=ready_draft.id,
@@ -413,6 +512,90 @@ class PlayerProjectionService:
             ],
             pending_approval_id=pending,
         )
+
+    @staticmethod
+    def _entity_presentation(
+        presentation: Any,
+        family: str,
+        semantic_key: str | None = None,
+    ) -> PublicEntityPresentationResponse:
+        resolved = presentation.entity(family, semantic_key=semantic_key)
+        return PublicEntityPresentationResponse(
+            summary_slot=resolved.summary_slot.value,
+            detail_level=resolved.detail_level.value,
+            default_open=resolved.default_open.value,
+            knowledge_level=resolved.knowledge_level.value,
+            semantic_order=[item.value for item in resolved.semantic_order],
+        )
+
+    @staticmethod
+    def _actor_activity(
+        task: PublicTaskResponse | None,
+        actor_name: str,
+    ) -> tuple[str, str | None]:
+        """Resolve only the safe activity summary already present in Player Task data."""
+
+        if task is None or task.execution_phase in {"COMPLETED", "BLOCKED", "ABORTED"}:
+            return "IDLE", None
+        active_actor_name = (
+            task.briefing.actor_name
+            if task.execution_phase in {"AWAITING_ACTION_ACK", "APPROVAL_REQUIRED"}
+            and task.briefing is not None
+            else None
+        )
+        if active_actor_name == actor_name:
+            return "ACTIVE", task.goal
+        if task.plan is not None and any(
+            step.assigned_actor_name == actor_name and step.status == "CURRENT"
+            for step in task.plan.steps
+        ):
+            return "ACTIVE", task.goal
+        if task.plan is not None and any(
+            step.assigned_actor_name == actor_name and step.status == "PENDING"
+            for step in task.plan.steps
+        ):
+            return "PLANNED", task.goal
+        return "IDLE", None
+
+    @staticmethod
+    def _fact_presentation_slot(
+        definition: ScenarioDefinitionV2,
+        node_key: str,
+        fact_key: str,
+    ) -> str:
+        """Assign a bounded header slot from authored fact order and family.
+
+        The resolver does not attach meaning to a machine Fact key.  The
+        first safe Fact authored for a Facility/Transport is the primary
+        header and the second is secondary; all remaining known Facts stay in
+        the semantic body.  Profiles can still change depth and placement
+        without changing Knowledge or Truth.
+        """
+
+        node = definition.world.node(node_key)
+        if node is None:
+            return "SEMANTIC"
+        authored_fact = next((fact for fact in node.facts if fact.key == fact_key), None)
+        if authored_fact is not None and authored_fact.presentation_role is not None:
+            if authored_fact.presentation_role.value in {"HEADER_PRIMARY", "HEADER_SECONDARY"}:
+                return authored_fact.presentation_role.value
+            return "SEMANTIC"
+        index = next(
+            (index for index, fact in enumerate(node.facts) if fact.key == fact_key),
+            None,
+        )
+        family = definition.node_family_for_node(node_key).value
+        if index is None:
+            return "SEMANTIC"
+        if family == "FACILITY":
+            if index == 0:
+                return "HEADER_PRIMARY"
+            if index == 1:
+                return "HEADER_SECONDARY"
+            return "SEMANTIC"
+        if family == "TRANSPORT" and index == 0:
+            return "HEADER_PRIMARY"
+        return "SEMANTIC"
 
     @staticmethod
     def _is_player_usable_regional_pool(item: GameInstanceResourceState) -> bool:
@@ -468,8 +651,19 @@ class PlayerProjectionService:
             requirements = [
                 knowledge_projection.availability_requirement_for_pool(item) for item in ordered
             ]
+            requirement_statuses = [
+                knowledge_projection.requirement_status(
+                    knowledge_projection.raw_availability_requirement_for_pool(item)
+                )
+                for item in ordered
+            ]
             requirement = (
                 requirements[0] if all(item == requirements[0] for item in requirements) else None
+            )
+            requirement_status = (
+                requirement_statuses[0]
+                if all(item == requirement_statuses[0] for item in requirement_statuses)
+                else None
             )
             result.append(
                 _PlayerResourceRow(
@@ -480,6 +674,7 @@ class PlayerProjectionService:
                     facility_key=representative.facility_key if len(ordered) == 1 else None,
                     availability=availability,
                     availability_requirement=requirement,
+                    availability_requirement_status=requirement_status,
                     scope_node_key=representative.scope_node_key,
                 )
             )
@@ -1675,7 +1870,20 @@ def _plan_display_reason(
         return None
     action = _action_definition(definition, failed_step)
     failure_code = (failed_step.failure_code or "").upper()
-    if "BLOCKED" in failure_code:
+    typed_failure = failure_event_from_json(
+        (failed_step.actual_result or {}).get("failure_event")
+        if isinstance(failed_step.actual_result, dict)
+        else None
+    )
+    if typed_failure is not None and typed_failure.kind == FailureKind.TRAVEL_BLOCKED:
+        return "发现通道受阻"
+    # Historical rows written before FailureEvent existed retain an exact-code
+    # compatibility path.  Do not infer transport semantics from a substring.
+    if typed_failure is None and failure_code in {
+        "KNOWN_TRANSPORT_BLOCKED",
+        "TRAVEL_BLOCKED",
+        "TRANSPORT_BLOCKED",
+    }:
         return "发现通道受阻"
     if action is not None and action.behavior == ActionBehavior.TRAVEL:
         return "前往区域失败"

@@ -1,13 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../api";
+import { EditorConfirmDialog } from "../components/editor/EditorConfirmDialog";
 import { useCheckpointGame } from "../hooks/useCheckpointGame";
 import { useForkGame } from "../hooks/useForkGame";
 import type { GameSummary } from "../types";
 import { errorText, uiLabel } from "../ui";
 
-export function GameCards({ games, archived }: { games: GameSummary[] | undefined; archived: boolean }) {
+export function GameCards({ games, archived, highlightGameId = null }: { games: GameSummary[] | undefined; archived: boolean; highlightGameId?: string | null }) {
   const queryClient = useQueryClient();
   const checkpoint = useCheckpointGame();
   const fork = useForkGame();
@@ -18,13 +20,21 @@ export function GameCards({ games, archived }: { games: GameSummary[] | undefine
     onSuccess: () => void refresh(),
   });
   const remove = useMutation({ mutationFn: (id: string) => api.deleteGame(id), onSuccess: () => void refresh() });
-  const permanentlyDelete = (id: string) => {
-    if (window.confirm("永久删除该游戏及其任务、计划和执行历史？\n\n此操作无法恢复。")) remove.mutate(id);
-  };
+  const [deleteTarget, setDeleteTarget] = useState<GameSummary | null>(null);
+  useEffect(() => {
+    if (!highlightGameId || !games?.some((game) => game.id === highlightGameId)) return;
+    const target = document.querySelector<HTMLElement>(`[data-game-id="${highlightGameId}"]`);
+    if (!target) return;
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    target.classList.add("game-card-highlight");
+    const timeout = window.setTimeout(() => target.classList.remove("game-card-highlight"), 3200);
+    return () => window.clearTimeout(timeout);
+  }, [games, highlightGameId]);
   if (!games?.length) return <p className="muted">这里还没有游戏。</p>;
   return <>
     {(archive.error || checkpoint.error || remove.error || fork.error) && <p className="error-text">{errorText(archive.error ?? checkpoint.error ?? remove.error ?? fork.error)}</p>}
-    <div className="card-grid">{games.map((game) => <article className={`scenario-card game-card${game.is_checkpoint ? " checkpoint-card" : ""}`} key={game.id}>
+    {deleteTarget && <EditorConfirmDialog title="永久删除这局游戏？" message="该操作会删除游戏及其任务、计划和执行历史，且无法恢复。" confirmLabel="永久删除" onCancel={() => setDeleteTarget(null)} onConfirm={() => { const id = deleteTarget.id; setDeleteTarget(null); remove.mutate(id); }} />}
+    <div className="card-grid">{games.map((game) => <article className={`scenario-card game-card${game.is_checkpoint ? " checkpoint-card" : ""}`} data-game-id={game.id} key={game.id}>
       <Link className="game-card-main" to={`/games/${game.id}`}>
         <span className={`status ${game.status.toLowerCase()}`}>{uiLabel(game.status)}</span>
         <h2>游戏 {game.id.slice(0, 8)}</h2>
@@ -34,17 +44,19 @@ export function GameCards({ games, archived }: { games: GameSummary[] | undefine
         </div>
         <p className="game-card-lineage">{game.is_checkpoint ? <>存档 · {game.checkpointed_from_game_instance_id ? `来源 ${game.checkpointed_from_game_instance_id.slice(0, 8)}` : "来源已删除"}</> : archived ? "普通归档" : "进行中"}</p>
       </Link>
-      <div className="game-card-actions"><Link className="secondary-button" to={`/games/${game.id}`}>{archived ? "查看记录" : "继续游戏"}</Link>{archived && <button disabled={fork.isPending || remove.isPending} onClick={() => fork.fork(game.id)}>以归档状态新开一局</button>}{!archived && <><button disabled={checkpoint.isPending || archive.isPending || remove.isPending || Boolean(game.active_task_id)} title={game.active_task_id ? "当前有活动任务，完成或放弃后才能存档" : undefined} onClick={() => checkpoint.checkpoint(game.id, game.runtime_revision)}>存档</button><button disabled={archive.isPending || remove.isPending || checkpoint.isPending || Boolean(game.active_task_id)} title={game.active_task_id ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate({ id: game.id, revision: game.runtime_revision })}>结束并归档</button></>}<button className="danger-button" disabled={archive.isPending || remove.isPending || fork.isPending || checkpoint.isPending} onClick={() => permanentlyDelete(game.id)}>永久删除</button></div>
+      <div className="game-card-actions"><Link className="secondary-button" to={`/games/${game.id}`}>{archived ? "查看记录" : "继续游戏"}</Link>{archived && <button disabled={fork.isPending || remove.isPending} onClick={() => fork.fork(game.id)}>以归档状态新开一局</button>}{!archived && <><button disabled={checkpoint.isPending || archive.isPending || remove.isPending || Boolean(game.active_task_id)} title={game.active_task_id ? "当前有活动任务，完成或放弃后才能存档" : undefined} onClick={() => checkpoint.checkpoint(game.id, game.runtime_revision)}>存档</button><button disabled={archive.isPending || remove.isPending || checkpoint.isPending || Boolean(game.active_task_id)} title={game.active_task_id ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate({ id: game.id, revision: game.runtime_revision })}>结束并归档</button></>}<button className="danger-button" disabled={archive.isPending || remove.isPending || fork.isPending || checkpoint.isPending} onClick={() => setDeleteTarget(game)}>永久删除</button></div>
     </article>)}</div>
   </>;
 }
 
 export function GamesPage() {
+  const [searchParams] = useSearchParams();
+  const highlightGameId = searchParams.get("highlight");
   const active = useQuery({ queryKey: ["games", false], queryFn: () => api.games(false) });
   const archived = useQuery({ queryKey: ["games", true], queryFn: () => api.games(true) });
   return <main className="page">
     <div className="page-heading"><div><p className="eyebrow">游玩</p><h1>游戏</h1></div><Link className="primary-button" to="/games/new">新游戏</Link></div>
-    <h2 className="section-title">进行中的游戏</h2><GameCards games={active.data} archived={false} />
-    <h2 className="section-title">历史与已归档游戏</h2><GameCards games={archived.data} archived />
+    <h2 className="section-title">进行中的游戏</h2><GameCards games={active.data} archived={false} highlightGameId={highlightGameId} />
+    <h2 className="section-title">历史与已归档游戏</h2><GameCards games={archived.data} archived highlightGameId={highlightGameId} />
   </main>;
 }

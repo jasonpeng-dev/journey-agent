@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api";
 import { uiLabel } from "../ui";
@@ -24,7 +24,7 @@ export function NewScenarioPage() {
     }),
     onSuccess: (scenario) => navigate(`/scenarios/${scenario.id}/edit/overview`),
   });
-  return <main className="page"><p className="eyebrow">场景创作</p><h1>新建场景</h1><div className="form-card">
+  return <main className="page"><div className="page-heading new-scenario-heading"><div><p className="eyebrow">场景创作</p><h1>新建场景</h1></div><Link className="secondary-button navigation-away-button action-button-centered" to="/scenarios">返回场景库</Link></div><div className="form-card">
     <label>创建方式<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="BLANK">空白场景</option><option value="EXAMPLE">使用示例</option></select></label>
     {mode === "EXAMPLE" && <label>示例<select value={selectedExampleKey} onChange={(event) => setExampleKey(event.target.value)}>{examples.data?.map((item) => <option key={item.key} value={item.key}>{item.name} · {uiLabel(item.maturity)}</option>)}</select></label>}
     <label>稳定键（用于引用）<input value={key} onChange={(event) => setKey(event.target.value)} /></label>

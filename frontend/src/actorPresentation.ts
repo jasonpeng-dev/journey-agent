@@ -35,8 +35,9 @@ export function groupActorsByTask(
     ["idle", []],
   ]);
   for (const actor of actors) {
-    const key: ActorDisplayGroupKey =
-      activeActorName === actor.name
+    const key: ActorDisplayGroupKey = actor.status
+      ? actor.status === "ACTIVE" ? "active" : actor.status === "PLANNED" ? "planned" : "idle"
+      : activeActorName === actor.name
         ? "active"
         : plannedActorNames.has(actor.name)
           ? "planned"

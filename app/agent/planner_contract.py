@@ -100,9 +100,7 @@ def action_planner_constraints(
         else target_role_requirements
     )
     if visible_target_roles:
-        executor["target_role_requirements"] = [
-            dict(item) for item in visible_target_roles
-        ]
+        executor["target_role_requirements"] = [dict(item) for item in visible_target_roles]
 
     target: dict[str, object] = {
         "kind": action.target_kind.value,
@@ -485,6 +483,92 @@ def planner_source_preconditions(
     return tuple(result)
 
 
+def planner_source_requirement_predicates(
+    definition: ScenarioDefinitionV2,
+    action: ActionDefinitionV2,
+) -> tuple[dict[str, object], ...] | None:
+    """Return normalized positive source predicates when the public form is complete.
+
+    Runtime PREFLIGHT rules are authored as failure conditions. This helper
+    converts simple ACTION_SOURCE Fact failure leaves into the corresponding
+    required predicate. Compound or mixed selector expressions deliberately
+    return None instead of publishing a partial source contract.
+    """
+
+    source_rules = [
+        rule
+        for rule in definition.rules
+        if rule.action_key == action.key
+        and rule.phase == RulePhase.PREFLIGHT
+        and _condition_contains_selector(rule.condition, NodeSelectorKind.ACTION_SOURCE)
+    ]
+    if not source_rules:
+        return None
+
+    predicates: list[dict[str, object]] = []
+    for rule in source_rules:
+        predicate = _simple_source_requirement_predicate(rule.condition)
+        if predicate is None:
+            return None
+        if predicate not in predicates:
+            predicates.append(predicate)
+    return tuple(predicates)
+
+
+def _simple_source_requirement_predicate(condition: Any) -> dict[str, object] | None:
+    if condition is None:
+        return None
+    if condition.kind == ConditionKind.ALL and len(condition.conditions) == 1:
+        return _simple_source_requirement_predicate(condition.conditions[0])
+    if (
+        condition.node is None
+        or condition.node.kind != NodeSelectorKind.ACTION_SOURCE
+        or condition.fact_key is None
+    ):
+        return None
+
+    operator: str | None = None
+    if condition.kind == ConditionKind.FACT_NOT_EQUALS:
+        operator = "EQ"
+    elif condition.kind == ConditionKind.FACT_EQUALS:
+        operator = "NE"
+    elif condition.kind == ConditionKind.FACT_IN:
+        operator = "NOT_IN"
+    elif condition.kind == ConditionKind.FACT_COMPARE and condition.operator is not None:
+        operator = {
+            "GT": "LTE",
+            "GTE": "LT",
+            "LT": "GTE",
+            "LTE": "GT",
+        }.get(condition.operator.value)
+        if operator is None:
+            return None
+    else:
+        return None
+
+    predicate: dict[str, object] = {
+        "fact_key": condition.fact_key,
+        "operator": operator,
+    }
+    if condition.value is not None:
+        predicate["value"] = condition.value
+    if condition.values:
+        predicate["values"] = list(condition.values)
+    if "value" not in predicate and "values" not in predicate:
+        return None
+    return predicate
+
+
+def _condition_contains_selector(condition: Any, selector: NodeSelectorKind) -> bool:
+    if condition is None:
+        return False
+    if condition.kind in {ConditionKind.ALL, ConditionKind.ANY}:
+        return any(_condition_contains_selector(item, selector) for item in condition.conditions)
+    if condition.kind == ConditionKind.NOT:
+        return _condition_contains_selector(condition.condition, selector)
+    return condition.node is not None and condition.node.kind == selector
+
+
 def action_planner_effects(action: ActionDefinitionV2) -> list[dict[str, object]]:
     """Describe behavior-owned effects without exposing runtime Truth."""
 
@@ -761,6 +845,54 @@ def planner_target_contracts(
             for effect in action.planning.target_terminal_effects
             for fact_key in (effect.fact_key,)
         ]
+    terminal_effect_refs = {
+        (reference.node_key, reference.fact_key) for reference in action.planning.terminal_effects
+    }
+    for target_key in eligible_targets:
+        target_terminal_effect_refs = {
+            fact_key for node_key, fact_key in terminal_effect_refs if node_key == target_key
+        }
+        if not target_terminal_effect_refs:
+            continue
+        for rule in definition.rules:
+            if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
+                continue
+            if rule.applicable_target_keys and target_key not in rule.applicable_target_keys:
+                continue
+            if not _condition_matches_target(
+                rule.condition,
+                target_key,
+                known_facts,
+                allow_authored_identity=include_authored_hidden_target_effects,
+            ):
+                continue
+            for item in rule.effects:
+                if (
+                    item.kind != EffectKind.SET_FACT
+                    or item.node is None
+                    or item.node.kind != NodeSelectorKind.EXPLICIT
+                    or item.node.node_key != target_key
+                    or item.fact_key not in target_terminal_effect_refs
+                ):
+                    continue
+                projection = declarative_effect(item)
+                if projection is None:
+                    continue
+                # An explicit authored identity is target-bound only for the
+                # eligible node with the same identity. No unscoped or
+                # cross-target effect is broadened to other eligible nodes.
+                projection["target"] = "target_key"
+                if _effect_is_knowledge_safe(
+                    item,
+                    projection,
+                    known_node_keys=known_node_keys,
+                    known_relation_keys=known_relation_keys,
+                    known_pool_keys=known_pool_keys,
+                    known_facts=known_facts,
+                    target_key=target_key,
+                    allow_hidden_target_effects=include_authored_hidden_target_effects,
+                ):
+                    effects_by_target[target_key].append(projection)
     if include_authored_hidden_target_effects:
         # ``terminal_effects`` carries authored target identities for some
         # actions (notably heavy-support deployment), while the behavior-level
@@ -787,9 +919,15 @@ def planner_target_contracts(
     for rule in definition.rules:
         if rule.action_key != action.key or rule.phase != RulePhase.RESOLVE:
             continue
+        if rule.applicable_target_keys:
+            eligible_rule_targets = set(rule.applicable_target_keys)
+        else:
+            eligible_rule_targets = eligible_targets
         if not _has_current_target_condition(rule.condition):
             continue
         for target_key in eligible_targets:
+            if target_key not in eligible_rule_targets:
+                continue
             if not _condition_matches_target(
                 rule.condition,
                 target_key,

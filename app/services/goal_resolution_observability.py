@@ -150,9 +150,7 @@ def _reconcile_stale_goal_resolution_attempts_in_session(
         seconds=stale_after_seconds + _STALE_GOAL_RESOLUTION_GRACE_SECONDS
     )
     statement = select(GoalResolutionAttempt).where(
-        GoalResolutionAttempt.resolution_status.in_(
-            ("IN_PROGRESS", "PENDING")
-        )
+        GoalResolutionAttempt.resolution_status.in_(("IN_PROGRESS", "PENDING"))
     )
     if game_instance_id is not None:
         statement = statement.where(GoalResolutionAttempt.game_instance_id == game_instance_id)

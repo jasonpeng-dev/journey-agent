@@ -87,6 +87,7 @@ class _VNextProvider:
         self.interpretation_requests.append(request)
         return self.interpretation_results.pop(0)
 
+
 def _role_grounding(
     refs: Iterable[DynamicGoalCandidateReference],
     *,

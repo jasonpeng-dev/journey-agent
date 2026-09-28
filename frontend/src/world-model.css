@@ -1,0 +1,6 @@
+/* The legacy world route is an auxiliary topology browser, never an editor. */
+.editor-columns:has(.topology-explorer) .world-mode-tabs,
+.editor-columns:has(.topology-explorer) .object-list-actions,
+.editor-columns:has(.topology-explorer) .world-filter-tabs {
+  display: none;
+}

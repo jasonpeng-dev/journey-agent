@@ -1,15 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 
-import { api } from "../api";
+import { ApiError, api } from "../api";
 import { groupActorsByTask } from "../actorPresentation";
+import { PresentationSettingsPanel } from "../components/PresentationSettingsPanel";
+import { EditorConfirmDialog } from "../components/editor/EditorConfirmDialog";
 import { useForkGame } from "../hooks/useForkGame";
 import {
   factDisplayLabel,
   factDisplayValue,
   facilityStatusDisplayValue,
-  publicFactRequirementText,
   resourceDisplayName,
   resourceAvailabilityRequirementText,
   knownRelationDescription,
@@ -26,16 +27,17 @@ import type {
   PublicPlanDisplayStatus,
   PublicPlanningAttempt,
   PublicPlanningCycle,
-  PublicActionResourceRequirement,
   PublicResourceUsage,
   MissionRoadmapRequirement,
   MissionRoadmapStage,
+  PublicProducerBinding,
   PublicTargetActionContract,
   ResourceIntelligence,
   PublicTask,
   PublicResolvedGoalDraft,
   PublicTimelineEvent,
-  ScenarioVersionDetail,
+  PresentationProfileDocument,
+  PresentationProfileResponse,
 } from "../types";
 import {
   confirmGoalErrorText,
@@ -55,12 +57,31 @@ import {
   type ActivePlayOperation,
 } from "../playPresentation";
 import {
+  buildFacilityDetailRows,
+  buildFacilityResourceRows,
+  buildTargetActionRequirementRows,
+  mergeTargetActionContracts,
+  publicResourceRequirementIdentity,
+  publicResourceRequirementParts,
+  resolveFacilityFactRole,
+  targetKeyForPublicActionRequirement,
+  uniquePublicResourceRequirements,
+} from "../playFacilityPresentation";
+import {
   actionLocationText,
   groupFactsByRegion,
   groupNodesByRegion,
   groupResourcesByRegion,
   meaningfulResult,
 } from "../spatialPresentation";
+import { legacyFactStateDisplayText } from "../legacyPresentationCompatibility";
+import {
+  clonePresentationProfile,
+  defaultPresentationProfile,
+  PRESENTATION_PROFILE_REFRESH_INTERVAL_MS,
+  resolvePresentationProfilePreview,
+} from "../presentationPolicy";
+import { useUnsavedChangesGuard } from "../useUnsavedChangesGuard";
 
 const taskTone: Record<string, string> = {
   COMPLETED: "success",
@@ -171,6 +192,8 @@ type MissionRoadmapNames = {
   nodeNames?: Record<string, string>;
   factNames?: Record<string, string>;
   factValues?: Record<string, string | number | boolean>;
+  factSafeMetadata?: Record<string, boolean>;
+  factValueLabels?: Record<string, string>;
 };
 
 function taskObjectiveLabel(goal: string, objectiveNames: string[]): string {
@@ -190,165 +213,28 @@ function derivedStateDisplayValue(requirement: MissionRoadmapRequirement): strin
   return String(requirement.current_known_value);
 }
 
-function publicResourceRequirementParts(
-  requirements: PublicActionResourceRequirement[] | undefined,
-  resourceName: (key: string) => string,
-): string[] {
-  return (requirements ?? []).flatMap((requirement) => (
-    typeof requirement.resource_key === "string" && typeof requirement.minimum === "number"
-      ? [`${resourceName(requirement.resource_key)} ×${String(requirement.minimum)}`]
-      : []
-  ));
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
-  }
-  if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? String(value);
-}
-
-function publicResourceRequirementIdentity(
-  actionKey: string,
-  requirement: PublicActionResourceRequirement,
-  targetKey?: string,
-): string {
-  const scope = requirement.scope ?? {};
-  const scopedTargetKey = typeof scope.target_key === "string" ? scope.target_key : undefined;
-  return canonicalJson({
-    action_key: actionKey,
-    target_key: scopedTargetKey ?? targetKey ?? null,
-    resource_key: requirement.resource_key,
-    scope,
-    minimum: requirement.minimum,
-  });
-}
-
-function uniquePublicResourceRequirements(
-  actionKey: string,
-  requirements: PublicActionResourceRequirement[] | undefined,
-  targetKey?: string,
-): PublicActionResourceRequirement[] {
-  const identities = new Set<string>();
-  return (requirements ?? []).filter((requirement) => {
-    if (typeof requirement.resource_key !== "string" || typeof requirement.minimum !== "number") {
-      return false;
-    }
-    const identity = publicResourceRequirementIdentity(actionKey, requirement, targetKey);
-    if (identities.has(identity)) return false;
-    identities.add(identity);
-    return true;
-  });
-}
-
-function targetKeyForPublicActionRequirement(
-  action: NonNullable<PlayerGameState["known_action_requirements"]>[number],
-  visibleNodes: PlayerGameState["visible_nodes"],
-): string | null {
-  const resourceRequirements = action.resource_requirements ?? [];
-  if (resourceRequirements.length === 0) return null;
-
-  const candidateKeys = new Set<string>();
-  resourceRequirements.forEach((requirement) => {
-    const scope = requirement.scope;
-    if (scope && typeof scope.target_key === "string") candidateKeys.add(scope.target_key);
-  });
-  action.known_preconditions.forEach((precondition) => {
-    if (precondition.selector === "EXPLICIT" && typeof precondition.node_key === "string") {
-      candidateKeys.add(precondition.node_key);
-    }
-  });
-  if (candidateKeys.size !== 1) return null;
-
-  const [targetKey] = candidateKeys;
-  const target = visibleNodes.find((node) => node.key === targetKey);
-  if (!target || !["facility", "transport"].includes(target.node_type_key ?? "")) return null;
-
-  const hasIncompatibleExplicitScope = resourceRequirements.some((requirement) => {
-    const scope = requirement.scope;
-    if (!scope || scope.kind !== "EXPLICIT" || typeof scope.node_key !== "string") return false;
-    return scope.node_key !== targetKey && scope.node_key !== target.region_key;
-  });
-  return hasIncompatibleExplicitScope ? null : targetKey;
-}
-
-function mergeTargetActionContracts(
-  contracts: PublicTargetActionContract[],
-): PublicTargetActionContract[] {
-  const merged = new Map<string, PublicTargetActionContract>();
-  contracts.forEach((contract) => {
-    const identity = canonicalJson({ action_key: contract.action_key, target_key: contract.target_key });
-    const current = merged.get(identity);
-    if (!current) {
-      merged.set(identity, {
-        ...contract,
-        resource_requirements: uniquePublicResourceRequirements(
-          contract.action_key,
-          contract.resource_requirements,
-          contract.target_key,
-        ),
-      });
-      return;
-    }
-    merged.set(identity, {
-      ...current,
-      resource_requirements: uniquePublicResourceRequirements(
-        contract.action_key,
-        [...(current.resource_requirements ?? []), ...(contract.resource_requirements ?? [])],
-        contract.target_key,
-      ),
-    });
-  });
-  return Array.from(merged.values());
-}
-
-const FACT_GOAL_LABELS: Record<string, string> = {
-  sustained_humanitarian_logistics: "建立持续人道物流能力",
-  sustained_generation_capability: "建立持续发电能力",
-};
-
-const FACT_GOAL_SUFFIXES: Record<string, string> = {
-  operational: "恢复运行",
-  power_supply: "恢复供电",
-  passable: "恢复通行",
-  emergency_power: "恢复应急供电",
-  heavy_engineering_support: "获得重型工程支援",
-  heavy_engineering_support_ready: "部署重型工程支援",
-  rail_freight_capability: "恢复铁路货运能力",
-  emergency_delivery_support: "建立应急配送能力",
-  external_relief_supply_ready: "建立外援供应能力",
-};
-
 function factStateDisplayText(
-  factKey: string,
   factName: string,
   currentValue: string | number | boolean | undefined,
   acceptedValues: Array<string | number | boolean>,
+  safeMetadata = false,
+  currentValueLabel?: string,
 ): string {
   const stateName = factName === "目标状态" ? "状态" : factName;
+  if (!safeMetadata) {
+    const legacy = legacyFactStateDisplayText(factName, currentValue, acceptedValues);
+    if (legacy) return legacy;
+  }
+  if (currentValueLabel) return currentValueLabel;
   if (currentValue === true) {
-    if (factKey === "operational" || factName.includes("运行")) return "正在运行";
-    if (factKey === "power_supply" || factName.includes("供电")) return "已供电";
-    if (factKey === "passable" || factName.includes("通行")) return "可通行";
-    if (factName.includes("发电")) return "正在发电";
     return `${stateName}已达到目标状态`;
   }
   if (currentValue === false) {
-    if (factKey === "operational" || factName.includes("运行")) return "尚未恢复运行";
-    if (factKey === "power_supply" || factName.includes("供电")) return "尚未供电";
-    if (factKey === "passable" || factName.includes("通行")) return "尚未恢复通行";
-    if (factName.includes("发电")) return "尚未发电";
     return `${stateName}尚未达到目标状态`;
   }
-  if (currentValue === "AVAILABLE") return `${stateName}可用`;
-  if (currentValue === "UNAVAILABLE") return `${stateName}不可用`;
+  if (currentValue !== undefined && currentValue !== null) {
+    return `${stateName}：${uiLabel(String(currentValue))}`;
+  }
   if (acceptedValues.some((value) => value === currentValue)) return `${stateName}已达到目标状态`;
   return `${stateName}待确认`;
 }
@@ -436,7 +322,6 @@ function missionRoadmapRequirementText(
 
   if (requirement.fact_key) {
     const accepted = requirement.accepted_values ?? [];
-    const positive = accepted.some((value) => value === true || value === "AVAILABLE");
     const targetName = requirement.node_key
       ? names.nodeNames?.[requirement.node_key] ?? "目标设施"
       : "目标设施";
@@ -446,17 +331,12 @@ function missionRoadmapRequirementText(
     const currentValue = requirement.node_key
       ? names.factValues?.[publicFactIdentity(requirement.node_key, requirement.fact_key)]
       : undefined;
-    if (positive) {
-      const directLabel = FACT_GOAL_LABELS[requirement.fact_key];
-      if (directLabel && currentValue === undefined) return directLabel;
-      const suffix = FACT_GOAL_SUFFIXES[requirement.fact_key];
-      if (suffix && currentValue === undefined) return targetName + suffix;
-    }
     const stateText = factStateDisplayText(
-      requirement.fact_key,
       factName,
       currentValue,
       accepted,
+      names.factSafeMetadata?.[publicFactIdentity(requirement.node_key ?? "", requirement.fact_key)] ?? false,
+      names.factValueLabels?.[publicFactIdentity(requirement.node_key ?? "", requirement.fact_key)],
     );
     return `${targetName}：${stateText}`;
   }
@@ -701,21 +581,31 @@ function missionRoadmapRequirementRows(
 
 export function MissionRoadmap({
   stages,
+  presentation,
   regionNames,
   resourceNames,
   nodeNames,
   factNames,
   factValues,
+  factSafeMetadata,
+  factValueLabels,
 }: {
   stages: MissionRoadmapStage[];
+  presentation?: PlayerGameState["presentation"];
   summary?: string;
   regionNames?: Record<string, string>;
   resourceNames?: Record<string, string>;
   nodeNames?: Record<string, string>;
   factNames?: Record<string, string>;
   factValues?: Record<string, string | number | boolean>;
+  factSafeMetadata?: Record<string, boolean>;
+  factValueLabels?: Record<string, string>;
 }) {
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const defaultOpen = presentation?.default_open === "FULL";
+  const [detailsOpen, setDetailsOpen] = useState(defaultOpen);
+  useEffect(() => {
+    setDetailsOpen(defaultOpen);
+  }, [defaultOpen, presentation?.revision]);
   if (stages.length === 0) return null;
   return (
     <div className="mission-roadmap-details">
@@ -740,13 +630,19 @@ export function MissionRoadmap({
                 nodeNames,
                 factNames,
                 factValues,
+                factSafeMetadata,
+                factValueLabels,
               })
             ));
-            if (rows.length === 0) return [];
+            const visibleRows = presentation?.roadmap_detail === "SUMMARY"
+              ? rows.filter((row) => row.type !== "field").slice(0, 3)
+              : rows;
+            const safeRows = visibleRows.length > 0 ? visibleRows : rows.slice(0, 1);
+            if (safeRows.length === 0) return [];
             return [(
               <li key={stage.key} className={stage.status.toLowerCase()}>
                 <div className="mission-roadmap-row-list">
-                  {rows.map((row, index) => {
+                  {safeRows.map((row, index) => {
                     if (row.type === "field") {
                       return (
                         <div
@@ -905,6 +801,21 @@ function timelineResultText(event: PublicTimelineEvent): string | null {
   return [status, usageText].filter(Boolean).join(" · ");
 }
 
+type PlanDisplayState = "COLLAPSED" | "COMPACT" | "FULL";
+
+function defaultPlanDisplayState(
+  plan: PublicPlanHistory,
+  latestId: string | null,
+  profileDefault: "COLLAPSED" | "COMPACT" | "FULL" | undefined,
+): PlanDisplayState {
+  if (profileDefault === "COLLAPSED") return "COLLAPSED";
+  if (profileDefault === "FULL") return "FULL";
+  if (profileDefault === "COMPACT") return plan.total_steps >= 6 ? "COMPACT" : "FULL";
+  return plan.total_steps >= 6 && plan.id === latestId
+    ? "COMPACT"
+    : plan.id === latestId ? "FULL" : "COLLAPSED";
+}
+
 function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
   const [open, setOpen] = useState(false);
   return (
@@ -955,8 +866,15 @@ function PlanningCycleDetails({ cycle }: { cycle: PublicPlanningCycle }) {
   );
 }
 
-export function Timeline({ task }: { task: PublicTask | null }) {
+export function Timeline({
+  task,
+  presentation,
+}: {
+  task: PublicTask | null;
+  presentation?: PlayerGameState["presentation"];
+}) {
   const timelineRef = useRef<HTMLDivElement>(null);
+  const timelineDensity = presentation?.timeline_density ?? "DETAILED";
   useEffect(() => {
     const element = timelineRef.current;
     if (element) element.scrollTop = element.scrollHeight;
@@ -973,7 +891,11 @@ export function Timeline({ task }: { task: PublicTask | null }) {
     );
   }
   return (
-    <div ref={timelineRef} className="mission-timeline" aria-live="polite">
+    <div
+      ref={timelineRef}
+      className={`mission-timeline timeline-density-${timelineDensity.toLowerCase()}`}
+      aria-live="polite"
+    >
       {task.timeline.map((event) => {
         const base = timelinePresentation[event.kind];
         const presentation =
@@ -1041,9 +963,9 @@ export function Timeline({ task }: { task: PublicTask | null }) {
                 </strong>
               )}
               {planReason && <p className="timeline-plan-reason">{planReason}</p>}
-              {planningCycle && <PlanningCycleDetails cycle={planningCycle} />}
+              {planningCycle && timelineDensity !== "COMPACT" && <PlanningCycleDetails cycle={planningCycle} />}
               {event.kind !== "ACTION_RESULT" && <ActionLocationLine location={eventLocation} />}
-              {event.detail && !event.kind.startsWith("PLAN_") && (
+              {event.detail && timelineDensity !== "COMPACT" && !event.kind.startsWith("PLAN_") && (
                 <p>
                   说明：
                   {uiLabel(event.detail)}
@@ -1052,7 +974,7 @@ export function Timeline({ task }: { task: PublicTask | null }) {
               {!event.kind.startsWith("PLAN_") && actionResultText && (
                 <p className="timeline-action-result">{actionResultText}</p>
               )}
-              {!event.kind.startsWith("PLAN_") && event.knowledge_changes.length > 0 && (
+              {timelineDensity !== "COMPACT" && !event.kind.startsWith("PLAN_") && event.knowledge_changes.length > 0 && (
                 <ul className="knowledge-gains">
                   {event.knowledge_changes.map((change) => (
                     <li key={`${event.id}:${change.key}`}>
@@ -1072,9 +994,14 @@ export function Timeline({ task }: { task: PublicTask | null }) {
   );
 }
 
-export function PlanHistory({ task }: { task: PublicTask }) {
+export function PlanHistory({
+  task,
+  presentation,
+}: {
+  task: PublicTask;
+  presentation?: PlayerGameState["presentation"];
+}) {
   const latestId = task.plan_history.at(-1)?.id ?? null;
-  type PlanDisplayState = "COLLAPSED" | "COMPACT" | "FULL";
   const [displayStates, setDisplayStates] = useState<Record<string, PlanDisplayState>>({});
   const initializedTaskId = useRef<string | null>(null);
   useEffect(() => {
@@ -1083,14 +1010,16 @@ export function PlanHistory({ task }: { task: PublicTask }) {
       initializedTaskId.current = task.id;
       task.plan_history.forEach((plan) => {
         if (!next[plan.id]) {
-          next[plan.id] = plan.total_steps >= 6 && plan.id === latestId
-            ? "COMPACT"
-            : plan.id === latestId ? "FULL" : "COLLAPSED";
+          next[plan.id] = defaultPlanDisplayState(
+            plan,
+            latestId,
+            presentation?.plan_default,
+          );
         }
       });
       return next;
     });
-  }, [latestId, task.id, task.plan_history]);
+  }, [latestId, presentation?.plan_default, task.id, task.plan_history]);
   if (!task.plan_history.length) return <p className="console-empty">尚未生成执行方案。</p>;
   return (
     <div className="plan-history">
@@ -1098,10 +1027,8 @@ export function PlanHistory({ task }: { task: PublicTask }) {
         const isLongPlan = plan.total_steps >= 6;
         const storedState = displayStates[plan.id];
         const state = !isLongPlan && storedState === "COMPACT"
-          ? "COLLAPSED"
-          : storedState ?? (isLongPlan
-            ? plan.id === latestId ? "COMPACT" : "COLLAPSED"
-            : plan.id === latestId ? "FULL" : "COLLAPSED");
+          ? "FULL"
+          : storedState ?? defaultPlanDisplayState(plan, latestId, presentation?.plan_default);
         const open = state !== "COLLAPSED";
         const markerSequence = interruptionMarkerSequence(plan);
         const interruption = plan.interruption;
@@ -1300,6 +1227,7 @@ export function KnowledgeAccordion({
 }
 
 type KnownWorldAccordionsProps = {
+  presentation?: PlayerGameState["presentation"];
   resources: PlayerGameState["resources"];
   publicResourceNames?: Record<string, string>;
   resourceIntelligence?: ResourceIntelligence;
@@ -1309,11 +1237,13 @@ type KnownWorldAccordionsProps = {
   knownRelations?: NonNullable<PlayerGameState["known_relations"]>;
   knownActionRequirements?: NonNullable<PlayerGameState["known_action_requirements"]>;
   knownTargetActionContracts?: PublicTargetActionContract[];
+  knownProducerBindings?: PublicProducerBinding[];
   task?: PublicTask | null;
   resourceTask?: PublicTask | null;
 };
 
 export function KnownWorldAccordions({
+  presentation,
   resources,
   publicResourceNames = {},
   resourceIntelligence,
@@ -1323,6 +1253,7 @@ export function KnownWorldAccordions({
   knownRelations = [],
   knownActionRequirements = [],
   knownTargetActionContracts = [],
+  knownProducerBindings = [],
   task = null,
   resourceTask,
 }: KnownWorldAccordionsProps) {
@@ -1350,6 +1281,9 @@ export function KnownWorldAccordions({
   const resourceGroups = groupResourcesByRegion(resources);
   const locationGroups = groupNodesByRegion(visibleNodes);
   const actorGroups = groupActorsByTask(actors, task);
+  const actorFields = presentation
+    ? presentation.actor_fields
+    : ["NAME", "ROLE", "LOCATION", "COMMAND_REACHABILITY"];
   const displayedRelations = meaningfulKnownRelations(knownRelations);
   const nodeByKey = new Map(visibleNodes.map((node) => [node.key, node]));
   const nodeDisplayName = (key: string, candidate?: string | null) =>
@@ -1369,23 +1303,27 @@ export function KnownWorldAccordions({
   const assignedFactKeys = new Set<string>();
   const assignedRelationKeys = new Set<string>();
   const factIdentity = (fact: PlayerGameState["known_facts"][number]) => `${fact.node_key}:${fact.fact_key}`;
+  const nodeFamily = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
+    node?.node_family ?? node?.node_type_key?.toUpperCase();
+  const factFamily = (fact: PlayerGameState["known_facts"][number]) =>
+    fact.node_family ?? fact.node_type_key?.toUpperCase();
   const isRegionNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
-    node?.node_type_key === "region";
+    nodeFamily(node) === "REGION";
   const isFacilityNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
-    node?.node_type_key === "facility";
+    nodeFamily(node) === "FACILITY";
   const isTransportNode = (node: PlayerGameState["visible_nodes"][number] | undefined) =>
-    node?.node_type_key === "transport";
+    nodeFamily(node) === "TRANSPORT";
 
   knownFacts.forEach((fact) => {
     const node = nodeByKey.get(fact.node_key);
     const facts = factsByNode.get(fact.node_key) ?? [];
     facts.push(fact);
     factsByNode.set(fact.node_key, facts);
-    if (isFacilityNode(node) || fact.node_type_key === "facility" || isTransportNode(node)) {
+    if (isFacilityNode(node) || factFamily(fact) === "FACILITY" || isTransportNode(node)) {
       assignedFactKeys.add(factIdentity(fact));
       return;
     }
-    if (isRegionNode(node) || fact.node_type_key === "region") {
+    if (isRegionNode(node) || factFamily(fact) === "REGION") {
       const regionKey = node?.key ?? fact.region_key;
       if (regionKey) {
         const group = regionFacts.get(regionKey) ?? [];
@@ -1427,6 +1365,12 @@ export function KnownWorldAccordions({
     const contracts = contractsByTarget.get(contract.target_key) ?? [];
     contracts.push(contract);
     contractsByTarget.set(contract.target_key, contracts);
+  });
+  const producerBindingsByTarget = new Map<string, PublicProducerBinding[]>();
+  knownProducerBindings.forEach((binding) => {
+    const bindings = producerBindingsByTarget.get(binding.target_key) ?? [];
+    bindings.push(binding);
+    producerBindingsByTarget.set(binding.target_key, bindings);
   });
   const resourceNames = new Map<string, string>();
   const isPublicResourceName = (key: string, candidate: unknown): candidate is string =>
@@ -1541,9 +1485,6 @@ export function KnownWorldAccordions({
       ? "neutral"
       : "success";
   const targetContractsFor = (nodeKey: string) => contractsByTarget.get(nodeKey) ?? [];
-  const facilityMetadataFacts = new Set(["operational", "power_supply", "repair_profile"]);
-
-
   const renderKnownLocations = () => (
     <div className="console-region-groups">
       {locationGroups.map((group) => {
@@ -1577,7 +1518,7 @@ export function KnownWorldAccordions({
                         <span className="knowledge-relation-arrow" aria-hidden="true">{"\u2192"}</span>
                         <strong>{nodeDisplayName(relation.target_node_key, relation.target_node_name)}</strong>
                       </div>
-                      <small>{knownRelationDescription(relation.relation_type_key)}</small>
+                      <small>{knownRelationDescription(relation.relation_type_key, relation.relation_type_name)}</small>
                     </div>
                   ))}
                 </div>
@@ -1588,153 +1529,70 @@ export function KnownWorldAccordions({
                   const nodeRelations = relationsBySource.get(node.key) ?? [];
                   const facility = isFacilityNode(node);
                   const transport = isTransportNode(node);
-                  const powerFact = nodeFacts.find((fact) => fact.fact_key === "power_supply");
-                  const operationalFact = nodeFacts.find((fact) => fact.fact_key === "operational");
-                  const passabilityFact = nodeFacts.find((fact) => fact.fact_key === "passable");
-                  const hasPowerOutputRelation = nodeRelations.some(
-                    (relation) =>
-                      relation.source_node_key === node.key
-                      && relation.relation_type_key === "supplies_power_to",
+                  const primaryHeaderFact = nodeFacts.find(
+                    (fact) => resolveFacilityFactRole(fact) === "HEADER_PRIMARY",
                   );
+                  const secondaryHeaderFact = nodeFacts.find(
+                    (fact) => resolveFacilityFactRole(fact) === "HEADER_SECONDARY",
+                  );
+                  const mainFacts = nodeFacts.filter(
+                    (fact) => !["SUPPORTING", "REQUIREMENT_ONLY"].includes(resolveFacilityFactRole(fact)),
+                  );
+                  const leadingFact = primaryHeaderFact ?? mainFacts[0];
+                  const supportingFact = secondaryHeaderFact ?? mainFacts[1];
+                  const facilityPresentation = presentation ? {
+                    ...presentation,
+                    summary_slot: node.presentation?.summary_slot ?? presentation.summary_slot,
+                    entity_detail: node.presentation?.detail_level ?? presentation.entity_detail,
+                    default_open: node.presentation?.default_open ?? presentation.default_open,
+                    knowledge_level: node.presentation?.knowledge_level ?? presentation.knowledge_level,
+                    semantic_order: node.presentation?.semantic_order ?? presentation.semantic_order,
+                  } : undefined;
                   const targetContracts = targetContractsFor(node.key);
-                  const additionalFacts = nodeFacts.filter((fact) => !facilityMetadataFacts.has(fact.fact_key));
-                  const associatedResources = (node.associated_known_resources ?? [])
-                    .filter((resource) => resource.availability !== "AVAILABLE");
-                  const targetActionRequirementRows = targetContracts.flatMap((contract) => {
-                    const typedRequirements = uniquePublicResourceRequirements(
-                      contract.action_key,
-                      contract.resource_requirements,
-                      contract.target_key,
-                    );
-                    const representedTypedIdentities = new Set<string>();
-                    const resourceParts = Object.entries(contract.cost ?? {}).flatMap(
-                      ([resourceKey, amount]) => {
-                        // ``cost`` predates typed requirements and has no scope
-                        // field.  When its Action/resource/amount is represented
-                        // by a typed requirement, keep the typed row as the
-                        // canonical display and suppress only this legacy copy.
-                        const matchingRequirements = typedRequirements.filter(
-                          (requirement) =>
-                            requirement.resource_key === resourceKey
-                            && requirement.minimum === amount,
+                  const associatedResources = node.associated_known_resources ?? [];
+                  const facilityResourceRows = facility
+                    ? buildFacilityResourceRows(
+                      node.key,
+                      resourceIntelligence,
+                      associatedResources,
+                      resourceName,
+                      nodeDisplayName,
+                      (factNodeKey, factKey) => {
+                        const fact = factsByNode.get(factNodeKey)?.find(
+                          (candidate) => candidate.fact_key === factKey,
                         );
-                        if (matchingRequirements.length === 0) {
-                          return [`${resourceName(resourceKey)} ×${String(amount)}`];
-                        }
-                        return matchingRequirements.map((requirement) => {
-                          representedTypedIdentities.add(
-                            publicResourceRequirementIdentity(
-                              contract.action_key,
-                              requirement,
-                              contract.target_key,
-                            ),
-                          );
-                          return `${resourceName(requirement.resource_key)} ×${String(requirement.minimum)}`;
-                        });
+                        return fact ? factDisplayLabel(fact) : undefined;
                       },
-                    );
-                    const parts = [
-                      ...resourceParts,
-                      ...publicResourceRequirementParts(
-                        typedRequirements.filter(
-                          (requirement) => !representedTypedIdentities.has(
-                            publicResourceRequirementIdentity(
-                              contract.action_key,
-                              requirement,
-                              contract.target_key,
-                            ),
-                          ),
-                        ),
-                        resourceName,
-                      ),
-                      ...(contract.special_requirements ?? []).flatMap((requirement) => {
-                        const nodeKey = typeof requirement.node_key === "string"
-                          ? requirement.node_key
-                          : null;
-                        const factKey = typeof requirement.fact_key === "string"
-                          ? requirement.fact_key
-                          : null;
-                        if (!nodeKey || !factKey || !nodeByKey.has(nodeKey)) return [];
-                        const fact = factsByNode.get(nodeKey)?.find(
-                          (item) => item.fact_key === factKey,
-                        );
-                        if (!fact) return [];
-                        const text = publicFactRequirementText(
-                          requirement,
-                          fact,
-                          nodeDisplayName(nodeKey, nodeByKey.get(nodeKey)?.name),
-                        );
-                        return text ? [`前置条件：${text}`] : [];
-                      }),
-                    ];
-                    if (parts.length === 0) return [];
-                    return {
-                      key: node.key + ":requirement:" + contract.action_key,
-                      actionKey: contract.action_key,
-                      label: contract.action_key.startsWith("repair_") ? "修复需求：" : `${contract.action_name}：`,
-                      value: parts.join("、"),
-                    };
+                      producerBindingsByTarget.get(node.key) ?? [],
+                    )
+                    : [];
+                  const targetActionRequirementRows = buildTargetActionRequirementRows({
+                    contracts: targetContracts,
+                    knownFacts,
+                    visibleNodeKeys: new Set(visibleNodes.map((visibleNode) => visibleNode.key)),
+                    resourceName,
+                    nodeName: nodeDisplayName,
+                    nodeByKey,
                   });
-                  const displayableRepairActionKeys = new Set(
-                    targetActionRequirementRows
-                      .filter((row) => row.actionKey.startsWith("repair_"))
-                      .map((row) => row.actionKey),
-                  );
+                  const facilityDetailRows = facility
+                    ? buildFacilityDetailRows({
+                      nodeKey: node.key,
+                      knownFacts,
+                      knownRelations: nodeRelations,
+                      knownActionRequirements,
+                      producerBindings: producerBindingsByTarget.get(node.key) ?? [],
+                      facilityResourceRows,
+                      resourceName,
+                      resolveNodeName: nodeDisplayName,
+                      presentation: facilityPresentation,
+                    })
+                    : [];
                   const renderTargetActionRequirementRows = () => targetActionRequirementRows.map((row) => (
                     <div className="knowledge-facility-attribute" key={row.key}>
                       <span className="knowledge-facility-attribute-label">{row.label}</span>
                       <span className="knowledge-facility-attribute-value">{row.value}</span>
                     </div>
                   ));
-                  const repairTeamNames = [
-                    ...new Set(
-                      targetContracts
-                        .filter(
-                          (contract) => contract.action_key.startsWith("repair_")
-                            && displayableRepairActionKeys.has(contract.action_key),
-                        )
-                        .map((contract) => contract.required_actor_role_name)
-                        .filter((name): name is string => typeof name === "string" && name.length > 0),
-                    ),
-                  ];
-                  const hasFacilityDetails = targetActionRequirementRows.length > 0
-                    || associatedResources.length > 0
-                    || hasPowerOutputRelation
-                    || additionalFacts.length > 0
-                    || nodeRelations.length > 0;
-                  const associatedResourceText = associatedResources
-                    .map((resource) => {
-                      const resourceKey = typeof resource.resource_key === "string" ? resource.resource_key : "";
-                      const name = resourceName(
-                        resourceKey,
-                        typeof resource.resource_name === "string" ? resource.resource_name : undefined,
-                      );
-                      const quantity = resource.quantity !== null && resource.quantity !== undefined
-                        ? ` \u00d7${String(resource.quantity)}`
-                        : "";
-                      const availability = resource.availability === "UNAVAILABLE"
-                        ? "\u6682\u4e0d\u53ef\u7528"
-                        : resource.availability === "AVAILABLE"
-                          ? "\u53ef\u7528"
-                          : "";
-                      const requirement = resourceRequirementText(resource.availability_requirement);
-                      return [name + quantity, availability, requirement].filter(Boolean).join("\uff0c");
-                    })
-                    .join("\uff0c");
-                  const relationLabels = new Map<string, string[]>();
-                  nodeRelations.forEach((relation) => {
-                    const label = relation.relation_type_key === "supplies_power_to"
-                      ? "\u53ef\u4f9b\u7535"
-                      : knownRelationDescription(relation.relation_type_key);
-                    const targets = relationLabels.get(label) ?? [];
-                    targets.push(nodeDisplayName(relation.target_node_key, relation.target_node_name));
-                    relationLabels.set(label, targets);
-                  });
-                  const facilityRelationRows = Array.from(relationLabels.entries()).map(([label, targets], index) => ({
-                    key: node.key + ":relation:" + index,
-                    label,
-                    value: targets.join("\u3001"),
-                  }));
 
                   if (transport) {
                     return (
@@ -1744,8 +1602,8 @@ export function KnownWorldAccordions({
                             <strong>{node.name}</strong>
                             <small>{node.endpoint_region_names?.join(" ↔ ") ?? group.name}</small>
                           </span>
-                          <span className={"knowledge-facility-status " + statusTone(passabilityFact?.value ?? "UNKNOWN")}>
-                            {passabilityFact ? factDisplayValue(passabilityFact) : "待探索"}
+                          <span className={"knowledge-facility-status " + statusTone(leadingFact?.value ?? "UNKNOWN")}>
+                            {leadingFact ? factDisplayValue(leadingFact) : "待探索"}
                           </span>
                           <span className="knowledge-transport-column-spacer" aria-hidden="true" />
                         </div>
@@ -1754,7 +1612,9 @@ export function KnownWorldAccordions({
                   }
 
                   if (facility) {
-                    const facilityOpen = expandedFacilities[node.key] === true;
+                    const defaultFacilityOpen = facilityPresentation?.default_open === "FULL";
+                    const facilityOpen = expandedFacilities[node.key]
+                      ?? defaultFacilityOpen;
                     return (
                       <details
                         className="knowledge-facility-card"
@@ -1774,56 +1634,30 @@ export function KnownWorldAccordions({
                           <span className="knowledge-facility-heading">
                             <strong>{node.name}</strong>
                           </span>
-                          <span className="knowledge-facility-statuses">
-                            <span className={"knowledge-facility-status " + statusTone(powerFact?.value ?? "UNKNOWN")}>
-                              {powerFact ? factDisplayValue(powerFact) : "供电未知"}
+                          {facilityPresentation?.summary_slot !== "BODY" && <span className="knowledge-facility-statuses">
+                            <span className={"knowledge-facility-status " + statusTone(supportingFact?.value ?? "UNKNOWN")}>
+                              {supportingFact ? factDisplayValue(supportingFact) : "状态未知"}
                             </span>
-                            <span className={"knowledge-facility-status " + statusTone(operationalFact?.value ?? "UNKNOWN")}>
-                              {operationalFact ? facilityStatusDisplayValue(operationalFact) : "状态未知"}
+                            <span className={"knowledge-facility-status " + statusTone(leadingFact?.value ?? "UNKNOWN")}>
+                              {leadingFact ? facilityStatusDisplayValue(leadingFact) : "状态未知"}
                             </span>
-                          </span>
+                          </span>}
                           <span className="knowledge-facility-toggle" aria-hidden="true">
                             {facilityOpen ? "-" : "+"}
                           </span>
                         </summary>
                         <div className="knowledge-facility-details">
-                          {renderTargetActionRequirementRows()}
-                          {repairTeamNames.map((name) => (
-                            <div className="knowledge-facility-attribute" key={node.key + ":team:" + name}>
-                              <span className="knowledge-facility-attribute-label">{"执行队伍："}</span>
-                              <span className="knowledge-facility-attribute-value">{name}</span>
-                            </div>
-                          ))}
-                          {associatedResources.length > 0 && (
-                            <div className="knowledge-facility-attribute">
-                              <span className="knowledge-facility-attribute-label">{"关联资源："}</span>
-                              <span className="knowledge-facility-attribute-value">{associatedResourceText}</span>
-                            </div>
-                          )}
-                          {hasPowerOutputRelation && (
-                            <div className="knowledge-facility-attribute">
-                              <span className="knowledge-facility-attribute-label">{"送电能力："}</span>
-                              <span className="knowledge-facility-attribute-value">
-                                {operationalFact?.value === true
-                                && (powerFact?.value === "AVAILABLE" || powerFact?.value === true)
-                                  ? "已具备"
-                                  : "未具备"}
-                              </span>
-                            </div>
-                          )}
-                          {additionalFacts.map((fact) => (
-                            <div className="knowledge-facility-attribute" key={"facility-fact:" + factIdentity(fact)}>
-                              <span className="knowledge-facility-attribute-label">{factDisplayLabel(fact) + "："}</span>
-                              <span className="knowledge-facility-attribute-value">{factDisplayValue(fact)}</span>
-                            </div>
-                          ))}
-                          {facilityRelationRows.map((row) => (
-                            <div className="knowledge-facility-attribute" key={row.key}>
-                              <span className="knowledge-facility-attribute-label">{row.label + "："}</span>
-                              <span className="knowledge-facility-attribute-value">{row.value}</span>
-                            </div>
-                          ))}
-                          {!hasFacilityDetails && <div className="knowledge-empty-state">{"暂无更多已知信息"}</div>}
+                          {facilityDetailRows.length > 0
+                            ? facilityDetailRows.map((row) => (
+                              <div
+                                className={`knowledge-facility-attribute${row.kind === "DETAIL" ? "" : " knowledge-facility-helper"}`}
+                                key={row.key}
+                              >
+                                <span className="knowledge-facility-attribute-label">{row.label}</span>
+                                <span className="knowledge-facility-attribute-value">{row.value}</span>
+                              </div>
+                            ))
+                            : <div className="knowledge-empty-state">{"暂无更多已知信息"}</div>}
                         </div>
                       </details>
                     );
@@ -1854,7 +1688,7 @@ export function KnownWorldAccordions({
                               <span className="knowledge-relation-arrow" aria-hidden="true">{"\u2192"}</span>
                               <strong>{relation.target_node_name ?? relation.target_node_key}</strong>
                             </div>
-                            <small>{knownRelationDescription(relation.relation_type_key)}</small>
+                            <small>{knownRelationDescription(relation.relation_type_key, relation.relation_type_name)}</small>
                           </div>
                         ))}
                         {nodeFacts.length === 0 && nodeRelations.length === 0 && (
@@ -1912,24 +1746,58 @@ export function KnownWorldAccordions({
               </summary>
               <div className="knowledge-region-content">
                 <div className="knowledge-entry-list">
-                  {group.actors.map((actor) => (
-                    <div className="knowledge-entry" key={actor.key}>
-                      <div className="knowledge-entry-copy">
-                        <strong>{actor.name}</strong>
-                        <small>{actor.role_name}</small>
+                  {group.actors.map((actor) => {
+                    const badgeFields = actorFields.filter(
+                      (field) => field === "LOCATION" || field === "COMMAND_REACHABILITY",
+                    );
+                    const copyFields = actorFields.filter(
+                      (field) => field !== "LOCATION" && field !== "COMMAND_REACHABILITY",
+                    );
+                    return (
+                      <div className="knowledge-entry actor-entry" key={actor.key}>
+                        <div className="knowledge-entry-copy">
+                          {copyFields.map((field) => {
+                            if (field === "NAME") return <strong key={field}>{actor.name}</strong>;
+                            if (field === "ROLE") return <small key={field}>{actor.role_name}</small>;
+                            if (field === "STATUS") {
+                              const statusLabel = actor.status === "ACTIVE"
+                                ? "行动中"
+                                : actor.status === "PLANNED"
+                                  ? "计划中"
+                                  : actor.status === "IDLE" ? "待命中" : group.label;
+                              return <small data-actor-field={field} key={field}>{statusLabel}</small>;
+                            }
+                            if (field === "TASK" && actor.task_name) {
+                              return <small data-actor-field={field} key={field}>{actor.task_name}</small>;
+                            }
+                            return null;
+                          })}
+                        </div>
+                        {badgeFields.length > 0 && (
+                          <div className="actor-status-pills">
+                            {badgeFields.map((field) => {
+                              if (field === "LOCATION") {
+                                return (
+                                  <span className="console-pill success knowledge-status-pill" data-actor-field={field} key={field}>
+                                    {actor.current_node_name}
+                                  </span>
+                                );
+                              }
+                              return (
+                                <span
+                                  className={`console-pill ${actor.command_reachability === "DISCONNECTED" ? "danger" : "success"} knowledge-status-pill`}
+                                  data-actor-field={field}
+                                  key={field}
+                                >
+                                  {actor.command_reachability === "DISCONNECTED" ? "失联" : "在线"}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
-                      <div className="actor-status-pills">
-                        <span className="console-pill success knowledge-status-pill">
-                          {actor.current_node_name}
-                        </span>
-                        <span
-                          className={`console-pill ${actor.command_reachability === "DISCONNECTED" ? "danger" : "success"} knowledge-status-pill`}
-                        >
-                          {actor.command_reachability === "DISCONNECTED" ? "失联" : "在线"}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </details>
@@ -2009,7 +1877,12 @@ export function KnownWorldAccordions({
                         knownResources.map(({ resourceKey, resource, synthetic }) => (
                           <div className="knowledge-entry" key={regionKey + ":" + resourceKey}>
                             <div className="knowledge-entry-copy">
-                              <strong>{resource.resource_name}</strong>
+                              <strong>
+                                {resource.resource_name}
+                                {(resource.display_unit ?? resource.unit)
+                                  ? ` · ${resource.display_unit ?? resource.unit}`
+                                  : ""}
+                              </strong>
                               {!synthetic && !region.resource_survey_completed && <small>已确认</small>}
                               {resource.pools
                                 .filter(
@@ -2063,7 +1936,14 @@ export function KnownWorldAccordions({
                       .filter(([, resource]) => (resource.known_total ?? resource.known_available) > 0)
                       .map(([resourceKey, resource]) => (
                         <div className="knowledge-entry" key={"global:" + resourceKey}>
-                          <div className="knowledge-entry-copy"><strong>{resource.resource_name}</strong></div>
+                          <div className="knowledge-entry-copy">
+                            <strong>
+                              {resource.resource_name}
+                              {(resource.display_unit ?? resource.unit)
+                                ? ` · ${resource.display_unit ?? resource.unit}`
+                                : ""}
+                            </strong>
+                          </div>
                           <span className="console-pill success knowledge-status-pill">
                             {resource.known_total == null || resource.known_total === resource.known_available
                               ? resource.known_available
@@ -2180,7 +2060,7 @@ export function KnownWorldAccordions({
                   <span className="knowledge-relation-arrow" aria-hidden="true">→</span>
                   <strong>{relation.target_node_name ?? relation.target_node_key}</strong>
                 </div>
-                <small>{knownRelationDescription(relation.relation_type_key)}</small>
+                <small>{knownRelationDescription(relation.relation_type_key, relation.relation_type_name)}</small>
               </div>
             ))}
           </div>
@@ -2236,7 +2116,7 @@ export function GoalComposer({
   feedback = null,
   readyDraft = null,
   confirming = false,
-  goalPresets = [],
+  quickInputs = [],
   presetsLoaded = false,
   onGoalChange,
   onSubmit,
@@ -2250,18 +2130,13 @@ export function GoalComposer({
   feedback?: string | null;
   readyDraft?: PublicResolvedGoalDraft | null;
   confirming?: boolean;
-  goalPresets?: string[];
+  quickInputs?: string[];
   presetsLoaded?: boolean;
   onGoalChange: (value: string) => void;
   onSubmit: () => void;
   onConfirm?: (draftId: string) => void;
 }) {
-  const [selectedPresetText, setSelectedPresetText] = useState("");
   const displayedGoal = resolving ? pendingGoal ?? goal : goal;
-  const handlePresetChange = (value: string) => {
-    setSelectedPresetText(value);
-    if (value) onGoalChange(value);
-  };
   return (
     <section className="command-panel goal-composer-panel" data-testid="goal-composer">
       <header className="command-panel-heading">
@@ -2284,10 +2159,7 @@ export function GoalComposer({
             id="goal"
             rows={2}
             value={displayedGoal}
-            onChange={(event) => {
-              setSelectedPresetText("");
-              onGoalChange(event.target.value);
-            }}
+            onChange={(event) => onGoalChange(event.target.value)}
             placeholder="描述你希望达成的目标，例如“修复中央隧道”……"
             disabled={resolving}
           />
@@ -2295,18 +2167,27 @@ export function GoalComposer({
             {resolving ? "解析中…" : "解析目标"}
           </button>
         </div>
-        <select
-          id="goal-preset-select"
-          aria-label="选择快捷目标"
-          value={presetsLoaded ? selectedPresetText : ""}
-          onChange={(event) => handlePresetChange(event.target.value)}
-          disabled={resolving || !presetsLoaded}
-        >
-          <option value="">{presetsLoaded ? '选择快捷目标……' : '正在加载快捷目标……'}</option>
-          {goalPresets.map((preset) => (
-            <option key={preset} value={preset}>{preset}</option>
-          ))}
-        </select>
+        {!presetsLoaded && (
+          <div className="goal-quick-inputs" aria-label="快捷输入">
+            <span className="muted">正在加载快捷输入……</span>
+          </div>
+        )}
+        {presetsLoaded && quickInputs.length > 0 && (
+          <select
+            id="goal-preset-select"
+            aria-label="选择快捷目标"
+            value=""
+            onChange={(event) => {
+              if (event.target.value) onGoalChange(event.target.value);
+            }}
+            disabled={resolving}
+          >
+            <option value="">选择快捷目标……</option>
+            {quickInputs.map((input) => (
+              <option key={input} value={input}>{input}</option>
+            ))}
+          </select>
+        )}
         {readyDraft && (
           <div className="goal-confirmation-feedback" data-testid="goal-confirmation-feedback" role="status">
             <span>{readyDraft.presentation_text}</span>
@@ -2336,26 +2217,13 @@ export function GoalComposer({
   );
 }
 
-function scenarioGoalPresets(
-  version: ScenarioVersionDetail | undefined,
+function scenarioQuickInputs(
+  metadata: PlayerGameState["scenario_metadata"] | undefined,
 ): string[] {
-  return (version?.definition_document.objectives ?? []).flatMap((item) => {
-    if (typeof item.key !== "string" || typeof item.name !== "string" || !item.name.trim()) {
-      return [];
-    }
-    return [item.name];
-  });
-}
-
-function definitionNameMap(value: unknown): Record<string, string> {
-  if (!Array.isArray(value)) return {};
-  return Object.fromEntries(value.flatMap((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    const entry = item as Record<string, unknown>;
-    return typeof entry.key === "string" && typeof entry.name === "string"
-      ? [[entry.key, entry.name]]
-      : [];
-  }));
+  const quickInputs = metadata?.quick_inputs;
+  return Array.isArray(quickInputs)
+    ? quickInputs.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+    : [];
 }
 
 export function MissionLogPanel({ children }: { children: ReactNode }) {
@@ -2366,8 +2234,102 @@ export function MissionLogPanel({ children }: { children: ReactNode }) {
   );
 }
 
+type GamePresentationSettingsModalProps = {
+  scenarioName: string;
+  savedProfile: PresentationProfileResponse | null;
+  workingProfile: PresentationProfileDocument | null;
+  saveState: "CLEAN" | "DIRTY" | "SAVING" | "CONFLICT" | "ERROR";
+  loading: boolean;
+  loadError: boolean;
+  saveError: boolean;
+  disabled: boolean;
+  onChange: (profile: PresentationProfileDocument) => void;
+  onReturnPreview: () => void;
+  onRestoreDefault: () => void;
+  onDiscard: () => void;
+  onSave: () => void;
+  onReload: () => void;
+};
+
+export function GamePresentationSettingsModal({
+  scenarioName,
+  savedProfile,
+  workingProfile,
+  saveState,
+  loading,
+  loadError,
+  saveError,
+  disabled,
+  onChange,
+  onReturnPreview,
+  onRestoreDefault,
+  onDiscard,
+  onSave,
+  onReload,
+}: GamePresentationSettingsModalProps) {
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onReturnPreview();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [onReturnPreview]);
+
+  return (
+    <div className="presentation-modal-overlay" data-testid="game-presentation-modal-overlay">
+      <section aria-labelledby="game-presentation-modal-title" aria-modal="true" className="presentation-modal" data-testid="game-presentation-modal" role="dialog">
+        <header className="presentation-modal-heading">
+          <div>
+            <p className="eyebrow">Live preview</p>
+            <h2 id="game-presentation-modal-title">界面设置</h2>
+            <span className="presentation-scenario-badge">{scenarioName}</span>
+          </div>
+          <div className="presentation-modal-status">
+            <span className={`save-state ${saveState.toLowerCase()}`} data-testid="game-presentation-save-state">{saveState}</span>
+            {savedProfile && <span>修订 {savedProfile.revision} · {savedProfile.profile.template}</span>}
+          </div>
+        </header>
+        <div className="presentation-modal-body">
+          {loading && <p className="muted">正在加载当前显示配置……</p>}
+          {loadError && <p className="error">无法加载界面设置。</p>}
+          {workingProfile && (
+            <PresentationSettingsPanel profile={workingProfile} compact onChange={onChange} disabled={disabled} />
+          )}
+          {(saveError || saveState === "CONFLICT") && (
+            <p className="error">
+              {saveState === "CONFLICT"
+                ? <><span>保存冲突：服务器修订已变化。</span> <button type="button" onClick={onReload}>重新加载服务器版本</button></>
+                : "保存失败，请稍后重试。"}
+            </p>
+          )}
+        </div>
+        <footer className="presentation-modal-footer">
+          <div className="presentation-bottom-notes" data-testid="game-presentation-bottom-notes">
+            <span>只调整安全信息的排列与密度，不修改场景、知识或 Agent 行为。</span>
+            <span>保存后的界面设置适用于此场景的所有版本和游戏实例。</span>
+          </div>
+          <div className="presentation-modal-action-row">
+            <button type="button" className="secondary-button action-button-centered" onClick={onReturnPreview}>返回预览</button>
+            <div>
+              <button type="button" className="secondary-button action-button-centered" disabled={disabled} onClick={onRestoreDefault}>恢复默认设置</button>
+              <button type="button" className="secondary-button presentation-discard-button action-button-centered" disabled={disabled || saveState === "CLEAN"} onClick={onDiscard}>放弃修改</button>
+              <button type="button" className="primary-button action-button-centered" disabled={disabled || saveState !== "DIRTY"} onClick={onSave}>{saveState === "SAVING" ? "正在保存……" : "保存并应用"}</button>
+            </div>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export function GamePage() {
   const { gameId = "" } = useParams();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const fork = useForkGame();
   const [goal, setGoal] = useState("");
@@ -2378,6 +2340,11 @@ export function GamePage() {
   const [continuousExecuting, setContinuousExecuting] = useState(false);
   const [developerOpen, setDeveloperOpen] = useState(false);
   const [developerToken, setDeveloperToken] = useState("");
+  const [presentationModalOpen, setPresentationModalOpen] = useState(false);
+  const [savedPresentationProfile, setSavedPresentationProfile] = useState<PresentationProfileResponse | null>(null);
+  const [workingPresentationProfile, setWorkingPresentationProfile] = useState<PresentationProfileDocument | null>(null);
+  const [presentationSaveState, setPresentationSaveState] = useState<"CLEAN" | "DIRTY" | "SAVING" | "CONFLICT" | "ERROR">("CLEAN");
+  const [pendingNavigation, setPendingNavigation] = useState<string | null>(null);
   const [checkpointNotice, setCheckpointNotice] = useState<string | null>(null);
   const [goalFeedback, setGoalFeedback] = useState<string | null>(null);
   const [lastParseResult, setLastParseResult] = useState<
@@ -2400,19 +2367,6 @@ export function GamePage() {
     refetchOnReconnect: !continuousExecuting,
     refetchInterval: (query) =>
       planningRefetchInterval(query.state.data, activeOperation, continuousExecuting),
-  });
-  const scenario = useQuery({
-    queryKey: ["scenario", play.data?.game.scenario_id],
-    queryFn: () => api.scenario(play.data!.game.scenario_id),
-    enabled: Boolean(play.data?.game.scenario_id),
-  });
-  const scenarioVersion = useQuery({
-    queryKey: ["scenario-version", play.data?.game.scenario_id, play.data?.game.scenario_version_id],
-    queryFn: () => api.scenarioVersion(
-      play.data!.game.scenario_id,
-      play.data!.game.scenario_version_id,
-    ),
-    enabled: Boolean(play.data?.game.scenario_id && play.data?.game.scenario_version_id),
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["play", gameId] });
   const syncLivePlay = (state: PlayerGameState) => {
@@ -2537,6 +2491,114 @@ export function GamePage() {
     queryFn: () => api.developerSnapshot(gameId, developerToken),
     enabled: developerOpen && Boolean(developerToken),
   });
+  const presentationScenarioId = play.data?.game.scenario_id ?? "";
+  const presentationProfileQuery = useQuery({
+    queryKey: ["presentation", presentationScenarioId],
+    queryFn: () => api.presentation(presentationScenarioId),
+    enabled: presentationModalOpen && Boolean(presentationScenarioId),
+    refetchOnWindowFocus: false,
+  });
+  const presentationRevisionQuery = useQuery({
+    queryKey: ["presentation-revision", presentationScenarioId],
+    queryFn: () => api.presentationRevision(presentationScenarioId),
+    enabled: Boolean(presentationScenarioId),
+    refetchOnWindowFocus: true,
+    refetchInterval: PRESENTATION_PROFILE_REFRESH_INTERVAL_MS,
+  });
+  const refetchPresentationProfile = presentationProfileQuery.refetch;
+  useEffect(() => {
+    const next = presentationProfileQuery.data;
+    if (!next) return;
+    if (!savedPresentationProfile) {
+      setSavedPresentationProfile(next);
+      setWorkingPresentationProfile(clonePresentationProfile(next.profile));
+      setPresentationSaveState("CLEAN");
+      return;
+    }
+    if (next.revision <= savedPresentationProfile.revision) return;
+    const localDirty = Boolean(
+      workingPresentationProfile
+      && JSON.stringify(savedPresentationProfile.profile) !== JSON.stringify(workingPresentationProfile),
+    );
+    setSavedPresentationProfile(next);
+    if (localDirty) {
+      setPresentationSaveState("CONFLICT");
+      return;
+    }
+    setWorkingPresentationProfile(clonePresentationProfile(next.profile));
+    setPresentationSaveState("CLEAN");
+  }, [presentationProfileQuery.data, savedPresentationProfile, workingPresentationProfile]);
+
+  useEffect(() => {
+    const nextRevision = presentationRevisionQuery.data?.revision;
+    if (nextRevision == null) return;
+    if (!savedPresentationProfile) {
+      void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
+      return;
+    }
+    if (nextRevision <= savedPresentationProfile.revision) return;
+    const localDirty = Boolean(
+      workingPresentationProfile
+      && JSON.stringify(savedPresentationProfile.profile) !== JSON.stringify(workingPresentationProfile),
+    );
+    if (localDirty) {
+      setPresentationSaveState("CONFLICT");
+      return;
+    }
+    void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
+    if (presentationModalOpen) void refetchPresentationProfile();
+  }, [
+    gameId,
+    presentationModalOpen,
+    refetchPresentationProfile,
+    presentationRevisionQuery.data?.revision,
+    queryClient,
+    savedPresentationProfile,
+    workingPresentationProfile,
+  ]);
+
+  const reloadGamePresentation = async () => {
+    const result = await presentationProfileQuery.refetch();
+    if (!result.data) return;
+    setSavedPresentationProfile(result.data);
+    setWorkingPresentationProfile(clonePresentationProfile(result.data.profile));
+    setPresentationSaveState("CLEAN");
+  };
+
+  const saveGamePresentation = useMutation({
+    mutationFn: () => {
+      if (!savedPresentationProfile || !workingPresentationProfile) {
+        throw new Error("显示配置尚未加载");
+      }
+      return api.savePresentation(
+        presentationScenarioId,
+        savedPresentationProfile.revision,
+        workingPresentationProfile,
+      );
+    },
+    onMutate: () => setPresentationSaveState("SAVING"),
+    onSuccess: (next) => {
+      setSavedPresentationProfile(next);
+      setWorkingPresentationProfile(clonePresentationProfile(next.profile));
+      setPresentationSaveState("CLEAN");
+      queryClient.setQueryData(["presentation", presentationScenarioId], next);
+      void queryClient.invalidateQueries({ queryKey: ["presentation", presentationScenarioId] });
+      void queryClient.invalidateQueries({ queryKey: ["presentation-revision", presentationScenarioId] });
+      void queryClient.invalidateQueries({ queryKey: ["play", gameId] });
+      setPresentationModalOpen(false);
+    },
+    onError: (error) => setPresentationSaveState(error instanceof ApiError && error.status === 409 ? "CONFLICT" : "ERROR"),
+  });
+
+  const presentationDirty = Boolean(
+    savedPresentationProfile
+    && workingPresentationProfile
+    && JSON.stringify(savedPresentationProfile.profile) !== JSON.stringify(workingPresentationProfile),
+  );
+  const effectivePresentationSaveState = ["SAVING", "CONFLICT", "ERROR"].includes(presentationSaveState)
+    ? presentationSaveState
+    : presentationDirty ? "DIRTY" : "CLEAN";
+  useUnsavedChangesGuard(presentationDirty, "存在未保存的界面预览修改，离开后将丢失。确定离开吗？", setPendingNavigation);
 
   const loadedTask = play.data?.current_task ?? null;
   const resolvingGoal = submit.isPending || pendingGoal !== null;
@@ -2547,13 +2609,12 @@ export function GamePage() {
   }
   const { game } = play.data;
   const liveGame = livePlay.data.game;
-  const goalPresets = scenarioGoalPresets(scenarioVersion.data);
-  const rawScenarioWorld = scenarioVersion.data?.definition_document.world;
-  const scenarioWorld = rawScenarioWorld && typeof rawScenarioWorld === "object" && !Array.isArray(rawScenarioWorld)
-    ? rawScenarioWorld as Record<string, unknown>
-    : {};
+  const localPresentation = workingPresentationProfile && savedPresentationProfile
+    ? resolvePresentationProfilePreview(workingPresentationProfile, savedPresentationProfile.revision)
+    : null;
+  const effectivePresentation = localPresentation ?? play.data.presentation;
+  const quickInputs = scenarioQuickInputs(play.data.scenario_metadata);
   const roadmapNodeNames = {
-    ...definitionNameMap(scenarioWorld.nodes),
     ...Object.fromEntries(play.data.visible_nodes.map((node) => [node.key, node.name])),
   };
   const roadmapRegionNames = {
@@ -2565,7 +2626,6 @@ export function GamePage() {
     ),
   };
   const roadmapResourceNames = {
-    ...definitionNameMap(scenarioWorld.resources),
     ...Object.fromEntries(play.data.resources.map((resource) => [resource.key, resource.name])),
     ...Object.fromEntries(
       Object.values(play.data.resource_intelligence?.regions ?? {}).flatMap((region) => (
@@ -2578,6 +2638,17 @@ export function GamePage() {
   );
   const roadmapFactValues = Object.fromEntries(
     play.data.known_facts.map((fact) => [publicFactIdentity(fact.node_key, fact.fact_key), fact.value]),
+  );
+  const roadmapFactSafeMetadata = Object.fromEntries(
+    play.data.known_facts.map((fact) => [
+      publicFactIdentity(fact.node_key, fact.fact_key),
+      fact.node_family != null || fact.presentation_slot != null || fact.value_label != null,
+    ]),
+  );
+  const roadmapFactValueLabels = Object.fromEntries(
+    play.data.known_facts.flatMap((fact) => fact.value_label
+      ? [[publicFactIdentity(fact.node_key, fact.fact_key), fact.value_label]]
+      : []),
   );
   const selectedTaskLoading = Boolean(
     selectedTaskId !== null && loadedTask?.id !== selectedTaskId,
@@ -2659,6 +2730,7 @@ export function GamePage() {
 
   return (
     <main className="game-console">
+      {pendingNavigation && <EditorConfirmDialog title="放弃当前界面预览修改？" message="当前界面预览有未保存修改，离开后这些修改将丢失。" confirmLabel="离开" onCancel={() => setPendingNavigation(null)} onConfirm={() => { const target = pendingNavigation; setPendingNavigation(null); const url = new URL(target, window.location.href); navigate(`${url.pathname}${url.search}${url.hash}`); }} />}
       {mutationError && (
         <div className="console-error">
           <strong>命令无法继续</strong>
@@ -2666,17 +2738,47 @@ export function GamePage() {
         </div>
       )}
       <section className="scenario-strip">
-        <div><span>场景</span><strong>{scenario.data?.name ?? "正在加载……"}</strong></div>
+        <div><span>场景</span><strong>{game.scenario_name}</strong></div>
         <div><span>实例</span><strong>{game.id.slice(0, 8)}</strong></div>
         <div><span>精确版本</span><strong>版本 {game.scenario_version_number}</strong></div>
         <div><span>运行状态</span><strong className={`console-pill ${game.status === "ACTIVE" ? "success" : "neutral"}`}>{uiLabel(game.status)}</strong></div>
+        <div className="scenario-strip-action"><span>界面</span>{presentationDirty && !presentationModalOpen && <span className="presentation-preview-indicator" data-testid="game-presentation-preview-indicator">预览中</span>}<button type="button" data-testid="game-presentation-settings-button" onClick={() => setPresentationModalOpen(true)}>界面设置</button></div>
       </section>
+      {presentationModalOpen && (
+        <GamePresentationSettingsModal
+          scenarioName={game.scenario_name}
+          savedProfile={savedPresentationProfile}
+          workingProfile={workingPresentationProfile}
+          saveState={effectivePresentationSaveState}
+          loading={presentationProfileQuery.isLoading}
+          loadError={Boolean(presentationProfileQuery.error)}
+          saveError={Boolean(saveGamePresentation.error)}
+          disabled={saveGamePresentation.isPending || liveGame.status !== "ACTIVE"}
+          onChange={(next) => {
+            setWorkingPresentationProfile(next);
+            setPresentationSaveState((current) => current === "CONFLICT" ? current : "DIRTY");
+          }}
+          onReturnPreview={() => setPresentationModalOpen(false)}
+          onRestoreDefault={() => {
+            setWorkingPresentationProfile(defaultPresentationProfile());
+            setPresentationSaveState((current) => current === "CONFLICT" ? current : "DIRTY");
+          }}
+          onDiscard={() => {
+            if (!savedPresentationProfile) return;
+            setWorkingPresentationProfile(clonePresentationProfile(savedPresentationProfile.profile));
+            setPresentationSaveState("CLEAN");
+          }}
+          onSave={() => saveGamePresentation.mutate()}
+          onReload={() => void reloadGamePresentation()}
+        />
+      )}
       <section className="command-grid">
         <aside className="command-panel world-panel">
           <header className="command-panel-heading"><div><p>01 · 世界</p><h1>已知世界</h1></div><span className="console-pill success">玩家可见</span></header>
           <KnownWorldAccordions
+            presentation={effectivePresentation}
             resources={play.data.resources}
-            publicResourceNames={definitionNameMap(scenarioWorld.resources)}
+            publicResourceNames={roadmapResourceNames}
             resourceIntelligence={play.data.resource_intelligence}
             visibleNodes={play.data.visible_nodes}
             actors={play.data.actors}
@@ -2684,6 +2786,7 @@ export function GamePage() {
             knownRelations={play.data.known_relations}
             knownActionRequirements={play.data.known_action_requirements}
             knownTargetActionContracts={play.data.known_target_action_contracts}
+            knownProducerBindings={play.data.known_producer_bindings}
             task={task}
             resourceTask={selectedTaskActive ? task : null}
           />
@@ -2701,7 +2804,7 @@ export function GamePage() {
               onSelect={setSelectedTaskId}
             />
             <div className="timeline-scroll">
-              <Timeline task={task} />
+              <Timeline task={task} presentation={effectivePresentation} />
               {planningForTask && activeOperation && (
                 <WaitingStatus
                   startedAt={activeOperation.startedAt}
@@ -2813,8 +2916,8 @@ export function GamePage() {
               feedback={goalSubmissionFeedback}
               readyDraft={readyGoalDraft}
               confirming={confirmGoal.isPending}
-              goalPresets={goalPresets}
-              presetsLoaded={scenarioVersion.isFetched}
+              quickInputs={quickInputs}
+              presetsLoaded={play.isFetched}
               onGoalChange={setGoal}
               onSubmit={() => submit.mutate()}
               onConfirm={(draftId) => confirmGoal.mutate(draftId)}
@@ -2837,20 +2940,25 @@ export function GamePage() {
                 <MissionRoadmap
                   key={task.id}
                   stages={task.roadmap.stages}
+                  presentation={effectivePresentation}
                   regionNames={roadmapRegionNames}
                   resourceNames={roadmapResourceNames}
                   nodeNames={roadmapNodeNames}
                   factNames={roadmapFactNames}
                   factValues={roadmapFactValues}
+                  factSafeMetadata={roadmapFactSafeMetadata}
+                  factValueLabels={roadmapFactValueLabels}
                 />
               )}
             </div>
           )}
-          {task && !planningForTask && <PlanHistory task={task} />}
+          {task && !planningForTask && (
+            <PlanHistory task={task} presentation={effectivePresentation} />
+          )}
           {game.status === "ACTIVE" && selectedTaskActive && task && <button className="console-button danger-button full" disabled={busy} onClick={() => abandon.mutate(task.id)}>放弃当前目标</button>}
         </aside>
       </section>
-      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，浏览器前端才会读取内部状态。</span>{checkpointNotice && <small className="checkpoint-notice" role="status">{checkpointNotice}</small>}{game.status === "ACTIVE" && gameHasActiveTask && <small className="lifecycle-help">当前有活动任务，完成或放弃后才能归档。</small>}</div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <><button disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能存档" : undefined} onClick={() => checkpoint.mutate(liveGame.runtime_revision)}>存档</button><button className="danger-button" disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate(liveGame.runtime_revision)}>结束并归档游戏</button></>}{game.status === "ARCHIVED" && <button disabled={busy} onClick={() => fork.fork(gameId)}>以此归档状态新开一局</button>}</div></section>
+      <section className="developer-bar-v2"><div><p>开发者控制</p><span>只有输入服务端配置的凭证后，前端页面才会读取内部状态。</span>{checkpointNotice && <small className="checkpoint-notice" role="status">{checkpointNotice}</small>}{game.status === "ACTIVE" && gameHasActiveTask && <small className="lifecycle-help">当前有活动任务，完成或放弃后才能归档。</small>}</div><div><button onClick={() => setDeveloperOpen((value) => !value)}>开发者视图</button>{game.status === "ACTIVE" && <><button disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能存档" : undefined} onClick={() => checkpoint.mutate(liveGame.runtime_revision)}>存档</button><button className="danger-button" disabled={busy || gameHasActiveTask} title={gameHasActiveTask ? "当前有活动任务，完成或放弃后才能归档" : undefined} onClick={() => archive.mutate(liveGame.runtime_revision)}>结束并归档游戏</button></>}{game.status === "ARCHIVED" && <button disabled={busy} onClick={() => fork.fork(gameId)}>以此归档状态新开一局</button>}</div></section>
       {developerOpen && <section className="developer-panel-v2"><label>开发者凭证<input type="password" value={developerToken} onChange={(event) => setDeveloperToken(event.target.value)} /></label>{developer.error && <p className="developer-error">开发者访问被拒绝。</p>}{developer.data && <><h2>内部运行时快照</h2><pre>{JSON.stringify(developer.data, null, 2)}</pre></>}</section>}
     </main>
   );

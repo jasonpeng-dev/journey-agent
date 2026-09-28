@@ -331,25 +331,16 @@ def test_plan_projection_allows_relay_then_disconnected_actor_action(
     assert task.current_plan_version == 1
     request = provider.requests[0]
     planner_input = request.planner_input
-    disconnected = next(
-        item
-        for item in planner_input.actors
-        if item.actor_key == "nurse_ana"
-    )
+    disconnected = next(item for item in planner_input.actors if item.actor_key == "nurse_ana")
     assert disconnected.command_reachability == "DISCONNECTED"
     assert disconnected.execution_state["status"] == "KNOWN_BLOCKED"
-    assert disconnected.execution_state["known_blockers"][0]["type"] == (
-        "COMMAND_REACHABILITY"
-    )
+    assert disconnected.execution_state["known_blockers"][0]["type"] == ("COMMAND_REACHABILITY")
     assert "diagnose_patient" in disconnected.allowed_action_keys
     assert any(
-        item.target_contract.get("kind") == "ACTOR"
-        for item in planner_input.action_contracts
+        item.target_contract.get("kind") == "ACTOR" for item in planner_input.action_contracts
     )
     relay = next(
-        item
-        for item in planner_input.action_contracts
-        if item.action_key == "relay_message"
+        item for item in planner_input.action_contracts if item.action_key == "relay_message"
     )
     assert relay.target_contract["kind"] == "ACTOR"
 

@@ -1,5 +1,26 @@
 """Domain types and contracts shared by application and infrastructure layers."""
 
+from app.domain.failure_messages import format_failure_message
+from app.domain.failures import (
+    ActorEvidence,
+    AuthorityEvidence,
+    FactEvidence,
+    FailureDomain,
+    FailureEvent,
+    FailureKind,
+    FailurePhase,
+    GenericEvidence,
+    LegacyFailureView,
+    LocalityEvidence,
+    ParameterEvidence,
+    ResourceEvidence,
+    TargetEvidence,
+    TransportEvidence,
+    failure_event_from_legacy,
+    legacy_failure_from_event,
+    normalize_legacy_failure,
+    project_legacy_failure,
+)
 from app.domain.runtime_scope import (
     RUNTIME_OWNERSHIP,
     GameInstanceContext,
@@ -14,18 +35,51 @@ from app.domain.runtime_scope import (
 )
 from app.domain.scenario import ScenarioVersionSnapshot
 from app.domain.scenario_v2 import ScenarioDefinitionV2
+from app.domain.scenario_v3 import (
+    EffectDefinitionV3,
+    EffectKindV3,
+    GoalResolutionV3,
+    PlanningDefinitionV3,
+    RuleDefinitionV3,
+    ScenarioDefinitionV3,
+)
 
 __all__ = [
     "RUNTIME_OWNERSHIP",
+    "ActorEvidence",
+    "AuthorityEvidence",
+    "EffectDefinitionV3",
+    "EffectKindV3",
+    "FactEvidence",
+    "FailureDomain",
+    "FailureEvent",
+    "FailureKind",
+    "FailurePhase",
     "GameInstanceContext",
     "GameInstanceId",
+    "GenericEvidence",
+    "GoalResolutionV3",
+    "LegacyFailureView",
+    "LocalityEvidence",
+    "ParameterEvidence",
+    "PlanningDefinitionV3",
     "PlayerId",
+    "ResourceEvidence",
+    "RuleDefinitionV3",
     "RuntimeOwner",
     "RuntimeOwnershipContract",
     "RuntimeScope",
     "RuntimeScopeContractError",
     "RuntimeScopeResolver",
     "ScenarioDefinitionV2",
+    "ScenarioDefinitionV3",
     "ScenarioVersionId",
     "ScenarioVersionSnapshot",
+    "TargetEvidence",
+    "TransportEvidence",
+    "failure_event_from_legacy",
+    "format_failure_message",
+    "legacy_failure_from_event",
+    "normalize_legacy_failure",
+    "project_legacy_failure",
 ]

@@ -27,7 +27,7 @@ from app.agent.provider import (
     DynamicGoalInterpretation,
     DynamicGoalInterpretationRequest,
     GenericProviderError,
-    OpenAICompatibleGenericProvider,
+    OpenAIProvider,
     PlannerInput,
     PlanProposal,
     PlanRequest,
@@ -149,7 +149,7 @@ class FailOnReplanProvider(RecordingProvider):
         return super().propose_plan(request)
 
 
-def _settings(provider: Literal["mock", "openai_compatible"] = "mock") -> Settings:
+def _settings(provider: Literal["mock", "openai"] = "mock") -> Settings:
     return Settings(
         _env_file=None,
         app_env="test",
@@ -237,12 +237,10 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = RecordingProvider(proposals=[_generic_plan()])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     submission = orchestrator.submit_goal("stabilize the patient", idempotency_key=str(uuid4()))
 
@@ -284,8 +282,7 @@ def test_exact_goal_skips_provider_selection_but_initial_plan_uses_provider(
     assert calls[-1]["proposal_stop_reason"] == "OBJECTIVE_COMPLETION"
     assert calls[-1]["validator_violations"] == []
     action_keys = {
-        item.action_key
-        for item in provider.plan_requests[0].planner_input.action_contracts
+        item.action_key for item in provider.plan_requests[0].planner_input.action_contracts
     }
     assert {"diagnose_patient", "treat_patient"} <= action_keys
 
@@ -300,12 +297,10 @@ def test_rejected_formal_attempt_is_not_persisted_as_plan_or_runtime_operation(
             (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),),
         ]
     )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     task = submit_and_confirm(orchestrator, "stabilize the patient")
     checkpoint = orchestrator._ensure_checkpoint(task)
@@ -338,12 +333,10 @@ def test_single_formal_request_runs_repair_and_persists_attempt_before_plan(
             _generic_plan(),
         ]
     )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     task = submit_and_confirm(orchestrator, "stabilize the patient")
 
@@ -390,11 +383,9 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
         dynamic_interpretation=DynamicGoalInterpretation(requirements=(dynamic_candidate,)),
         proposals=[_generic_plan()],
     )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     accepted = orchestrator.submit_goal(
         "make the patient better",
@@ -411,11 +402,9 @@ def test_unmatched_goal_uses_dynamic_interpreter_and_rejects_unsupported_goal(
 
     accepted_task.status = "SUCCEEDED"
     invented = RecordingProvider()
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: invented
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: invented)
     rejected = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     ).submit_goal("do something the scenario never defined", idempotency_key=str(uuid4()))
     assert rejected.draft is None
     assert rejected.resolution.status == "UNSUPPORTED"
@@ -471,12 +460,10 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     unknown = (_step("invented_action", "patient_one", "doctor_lee"),)
     invalid_parameters = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
     provider = RecordingProvider(proposals=[unknown, invalid_parameters, _generic_plan()])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)
@@ -573,11 +560,11 @@ def test_provider_repair_uses_safe_diagnostics_and_stops_after_two_attempts(
     )
     rejected_provider = RecordingProvider(proposals=[unknown, unknown, unknown])
     monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: rejected_provider
+        "app.services.composition.build_provider", lambda _settings: rejected_provider
     )
     task.status = "SUCCEEDED"
     rejected_orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     rejected_task = submit_and_confirm(rejected_orchestrator, "diagnose the patient")
     _start_initial_plan(
@@ -616,13 +603,9 @@ def test_provider_repair_attempt_limit_comes_from_settings(
     assert Settings(_env_file=None).model_max_repair_attempts_per_cycle == 2
     unknown = (_step("invented_action", "patient_one", "doctor_lee"),)
     provider = RecordingProvider(proposals=[unknown, unknown, unknown, unknown, _generic_plan()])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, _scope = _runtime(session, GENERIC_TEST)
-    settings = _settings("openai_compatible").model_copy(
-        update={"model_max_repair_attempts_per_cycle": 4}
-    )
+    settings = _settings("openai").model_copy(update={"model_max_repair_attempts_per_cycle": 4})
     orchestrator = configured_play_orchestrator(
         session, GameInstanceId(runtime.instance.id), settings
     )
@@ -644,13 +627,11 @@ def test_plan_order_repair_accepts_future_step_after_public_prerequisite(
 ) -> None:
     reversed_plan = tuple(reversed(_generic_plan()))
     provider = RecordingProvider(proposals=[reversed_plan, _generic_plan()])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, _scope = _runtime(session, _plan_order_definition())
 
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)
@@ -667,9 +648,7 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = RecordingProvider(proposals=[])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, _scope = _runtime(session, GENERIC_TEST)
     patient = session.get(
         GameInstanceNodeState,
@@ -680,7 +659,7 @@ def test_empty_planning_catalog_is_unreachable_without_provider_fallback(
     session.flush()
 
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
 
     task = submit_and_confirm(orchestrator, "stabilize the patient")
@@ -696,11 +675,9 @@ def test_generic_composition_uses_the_same_provider_wiring(
 ) -> None:
     runtime, _scope = _runtime(session, GENERIC_TEST)
     provider = RecordingProvider(proposals=[_generic_plan()])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)
@@ -711,9 +688,7 @@ def test_draft_sandbox_uses_same_provider_composition_without_formal_game_row(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = RecordingProvider(proposals=[_generic_plan()])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     created = create_test_scenario(
         session,
         GENERIC_TEST,
@@ -734,7 +709,7 @@ def test_draft_sandbox_uses_same_provider_composition_without_formal_game_row(
 
 
 def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> None:
-    settings = _settings("openai_compatible")
+    settings = _settings("openai")
     request = PlanRequest(
         call_type="INITIAL_PLAN",
         planner_input=PlannerInput(
@@ -746,7 +721,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
     def timeout(_request: httpx.Request) -> NoReturn:
         raise httpx.ReadTimeout("timed out")
 
-    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(timeout))
+    provider = OpenAIProvider(settings, transport=httpx.MockTransport(timeout))
     with pytest.raises(GenericProviderError) as timed_out:
         provider.propose_plan(request)
     assert timed_out.value.code == "MODEL_PROVIDER_TIMEOUT"
@@ -755,7 +730,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
     assert provider.last_call_metadata.timeout_subtype == "ReadTimeout"
     assert provider.last_call_metadata.response_headers_received_at is None
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         settings,
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -769,7 +744,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         provider.propose_plan(request)
     assert malformed.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         settings,
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -783,7 +758,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
         provider.propose_plan(request)
     assert wrong_schema.value.code == "MODEL_PROVIDER_RESPONSE_INVALID"
 
-    provider = OpenAICompatibleGenericProvider(
+    provider = OpenAIProvider(
         settings,
         transport=httpx.MockTransport(lambda request: httpx.Response(503, request=request)),
     )
@@ -805,7 +780,7 @@ def test_provider_timeout_and_malformed_json_are_explicit_and_secret_safe() -> N
 def test_grounding_wire_invalid_variants_return_recovery_evidence_to_stage_owner(
     invalid_content: str,
 ) -> None:
-    settings = _settings("openai_compatible")
+    settings = _settings("openai")
     calls: list[dict[str, object]] = []
 
     def complete(request: httpx.Request) -> httpx.Response:
@@ -822,7 +797,7 @@ def test_grounding_wire_invalid_variants_return_recovery_evidence_to_stage_owner
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(settings, transport=httpx.MockTransport(complete))
     with pytest.raises(GenericProviderError) as caught:
         provider.ground_dynamic_goal_entities(
             DynamicGoalEntityGroundingRequest(
@@ -843,7 +818,7 @@ def test_grounding_wire_invalid_variants_return_recovery_evidence_to_stage_owner
 
 
 def test_grounding_wire_valid_unresolved_variant_is_not_recovered() -> None:
-    settings = _settings("openai_compatible")
+    settings = _settings("openai")
     calls: list[dict[str, object]] = []
 
     def complete(request: httpx.Request) -> httpx.Response:
@@ -865,7 +840,7 @@ def test_grounding_wire_valid_unresolved_variant_is_not_recovered() -> None:
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(settings, transport=httpx.MockTransport(complete))
     result = provider.ground_dynamic_goal_entities(
         DynamicGoalEntityGroundingRequest(
             goal="repair an unclear road",
@@ -879,7 +854,7 @@ def test_grounding_wire_valid_unresolved_variant_is_not_recovered() -> None:
 
 
 def test_grounding_amount_object_returns_native_scalar_recovery_contract() -> None:
-    settings = _settings("openai_compatible")
+    settings = _settings("openai")
     calls: list[dict[str, object]] = []
     candidate_refs = [
         {"ref_type": "ACTION", "key": "transport_resource"},
@@ -934,7 +909,7 @@ def test_grounding_amount_object_returns_native_scalar_recovery_contract() -> No
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(settings, transport=httpx.MockTransport(complete))
     with pytest.raises(GenericProviderError) as caught:
         provider.ground_dynamic_goal_entities(
             DynamicGoalEntityGroundingRequest(
@@ -964,7 +939,7 @@ def test_grounding_amount_object_returns_native_scalar_recovery_contract() -> No
 
 
 def test_grounding_recovery_feedback_preserves_only_public_canonical_identity() -> None:
-    settings = _settings("openai_compatible")
+    settings = _settings("openai")
     calls: list[dict[str, object]] = []
 
     def complete(request: httpx.Request) -> httpx.Response:
@@ -982,7 +957,7 @@ def test_grounding_recovery_feedback_preserves_only_public_canonical_identity() 
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(settings, transport=httpx.MockTransport(complete))
     with pytest.raises(GenericProviderError) as caught:
         provider.ground_dynamic_goal_entities(
             DynamicGoalEntityGroundingRequest(
@@ -1001,7 +976,7 @@ def test_grounding_recovery_feedback_preserves_only_public_canonical_identity() 
 
 
 def test_plan_timeout_bounds_a_slow_sync_provider_call() -> None:
-    settings = _settings("openai_compatible").model_copy(
+    settings = _settings("openai").model_copy(
         update={"plan_timeout_seconds": 0.02, "plan_total_timeout_seconds": None}
     )
     request = PlanRequest(
@@ -1020,7 +995,7 @@ def test_plan_timeout_bounds_a_slow_sync_provider_call() -> None:
             request=_request,
         )
 
-    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(slow_post))
+    provider = OpenAIProvider(settings, transport=httpx.MockTransport(slow_post))
     with pytest.raises(GenericProviderError) as timed_out:
         provider.propose_plan(request)
 
@@ -1035,7 +1010,7 @@ def test_plan_timeout_bounds_a_slow_sync_provider_call() -> None:
 def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = _settings("openai_compatible")
+    settings = _settings("openai")
     request = PlanRequest(
         call_type="INITIAL_PLAN",
         planner_input=PlannerInput(
@@ -1066,9 +1041,7 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(
-        settings, transport=httpx.MockTransport(http_error_response)
-    )
+    provider = OpenAIProvider(settings, transport=httpx.MockTransport(http_error_response))
 
     with pytest.raises(GenericProviderError) as http_error:
         provider.propose_plan(request)
@@ -1089,7 +1062,7 @@ def test_provider_http_error_logs_bounded_safe_upstream_diagnostics(
 
 
 def test_generic_planner_prompt_defines_local_and_risk_frontier_tie_breakers() -> None:
-    settings = _settings("openai_compatible")
+    settings = _settings("openai")
     system_prompts: list[str] = []
 
     def complete(request: httpx.Request) -> httpx.Response:
@@ -1125,7 +1098,7 @@ def test_generic_planner_prompt_defines_local_and_risk_frontier_tie_breakers() -
             request=request,
         )
 
-    provider = OpenAICompatibleGenericProvider(settings, transport=httpx.MockTransport(complete))
+    provider = OpenAIProvider(settings, transport=httpx.MockTransport(complete))
     planner_input = PlannerInput(
         objective={"objective_keys": ["known_objective"]},
         known_world={"facts": {}},
@@ -1216,9 +1189,7 @@ def test_provider_failure_returns_gateway_error_without_deterministic_fallback(
     provider = FailingPlanProvider(
         GenericProviderError("MODEL_PROVIDER_TIMEOUT", "provider timed out")
     )
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     version = require_builtin_v2_version(session, GENERIC_TEST)
     session.commit()
     response = client.post(
@@ -1276,9 +1247,7 @@ def test_formal_planning_repair_loop_is_one_http_and_returns_final_failure(
 ) -> None:
     rejected = (_step("invented_action", "patient_one", "doctor_lee"),)
     provider = RecordingProvider(proposals=[rejected, rejected, rejected])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     version = require_builtin_v2_version(session, GENERIC_TEST)
     session.commit()
     game = client.post(
@@ -1313,9 +1282,7 @@ def test_replan_provider_failure_persists_failure_and_action_history(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = FailOnReplanProvider(proposals=[_generic_plan()])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     version = require_builtin_v2_version(session, GENERIC_TEST)
     session.commit()
     game = client.post(
@@ -1378,12 +1345,10 @@ def test_continuity_trigger_without_knowledge_does_not_reuse_historical_delta(
     session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = RecordingProvider(proposals=[_generic_plan()])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)
@@ -1450,12 +1415,10 @@ def test_replan_continuity_is_frozen_and_keeps_only_latest_three_formal_plans(
     initial = _generic_plan()
     invalid = (_step("treat_patient", "patient_one", "doctor_lee", {"dosage": 99}),)
     provider = RecordingProvider(proposals=[initial, invalid, initial, initial, initial, initial])
-    monkeypatch.setattr(
-        "app.services.composition.build_generic_provider", lambda _settings: provider
-    )
+    monkeypatch.setattr("app.services.composition.build_provider", lambda _settings: provider)
     runtime, _scope = _runtime(session, GENERIC_TEST)
     orchestrator = configured_play_orchestrator(
-        session, GameInstanceId(runtime.instance.id), _settings("openai_compatible")
+        session, GameInstanceId(runtime.instance.id), _settings("openai")
     )
     task = submit_and_confirm(orchestrator, "stabilize the patient")
     _start_initial_plan(orchestrator, task)

@@ -8,6 +8,7 @@ decoder; later Phase R stages interpret its rules without generating code.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Literal
@@ -19,6 +20,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    field_validator,
     model_validator,
 )
 
@@ -92,6 +94,30 @@ class ActionLocality(StrEnum):
     TRANSPORT_ENDPOINT = "TRANSPORT_ENDPOINT"
     ACTOR_REGION = "ACTOR_REGION"
     REGION = "REGION"
+
+
+class NodeFamilyV2(StrEnum):
+    """Resolved semantic family for a World Node.
+
+    The Scenario locality contract is the only authoring authority for the
+    special Region/Facility/Transport families.  A Scenario without that
+    opt-in remains generic rather than acquiring a second implicit taxonomy.
+    """
+
+    GENERIC = "GENERIC"
+    REGION = "REGION"
+    FACILITY = "FACILITY"
+    TRANSPORT = "TRANSPORT"
+
+
+class FactPresentationRoleV2(StrEnum):
+    """Authored presentation intent without assigning domain meaning to a key."""
+
+    HEADER_PRIMARY = "HEADER_PRIMARY"
+    HEADER_SECONDARY = "HEADER_SECONDARY"
+    BODY_MAIN = "BODY_MAIN"
+    SUPPORTING = "SUPPORTING"
+    REQUIREMENT_ONLY = "REQUIREMENT_ONLY"
 
 
 class ActionTargetKind(StrEnum):
@@ -227,6 +253,11 @@ class EffectKind(StrEnum):
     RELEASE_RESOURCE = "RELEASE_RESOURCE"
     EMIT_OUTCOME = "EMIT_OUTCOME"
     EMIT_FAILURE = "EMIT_FAILURE"
+    # Current authoring (v3) uses this typed semantic instead of allowing
+    # authors to provide failure code/message/retryability metadata.  It is
+    # accepted by the v2 normalized runtime model as a backend-derived
+    # compatibility representation; legacy v2 EMIT_FAILURE remains intact.
+    BLOCK_ACTION = "BLOCK_ACTION"
     WRITE_MEMORY_EVENT = "WRITE_MEMORY_EVENT"
     SET_ACTOR_COMMAND_REACHABILITY = "SET_ACTOR_COMMAND_REACHABILITY"
     SET_RELATION_VISIBILITY = "SET_RELATION_VISIBILITY"
@@ -383,6 +414,31 @@ class InteractionDefinitionV2(FrozenDefinitionModel):
     description: str = Field(default="", max_length=2000)
 
 
+class ValueLabelV2(FrozenDefinitionModel):
+    """One typed Scenario value paired with its business display label."""
+
+    value: StrictScalar
+    label: StrictStr = Field(min_length=1, max_length=160)
+    summary_label: StrictStr | None = Field(
+        default=None, min_length=1, max_length=160, exclude_if=lambda value: value is None
+    )
+    detail_label: StrictStr | None = Field(
+        default=None, min_length=1, max_length=160, exclude_if=lambda value: value is None
+    )
+
+    @model_validator(mode="after")
+    def validate_label(self) -> ValueLabelV2:
+        labels = (self.label, self.summary_label, self.detail_label)
+        if any(label is not None and label != label.strip() for label in labels):
+            raise ValueError("Value labels must not have surrounding whitespace")
+        return self
+
+
+# The longer alias makes the typed vocabulary discoverable to callers without
+# changing the concise persisted field name used by Scenario documents.
+TypedValueLabelV2 = ValueLabelV2
+
+
 class FactDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -400,6 +456,19 @@ class FactDefinitionV2(FrozenDefinitionModel):
         exclude_if=lambda value: not value,
     )
     allowed_values: tuple[StrictScalar, ...] = ()
+    value_labels: tuple[ValueLabelV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+    presentation_role: FactPresentationRoleV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_typed_allowed_values(cls, value: object) -> object:
+        return _normalize_typed_value_labels(value, "Fact")
 
     @model_validator(mode="after")
     def validate_value_domain(self) -> FactDefinitionV2:
@@ -415,12 +484,25 @@ class FactDefinitionV2(FrozenDefinitionModel):
             raise ValueError("initial_value does not match the Fact value_type")
         if self.value_type != FactValueType.ENUM and self.allowed_values:
             raise ValueError("allowed_values are valid only for ENUM Facts")
-        if len(set(self.allowed_values)) != len(self.allowed_values):
-            raise ValueError("Fact allowed_values must be unique")
+        _require_unique_typed(self.allowed_values, "Fact allowed_values")
         if self.value_type == FactValueType.ENUM and any(
             type(value) is not type(self.initial_value) for value in self.allowed_values
         ):
             raise ValueError("ENUM values must share one scalar type")
+        label_values = tuple(item.value for item in self.value_labels)
+        _require_unique_typed(label_values, "Fact value labels")
+        _validate_typed_values(
+            self.value_type,
+            self.allowed_values,
+            label_values,
+            "Fact value label",
+        )
+        if (
+            self.value_type == FactValueType.ENUM
+            and self.value_labels
+            and _typed_value_set(label_values) != _typed_value_set(self.allowed_values)
+        ):
+            raise ValueError("Fact value labels must cover the ENUM domain exactly")
         normalized_aliases = [alias.strip().casefold() for alias in self.goal_aliases]
         normalized_examples = [example.strip().casefold() for example in self.goal_examples]
         if any(not alias for alias in (*normalized_aliases, *normalized_examples)):
@@ -483,6 +565,134 @@ def relation_identity(relation: RelationDefinitionV2) -> str:
     )
 
 
+class RelationTypeDefinitionV2(FrozenDefinitionModel):
+    """Scenario-scoped semantic vocabulary entry for a Relation edge."""
+
+    key: StableKey
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=2000)
+
+
+class ResourceSourceHintV2(FrozenDefinitionModel):
+    """Optional public discovery guidance owned by one Resource."""
+
+    primary_region_key: StableKey | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    candidate_region_keys: tuple[StableKey, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def validate_regions(self) -> ResourceSourceHintV2:
+        if self.primary_region_key is None and not self.candidate_region_keys:
+            raise ValueError("Resource source hint needs a primary or candidate Region")
+        _require_unique(self.candidate_region_keys, "Resource source hint candidate Regions")
+        if (
+            self.primary_region_key is not None
+            and self.primary_region_key in self.candidate_region_keys
+        ):
+            raise ValueError("Resource source hint primary Region cannot be a candidate Region")
+        return self
+
+
+def normalize_resource_source_hint_document(document: object) -> object:
+    """Normalize the legacy root collection onto Resource owners in a copy.
+
+    This compatibility boundary intentionally leaves incomplete Drafts
+    otherwise untouched. Full typed validation remains in the document parser.
+    """
+
+    if not isinstance(document, Mapping):
+        return document
+    normalized = deepcopy(dict(document))
+    world = normalized.get("world")
+    resources = world.get("resources") if isinstance(world, dict) else None
+    if isinstance(resources, tuple) and isinstance(world, dict):
+        resources = list(resources)
+        world["resources"] = resources
+    public_knowledge = normalized.get("public_knowledge")
+    legacy_hints = (
+        public_knowledge.get("resource_source_hints")
+        if isinstance(public_knowledge, dict)
+        else None
+    )
+    if legacy_hints is None:
+        if isinstance(public_knowledge, dict) and not public_knowledge:
+            normalized.pop("public_knowledge", None)
+        return normalized
+    if not isinstance(legacy_hints, (list, tuple)):
+        raise ValueError("Legacy public_knowledge.resource_source_hints must be a list")
+    if not isinstance(public_knowledge, dict):
+        raise ValueError("Legacy resource source hints require public_knowledge")
+    if not isinstance(resources, list):
+        if legacy_hints:
+            raise ValueError("Legacy Resource source hints require world.resources")
+        public_knowledge.pop("resource_source_hints", None)
+        if not public_knowledge:
+            normalized.pop("public_knowledge", None)
+        return normalized
+
+    resources_by_key = {
+        item.get("key"): item
+        for item in resources
+        if isinstance(item, dict) and isinstance(item.get("key"), str)
+    }
+    seen: set[str] = set()
+    for legacy_hint in legacy_hints:
+        if not isinstance(legacy_hint, Mapping):
+            raise ValueError("Legacy Resource source hints must contain objects")
+        if set(legacy_hint) - {
+            "resource_key",
+            "primary_region_key",
+            "candidate_region_keys",
+        }:
+            raise ValueError("Legacy Resource source hint contains unsupported fields")
+        resource_key = legacy_hint.get("resource_key")
+        if not isinstance(resource_key, str) or not resource_key:
+            raise ValueError("Legacy Resource source hint requires resource_key")
+        if resource_key in seen:
+            raise ValueError("Legacy Resource source hint Resource keys must be unique")
+        seen.add(resource_key)
+        resource = resources_by_key.get(resource_key)
+        if resource is None:
+            raise ValueError(f"Legacy Resource source hint targets unknown Resource {resource_key}")
+        legacy_value = {
+            key: deepcopy(value) for key, value in legacy_hint.items() if key != "resource_key"
+        }
+        if "source_hint" in resource:
+            if not _source_hint_values_equivalent(resource.get("source_hint"), legacy_value):
+                raise ValueError(
+                    f"Legacy and current Resource source hints conflict for Resource {resource_key}"
+                )
+        else:
+            resource["source_hint"] = legacy_value
+
+    public_knowledge.pop("resource_source_hints", None)
+    if not public_knowledge:
+        normalized.pop("public_knowledge", None)
+    return normalized
+
+
+def _source_hint_values_equivalent(left: object, right: object) -> bool:
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return left is None and right is None
+    left_primary = left.get("primary_region_key")
+    right_primary = right.get("primary_region_key")
+    left_candidates = left.get("candidate_region_keys", ())
+    right_candidates = right.get("candidate_region_keys", ())
+    if not isinstance(left_candidates, (list, tuple)) or not isinstance(
+        right_candidates, (list, tuple)
+    ):
+        return False
+    if any(not isinstance(item, str) for item in (*left_candidates, *right_candidates)):
+        return False
+    # Preserve the authored order used by the existing Planner projection.
+    return left_primary == right_primary and tuple(left_candidates) == tuple(right_candidates)
+
+
 class ResourceDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -491,6 +701,22 @@ class ResourceDefinitionV2(FrozenDefinitionModel):
     minimum: int
     maximum: int | None = None
     reservation_supported: bool = False
+    unit: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        exclude_if=lambda value: value is None,
+    )
+    display_unit: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        exclude_if=lambda value: value is None,
+    )
+    source_hint: ResourceSourceHintV2 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_bounds(self) -> ResourceDefinitionV2:
@@ -500,6 +726,10 @@ class ResourceDefinitionV2(FrozenDefinitionModel):
             self.maximum is not None and self.initial_value > self.maximum
         ):
             raise ValueError("Resource initial_value is outside its bounds")
+        for field_name in ("unit", "display_unit"):
+            value = getattr(self, field_name)
+            if value is not None and value != value.strip():
+                raise ValueError(f"Resource {field_name} must not have surrounding whitespace")
         return self
 
 
@@ -508,11 +738,23 @@ class WorldDefinitionV2(FrozenDefinitionModel):
     name: str = Field(min_length=1, max_length=160)
     node_types: tuple[NodeTypeDefinitionV2, ...]
     nodes: tuple[NodeDefinitionV2, ...]
+    relation_types: tuple[RelationTypeDefinitionV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     relations: tuple[RelationDefinitionV2, ...] = ()
     resources: tuple[ResourceDefinitionV2, ...] = ()
 
+    @model_validator(mode="after")
+    def validate_relation_types(self) -> WorldDefinitionV2:
+        _require_unique((item.key for item in self.relation_types), "World Relation Type keys")
+        return self
+
     def node(self, key: str) -> NodeDefinitionV2 | None:
         return next((node for node in self.nodes if node.key == key), None)
+
+    def relation_type(self, key: str) -> RelationTypeDefinitionV2 | None:
+        return next((item for item in self.relation_types if item.key == key), None)
 
 
 class RoleDefinitionV2(FrozenDefinitionModel):
@@ -733,10 +975,19 @@ class DerivedStateDefinitionV2(FrozenDefinitionModel):
     available_value: StrictScalar
     unavailable_value: StrictScalar
     allowed_values: tuple[StrictScalar, ...] = ()
+    value_labels: tuple[ValueLabelV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     goal_addressable: bool = Field(default=False, exclude_if=lambda value: not value)
     goal_aliases: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     goal_examples: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     dependencies: tuple[DerivedStateDependencyV2, ...] = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_typed_allowed_values(cls, value: object) -> object:
+        return _normalize_typed_value_labels(value, "Derived state")
 
     @model_validator(mode="after")
     def validate_value_domain(self) -> DerivedStateDefinitionV2:
@@ -761,8 +1012,21 @@ class DerivedStateDefinitionV2(FrozenDefinitionModel):
             raise ValueError("Derived state values do not match value_type")
         if self.value_type != FactValueType.ENUM and self.allowed_values:
             raise ValueError("allowed_values are valid only for ENUM Derived states")
-        if len(set(self.allowed_values)) != len(self.allowed_values):
-            raise ValueError("Derived state allowed_values must be unique")
+        _require_unique_typed(self.allowed_values, "Derived state allowed_values")
+        label_values = tuple(item.value for item in self.value_labels)
+        _require_unique_typed(label_values, "Derived state value labels")
+        _validate_typed_values(
+            self.value_type,
+            self.allowed_values,
+            label_values,
+            "Derived state value label",
+        )
+        if (
+            self.value_type == FactValueType.ENUM
+            and self.value_labels
+            and _typed_value_set(label_values) != _typed_value_set(self.allowed_values)
+        ):
+            raise ValueError("Derived state value labels must cover the ENUM domain exactly")
         normalized_aliases = [alias.strip().casefold() for alias in self.goal_aliases]
         normalized_examples = [example.strip().casefold() for example in self.goal_examples]
         if any(not alias for alias in (*normalized_aliases, *normalized_examples)):
@@ -862,6 +1126,25 @@ class ActionTargetActorRoleV2(FrozenDefinitionModel):
     required_actor_role_key: StableKey
 
 
+class ActionTargetContractBindingV2(FrozenDefinitionModel):
+    """One authored Action/target Knowledge contract.
+
+    The binding is deliberately separate from Facts.  ``initial_visibility``
+    is the Knowledge state for this exact Action target when a new Game is
+    initialized; it is not a target Truth value.  ``reveal_on_inspect`` is a
+    generic discovery policy used by inspect-capable Actions and keeps the
+    legacy target-discovery behavior expressible without naming a scenario
+    Fact key.
+    """
+
+    target_key: StableKey
+    initial_visibility: Visibility = Visibility.KNOWN
+    reveal_on_inspect: bool = Field(
+        default=False,
+        exclude_if=lambda value: value is False,
+    )
+
+
 class ActionDefinitionV2(FrozenDefinitionModel):
     key: StableKey
     name: str = Field(min_length=1, max_length=160)
@@ -893,6 +1176,10 @@ class ActionDefinitionV2(FrozenDefinitionModel):
     )
     target_node_type_keys: tuple[StableKey, ...] = ()
     target_actor_roles: tuple[ActionTargetActorRoleV2, ...] = ()
+    target_contracts: tuple[ActionTargetContractBindingV2, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     operation_bindings: tuple[ActionOperationBindingV2, ...] = ()
     goal_required_slots: tuple[StableKey, ...] = Field(
         default=(),
@@ -947,6 +1234,10 @@ class ActionDefinitionV2(FrozenDefinitionModel):
         _require_unique(
             (item.target_key for item in self.target_actor_roles),
             "Action target-specific Actor Roles",
+        )
+        _require_unique(
+            (item.target_key for item in self.target_contracts),
+            "Action target contract targets",
         )
         _require_unique((item.role for item in self.operation_bindings), "Action binding roles")
         _require_unique(self.goal_required_slots, "Action Goal required slots")
@@ -1210,6 +1501,35 @@ class EffectV2(FrozenDefinitionModel):
         elif self.kind == EffectKind.EMIT_FAILURE:
             if self.failure_code is None or not self.message:
                 raise ValueError("EMIT_FAILURE requires failure_code/message")
+        elif self.kind == EffectKind.BLOCK_ACTION:
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.node,
+                        self.fact_key,
+                        self.value,
+                        self.access,
+                        self.resource_key,
+                        self.resource_scope,
+                        self.amount,
+                        self.outcome_code,
+                        self.failure_code,
+                        self.message,
+                        self.memory_key,
+                        self.memory_content,
+                        self.actor_key,
+                        self.relation_key,
+                        self.command_reachability,
+                        self.region_key,
+                        self.pool_key,
+                        self.visibility,
+                        self.availability,
+                    )
+                )
+                or self.retryable
+            ):
+                raise ValueError("BLOCK_ACTION cannot carry failure metadata or mutations")
         elif self.kind == EffectKind.WRITE_MEMORY_EVENT and (
             self.memory_key is None or not self.memory_content
         ):
@@ -1249,28 +1569,43 @@ class RuleDefinitionV2(FrozenDefinitionModel):
         default=RuleTrigger.ACTION,
         exclude_if=lambda value: value == RuleTrigger.ACTION,
     )
+    applicable_target_keys: tuple[StableKey, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     priority: int
     condition: ConditionV2 | None = None
     effects: tuple[EffectV2, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_phase_effects(self) -> RuleDefinitionV2:
+        _require_unique(self.applicable_target_keys, "Rule applicable target keys")
         terminals = [
             effect
             for effect in self.effects
-            if effect.kind in {EffectKind.EMIT_OUTCOME, EffectKind.EMIT_FAILURE}
+            if effect.kind
+            in {
+                EffectKind.EMIT_OUTCOME,
+                EffectKind.EMIT_FAILURE,
+                EffectKind.BLOCK_ACTION,
+            }
         ]
         if self.trigger == RuleTrigger.ACTION and self.action_key is None:
             raise ValueError("ACTION Rules require action_key")
         if self.trigger == RuleTrigger.STATE and self.action_key is not None:
             raise ValueError("STATE Rules must not declare action_key")
+        if self.trigger == RuleTrigger.STATE and self.applicable_target_keys:
+            raise ValueError("STATE Rules must not declare applicable target keys")
         if self.trigger == RuleTrigger.STATE and self.phase != RulePhase.RESOLVE:
             raise ValueError("STATE Rules must use the RESOLVE phase")
         if self.trigger == RuleTrigger.STATE and terminals:
             raise ValueError("STATE Rules may not emit Action outcomes or failures")
         if self.phase == RulePhase.PREFLIGHT:
-            if any(effect.kind != EffectKind.EMIT_FAILURE for effect in self.effects):
-                raise ValueError("PREFLIGHT rules may only emit a deterministic failure")
+            if any(
+                effect.kind not in {EffectKind.EMIT_FAILURE, EffectKind.BLOCK_ACTION}
+                for effect in self.effects
+            ):
+                raise ValueError("PREFLIGHT rules may only emit a deterministic blocker")
         elif self.trigger == RuleTrigger.ACTION and len(terminals) != 1:
             raise ValueError("A RESOLVE rule requires exactly one outcome or failure Effect")
         return self
@@ -1392,64 +1727,30 @@ class ObjectiveDefinitionV2(FrozenDefinitionModel):
 class GoalResolutionV2(FrozenDefinitionModel):
     allow_llm_fallback: bool = True
     clarification_prompt: str = Field(min_length=1, max_length=2000)
+    quick_inputs: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     # When enabled, current authored Objective rows are compatibility
     # metadata only; player text resolves through the public World Goal State
     # catalog instead of the legacy Objective shortcut.
     world_goal_state_catalog: bool = Field(default=False, exclude_if=lambda value: not value)
 
+    @field_validator("quick_inputs", mode="before")
+    @classmethod
+    def normalize_quick_inputs(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            return value
+        normalized: list[object] = [
+            item.strip() if isinstance(item, str) else item for item in value
+        ]
+        if any(item == "" for item in normalized):
+            raise ValueError("Goal Resolution quick inputs cannot be blank")
+        folded = [item.casefold() for item in normalized if isinstance(item, str)]
+        _require_unique(folded, "Goal Resolution quick inputs")
+        return tuple(normalized)
+
 
 class RecoveryHintV2(FrozenDefinitionModel):
     failure_code: SymbolicCode
     hint: str = Field(min_length=1, max_length=2000)
-
-
-class ResourceSourceHintV2(FrozenDefinitionModel):
-    """Authored public background about where a Resource may be found.
-
-    This is discovery guidance only.  It is deliberately separate from
-    Resource Pool Truth: it carries no quantity, availability, facility, or
-    storage identity and does not constrain the legal source choices of an
-    Action.
-    """
-
-    resource_key: StableKey
-    primary_region_key: StableKey | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-    )
-    candidate_region_keys: tuple[StableKey, ...] = Field(
-        default=(),
-        exclude_if=lambda value: not value,
-    )
-
-    @model_validator(mode="after")
-    def validate_regions(self) -> ResourceSourceHintV2:
-        if self.primary_region_key is None and not self.candidate_region_keys:
-            raise ValueError("Resource source hint needs a primary or candidate Region")
-        _require_unique(self.candidate_region_keys, "Resource source hint candidate Regions")
-        if (
-            self.primary_region_key is not None
-            and self.primary_region_key in self.candidate_region_keys
-        ):
-            raise ValueError("Resource source hint primary Region cannot be a candidate Region")
-        return self
-
-
-class PublicKnowledgeDefinitionV2(FrozenDefinitionModel):
-    """Static public discovery metadata authored in a ScenarioVersion."""
-
-    resource_source_hints: tuple[ResourceSourceHintV2, ...] = Field(
-        default=(),
-        exclude_if=lambda value: not value,
-    )
-
-    @model_validator(mode="after")
-    def validate_resource_source_hints(self) -> PublicKnowledgeDefinitionV2:
-        _require_unique(
-            (item.resource_key for item in self.resource_source_hints),
-            "Public resource source hint Resource keys",
-        )
-        return self
 
 
 class PlanningDefinitionV2(FrozenDefinitionModel):
@@ -1475,19 +1776,24 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     interactions: tuple[InteractionDefinitionV2, ...]
     actions: tuple[ActionDefinitionV2, ...]
     rules: tuple[RuleDefinitionV2, ...]
-    objectives: tuple[ObjectiveDefinitionV2, ...]
+    # Historical ScenarioVersion compatibility only. Current authoring omits
+    # this field and resolves public goals from Fact/Derived State metadata.
+    objectives: tuple[ObjectiveDefinitionV2, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     derived_states: tuple[DerivedStateDefinitionV2, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
     goal_resolution: GoalResolutionV2
     planning: PlanningDefinitionV2 = Field(default_factory=PlanningDefinitionV2)
-    public_knowledge: PublicKnowledgeDefinitionV2 = Field(
-        default_factory=PublicKnowledgeDefinitionV2,
-        exclude_if=lambda value: not value.resource_source_hints,
-    )
     public_references: tuple[PublicReferenceV2, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_resource_source_hints(cls, value: object) -> object:
+        return normalize_resource_source_hint_document(value)
 
     @property
     def objective_catalog_version(self) -> str:
@@ -1500,6 +1806,34 @@ class ScenarioDefinitionV2(FrozenDefinitionModel):
     @property
     def derived_state_definitions(self):  # type: ignore[no-untyped-def]
         return MappingProxyType({state.key: state for state in self.derived_states})
+
+    def node_family_for_type(self, node_type_key: str) -> NodeFamilyV2:
+        """Resolve a safe semantic Node family from the locality authority."""
+
+        locality = self.metadata.locality
+        if not locality.enabled:
+            return NodeFamilyV2.GENERIC
+        family_by_type = {
+            locality.region_node_type_key: NodeFamilyV2.REGION,
+            locality.facility_node_type_key: NodeFamilyV2.FACILITY,
+            locality.transport_node_type_key: NodeFamilyV2.TRANSPORT,
+        }
+        return family_by_type.get(node_type_key, NodeFamilyV2.GENERIC)
+
+    def node_family_for_node(self, node_key: str) -> NodeFamilyV2:
+        """Resolve one Node's family without introducing a second authority."""
+
+        node = self.world.node(node_key)
+        if node is None:
+            raise KeyError(f"Unknown Scenario Node: {node_key}")
+        return self.node_family_for_type(node.node_type_key)
+
+    def node_family_metadata(self) -> dict[str, NodeFamilyV2]:
+        """Return resolved safe family metadata keyed by Node identity."""
+
+        return {
+            node.key: self.node_family_for_type(node.node_type_key) for node in self.world.nodes
+        }
 
     @model_validator(mode="after")
     def validate_references(self) -> ScenarioDefinitionV2:
@@ -1660,10 +1994,80 @@ def _normalize_transport_resource_parameters(
     }
 
 
+def _normalize_typed_value_labels(value: object, owner: str) -> object:
+    """Accept typed label entries without weakening the scalar domain.
+
+    Existing documents continue to use ``allowed_values: [scalar, ...]``.
+    During authoring, the same list may contain ``{value, label}`` entries;
+    they are normalized into the existing scalar domain plus the explicit
+    ``value_labels`` vocabulary.  A mapping with any other shape is rejected,
+    so a weak ``dict[str, str]`` contract can never become canonical data.
+    """
+
+    if not isinstance(value, Mapping):
+        return value
+    payload = dict(value)
+    raw_allowed = payload.get("allowed_values")
+
+    def normalize_entries(raw: object) -> list[dict[str, object]] | None:
+        if not isinstance(raw, (list, tuple)):
+            if raw in (None, (), []):
+                return []
+            raise ValueError(f"{owner} value labels must be a list of typed entries")
+        entries: list[dict[str, object]] = []
+        for item in raw:
+            if isinstance(item, ValueLabelV2):
+                entries.append(item.model_dump(mode="json"))
+            elif isinstance(item, Mapping):
+                allowed_fields = {"value", "label", "summary_label", "detail_label"}
+                if not {"value", "label"}.issubset(item) or set(item) - allowed_fields:
+                    raise ValueError(
+                        f"{owner} typed value label entries contain unsupported fields"
+                    )
+                entries.append({key: item[key] for key in allowed_fields if key in item})
+            else:
+                raise ValueError(f"{owner} value labels must contain typed entries")
+        return entries
+
+    scalar_values: list[StrictScalar] = []
+    typed_entries: list[dict[str, object]] = []
+    if isinstance(raw_allowed, (list, tuple)):
+        for item in raw_allowed:
+            if isinstance(item, ValueLabelV2):
+                typed_entries.append(item.model_dump(mode="json"))
+            elif isinstance(item, Mapping):
+                allowed_fields = {"value", "label", "summary_label", "detail_label"}
+                if not {"value", "label"}.issubset(item) or set(item) - allowed_fields:
+                    raise ValueError(
+                        f"{owner} typed allowed_values entries contain unsupported fields"
+                    )
+                typed_entries.append({key: item[key] for key in allowed_fields if key in item})
+            else:
+                scalar_values.append(item)
+
+    label_entries = normalize_entries(payload.get("value_labels"))
+    value_type = payload.get("value_type")
+    is_enum = value_type in {FactValueType.ENUM, FactValueType.ENUM.value}
+    if not typed_entries and is_enum and not scalar_values and label_entries:
+        payload["allowed_values"] = [entry["value"] for entry in label_entries]
+        return payload
+
+    if not typed_entries:
+        return payload
+    if scalar_values:
+        raise ValueError(f"{owner} allowed_values cannot mix scalar and typed entries")
+
+    payload["allowed_values"] = [entry["value"] for entry in typed_entries] if is_enum else []
+    if not payload.get("value_labels"):
+        payload["value_labels"] = typed_entries
+    return payload
+
+
 def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
     world = definition.world
     _require_unique((item.key for item in world.node_types), "World Node Type keys")
     _require_unique((item.key for item in world.nodes), "World Node keys")
+    _require_unique((item.key for item in world.relation_types), "World Relation Type keys")
     _require_unique((item.key for item in world.resources), "World Resource keys")
     _require_unique((item.key for item in definition.interactions), "Interaction keys")
     _require_unique((item.key for item in definition.actors.roles), "Role keys")
@@ -1717,11 +2121,15 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
         else:
             _require_key(actors, reference.ref_key, "Public reference Actor")
 
-    _validate_locality_contract(definition, nodes, node_types)
+    relation_type_keys = (
+        {item.key for item in world.relation_types} if world.relation_types else None
+    )
+    _validate_relation_type_references(definition, relation_type_keys)
+    _validate_locality_contract(definition, nodes, node_types, relation_type_keys)
     _validate_resource_initial_states(definition, nodes)
     _validate_resource_pools(definition, nodes)
     _validate_region_resource_knowledge(definition, nodes)
-    _validate_public_knowledge(definition, nodes, resources)
+    _validate_resource_source_hints(definition, nodes)
     _validate_derived_states(definition, nodes, resources, derived_states)
 
     _require_key(nodes, definition.initialization.start_node_key, "start Node")
@@ -1796,6 +2204,34 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
                 raise ValueError(
                     f"Action {action.key} target-specific Actor Role target lacks its Interaction"
                 )
+        for target_contract in action.target_contracts:
+            if action.target_kind == ActionTargetKind.NODE:
+                target = _require_key(
+                    nodes,
+                    target_contract.target_key,
+                    f"Action {action.key} target contract Node",
+                )
+                if action.required_interaction_key not in target.interaction_keys:
+                    raise ValueError(
+                        f"Action {action.key} target contract target lacks its Interaction"
+                    )
+                if (
+                    action.target_node_type_keys
+                    and target.node_type_key not in action.target_node_type_keys
+                ):
+                    raise ValueError(
+                        f"Action {action.key} target contract target has an invalid Node type"
+                    )
+            else:
+                target_actor = _require_key(
+                    actors,
+                    target_contract.target_key,
+                    f"Action {action.key} target contract Actor",
+                )
+                if action.key not in target_actor.allowed_action_keys:
+                    raise ValueError(
+                        f"Action {action.key} target contract Actor is not eligible for that Action"
+                    )
         if (
             action.behavior != ActionBehavior.RULE or action.locality != ActionLocality.NONE
         ) and not definition.metadata.locality.enabled:
@@ -1863,6 +2299,42 @@ def _validate_v2_references(definition: ScenarioDefinitionV2) -> None:
             if rule.action_key is not None
             else None
         )
+        if rule.applicable_target_keys:
+            if rule_action is None:
+                raise ValueError(f"Rule {rule.key} applicable targets require an Action")
+            declared_contract_keys = {item.target_key for item in rule_action.target_contracts}
+            for target_key in rule.applicable_target_keys:
+                if declared_contract_keys and target_key not in declared_contract_keys:
+                    raise ValueError(
+                        f"Rule {rule.key} applicable target is not declared by "
+                        f"Action {rule_action.key} target contracts"
+                    )
+                if rule_action.target_kind == ActionTargetKind.NODE:
+                    target = _require_key(
+                        nodes,
+                        target_key,
+                        f"Rule {rule.key} applicable target Node",
+                    )
+                    if rule_action.required_interaction_key not in target.interaction_keys:
+                        raise ValueError(f"Rule {rule.key} applicable target lacks its Interaction")
+                    if (
+                        rule_action.target_node_type_keys
+                        and target.node_type_key not in rule_action.target_node_type_keys
+                    ):
+                        raise ValueError(
+                            f"Rule {rule.key} applicable target has an invalid Node type"
+                        )
+                else:
+                    target_actor = _require_key(
+                        actors,
+                        target_key,
+                        f"Rule {rule.key} applicable target Actor",
+                    )
+                    if rule_action.key not in target_actor.allowed_action_keys:
+                        raise ValueError(
+                            f"Rule {rule.key} applicable target Actor is not eligible "
+                            "for that Action"
+                        )
         parameters = (
             {parameter.key: parameter for parameter in rule_action.parameters}
             if rule_action is not None
@@ -2212,8 +2684,27 @@ def _validate_typed_values(
             raise ValueError(f"{label} does not match INTEGER")
         if value_type == FactValueType.BOOLEAN and type(value) is not bool:
             raise ValueError(f"{label} does not match BOOLEAN")
-        if value_type == FactValueType.ENUM and value not in allowed_values:
+        if value_type == FactValueType.ENUM and _typed_value_identity(
+            value
+        ) not in _typed_value_set(allowed_values):
             raise ValueError(f"{label} is outside the ENUM domain")
+
+
+def _typed_value_identity(value: StrictScalar) -> tuple[type[object], StrictScalar]:
+    """Keep bool/int identities distinct while retaining scalar equality."""
+
+    return type(value), value
+
+
+def _typed_value_set(
+    values: tuple[StrictScalar, ...] | list[StrictScalar],
+) -> set[tuple[type[object], StrictScalar]]:
+    return {_typed_value_identity(value) for value in values}
+
+
+def _require_unique_typed(values: tuple[StrictScalar, ...], label: str) -> None:
+    if len(_typed_value_set(values)) != len(values):
+        raise ValueError(f"{label} must be unique")
 
 
 def _validate_gate(
@@ -2226,10 +2717,56 @@ def _validate_gate(
             raise ValueError("Objective gate value is outside the ENUM Fact domain")
 
 
+def _validate_relation_type_references(
+    definition: ScenarioDefinitionV2,
+    relation_type_keys: set[str] | None,
+) -> None:
+    """Validate catalog references when a Scenario opts into typed relations.
+
+    ``None`` deliberately represents the legacy uncatalogued read path. An
+    empty catalog is still a valid new Scenario, but once catalog entries are
+    authored every relation-type reference must resolve to one of them.
+    """
+
+    if relation_type_keys is None:
+        return
+
+    def require_relation_type(key: str, label: str) -> None:
+        _require_key(relation_type_keys, key, label)
+
+    def validate_selector(selector: NodeSelectorV2 | None) -> None:
+        if selector is not None and selector.relation_type_key is not None:
+            require_relation_type(selector.relation_type_key, "Node selector Relation Type")
+
+    def validate_condition(condition: ConditionV2 | None) -> None:
+        if condition is None:
+            return
+        validate_selector(condition.node)
+        if condition.relation_type_key is not None:
+            require_relation_type(condition.relation_type_key, "Condition Relation Type")
+        for child in condition.conditions:
+            validate_condition(child)
+        validate_condition(condition.condition)
+
+    for relation in definition.world.relations:
+        require_relation_type(relation.relation_type_key, "World Relation")
+    for action in definition.actions:
+        if action.source_relation_type_key is not None:
+            require_relation_type(
+                action.source_relation_type_key,
+                f"Action {action.key} source Relation Type",
+            )
+    for rule in definition.rules:
+        validate_condition(rule.condition)
+        for effect in rule.effects:
+            validate_selector(effect.node)
+
+
 def _validate_locality_contract(
     definition: ScenarioDefinitionV2,
     nodes: dict[str, NodeDefinitionV2],
     node_types: set[str],
+    relation_type_keys: set[str] | None = None,
 ) -> None:
     locality = definition.metadata.locality
     if not locality.enabled:
@@ -2241,7 +2778,11 @@ def _validate_locality_contract(
     ):
         assert key is not None
         _require_key(node_types, key, label)
-    relation_types = {item.relation_type_key for item in definition.world.relations}
+    relation_types = (
+        relation_type_keys
+        if relation_type_keys is not None
+        else {item.relation_type_key for item in definition.world.relations}
+    )
     for key, label in (
         (locality.located_in_relation_type_key, "located_in Relation Type"),
         (locality.transport_endpoint_relation_type_key, "endpoint Relation Type"),
@@ -2364,30 +2905,32 @@ def _validate_region_resource_knowledge(
             raise ValueError("Region Resource Knowledge must target a Region Node")
 
 
-def _validate_public_knowledge(
+def _validate_resource_source_hints(
     definition: ScenarioDefinitionV2,
     nodes: dict[str, NodeDefinitionV2],
-    resources: dict[str, ResourceDefinitionV2],
 ) -> None:
-    hints = definition.public_knowledge.resource_source_hints
-    if not hints:
+    resources_with_hints = [
+        resource for resource in definition.world.resources if resource.source_hint is not None
+    ]
+    if not resources_with_hints:
         return
     locality = definition.metadata.locality
     if not locality.enabled or not locality.scoped_resources:
         raise ValueError("Resource source hints require locality.scoped_resources")
     assert locality.region_node_type_key is not None
-    for hint in hints:
-        _require_key(resources, hint.resource_key, "Public Resource Source Hint Resource")
+    for resource in resources_with_hints:
+        hint = resource.source_hint
+        assert hint is not None
         region_keys = (
             *((hint.primary_region_key,) if hint.primary_region_key is not None else ()),
             *hint.candidate_region_keys,
         )
         for region_key in region_keys:
-            region = _require_key(nodes, region_key, "Public Resource Source Hint Region")
+            region = _require_key(nodes, region_key, "Resource source hint Region")
             if region.node_type_key != locality.region_node_type_key:
-                raise ValueError("Public Resource Source Hint must target a Region Node")
+                raise ValueError("Resource source hint must target a Region Node")
             if region.initial_visibility != Visibility.KNOWN:
-                raise ValueError("Public Resource Source Hint Region must be publicly known")
+                raise ValueError("Resource source hint Region must be publicly known")
 
 
 def _static_facility_region(definition: ScenarioDefinitionV2, facility_key: str) -> str | None:
@@ -2479,6 +3022,7 @@ __all__ = [
     "ActionParameterType",
     "ActionParameters",
     "ActionSemanticReferenceType",
+    "ActionTargetContractBindingV2",
     "ConditionKind",
     "DerivedDependencyKind",
     "DerivedDependencyV2",
@@ -2486,11 +3030,13 @@ __all__ = [
     "DerivedStateDependencyV2",
     "EffectKind",
     "EngineCapability",
+    "FactPresentationRoleV2",
     "LocalityContractV2",
-    "PublicKnowledgeDefinitionV2",
+    "NodeFamilyV2",
     "PublicReferenceTypeV2",
     "PublicReferenceV2",
     "RegionResourceKnowledgeInitialStateV2",
+    "RelationTypeDefinitionV2",
     "ResourceAvailabilityRequirementV2",
     "ResourceInitialStateV2",
     "ResourcePoolDefinitionV2",
@@ -2500,6 +3046,9 @@ __all__ = [
     "RulePhase",
     "RuleTrigger",
     "ScenarioDefinitionV2",
+    "TypedValueLabelV2",
+    "ValueLabelV2",
     "knowledge_gate_is_revealed",
+    "normalize_resource_source_hint_document",
     "transport_resource_entries",
 ]

@@ -189,6 +189,40 @@ class ScenarioDetailResponse(ScenarioSummaryResponse):
     version_count: int = Field(ge=0)
 
 
+class PresentationProfileResponse(ApiModel):
+    scenario_id: UUID
+    revision: int = Field(ge=1)
+    profile: dict[str, Any]
+    updated_at: datetime
+
+
+class PresentationProfileRevisionCheckResponse(ApiModel):
+    scenario_id: UUID
+    revision: int = Field(ge=1)
+
+
+class PresentationProfileRevisionResponse(ApiModel):
+    scenario_id: UUID
+    revision: int = Field(ge=1)
+    profile: dict[str, Any]
+    created_at: datetime
+
+
+class PresentationProfileHistoryResponse(ApiModel):
+    scenario_id: UUID
+    revisions: list[PresentationProfileRevisionResponse]
+
+
+class PresentationProfileReplaceRequest(ApiModel):
+    expected_revision: int = Field(ge=1)
+    profile: dict[str, Any]
+
+
+class PresentationProfileRestoreRequest(ApiModel):
+    expected_revision: int = Field(ge=1)
+    revision: int = Field(ge=1)
+
+
 class DraftResponse(ApiModel):
     scenario_id: UUID
     revision: int = Field(ge=1)
@@ -209,12 +243,29 @@ class DraftRevisionRequest(ApiModel):
     expected_revision: int = Field(ge=1)
 
 
+class InitializationPreviewFocus(ApiModel):
+    """Optional entity scope for a truthful partial working-copy preview."""
+
+    object_kind: Literal["node", "actor", "relation", "resource"]
+    object_key: str = Field(min_length=1, max_length=160)
+
+
+class InitializationPreviewRequest(DraftRevisionRequest):
+    """A read-only projection request for the browser working document."""
+
+    definition_document: dict[str, Any]
+    focus: InitializationPreviewFocus | None = None
+
+
+class SemanticDiffRequest(DraftRevisionRequest):
+    """Read-only semantic comparison for the current Working Copy."""
+
+    definition_document: dict[str, Any]
+    include_entries: bool = True
+
+
 class DraftPublishRequest(DraftRevisionRequest):
     expected_content_hash: str | None = Field(default=None, min_length=64, max_length=64)
-
-
-class DraftRestoreRequest(DraftRevisionRequest):
-    version_id: UUID
 
 
 class DraftRenameKeyRequest(DraftRevisionRequest):
@@ -228,10 +279,161 @@ class DraftDeleteObjectRequest(DraftRevisionRequest):
     object_key: str = Field(min_length=1, max_length=100)
 
 
+class DraftTransformOperation(ApiModel):
+    kind: Literal[
+        "RENAME_KEY",
+        "DELETE_OBJECT",
+        "DELETE_FACT",
+        "DELETE_ROOT_COLLECTION_ITEM",
+        "DELETE_NESTED",
+    ]
+    object_kind: str = Field(min_length=1, max_length=80)
+    old_key: str | None = Field(default=None, min_length=1, max_length=100)
+    new_key: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,79}$")
+    object_key: str | None = Field(default=None, min_length=1, max_length=100)
+    node_key: str | None = Field(default=None, min_length=1, max_length=100)
+    fact_key: str | None = Field(default=None, min_length=1, max_length=100)
+    collection: str | None = Field(default=None, min_length=1, max_length=100)
+    identity: str | None = Field(default=None, min_length=1, max_length=200)
+    parent_kind: str | None = Field(default=None, min_length=1, max_length=80)
+    parent_key: str | None = Field(default=None, min_length=1, max_length=100)
+    nested_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_operation_fields(self) -> DraftTransformOperation:
+        if self.kind == "RENAME_KEY":
+            if (
+                self.old_key is None
+                or self.new_key is None
+                or self.object_key is not None
+                or self.node_key is not None
+                or self.fact_key is not None
+                or self.collection is not None
+                or self.identity is not None
+                or self.parent_kind is not None
+                or self.parent_key is not None
+                or self.nested_key is not None
+            ):
+                raise ValueError("RENAME_KEY requires old_key and new_key only")
+        elif self.kind == "DELETE_OBJECT":
+            if (
+                self.object_key is None
+                or self.old_key is not None
+                or self.new_key is not None
+                or self.node_key is not None
+                or self.fact_key is not None
+                or self.collection is not None
+                or self.identity is not None
+                or self.parent_kind is not None
+                or self.parent_key is not None
+                or self.nested_key is not None
+            ):
+                raise ValueError("DELETE_OBJECT requires object_key only")
+        elif self.kind == "DELETE_FACT":
+            if (
+                self.object_kind != "node"
+                or self.node_key is None
+                or self.fact_key is None
+                or self.object_key is not None
+                or self.old_key is not None
+                or self.new_key is not None
+                or self.collection is not None
+                or self.identity is not None
+                or self.parent_kind is not None
+                or self.parent_key is not None
+                or self.nested_key is not None
+            ):
+                raise ValueError("DELETE_FACT requires node_key and fact_key only")
+        elif self.kind == "DELETE_ROOT_COLLECTION_ITEM":
+            if (
+                self.collection is None
+                or self.identity is None
+                or self.old_key is not None
+                or self.new_key is not None
+                or self.object_key is not None
+                or self.node_key is not None
+                or self.fact_key is not None
+                or self.parent_kind is not None
+                or self.parent_key is not None
+                or self.nested_key is not None
+            ):
+                raise ValueError(
+                    "DELETE_ROOT_COLLECTION_ITEM requires collection and identity only"
+                )
+        elif (
+            self.parent_kind is None
+            or self.parent_key is None
+            or self.collection is None
+            or self.nested_key is None
+            or self.old_key is not None
+            or self.new_key is not None
+            or self.object_key is not None
+            or self.node_key is not None
+            or self.fact_key is not None
+            or self.identity is not None
+        ):
+            raise ValueError(
+                "DELETE_NESTED requires parent_kind, parent_key, collection, and nested_key"
+            )
+        return self
+
+
+class DraftTransformRequest(ApiModel):
+    expected_revision: int = Field(ge=1)
+    definition_document: dict[str, Any]
+    operation: DraftTransformOperation
+
+
 class ObjectLocator(ApiModel):
     object_kind: str
     object_key: str | None = None
     field_path: str | None = None
+
+
+class SemanticDiffComparedVersion(ApiModel):
+    id: UUID
+    version_number: int = Field(ge=1)
+    schema_version: Literal[2, 3]
+
+
+class SemanticDiffEntryResponse(ApiModel):
+    scope: Literal["DESIGN", "INITIALIZATION"]
+    editor_section: str
+    editor_subsection: str
+    object_kind: str
+    object_key: str | None = None
+    object_display_name: str
+    change_kind: Literal["ADDED", "REMOVED", "MODIFIED", "REORDERED"]
+    locator: ObjectLocator
+    field_path: str | None = None
+    before: Any | None = None
+    after: Any | None = None
+
+
+class SemanticDiffSubsectionSummary(ApiModel):
+    subsection: str
+    count: int = Field(ge=0)
+
+
+class SemanticDiffSectionSummary(ApiModel):
+    section: str
+    count: int = Field(ge=0)
+    subsections: list[SemanticDiffSubsectionSummary] = Field(default_factory=list)
+
+
+class SemanticDiffResponse(ApiModel):
+    published: bool
+    compared_version: SemanticDiffComparedVersion | None = None
+    published_version_id: UUID | None = None
+    published_version_number: int | None = Field(default=None, ge=1)
+    published_schema_version: Literal[2, 3] | None = None
+    is_equal: bool | None = None
+    comparable: bool = True
+    total_changed_objects: int = Field(ge=0)
+    total_changed_items: int = Field(ge=0)
+    section_summaries: list[SemanticDiffSectionSummary] = Field(default_factory=list)
+    entries: list[SemanticDiffEntryResponse] = Field(default_factory=list)
+    error_message: str | None = None
 
 
 class ValidationIssueResponse(ApiModel):
@@ -240,6 +442,7 @@ class ValidationIssueResponse(ApiModel):
     path: str
     message: str
     locator: ObjectLocator | None = None
+    type: str | None = None
 
 
 class ReadinessCheckResponse(ApiModel):
@@ -265,13 +468,50 @@ class ScenarioVersionSummaryResponse(ApiModel):
     id: UUID
     scenario_id: UUID
     version_number: int = Field(ge=1)
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     content_hash: str = Field(min_length=64, max_length=64)
     published_at: datetime
 
 
 class ScenarioVersionDetailResponse(ScenarioVersionSummaryResponse):
     definition_document: dict[str, Any]
+
+
+class RestorePreviewRequest(ApiModel):
+    """Read-only restore handoff guarded by the current persisted Draft revision."""
+
+    expected_persisted_revision: int = Field(ge=1)
+
+
+class RestorePreviewResponse(ApiModel):
+    scenario_id: UUID
+    version: ScenarioVersionSummaryResponse
+    current_draft_revision: int = Field(ge=1)
+    candidate_working_document: dict[str, Any]
+    semantic_diff: SemanticDiffResponse
+    unchanged: bool
+    restore_supported: bool = True
+    restore_note: str | None = None
+
+
+class ScenarioDependentGameResponse(ApiModel):
+    game_id: UUID
+    identifier: str
+    status: str
+    scenario_version_id: UUID
+    scenario_version_number: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScenarioDeletionImpactResponse(ApiModel):
+    scenario_id: UUID
+    scenario_name: str
+    scenario_key: str
+    draft_revision: int = Field(ge=1)
+    published_version_count: int = Field(ge=0)
+    dependent_games: list[ScenarioDependentGameResponse] = Field(default_factory=list)
+    can_delete: bool
 
 
 class ScenarioPublishResponse(ApiModel):
@@ -297,7 +537,74 @@ class ReferenceIndexResponse(ApiModel):
     references: list[ReferenceEdgeResponse]
 
 
+class DraftTransformResponse(ApiModel):
+    scenario_id: UUID
+    base_revision: int = Field(ge=1)
+    source: Literal["WORKING_COPY"]
+    definition_document: dict[str, Any]
+    references: list[ReferenceEdgeResponse]
+
+
+class DraftReferenceAnalysisRequest(DraftRevisionRequest):
+    definition_document: dict[str, Any]
+
+
+class DraftCompletenessRequest(DraftRevisionRequest):
+    definition_document: dict[str, Any]
+
+
+class DraftReferenceAnalysisResponse(ApiModel):
+    scenario_id: UUID
+    base_revision: int = Field(ge=1)
+    source: Literal["WORKING_COPY"]
+    references: list[ReferenceEdgeResponse]
+
+
+class CompletenessItemResponse(ApiModel):
+    key: str
+    title: str
+    level: Literal[
+        "COMPLETE",
+        "INCOMPLETE_REQUIRED",
+        "VALID_BUT_UNCONFIGURED",
+        "OPTIONAL_ENHANCEMENT",
+        "LEGACY_FALLBACK",
+    ]
+    dependency_kind: Literal[
+        "HARD_REQUIRED",
+        "PUBLISH_REQUIRED",
+        "RUNTIME_REQUIRED",
+        "SEMANTIC_REQUIRED",
+        "RECOMMENDED",
+        "OPTIONAL",
+        "DERIVED",
+        "LEGACY",
+        "NONE",
+    ]
+    message: str
+    path: str
+    locator: ObjectLocator | None = None
+    action: Literal["OPEN", "CREATE", "CONFIGURE", "NONE"] = "OPEN"
+    reference_locator: ObjectLocator | None = None
+    reference_owner: str | None = None
+
+
+class DraftCompletenessResponse(ApiModel):
+    scenario_id: UUID
+    base_revision: int = Field(ge=1)
+    items: list[CompletenessItemResponse]
+    validation_issues: list[ValidationIssueResponse] = Field(default_factory=list)
+    required_missing: int = Field(ge=0)
+    recommended_missing: int = Field(ge=0)
+    validation_issue_count: int = Field(ge=0)
+    reference_edge_count: int = Field(ge=0)
+
+
 class NewGameRequest(ApiModel):
+    # The UI sends the selected Scenario identity as a binding guard.  Keep it
+    # optional for older API clients; the immutable ScenarioVersion remains the
+    # authoritative runtime pin when it is omitted.
+    scenario_id: UUID | None = None
     scenario_version_id: UUID
     idempotency_key: str = Field(min_length=1, max_length=160)
 
@@ -592,6 +899,21 @@ class PublicFactResponse(ApiModel):
     value: str | int | bool
     node_name: str | None = None
     node_type_key: str | None = None
+    node_family: Literal["GENERIC", "REGION", "FACILITY", "TRANSPORT"] = "GENERIC"
+    value_label: str | None = None
+    summary_value_label: str | None = None
+    detail_value_label: str | None = None
+    presentation_role: (
+        Literal[
+            "HEADER_PRIMARY",
+            "HEADER_SECONDARY",
+            "BODY_MAIN",
+            "SUPPORTING",
+            "REQUIREMENT_ONLY",
+        ]
+        | None
+    ) = None
+    presentation_slot: Literal["HEADER_PRIMARY", "HEADER_SECONDARY", "SEMANTIC"] = "SEMANTIC"
     region_key: str | None = None
     region_name: str | None = None
     endpoint_region_keys: list[str] = Field(default_factory=list)
@@ -603,11 +925,32 @@ class PublicNodeResponse(ApiModel):
     name: str
     accessible: bool
     node_type_key: str | None = None
+    node_family: Literal["GENERIC", "REGION", "FACILITY", "TRANSPORT"] = "GENERIC"
     region_key: str | None = None
     region_name: str | None = None
     endpoint_region_keys: list[str] = Field(default_factory=list)
     endpoint_region_names: list[str] = Field(default_factory=list)
     associated_known_resources: list[dict[str, Any]] = Field(default_factory=list)
+    presentation: PublicEntityPresentationResponse | None = None
+
+
+class PublicEntityPresentationResponse(ApiModel):
+    summary_slot: Literal["HEADER", "BODY", "BOTH"]
+    detail_level: Literal["SUMMARY", "DETAIL", "CAUSALITY"]
+    default_open: Literal["COLLAPSED", "COMPACT", "FULL"]
+    knowledge_level: Literal["A", "A+B", "A+B+C"]
+    semantic_order: list[
+        Literal[
+            "NAME",
+            "NODE_TYPE",
+            "VISIBILITY",
+            "ACCESS",
+            "FACTS",
+            "RELATIONS",
+            "RESOURCES",
+            "STATUS",
+        ]
+    ] = Field(default_factory=list)
 
 
 class PublicRelationResponse(ApiModel):
@@ -617,6 +960,9 @@ class PublicRelationResponse(ApiModel):
     target_node_key: str
     source_node_name: str | None = None
     target_node_name: str | None = None
+    relation_type_name: str | None = None
+    relation_type_description: str | None = None
+    is_structural: bool | None = None
 
 
 class PublicActionRequirementResponse(ApiModel):
@@ -626,8 +972,23 @@ class PublicActionRequirementResponse(ApiModel):
     required_actor_role_name: str | None = None
     target_actor_roles: list[dict[str, Any]] = Field(default_factory=list)
     source_relation_type_key: str | None = None
+    source_requirements: list[PublicSourceRequirementResponse] = Field(default_factory=list)
     known_preconditions: list[dict[str, Any]] = Field(default_factory=list)
     resource_requirements: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PublicSourceFactPredicateResponse(ApiModel):
+    fact_key: str
+    operator: Literal["EQ", "NE", "IN", "NOT_IN", "GT", "GTE", "LT", "LTE"]
+    value: Any | None = None
+    values: list[Any] = Field(default_factory=list)
+
+
+class PublicSourceRequirementResponse(ApiModel):
+    source_node_key: str
+    kind: Literal["SOURCE_REQUIREMENTS", "POWER_SOURCE_READINESS"]
+    status: Literal["SATISFIED", "UNSATISFIED"]
+    conditions: list[PublicSourceFactPredicateResponse] = Field(default_factory=list)
 
 
 class PublicTargetActionContractResponse(ApiModel):
@@ -637,10 +998,77 @@ class PublicTargetActionContractResponse(ApiModel):
     required_actor_role_key: str | None = None
     required_actor_role_name: str | None = None
     source_relation_type_key: str | None = None
+    source_node_key: str | None = None
+    source_binding_key: str | None = None
     cost: dict[str, int] = Field(default_factory=dict)
     resource_requirements: list[dict[str, Any]] = Field(default_factory=list)
     special_requirements: list[dict[str, Any]] = Field(default_factory=list)
     effects: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PublicProducerOutputResponse(ApiModel):
+    semantic_key: str
+    target_key: str
+    fact_key: str | None = None
+    resource_key: str | None = None
+    desired_value: Any | None = None
+    status: Literal["SATISFIED", "UNSATISFIED", "UNKNOWN"]
+
+
+class PublicProducerRequirementResponse(ApiModel):
+    key: str
+    kind: Literal["RESOURCE", "ROLE", "INTERACTION", "FACT", "STATE", "SOURCE", "SPECIAL"]
+    status: Literal["SATISFIED", "UNSATISFIED", "UNKNOWN"] | None = None
+    resource_key: str | None = None
+    minimum: int | None = None
+    scope: dict[str, Any] | None = None
+    known_status: Literal["KNOWN", "KNOWN_ZERO", "UNKNOWN"] | None = None
+    known_available: int | None = None
+    role_key: str | None = None
+    display_name: str | None = None
+    node_key: str | None = None
+    fact_key: str | None = None
+    operator: str | None = None
+    value: Any | None = None
+    values: list[Any] = Field(default_factory=list)
+    source_node_key: str | None = None
+    source_kind: str | None = None
+    conditions: list[dict[str, Any]] = Field(default_factory=list)
+    condition: dict[str, Any] | None = None
+
+
+class PublicProducerBindingResponse(ApiModel):
+    binding_key: str
+    action_key: str
+    action_name: str
+    target_key: str
+    source_node_key: str | None = None
+    source_binding_key: str | None = None
+    producer_kind: Literal["ACTION_PRODUCED_STATE", "CONDITION", "RESOURCE_AVAILABILITY"]
+    outputs: list[PublicProducerOutputResponse] = Field(default_factory=list)
+    requirements: list[PublicProducerRequirementResponse] = Field(default_factory=list)
+
+
+class PublicUnknownResourceAvailabilityRequirementResponse(ApiModel):
+    """Player-safe marker for an unavailable pool whose unlock Fact is unknown."""
+
+    status: Literal["UNKNOWN"]
+
+
+class PublicKnownResourceAvailabilityRequirementResponse(ApiModel):
+    """Player-safe unlock metadata revealed only after the referenced Fact is known."""
+
+    status: Literal["KNOWN"]
+    node_key: str
+    fact_key: str
+    value: Any
+    known_value: Any
+
+
+PublicResourceAvailabilityRequirementResponse = (
+    PublicUnknownResourceAvailabilityRequirementResponse
+    | PublicKnownResourceAvailabilityRequirementResponse
+)
 
 
 class PublicResourceResponse(ApiModel):
@@ -651,12 +1079,14 @@ class PublicResourceResponse(ApiModel):
     pool_key: str = "default"
     facility_key: str | None = None
     availability: Literal["AVAILABLE", "UNAVAILABLE"] = "AVAILABLE"
-    availability_requirement: dict[str, Any] | None = None
+    availability_requirement: PublicResourceAvailabilityRequirementResponse | None = None
     availability_requirement_status: Literal["KNOWN", "UNKNOWN"] | None = None
     scope_node_key: str | None = None
     scope_node_name: str | None = None
     scope_region_key: str | None = None
     scope_region_name: str | None = None
+    unit: str | None = None
+    display_unit: str | None = None
 
 
 class PublicActorResponse(ApiModel):
@@ -664,11 +1094,41 @@ class PublicActorResponse(ApiModel):
     name: str
     role_name: str
     current_node_name: str
+    status: Literal["ACTIVE", "PLANNED", "IDLE"] = "IDLE"
+    task_name: str | None = None
     command_reachability: Literal["ONLINE", "DISCONNECTED"] = "ONLINE"
+
+
+class PublicScenarioMetadataResponse(ApiModel):
+    quick_inputs: list[str] = Field(default_factory=list)
+    # Compatibility for older clients and serialized snapshots. Current
+    # projection no longer derives suggestions from Objective definitions.
+    goal_presets: list[dict[str, str]] = Field(default_factory=list)
+
+
+class PublicPresentationResponse(ApiModel):
+    revision: int = Field(ge=1)
+    template: Literal["compact", "standard", "detailed"]
+    density: Literal["COMPACT", "STANDARD", "DETAILED"]
+    default_open: Literal["COLLAPSED", "COMPACT", "FULL"]
+    summary_slot: Literal["HEADER", "BODY", "BOTH"]
+    entity_detail: Literal["SUMMARY", "DETAIL", "CAUSALITY"]
+    knowledge_level: Literal["A", "A+B", "A+B+C"]
+    semantic_order: list[str] = Field(default_factory=list)
+    resource_order: list[str] = Field(default_factory=list)
+    relation_order: list[str] = Field(default_factory=list)
+    actor_fields: list[str] = Field(default_factory=list)
+    roadmap_detail: Literal["SUMMARY", "DETAIL", "CAUSALITY"]
+    plan_default: Literal["COLLAPSED", "COMPACT", "FULL"]
+    timeline_density: Literal["COMPACT", "STANDARD", "DETAILED"]
 
 
 class PlayerGameStateResponse(ApiModel):
     game: GameSummaryResponse
+    scenario_metadata: PublicScenarioMetadataResponse = Field(
+        default_factory=PublicScenarioMetadataResponse
+    )
+    presentation: PublicPresentationResponse | None = None
     visible_nodes: list[PublicNodeResponse]
     known_facts: list[PublicFactResponse]
     known_relations: list[PublicRelationResponse] = Field(default_factory=list)
@@ -676,6 +1136,7 @@ class PlayerGameStateResponse(ApiModel):
     known_target_action_contracts: list[PublicTargetActionContractResponse] = Field(
         default_factory=list
     )
+    known_producer_bindings: list[PublicProducerBindingResponse] = Field(default_factory=list)
     resources: list[PublicResourceResponse]
     resource_intelligence: dict[str, Any] = Field(default_factory=dict)
     actors: list[PublicActorResponse] = Field(default_factory=list)
@@ -726,21 +1187,29 @@ class PlayerPacingRequest(ApiModel):
 __all__ = [
     "ApprovalDecisionRequest",
     "CheckpointGameRequest",
+    "CompletenessItemResponse",
     "DeveloperGameSnapshotResponse",
+    "DraftCompletenessRequest",
+    "DraftCompletenessResponse",
     "DraftDeleteObjectRequest",
     "DraftPublishRequest",
+    "DraftReferenceAnalysisRequest",
+    "DraftReferenceAnalysisResponse",
     "DraftRenameKeyRequest",
     "DraftReplaceRequest",
     "DraftResponse",
-    "DraftRestoreRequest",
     "DraftRevisionRequest",
     "DraftSandboxRequest",
     "DraftSandboxResponse",
+    "DraftTransformOperation",
+    "DraftTransformRequest",
+    "DraftTransformResponse",
     "DraftValidationResponse",
     "GameSummaryResponse",
     "GoalSubmissionRequest",
     "GoalSubmissionResponse",
     "GoalSubmissionStatus",
+    "InitializationPreviewRequest",
     "MissionRoadmapResponse",
     "MissionRoadmapStageResponse",
     "NewGameRequest",
@@ -750,11 +1219,13 @@ __all__ = [
     "PublicActionBriefingResponse",
     "PublicActionDebriefResponse",
     "PublicActionRequirementResponse",
+    "PublicEntityPresentationResponse",
     "PublicExecutionPhase",
     "PublicGameStatus",
     "PublicGoalRequirementResponse",
     "PublicPlanResponse",
     "PublicPlanStepResponse",
+    "PublicPresentationResponse",
     "PublicResolvedGoalDraftResponse",
     "PublicStepStatus",
     "PublicTaskResponse",
@@ -764,8 +1235,12 @@ __all__ = [
     "ReadinessLevel",
     "ReferenceEdgeResponse",
     "ReferenceIndexResponse",
+    "RestorePreviewRequest",
+    "RestorePreviewResponse",
     "ScenarioCreateMode",
     "ScenarioCreateRequest",
+    "ScenarioDeletionImpactResponse",
+    "ScenarioDependentGameResponse",
     "ScenarioDetailResponse",
     "ScenarioExampleResponse",
     "ScenarioPublishResponse",

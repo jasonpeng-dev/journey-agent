@@ -8,7 +8,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "line",
   outputDir: process.env.E2E_ARTIFACT_DIR ?? "test-results",
-  use: { baseURL: "http://127.0.0.1:4173", trace: "on-first-retry" },
+  use: { baseURL: process.env.E2E_FRONTEND_ORIGIN ?? "http://127.0.0.1:4173", trace: "on-first-retry" },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   ...(managedServers
     ? {}

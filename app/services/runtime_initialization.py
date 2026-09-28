@@ -18,10 +18,11 @@ from app.domain.resources import (
     valid_resource_state_identity,
 )
 from app.domain.scenario_v2 import NodeDefinitionV2, ScenarioDefinitionV2, relation_identity
-from app.domain.world import AccessState
+from app.domain.world import AccessState, Visibility
 from app.infrastructure.db.models import (
     ConversationSession,
     GameInstance,
+    GameInstanceActionTargetKnowledge,
     GameInstanceActor,
     GameInstanceFactState,
     GameInstanceNodeState,
@@ -283,6 +284,27 @@ class RuntimeInitializationService:
                 "RUNTIME_RELATION_KNOWLEDGE_SCHEMA_REQUIRED",
                 "This database must be upgraded before a hidden Relation Scenario can start",
             )
+        target_contracts = tuple(
+            (action.key, contract)
+            for action in definition.actions
+            for contract in action.target_contracts
+        )
+        if target_contracts and not self._supports_action_target_knowledge_schema():
+            raise RuntimeInitializationError(
+                "RUNTIME_ACTION_TARGET_KNOWLEDGE_SCHEMA_REQUIRED",
+                "This database must be upgraded before an Action target contract "
+                "Scenario can start",
+            )
+        if self._supports_action_target_knowledge_schema():
+            for action_key, contract in target_contracts:
+                self.db.add(
+                    GameInstanceActionTargetKnowledge(
+                        game_instance_id=instance.id,
+                        action_key=action_key,
+                        target_key=contract.target_key,
+                        visibility=contract.initial_visibility,
+                    )
+                )
         roles = {role.key: role for role in definition.actors.roles}
         primary_key = definition.initialization.primary_actor_key
         supports_actor_reachability = self._supports_actor_reachability_schema()
@@ -406,6 +428,13 @@ class RuntimeInitializationService:
             return False
         return True
 
+    def _supports_action_target_knowledge_schema(self) -> bool:
+        try:
+            inspect(self.db.connection()).get_columns("game_instance_action_target_knowledge")
+        except Exception:
+            return False
+        return True
+
     @staticmethod
     def _region_nodes(definition: ScenarioDefinitionV2) -> tuple[NodeDefinitionV2, ...]:
         locality = definition.metadata.locality
@@ -461,6 +490,15 @@ class RuntimeInitializationService:
             if self._supports_relation_knowledge_schema()
             else []
         )
+        target_contract_knowledge_rows = (
+            self.db.scalars(
+                select(GameInstanceActionTargetKnowledge).where(
+                    GameInstanceActionTargetKnowledge.game_instance_id == instance.id
+                )
+            ).all()
+            if self._supports_action_target_knowledge_schema()
+            else []
+        )
         counts = tuple(
             int(value or 0)
             for value in (
@@ -485,6 +523,23 @@ class RuntimeInitializationService:
             len(definition.world.nodes),
             sum(len(node.facts) for node in definition.world.nodes),
             len(definition.actors.actor_profiles),
+        )
+        expected_target_contracts = {
+            (action.key, contract.target_key)
+            for action in definition.actions
+            for contract in action.target_contracts
+        }
+        target_contracts_valid = (
+            not expected_target_contracts and not self._supports_action_target_knowledge_schema()
+        ) or (
+            self._supports_action_target_knowledge_schema()
+            and {(row.action_key, row.target_key) for row in target_contract_knowledge_rows}
+            == expected_target_contracts
+            and all(
+                getattr(row.visibility, "value", row.visibility)
+                in {item.value for item in Visibility}
+                for row in target_contract_knowledge_rows
+            )
         )
         expected_resources = {
             (item.resource_key, item.region_key, item.pool_key)
@@ -531,6 +586,7 @@ class RuntimeInitializationService:
             or not resources_valid
             or not knowledge_valid
             or not relation_knowledge_valid
+            or not target_contracts_valid
         ):
             raise RuntimeInitializationError(
                 "RUNTIME_INITIALIZATION_INCOMPLETE",

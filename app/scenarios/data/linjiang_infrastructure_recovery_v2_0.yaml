@@ -206,6 +206,19 @@ world:
   - key: transport
     name: 交通通道
     description: ''
+  relation_types:
+  - key: contains
+    name: 包含
+    description: 世界节点包含目标节点。
+  - key: endpoint
+    name: 端点
+    description: 交通节点连接目标区域。
+  - key: located_in
+    name: 位于
+    description: 设施或交通节点位于目标区域。
+  - key: supplies_power_to
+    name: 供电至
+    description: 电力来源可向目标设施供电。
   nodes:
   - key: central_district
     name: 中央城区
@@ -1888,8 +1901,8 @@ interactions:
   name: 可前往区域
   description: 作为 Travel 目标的区域。
 - key: logistics_hub
-  name: logistics_hub
-  description: logistics_hub
+  name: 物流枢纽
+  description: 物流枢纽能力。
 - key: external_relief_intake
   name: 外部援助接收点
   description: 可接收铁路外援物资的仓储设施
@@ -1897,8 +1910,8 @@ interactions:
   name: 持续物流控制点
   description: 可建立全城持续人道物流能力的配送设施
 - key: generation_control
-  name: generation_control
-  description: generation_control
+  name: 发电控制
+  description: 发电控制能力。
 actions:
 - key: clear_transport
   name: 清理交通通道
@@ -2239,7 +2252,7 @@ actions:
   - role: source_region
     value_type: REGION
     source: EXECUTION_START_ACTOR_REGION
-    description: Player-constrained origin Region; omitted origins remain a Planner choice.
+    description: 玩家约束的起始区域；未提供时由规划器选择起点。
 - key: travel
   name: 前往区域
   description: 让行动人员前往目标区域。
@@ -7484,108 +7497,6 @@ rules:
       literal: true
   - kind: EMIT_OUTCOME
     outcome_code: FACILITY_REPAIRED
-objectives:
-- key: restore_central_communication_capability
-  name: 恢复中央通信能力
-  description: 恢复中央通信核心并重新建立城市调度联络。
-  completion_requirements:
-  - key: central_telecom_operational
-    kind: FACT
-    node_key: central_telecom_hub
-    fact_key: operational
-    accepted_values:
-    - true
-    description: 中央通信核心已恢复运行。
-  prerequisites: []
-  subsumes: []
-  goal_aliases:
-  - Restore central communications
-  - 恢复中央通信核心
-  goal_examples: []
-  planning_guidance: 优先恢复中央通信核心；遵循已知的地点、通道和资源条件。
-- key: restore_east_emergency_power_network
-  name: 恢复东部应急供电网络
-  description: 恢复东部配电与东部应急设施的供电能力。
-  completion_requirements:
-  - key: east_emergency_power_network
-    kind: DERIVED_STATE
-    derived_key: east_emergency_power_network
-    accepted_values:
-    - AVAILABLE
-    description: 东部应急供电网络已恢复。
-  prerequisites: []
-  subsumes: []
-  goal_aliases:
-  - Restore east emergency power
-  - 恢复东部应急供电
-  goal_examples: []
-  planning_guidance: 依据已知的电力拓扑连续修复、供电并校验两个东部设施。
-- key: restore_east_emergency_water_supply
-  name: 恢复东部应急供水
-  description: 恢复东部应急供水调度能力。
-  completion_requirements:
-  - key: east_emergency_water_supply
-    kind: DERIVED_STATE
-    derived_key: east_emergency_water_supply
-    accepted_values:
-    - AVAILABLE
-    description: 东部应急供水能力已恢复。
-  prerequisites: []
-  subsumes: []
-  goal_aliases:
-  - Restore east emergency water supply
-  - 恢复东部应急供水
-  goal_examples: []
-  planning_guidance: 满足水务设施、供电、重型工程与南部通信协调条件后启动调度。
-- key: restore_north_basic_engineering_support
-  name: 恢复北部基础工程支援
-  description: 恢复北部通信中继与市政工程服务能力。
-  completion_requirements:
-  - key: north_basic_engineering_support
-    kind: DERIVED_STATE
-    derived_key: north_basic_engineering_support
-    accepted_values:
-    - AVAILABLE
-    description: 北部基础工程支援已恢复。
-  prerequisites: []
-  subsumes: []
-  goal_aliases:
-  - Restore north engineering support
-  - 恢复北部基础工程支援
-  goal_examples: []
-  planning_guidance: 先确认北部通道与通信条件，再按专业队与已知资源编排修复。
-- key: establish_citywide_sustained_emergency_support
-  name: 建立全城灾后持续应急保障网络
-  description: 建立持续物流与救援物资部署。
-  completion_requirements:
-  - key: citywide_sustained_emergency_support
-    kind: DERIVED_STATE
-    derived_key: citywide_sustained_emergency_support
-    accepted_values:
-    - AVAILABLE
-    description: 全城灾后持续应急保障已建立。
-  prerequisites: []
-  subsumes: []
-  goal_aliases:
-  - 建立全城持续应急保障网络
-  goal_examples: []
-  planning_guidance: 恢复外援入口、仓储、车辆与配送能力，并把救援物资部署到三个目标区域。
-- key: establish_sustained_emergency_generation
-  name: 建立持续应急发电保障
-  description: 启动并建立东南持续燃料发电保障。
-  completion_requirements:
-  - key: southeast_sustained_emergency_generation
-    kind: DERIVED_STATE
-    derived_key: southeast_sustained_emergency_generation
-    accepted_values:
-    - AVAILABLE
-    description: 东南持续应急发电保障已建立。
-  prerequisites: []
-  subsumes: []
-  goal_aliases:
-  - 建立持续应急发电保障
-  goal_examples: []
-  planning_guidance: 先修复电厂并用启动燃料成功发电；根据新揭示的持续保障条件继续规划。
 derived_states:
 - key: east_emergency_power_network
   name: 东部应急供电网络
@@ -7821,6 +7732,13 @@ derived_states:
 goal_resolution:
   allow_llm_fallback: true
   clarification_prompt: 请说明希望恢复的基础设施或公共服务。
+  quick_inputs:
+  - 恢复中央通信能力
+  - 恢复东部应急供电网络
+  - 恢复东部应急供水
+  - 恢复北部基础工程支援
+  - 建立全城灾后持续应急保障网络
+  - 建立持续应急发电保障
   world_goal_state_catalog: true
 public_references:
 - term: 中区

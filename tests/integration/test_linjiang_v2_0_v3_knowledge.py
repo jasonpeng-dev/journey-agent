@@ -399,12 +399,11 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
     assert surveyed.outcome.failure is None
     before_inspect = discovered_pool(survey_first_scope, survey_definition)
     assert before_inspect is not None
-    assert before_inspect.availability_requirement == {
-        "node_key": "utility_service_depot",
-        "fact_key": "operational",
-        "value": True,
-    }
-    assert "known_value" not in before_inspect.availability_requirement
+    assert before_inspect.availability_requirement == {"status": "UNKNOWN"}
+    assert before_inspect.availability_requirement_status == "UNKNOWN"
+    assert "node_key" not in before_inspect.availability_requirement
+    assert "fact_key" not in before_inspect.availability_requirement
+    assert "value" not in before_inspect.availability_requirement
     assert (
         _fact(
             session,
@@ -423,7 +422,14 @@ def test_resource_pool_and_facility_knowledge_is_order_independent(session: Sess
     assert inspected.outcome.failure is None
     survey_then_inspect = discovered_pool(survey_first_scope, survey_definition)
     assert survey_then_inspect is not None
-    assert survey_then_inspect.availability_requirement["known_value"] is False
+    assert survey_then_inspect.availability_requirement == {
+        "status": "KNOWN",
+        "node_key": "utility_service_depot",
+        "fact_key": "operational",
+        "value": True,
+        "known_value": False,
+    }
+    assert survey_then_inspect.availability_requirement_status == "KNOWN"
 
     inspect_first_runtime, inspect_first_scope = _runtime(
         session,
@@ -635,7 +641,7 @@ def test_legacy_repair_communications_snapshot_behavior_remains_executable(
     document["rules"] = [
         rule
         for rule in document["rules"]
-            if rule.get("action_key") != "repair_facility"
+        if rule.get("action_key") != "repair_facility"
         or rule["key"] == "repair_facility_base_resolution"
     ]
     for rule in document["rules"]:

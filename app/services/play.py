@@ -31,6 +31,7 @@ from app.agent.provider import (
     plan_operation,
     provider_call_history_metadata,
 )
+from app.agent.recovery import GenericRecoveryPolicy
 from app.domain.enums import (
     AgentPlanStatus,
     AgentStepStatus,
@@ -171,6 +172,18 @@ class PlayOrchestrator:
         task.status = AgentTaskStatus.FAILED
         task.last_error_code = error.code
         task.last_error_detail = _provider_failure_detail(error.code)
+        failure_event = error.failure_event
+        recovery_context = GenericRecoveryPolicy().evaluate(failure_event)
+        metadata = dict(task.objective_resolution_metadata or {})
+        metadata.update(
+            {
+                "last_failure_event": failure_event.model_dump(mode="json", exclude_none=True),
+                "last_recovery_context": recovery_context.model_dump(
+                    mode="json", exclude_none=True
+                ),
+            }
+        )
+        task.objective_resolution_metadata = metadata
         task.completed_at = datetime.now(UTC)
         task.version += 1
         checkpoint.phase = PlayerExecutionPhase.BLOCKED
