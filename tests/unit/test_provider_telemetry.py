@@ -1796,6 +1796,7 @@ def test_provider_settings_defaults_remain_bounded_and_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for key in (
+        "DATABASE_URL",
         "PLAN_TIMEOUT_SECONDS",
         "PLAN_TOTAL_TIMEOUT_SECONDS",
         "MODEL_MAX_OUTPUT_TOKENS",

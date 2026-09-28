@@ -46,7 +46,7 @@ def phase4_factory() -> Any:
 
 
 def test_official_artifact_is_strict_deterministic_and_source_free() -> None:
-    raw = OFFICIAL_ARTIFACT.read_bytes()
+    raw = OFFICIAL_ARTIFACT.read_bytes().replace(b"\r\n", b"\n")
     candidate = ScenarioArtifactCodec.parse(raw)
     assert candidate.artifact.artifact_type == "journey_scenario"
     assert candidate.artifact.artifact_version == 1

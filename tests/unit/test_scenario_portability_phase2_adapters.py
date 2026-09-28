@@ -199,7 +199,9 @@ def test_http_existing_draft_preview_endpoint_is_removed(
         f"/api/v1/scenarios/{scenario_id}/draft/artifacts/preview",
         json={"artifact": {}},
     )
-    assert response.status_code == 405
+    # CI has no built frontend (404); local app runs may have the static mount
+    # (405 for an unsupported POST). Both prove the removed API route is absent.
+    assert response.status_code in {404, 405}
 
 
 def test_http_exports_are_deterministic_downloads_with_safe_filenames(
@@ -285,7 +287,7 @@ def test_http_typed_errors_cover_hash_conflict_invalid_key_and_stale_revision(
         f"/api/v1/scenarios/{scenario_id}/draft/artifacts/preview",
         json={"artifact": artifact.model_dump(mode="json")},
     )
-    assert stale.status_code == 405
+    assert stale.status_code in {404, 405}
 
 
 def test_http_v2_release_export_is_rejected_with_typed_error(
